@@ -646,10 +646,11 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Find all available time slots in the tee sheet.
 
-        The Northstar Technologies tee sheet uses a div-based layout (not tables):
+        The Northstar Technologies tee sheet uses a div-based layout:
         - Available slots: <span class="custom-free-slot-span">Available</span>
-        - Container: <div class="custom-free-slot-div">
-        - Time displayed in elements with class "teetime-player-col-4"
+        - Immediate parent: <div class="ui-bar ui-bar-a custom-free-slot-div">
+        - Row container: <div class="block-available"> (ancestor level ~6)
+        - Time is embedded in the row container's text content (e.g., "07:46 AM")
 
         Returns:
             List of (time, element) tuples for available slots
@@ -664,41 +665,20 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info(f"Found {len(available_spans)} available slot spans (div-based layout)")
             for span in available_spans:
                 try:
-                    slot_container = span.find_element(By.XPATH, "./ancestor::div[contains(@class, 'custom-free-slot-div')]")
+                    row_container = self._find_row_container(span)
+                    if row_container is None:
+                        logger.debug("Could not find row container for slot")
+                        continue
 
-                    row_container = slot_container.find_element(By.XPATH, "./ancestor::div[contains(@class, 'ui-bar') or contains(@class, 'teetime-row')]")
-
-                    time_element = row_container.find_element(
-                        By.CSS_SELECTOR, ".teetime-player-col-4, [class*='time'], .time-cell"
-                    )
-                    time_text = time_element.text.strip()
-
-                    if not time_text:
-                        time_elements = row_container.find_elements(By.XPATH, ".//span[contains(@class, 'teetime')]")
-                        for te in time_elements:
-                            text = te.text.strip()
-                            if text and re.match(r"\d{1,2}:\d{2}", text):
-                                time_text = text
-                                break
-
-                    slot_time = self._parse_time(time_text)
+                    slot_time = self._extract_time_from_container(row_container)
                     if slot_time:
                         available_slots.append((slot_time, span))
                         logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')}")
+                    else:
+                        logger.debug("Could not extract time from row container")
 
                 except (NoSuchElementException, ValueError) as e:
                     logger.debug(f"Could not parse div-based slot: {e}")
-                    try:
-                        parent = span.find_element(By.XPATH, "./..")
-                        all_text = parent.text
-                        time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM)?)", all_text, re.IGNORECASE)
-                        if time_match:
-                            slot_time = self._parse_time(time_match.group(1))
-                            if slot_time:
-                                available_slots.append((slot_time, span))
-                                logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')} (fallback)")
-                    except Exception:
-                        pass
                     continue
 
         if not available_slots:
@@ -751,6 +731,99 @@ class WaldenGolfProvider(ReservationProvider):
         available_slots.sort(key=lambda x: x[0])
         logger.info(f"Total available slots found: {len(available_slots)}")
         return available_slots
+
+    def _find_row_container(self, span: Any) -> Any | None:
+        """
+        Find the row container element for an available slot span.
+
+        The DOM structure is:
+        - span.custom-free-slot-span (level 0)
+        - div.ui-bar.ui-bar-a.custom-free-slot-div (level 1, immediate parent)
+        - ... intermediate divs ...
+        - div.block-available (level ~6, the row container with time info)
+
+        Args:
+            span: The span element with class "custom-free-slot-span"
+
+        Returns:
+            The row container element, or None if not found
+        """
+        row_container_selectors = [
+            "./ancestor::div[contains(@class, 'block-available')][1]",
+            "./ancestor::div[contains(@class, 'ui-grid-a') and contains(@class, 'full-width')][1]",
+            "./ancestor::div[contains(@class, 'teetime-row')][1]",
+        ]
+
+        for selector in row_container_selectors:
+            try:
+                container = span.find_element(By.XPATH, selector)
+                return container
+            except NoSuchElementException:
+                continue
+
+        try:
+            current = span
+            for _ in range(10):
+                current = current.find_element(By.XPATH, "./..")
+                text_content = current.get_attribute("textContent") or ""
+
+                if re.search(r"\d{1,2}:\d{2}\s*[AP]M", text_content, re.IGNORECASE):
+                    return current
+        except (NoSuchElementException, Exception):
+            pass
+
+        return None
+
+    def _extract_time_from_container(self, container: Any) -> time | None:
+        """
+        Extract the tee time from a row container element.
+
+        The time may be in a dedicated element or embedded in the container's text.
+        Uses textContent for more reliable extraction than element.text.
+
+        Args:
+            container: The row container element
+
+        Returns:
+            The parsed time, or None if extraction fails
+        """
+        try:
+            time_selectors = [
+                ".teetime-player-col-4",
+                "[class*='time']",
+                ".time-cell",
+            ]
+            for selector in time_selectors:
+                try:
+                    time_element = container.find_element(By.CSS_SELECTOR, selector)
+                    time_text = time_element.text.strip()
+                    if time_text:
+                        slot_time = self._parse_time(time_text)
+                        if slot_time:
+                            return slot_time
+                except NoSuchElementException:
+                    continue
+        except Exception:
+            pass
+
+        try:
+            text_content = container.get_attribute("textContent") or container.text or ""
+
+            time_match = re.search(r"\b(\d{1,2}:\d{2}\s*[AP]M)\b", text_content, re.IGNORECASE)
+            if time_match:
+                slot_time = self._parse_time(time_match.group(1))
+                if slot_time:
+                    return slot_time
+
+            time_match_24h = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", text_content)
+            if time_match_24h:
+                slot_time = self._parse_time(time_match_24h.group(0))
+                if slot_time:
+                    return slot_time
+        except Exception as e:
+            logger.debug(f"Error extracting time from container text: {e}")
+
+        return None
 
     def _parse_time(self, time_text: str) -> time | None:
         """Parse a time string like '07:30 AM' or '12:42 PM' into a time object."""
