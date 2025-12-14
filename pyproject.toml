@@ -21,6 +21,8 @@ python-dotenv = "^1.0.0"
 httpx = "^0.28.0"
 apscheduler = "^3.10.0"
 pytz = "^2024.2"
+python-multipart = "^0.0.20"
+aiosqlite = "^0.22.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

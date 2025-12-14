@@ -37,7 +37,7 @@ async def create_booking(request: CreateBookingRequest) -> BookingResponse:
         fallback_window_minutes=request.fallback_window_minutes,
     )
 
-    booking = await booking_service._create_booking(request.phone_number, tee_time_request)
+    booking = await booking_service.create_booking(request.phone_number, tee_time_request)
 
     return BookingResponse(
         id=booking.id,
@@ -55,13 +55,7 @@ async def create_booking(request: CreateBookingRequest) -> BookingResponse:
 async def list_bookings(
     phone_number: str | None = None, status: BookingStatus | None = None
 ) -> list[BookingResponse]:
-    bookings = list(booking_service._bookings.values())
-
-    if phone_number:
-        bookings = [b for b in bookings if b.phone_number == phone_number]
-
-    if status:
-        bookings = [b for b in bookings if b.status == status]
+    bookings = booking_service.get_bookings(phone_number=phone_number, status=status)
 
     return [
         BookingResponse(
@@ -80,7 +74,7 @@ async def list_bookings(
 
 @router.get("/{booking_id}", response_model=BookingResponse)
 async def get_booking(booking_id: str) -> BookingResponse:
-    booking = booking_service._bookings.get(booking_id)
+    booking = booking_service.get_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
@@ -98,20 +92,16 @@ async def get_booking(booking_id: str) -> BookingResponse:
 
 @router.delete("/{booking_id}")
 async def cancel_booking(booking_id: str) -> dict:
-    booking = booking_service._bookings.get(booking_id)
+    booking = booking_service.cancel_booking(booking_id)
     if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
+        raise HTTPException(status_code=404, detail="Booking not found or cannot be cancelled")
 
-    if booking.status not in [BookingStatus.PENDING, BookingStatus.SCHEDULED]:
-        raise HTTPException(status_code=400, detail="Cannot cancel this booking")
-
-    booking.status = BookingStatus.CANCELLED
     return {"status": "cancelled", "booking_id": booking_id}
 
 
 @router.post("/{booking_id}/execute")
 async def execute_booking(booking_id: str) -> dict:
-    booking = booking_service._bookings.get(booking_id)
+    booking = booking_service.get_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 

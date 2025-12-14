@@ -136,7 +136,7 @@ class BookingService:
         if session.state != ConversationState.AWAITING_CONFIRMATION or not session.pending_request:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
-        booking = await self._create_booking(session.phone_number, session.pending_request)
+        booking = await self.create_booking(session.phone_number, session.pending_request)
 
         session.pending_request = None
         session.state = ConversationState.IDLE
@@ -198,9 +198,22 @@ class BookingService:
 
         return "Which booking would you like to cancel? Reply with the date."
 
-    async def _create_booking(
+    async def create_booking(
         self, phone_number: str, request: TeeTimeRequest
     ) -> TeeTimeBooking:
+        """
+        Create a new booking record and schedule it for execution.
+
+        This is the public API for creating bookings, used by both the SMS
+        conversation flow and the REST API.
+
+        Args:
+            phone_number: The phone number to associate with the booking.
+            request: The tee time request details.
+
+        Returns:
+            The created TeeTimeBooking record.
+        """
         booking_id = str(uuid.uuid4())[:8]
 
         execution_time = self._calculate_execution_time(request.requested_date)
@@ -214,6 +227,61 @@ class BookingService:
         )
 
         self._bookings[booking_id] = booking
+        return booking
+
+    def get_booking(self, booking_id: str) -> TeeTimeBooking | None:
+        """
+        Get a booking by its ID.
+
+        Args:
+            booking_id: The unique identifier of the booking.
+
+        Returns:
+            The booking if found, None otherwise.
+        """
+        return self._bookings.get(booking_id)
+
+    def get_bookings(
+        self, phone_number: str | None = None, status: BookingStatus | None = None
+    ) -> list[TeeTimeBooking]:
+        """
+        Get all bookings, optionally filtered by phone number and/or status.
+
+        Args:
+            phone_number: Filter by phone number (optional).
+            status: Filter by booking status (optional).
+
+        Returns:
+            List of matching bookings.
+        """
+        bookings = list(self._bookings.values())
+
+        if phone_number:
+            bookings = [b for b in bookings if b.phone_number == phone_number]
+
+        if status:
+            bookings = [b for b in bookings if b.status == status]
+
+        return bookings
+
+    def cancel_booking(self, booking_id: str) -> TeeTimeBooking | None:
+        """
+        Cancel a booking by its ID.
+
+        Args:
+            booking_id: The unique identifier of the booking to cancel.
+
+        Returns:
+            The cancelled booking if found and cancellable, None otherwise.
+        """
+        booking = self._bookings.get(booking_id)
+        if not booking:
+            return None
+
+        if booking.status not in [BookingStatus.PENDING, BookingStatus.SCHEDULED]:
+            return None
+
+        booking.status = BookingStatus.CANCELLED
         return booking
 
     def _calculate_execution_time(self, target_date: datetime.date) -> datetime:
@@ -263,7 +331,7 @@ class BookingService:
         Returns:
             True if the booking was successful, False otherwise.
         """
-        booking = self._bookings.get(booking_id)
+        booking = self.get_booking(booking_id)
         if not booking:
             return False
 
