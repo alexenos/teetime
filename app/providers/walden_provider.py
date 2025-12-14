@@ -758,17 +758,17 @@ class WaldenGolfProvider(ReservationProvider):
 
         search_context = northgate_section if northgate_section else driver
 
-        # For 4-player bookings, first try to find completely empty slots
-        # These have a "Reserve" button instead of just "Available" spans
-        if num_players == 4:
-            empty_slots = self._find_empty_slots(search_context)
-            if empty_slots:
-                logger.info(f"Found {len(empty_slots)} completely empty slots for 4-player booking")
+        # For multi-player bookings, find slots with enough available spots
+        # This ensures we don't book a slot that can't accommodate all players
+        if num_players > 1:
+            slots_with_capacity = self._find_empty_slots(search_context, min_available_spots=num_players)
+            if slots_with_capacity:
+                logger.info(f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots")
                 
                 best_slot = None
                 best_diff = float("inf")
                 
-                for slot_time, slot_element in empty_slots:
+                for slot_time, slot_element in slots_with_capacity:
                     slot_minutes = slot_time.hour * 60 + slot_time.minute
                     diff = abs(slot_minutes - target_minutes)
                     
@@ -778,11 +778,31 @@ class WaldenGolfProvider(ReservationProvider):
                 
                 if best_slot:
                     booked_time, reserve_element = best_slot
-                    logger.info(f"Attempting to book empty slot at {booked_time.strftime('%I:%M %p')} for {num_players} players")
+                    logger.info(f"Attempting to book slot at {booked_time.strftime('%I:%M %p')} for {num_players} players")
                     return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
                 else:
-                    logger.warning("No empty slots within fallback window, trying partial slots")
+                    # No slots with enough capacity within the fallback window
+                    # Return error with helpful information
+                    all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
+                    return BookingResult(
+                        success=False,
+                        error_message=(
+                            f"No time slots with {num_players} available spots within "
+                            f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
+                        ),
+                        alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}" if all_times else None,
+                    )
+            else:
+                # No slots with enough capacity on this date
+                return BookingResult(
+                    success=False,
+                    error_message=(
+                        f"No time slots with {num_players} available spots found on this date. "
+                        f"All slots are either fully booked or have fewer than {num_players} spots available."
+                    ),
+                )
 
+        # For single-player bookings, use the standard available slots logic
         available_slots = self._find_available_slots(search_context)
 
         if not available_slots:
