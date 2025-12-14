@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import logging
+import os
 import re
 import time as time_module
 from collections.abc import Callable
@@ -147,7 +148,13 @@ class WaldenGolfProvider(ReservationProvider):
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
-        service = Service(ChromeDriverManager().install())
+        # Try to use a specific ChromeDriver path if available (for version compatibility)
+        # Fall back to ChromeDriverManager if not found
+        chromedriver_path = "/tmp/chromedriver-linux64/chromedriver"
+        if os.path.exists(chromedriver_path):
+            service = Service(chromedriver_path)
+        else:
+            service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
 
         driver.execute_cdp_cmd(
@@ -520,18 +527,70 @@ class WaldenGolfProvider(ReservationProvider):
             return False
 
 
-    def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> None:
+    def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> bool:
         """
         Select the number of players in the booking dialog.
 
-        The player count selector is visible in the tee sheet interface after clicking Reserve.
-        This method attempts to find and set the player count dropdown or input.
+        The player count selector on Walden Golf is a button group (ui-selectonebutton)
+        with buttons for 1, 2, 3, 4 players. This method clicks the appropriate button.
 
         Args:
             driver: The WebDriver instance
             num_players: Number of players (1-4)
+
+        Returns:
+            True if player count was successfully selected, False otherwise
         """
         try:
+            # Wait for the player count button group to appear
+            time_module.sleep(1)
+            
+            # The Walden Golf site uses a button group with class "reservation-players"
+            # Each button contains a radio input with value 1, 2, 3, or 4
+            # The button div has class "ui-button" and we need to click the one with the correct value
+            
+            # First try to find the button group
+            button_group_selectors = [
+                ".reservation-players",
+                ".ui-selectonebutton",
+                "[class*='players-sel']",
+            ]
+            
+            button_group = None
+            for selector in button_group_selectors:
+                try:
+                    button_group = driver.find_element(By.CSS_SELECTOR, selector)
+                    logger.debug(f"Found player button group with selector: {selector}")
+                    break
+                except NoSuchElementException:
+                    continue
+            
+            if button_group:
+                # Find the button with the correct value
+                # The button contains a radio input with the value we want
+                try:
+                    # Find the radio input with the correct value
+                    radio_input = button_group.find_element(
+                        By.CSS_SELECTOR, f"input[type='radio'][value='{num_players}']"
+                    )
+                    # Get the parent div (the clickable button)
+                    button_div = radio_input.find_element(By.XPATH, "./..")
+                    
+                    # Check if the button is disabled
+                    button_classes = button_div.get_attribute("class") or ""
+                    if "ui-state-disabled" in button_classes:
+                        logger.warning(f"Player count {num_players} button is disabled")
+                        return False
+                    
+                    # Click the button
+                    driver.execute_script("arguments[0].click();", button_div)
+                    logger.info(f"Selected {num_players} players using button group")
+                    time_module.sleep(1)  # Wait for the form to update
+                    return True
+                except NoSuchElementException:
+                    logger.warning(f"Could not find radio input for {num_players} players")
+            
+            # Fallback: try dropdown selectors
             player_selectors = [
                 "select[id*='player']",
                 "select[id*='golfer']",
@@ -548,35 +607,117 @@ class WaldenGolfProvider(ReservationProvider):
                     select.select_by_value(str(num_players))
                     logger.info(f"Selected {num_players} players using selector: {selector}")
                     time_module.sleep(0.5)
-                    return
+                    return True
                 except (NoSuchElementException, Exception):
-                    continue
-
-            player_input_selectors = [
-                "input[id*='player']",
-                "input[id*='golfer']",
-                "input[name*='player']",
-                "input[name*='golfer']",
-            ]
-
-            for selector in player_input_selectors:
-                try:
-                    player_input = driver.find_element(By.CSS_SELECTOR, selector)
-                    player_input.clear()
-                    player_input.send_keys(str(num_players))
-                    logger.info(f"Entered {num_players} players using input: {selector}")
-                    time_module.sleep(0.5)
-                    return
-                except NoSuchElementException:
                     continue
 
             logger.warning(
                 f"Could not find player count selector - site may auto-fill or use different control. "
                 f"Requested {num_players} players."
             )
+            return False
 
         except Exception as e:
             logger.warning(f"Error selecting player count: {e}")
+            return False
+
+    def _add_tbd_registered_guests_sync(
+        self, driver: webdriver.Chrome, num_tbd_guests: int
+    ) -> bool:
+        """
+        Add TBD Registered Guests for additional player slots.
+
+        After selecting the player count, the booking form shows player rows.
+        For players 2, 3, 4, we need to click the "TBD" button to register them
+        as TBD Registered Guests.
+
+        Args:
+            driver: The WebDriver instance
+            num_tbd_guests: Number of TBD guests to add (1-3)
+
+        Returns:
+            True if TBD guests were successfully added, False otherwise
+        """
+        try:
+            # Wait for the player table to update after selecting player count
+            time_module.sleep(2)
+            
+            # The player table has rows for each player
+            # Each row has a "TBD" button that we need to click for guests
+            # The button has class "btn-tbd" or similar
+            
+            tbd_buttons_added = 0
+            
+            # Find all player rows in the table
+            # Player rows are in the playersTable with data-ri attribute
+            player_rows = driver.find_elements(
+                By.CSS_SELECTOR, 
+                "[id*='playersTable'] tbody tr[data-ri]"
+            )
+            
+            logger.info(f"Found {len(player_rows)} player rows")
+            
+            # Skip the first row (primary player) and process the rest
+            for i, row in enumerate(player_rows[1:], start=2):
+                if tbd_buttons_added >= num_tbd_guests:
+                    break
+                
+                try:
+                    # Look for the TBD button in this row
+                    # The button might have various selectors
+                    tbd_button = None
+                    tbd_selectors = [
+                        "a[id*='tbd']",
+                        "span[id*='tbd']",
+                        "[class*='btn-tbd']",
+                        "a[class*='tbd']",
+                        "span[class*='tbd']",
+                    ]
+                    
+                    for selector in tbd_selectors:
+                        try:
+                            tbd_button = row.find_element(By.CSS_SELECTOR, selector)
+                            break
+                        except NoSuchElementException:
+                            continue
+                    
+                    if tbd_button:
+                        # Click the TBD button
+                        driver.execute_script("arguments[0].click();", tbd_button)
+                        logger.info(f"Clicked TBD button for player {i}")
+                        tbd_buttons_added += 1
+                        time_module.sleep(0.5)  # Wait for the form to update
+                    else:
+                        # If no TBD button, try to find the player name input and type "TBD"
+                        try:
+                            player_input = row.find_element(
+                                By.CSS_SELECTOR, "input[id*='player_input']"
+                            )
+                            # Check if input is enabled
+                            if not player_input.get_attribute("disabled"):
+                                player_input.clear()
+                                player_input.send_keys("TBD Registered Guest")
+                                logger.info(f"Entered TBD Registered Guest for player {i}")
+                                tbd_buttons_added += 1
+                                time_module.sleep(0.5)
+                        except NoSuchElementException:
+                            logger.warning(f"Could not find TBD button or input for player {i}")
+                
+                except Exception as e:
+                    logger.warning(f"Error adding TBD guest for player {i}: {e}")
+            
+            if tbd_buttons_added == num_tbd_guests:
+                logger.info(f"Successfully added {tbd_buttons_added} TBD Registered Guests")
+                return True
+            else:
+                logger.warning(
+                    f"Only added {tbd_buttons_added} of {num_tbd_guests} TBD guests"
+                )
+                return tbd_buttons_added > 0
+
+        except Exception as e:
+            logger.error(f"Error adding TBD Registered Guests: {e}")
+            return False
 
     def _find_and_book_time_slot_sync(
         self,
@@ -590,6 +731,9 @@ class WaldenGolfProvider(ReservationProvider):
 
         First tries the exact requested time, then searches within the fallback window
         for the nearest available slot.
+
+        For 4-player bookings, prioritizes completely empty slots (with Reserve button)
+        since partially filled slots may not have enough spots.
 
         Args:
             driver: The WebDriver instance
@@ -613,6 +757,31 @@ class WaldenGolfProvider(ReservationProvider):
             pass
 
         search_context = northgate_section if northgate_section else driver
+
+        # For 4-player bookings, first try to find completely empty slots
+        # These have a "Reserve" button instead of just "Available" spans
+        if num_players == 4:
+            empty_slots = self._find_empty_slots(search_context)
+            if empty_slots:
+                logger.info(f"Found {len(empty_slots)} completely empty slots for 4-player booking")
+                
+                best_slot = None
+                best_diff = float("inf")
+                
+                for slot_time, slot_element in empty_slots:
+                    slot_minutes = slot_time.hour * 60 + slot_time.minute
+                    diff = abs(slot_minutes - target_minutes)
+                    
+                    if diff <= fallback_window_minutes and diff < best_diff:
+                        best_diff = diff
+                        best_slot = (slot_time, slot_element)
+                
+                if best_slot:
+                    booked_time, reserve_element = best_slot
+                    logger.info(f"Attempting to book empty slot at {booked_time.strftime('%I:%M %p')} for {num_players} players")
+                    return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+                else:
+                    logger.warning("No empty slots within fallback window, trying partial slots")
 
         available_slots = self._find_available_slots(search_context)
 
@@ -650,6 +819,54 @@ class WaldenGolfProvider(ReservationProvider):
         logger.info(f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players")
 
         return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+
+    def _find_empty_slots(self, search_context: Any) -> list[tuple[time, Any]]:
+        """
+        Find completely empty time slots that have all 4 spots available.
+
+        Empty slots on the Walden Golf tee sheet have:
+        - An "Available" link followed by a "Reserve" link
+        - No player names in the row
+        - The row structure: <li><label>TIME</label><a>Available</a><a>Reserve</a></li>
+
+        Returns:
+            List of (time, reserve_element) tuples for empty slots
+        """
+        empty_slots: list[tuple[time, Any]] = []
+
+        try:
+            # Find all Reserve links - these indicate completely empty slots
+            reserve_links = search_context.find_elements(
+                By.XPATH,
+                ".//a[contains(text(), 'Reserve')]"
+            )
+
+            logger.info(f"Found {len(reserve_links)} Reserve links")
+
+            for reserve_link in reserve_links:
+                try:
+                    # Get the parent <li> element which contains the time
+                    parent_li = reserve_link.find_element(By.XPATH, "./ancestor::li[1]")
+                    
+                    # Find the time label in the parent
+                    time_label = parent_li.find_element(By.TAG_NAME, "label")
+                    time_text = time_label.text.strip()
+                    
+                    slot_time = self._parse_time(time_text)
+                    if slot_time:
+                        empty_slots.append((slot_time, reserve_link))
+                        logger.debug(f"Found empty slot at {slot_time.strftime('%I:%M %p')}")
+
+                except (NoSuchElementException, ValueError) as e:
+                    logger.debug(f"Could not parse empty slot: {e}")
+                    continue
+
+        except NoSuchElementException:
+            logger.debug("No Reserve links found")
+
+        empty_slots.sort(key=lambda x: x[0])
+        logger.info(f"Total empty slots found: {len(empty_slots)}")
+        return empty_slots
 
 
     @with_retry(max_attempts=3, backoff_base=0.5)
@@ -941,6 +1158,12 @@ class WaldenGolfProvider(ReservationProvider):
                 pass
 
             self._select_player_count_sync(driver, num_players)
+
+            # If booking for multiple players, add TBD Registered Guests for the additional slots
+            if num_players > 1:
+                num_tbd_guests = num_players - 1
+                logger.info(f"Adding {num_tbd_guests} TBD Registered Guests")
+                self._add_tbd_registered_guests_sync(driver, num_tbd_guests)
 
             try:
                 # Wait for the booking form to load
