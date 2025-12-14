@@ -13,22 +13,27 @@ class BookingResult:
 
 
 class ReservationProvider(ABC):
+    """Abstract base class for golf course reservation providers."""
+
     @abstractmethod
     async def login(self) -> bool:
+        """Authenticate with the booking system."""
         pass
 
     @abstractmethod
     async def book_tee_time(
         self,
-        date: date,
-        time: time,
+        target_date: date,
+        target_time: time,
         num_players: int,
         fallback_window_minutes: int = 30,
     ) -> BookingResult:
+        """Book a tee time for the specified date and time."""
         pass
 
     @abstractmethod
-    async def get_available_times(self, date: date) -> list[time]:
+    async def get_available_times(self, target_date: date) -> list[time]:
+        """Get available tee times for a given date."""
         pass
 
     @abstractmethod

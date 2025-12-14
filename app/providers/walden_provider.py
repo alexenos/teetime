@@ -1,140 +1,1141 @@
 import asyncio
+import functools
+import logging
+import re
+import time as time_module
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
+from typing import Any, TypeVar
 
-from playwright.async_api import Browser, Page, Playwright, async_playwright
+from selenium import webdriver
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 from app.config import settings
 from app.providers.base import BookingResult, ReservationProvider
 
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+TRANSIENT_EXCEPTIONS = (
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
+    TimeoutException,
+)
+
+
+def with_retry(
+    max_attempts: int = 3,
+    backoff_base: float = 0.5,
+    exceptions: tuple[type[Exception], ...] = TRANSIENT_EXCEPTIONS,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """
+    Decorator for retrying operations that may fail due to transient Selenium issues.
+
+    Uses exponential backoff between attempts. Only retries on specified exception types.
+
+    Args:
+        max_attempts: Maximum number of attempts (default 3)
+        backoff_base: Base delay in seconds, doubled each attempt (default 0.5)
+        exceptions: Tuple of exception types to retry on
+    """
+
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            last_exception: Exception | None = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        delay = backoff_base * (2**attempt)
+                        logger.warning(
+                            f"Attempt {attempt + 1}/{max_attempts} failed for {func.__name__}: {e}. "
+                            f"Retrying in {delay:.1f}s..."
+                        )
+                        time_module.sleep(delay)
+                    else:
+                        logger.error(
+                            f"All {max_attempts} attempts failed for {func.__name__}: {e}"
+                        )
+            raise last_exception  # type: ignore[misc]
+
+        return wrapper
+
+    return decorator
+
 
 class WaldenGolfProvider(ReservationProvider):
+    """
+    Selenium-based provider for booking tee times at Walden Golf / Northgate Country Club.
+
+    The booking system uses Liferay Portal with Northstar Technologies' club management
+    software. This provider automates the browser-based booking flow:
+    1. Login with member credentials
+    2. Navigate to tee time booking page
+    3. Select course (Northgate 18)
+    4. Select date and find available time slots
+    5. Click Reserve on the desired time slot
+    6. Confirm the booking
+
+    Time slots are in 8-minute intervals for Northgate (e.g., 07:30, 07:38, 07:46).
+
+    Implementation Note:
+        All public async methods use asyncio.to_thread() to run blocking Selenium
+        operations in a background thread. Each operation manages its own WebDriver
+        lifecycle (create -> use -> quit) to avoid thread-affinity issues.
+    """
+
+    BASE_URL = "https://www.waldengolf.com"
+    LOGIN_URL = f"{BASE_URL}/web/pages/login"
+    DASHBOARD_URL = f"{BASE_URL}/group/pages/home"
+    TEE_TIME_URL = f"{BASE_URL}/group/pages/book-a-tee-time"
+
+    NORTHGATE_COURSE_NAME = "Northgate"
+    TEE_TIME_INTERVAL_MINUTES = 8
+
     def __init__(self) -> None:
-        self._playwright: Playwright | None = None
-        self._browser: Browser | None = None
-        self._page: Page | None = None
-        self._logged_in: bool = False
+        """
+        Initialize the WaldenGolfProvider.
 
-    async def _ensure_browser(self) -> Page:
-        if self._playwright is None:
-            self._playwright = await async_playwright().start()
-
-        if self._browser is None:
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
+        Validates that required credentials are configured. Logs a warning if
+        credentials are missing - operations will fail at login time.
+        """
+        if not settings.walden_member_number or not settings.walden_password:
+            logger.warning(
+                "Walden Golf credentials not configured. "
+                "Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD environment variables."
             )
 
-        if self._page is None:
-            self._page = await self._browser.new_page()
+    async def __aenter__(self) -> "WaldenGolfProvider":
+        """Async context manager entry."""
+        return self
 
-        return self._page
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        """Async context manager exit."""
+        await self.close()
+
+    def _create_driver(self) -> webdriver.Chrome:
+        """Create a headless Chrome WebDriver instance."""
+        options = Options()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-setuid-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+            """
+            },
+        )
+
+        return driver
 
     async def login(self) -> bool:
-        if self._logged_in:
-            return True
+        """
+        Log in to the Walden Golf member portal.
 
-        page = await self._ensure_browser()
+        This method creates a temporary driver, logs in, and closes it.
+        It is primarily useful for testing credentials.
 
+        Returns:
+            True if login was successful, False otherwise.
+        """
+        return await asyncio.to_thread(self._login_sync)
+
+    def _login_sync(self) -> bool:
+        """Synchronous login implementation with full driver lifecycle."""
+        driver = self._create_driver()
         try:
-            await page.goto(f"{settings.walden_base_url}/web/pages/login")
-            await page.wait_for_load_state("networkidle")
+            return self._perform_login(driver)
+        finally:
+            driver.quit()
 
-            member_input = page.locator(
-                'input[name="_com_liferay_login_web_portlet_LoginPortlet_login"]'
+    def _perform_login(self, driver: webdriver.Chrome) -> bool:
+        """
+        Perform the login flow on an existing driver.
+
+        Args:
+            driver: The WebDriver instance to use
+
+        Returns:
+            True if login was successful, False otherwise.
+        """
+        try:
+            logger.info("Navigating to login page...")
+            driver.get(self.LOGIN_URL)
+
+            wait = WebDriverWait(driver, 15)
+            member_input = wait.until(
+                expected_conditions.presence_of_element_located(
+                    (By.NAME, "_com_liferay_login_web_portlet_LoginPortlet_login")
+                )
             )
-            password_input = page.locator(
-                'input[name="_com_liferay_login_web_portlet_LoginPortlet_password"]'
+
+            password_input = driver.find_element(
+                By.NAME, "_com_liferay_login_web_portlet_LoginPortlet_password"
             )
 
-            await member_input.fill(settings.walden_member_number)
-            await password_input.fill(settings.walden_password)
+            logger.info("Entering credentials...")
+            member_input.clear()
+            member_input.send_keys(settings.walden_member_number)
 
-            await page.click('button[type="submit"]')
-            await page.wait_for_load_state("networkidle")
+            password_input.clear()
+            password_input.send_keys(settings.walden_password)
 
-            if "login" not in page.url.lower():
-                self._logged_in = True
+            submit_button = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+            current_url = driver.current_url
+            submit_button.click()
+
+            try:
+                wait.until(expected_conditions.url_changes(current_url))
+            except TimeoutException:
+                pass
+
+            if "login" not in driver.current_url.lower() or "home" in driver.current_url.lower():
+                logger.info(f"Login successful. Current URL: {driver.current_url}")
                 return True
 
+            logger.error(f"Login failed. Still on URL: {driver.current_url}")
             return False
 
-        except Exception as e:
-            print(f"Login error: {e}")
+        except TimeoutException as e:
+            logger.error(f"Login timeout: {e}")
             return False
+        except WebDriverException as e:
+            logger.error(f"Login WebDriver error: {e}")
+            return False
+
 
     async def book_tee_time(
         self,
-        date: date,
-        time: time,
+        target_date: date,
+        target_time: time,
         num_players: int,
         fallback_window_minutes: int = 30,
     ) -> BookingResult:
-        if not await self.login():
-            return BookingResult(
-                success=False,
-                error_message="Failed to log in to Walden Golf",
+        """
+        Book a tee time at Northgate Country Club.
+
+        This method runs the entire booking workflow in a background thread:
+        1. Creates a new WebDriver instance
+        2. Logs in to the member portal
+        3. Navigates to the tee time booking page
+        4. Selects the Northgate course and target date
+        5. Finds the requested time slot (or nearest available within fallback window)
+        6. Clicks Reserve, selects player count, and confirms the booking
+        7. Closes the WebDriver
+
+        The async interface is genuinely non-blocking - all Selenium operations
+        run in a dedicated thread via asyncio.to_thread().
+
+        Args:
+            target_date: The date to book (should be 7 days in advance for new bookings)
+            target_time: The preferred tee time
+            num_players: Number of players (1-4)
+            fallback_window_minutes: If exact time unavailable, try times within this window
+
+        Returns:
+            BookingResult with success status, booked time, and confirmation details
+        """
+        return await asyncio.to_thread(
+            self._book_tee_time_sync,
+            target_date,
+            target_time,
+            num_players,
+            fallback_window_minutes,
+        )
+
+    def _book_tee_time_sync(
+        self,
+        target_date: date,
+        target_time: time,
+        num_players: int,
+        fallback_window_minutes: int,
+    ) -> BookingResult:
+        """
+        Synchronous booking implementation with full driver lifecycle.
+
+        Creates driver, performs booking, and ensures cleanup in finally block.
+        """
+        driver = self._create_driver()
+        try:
+            if not self._perform_login(driver):
+                return BookingResult(
+                    success=False,
+                    error_message="Failed to log in to Walden Golf",
+                )
+
+            logger.info("Navigating to tee time booking page...")
+            driver.get(self.TEE_TIME_URL)
+
+            wait = WebDriverWait(driver, 15)
+            wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
+
+            self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
+            self._select_date_sync(driver, target_date)
+
+            wait.until(
+                expected_conditions.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form")
+                )
             )
 
-        page = await self._ensure_browser()
+            result = self._find_and_book_time_slot_sync(
+                driver, target_time, num_players, fallback_window_minutes
+            )
 
-        try:
-            tee_times_url = f"{settings.walden_base_url}/web/pages/golf"
-            await page.goto(tee_times_url)
-            await page.wait_for_load_state("networkidle")
+            return result
 
-            date_str = date.strftime("%Y-%m-%d")
-            time_str = time.strftime("%H:%M")
-
-            print(f"Attempting to book: {date_str} at {time_str} for {num_players} players")
-
+        except TimeoutException as e:
+            logger.error(f"Booking timeout: {e}")
             return BookingResult(
                 success=False,
-                error_message="Booking flow not yet implemented - requires site-specific selectors",
+                error_message=f"Booking timeout: {str(e)}",
+            )
+        except WebDriverException as e:
+            logger.error(f"Booking WebDriver error: {e}")
+            return BookingResult(
+                success=False,
+                error_message=f"Booking error: {str(e)}",
+            )
+        finally:
+            driver.quit()
+
+    def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> None:
+        """Select the course from the dropdown."""
+        try:
+            course_select = driver.find_element(By.CSS_SELECTOR, "select[id*='course']")
+            select = Select(course_select)
+
+            for option in select.options:
+                if course_name.lower() in option.text.lower():
+                    select.select_by_visible_text(option.text)
+                    logger.info(f"Selected course: {option.text}")
+                    wait = WebDriverWait(driver, 10)
+                    try:
+                        wait.until(expected_conditions.staleness_of(course_select))
+                    except TimeoutException:
+                        pass
+                    return
+
+            logger.warning(f"Course '{course_name}' not found in dropdown, using default")
+
+        except NoSuchElementException:
+            logger.info("No course dropdown found - may already be on correct course page")
+
+    def _select_date_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
+        """
+        Select the target date using various date selection mechanisms.
+
+        The Northstar Technologies tee sheet may use different date selection methods:
+        1. Date input field (various selectors)
+        2. Date picker widget
+        3. Day-of-week tabs
+        4. Calendar navigation
+
+        This method tries multiple approaches in order of likelihood.
+        """
+        date_str = target_date.strftime("%m/%d/%Y")
+        date_str_alt = target_date.strftime("%Y-%m-%d")
+
+        date_input_selectors = [
+            "input[type='text'][id*='date']",
+            "input[type='date']",
+            "input[id*='date']",
+            "input[name*='date']",
+            "input[class*='date']",
+            "input[placeholder*='date' i]",
+            "input[placeholder*='mm/dd' i]",
+            ".datepicker input",
+            "[data-date] input",
+        ]
+
+        for selector in date_input_selectors:
+            try:
+                date_input = driver.find_element(By.CSS_SELECTOR, selector)
+                input_type = date_input.get_attribute("type")
+
+                date_input.clear()
+                if input_type == "date":
+                    date_input.send_keys(date_str_alt)
+                else:
+                    date_input.send_keys(date_str)
+                logger.info(f"Entered date {date_str} using selector: {selector}")
+
+                wait = WebDriverWait(driver, 5)
+                try:
+                    search_button = wait.until(
+                        expected_conditions.element_to_be_clickable(
+                            (By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button.search, .btn-search")
+                        )
+                    )
+                    search_button.click()
+                    logger.info("Clicked search/submit button after date entry")
+                except TimeoutException:
+                    pass
+
+                return
+
+            except NoSuchElementException:
+                continue
+
+        logger.info("No date input found with standard selectors, trying day tabs...")
+        if self._select_date_via_tabs_sync(driver, target_date):
+            return
+
+        logger.info("Day tabs not found, trying calendar picker...")
+        self._select_date_via_calendar_sync(driver, target_date)
+
+    def _select_date_via_calendar_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
+        """
+        Select date using a calendar picker widget if available.
+
+        Returns:
+            True if date was selected successfully, False otherwise.
+        """
+        try:
+            calendar_triggers = driver.find_elements(
+                By.CSS_SELECTOR,
+                ".calendar-trigger, .datepicker-trigger, [class*='calendar'], "
+                "button[aria-label*='calendar' i], .ui-datepicker-trigger, "
+                "span.icon-calendar, i.fa-calendar"
+            )
+
+            if calendar_triggers:
+                calendar_triggers[0].click()
+                logger.info("Clicked calendar trigger")
+
+                wait = WebDriverWait(driver, 5)
+                try:
+                    wait.until(
+                        expected_conditions.presence_of_element_located(
+                            (By.CSS_SELECTOR, ".ui-datepicker, .datepicker, [class*='calendar-popup']")
+                        )
+                    )
+
+                    day_str = str(target_date.day)
+                    day_elements = driver.find_elements(
+                        By.XPATH,
+                        f"//td[@data-date='{target_date.day}'] | "
+                        f"//a[text()='{day_str}'] | "
+                        f"//td[contains(@class, 'day') and text()='{day_str}']"
+                    )
+
+                    for day_el in day_elements:
+                        if day_el.is_displayed() and day_el.is_enabled():
+                            day_el.click()
+                            logger.info(f"Selected day {day_str} from calendar")
+                            return True
+
+                except TimeoutException:
+                    logger.debug("Calendar popup did not appear")
+
+        except Exception as e:
+            logger.debug(f"Calendar selection failed: {e}")
+
+        return False
+
+    def _select_date_via_tabs_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
+        """
+        Select date using the day-of-week tabs if date picker not available.
+
+        Returns:
+            True if date was selected successfully, False otherwise.
+        """
+        day_name = target_date.strftime("%A")
+        date_str = target_date.strftime("%m/%d")
+
+        try:
+            day_tabs = driver.find_elements(
+                By.CSS_SELECTOR,
+                ".day-tab, [class*='day-tab'], a[href*='day'], "
+                "[data-day], .teetime-day-tab, .nav-tabs a"
+            )
+
+            for tab in day_tabs:
+                tab_text = tab.text.lower()
+                if day_name.lower() in tab_text or date_str in tab.text:
+                    wait = WebDriverWait(driver, 10)
+                    try:
+                        wait.until(expected_conditions.element_to_be_clickable(tab))
+                        tab.click()
+                        logger.info(f"Clicked day tab: {day_name}")
+                        wait.until(
+                            expected_conditions.staleness_of(tab)
+                        )
+                    except TimeoutException:
+                        tab.click()
+                        logger.info(f"Clicked day tab (no staleness wait): {day_name}")
+                    return True
+
+            logger.warning(f"Could not find day tab for {day_name}")
+            return False
+
+        except NoSuchElementException:
+            logger.warning("No day tabs found")
+            return False
+
+
+    def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> None:
+        """
+        Select the number of players in the booking dialog.
+
+        The player count selector is visible in the tee sheet interface after clicking Reserve.
+        This method attempts to find and set the player count dropdown or input.
+
+        Args:
+            driver: The WebDriver instance
+            num_players: Number of players (1-4)
+        """
+        try:
+            player_selectors = [
+                "select[id*='player']",
+                "select[id*='golfer']",
+                "select[name*='player']",
+                "select[name*='golfer']",
+                "select[id*='numPlayers']",
+                "select[id*='numberOfPlayers']",
+            ]
+
+            for selector in player_selectors:
+                try:
+                    player_select = driver.find_element(By.CSS_SELECTOR, selector)
+                    select = Select(player_select)
+                    select.select_by_value(str(num_players))
+                    logger.info(f"Selected {num_players} players using selector: {selector}")
+                    time_module.sleep(0.5)
+                    return
+                except (NoSuchElementException, Exception):
+                    continue
+
+            player_input_selectors = [
+                "input[id*='player']",
+                "input[id*='golfer']",
+                "input[name*='player']",
+                "input[name*='golfer']",
+            ]
+
+            for selector in player_input_selectors:
+                try:
+                    player_input = driver.find_element(By.CSS_SELECTOR, selector)
+                    player_input.clear()
+                    player_input.send_keys(str(num_players))
+                    logger.info(f"Entered {num_players} players using input: {selector}")
+                    time_module.sleep(0.5)
+                    return
+                except NoSuchElementException:
+                    continue
+
+            logger.warning(
+                f"Could not find player count selector - site may auto-fill or use different control. "
+                f"Requested {num_players} players."
             )
 
         except Exception as e:
+            logger.warning(f"Error selecting player count: {e}")
+
+    def _find_and_book_time_slot_sync(
+        self,
+        driver: webdriver.Chrome,
+        target_time: time,
+        num_players: int,
+        fallback_window_minutes: int,
+    ) -> BookingResult:
+        """
+        Find an available time slot and book it.
+
+        First tries the exact requested time, then searches within the fallback window
+        for the nearest available slot.
+
+        Args:
+            driver: The WebDriver instance
+            target_time: The preferred tee time
+            num_players: Number of players (1-4)
+            fallback_window_minutes: Window to search for alternatives
+
+        Returns:
+            BookingResult with booking outcome
+        """
+        target_minutes = target_time.hour * 60 + target_time.minute
+
+        northgate_section = None
+        try:
+            sections = driver.find_elements(By.CSS_SELECTOR, ".course-section, [class*='course']")
+            for section in sections:
+                if self.NORTHGATE_COURSE_NAME.lower() in section.text.lower():
+                    northgate_section = section
+                    break
+        except NoSuchElementException:
+            pass
+
+        search_context = northgate_section if northgate_section else driver
+
+        available_slots = self._find_available_slots(search_context)
+
+        if not available_slots:
+            return BookingResult(
+                success=False,
+                error_message="No available time slots found for the selected date",
+            )
+
+        logger.info(f"Found {len(available_slots)} available slots")
+
+        best_slot = None
+        best_diff = float("inf")
+
+        for slot_time, slot_element in available_slots:
+            slot_minutes = slot_time.hour * 60 + slot_time.minute
+            diff = abs(slot_minutes - target_minutes)
+
+            if diff <= fallback_window_minutes and diff < best_diff:
+                best_diff = diff
+                best_slot = (slot_time, slot_element)
+
+        if best_slot is None:
+            available_times = [t.strftime("%I:%M %p") for t, _ in available_slots[:5]]
+            return BookingResult(
+                success=False,
+                error_message=(
+                    f"No available times within {fallback_window_minutes} minutes "
+                    f"of {target_time.strftime('%I:%M %p')}"
+                ),
+                alternatives=f"Available times: {', '.join(available_times)}",
+            )
+
+        booked_time, reserve_element = best_slot
+        logger.info(f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players")
+
+        return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+
+
+    @with_retry(max_attempts=3, backoff_base=0.5)
+    def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
+        """
+        Find all available time slots in the tee sheet.
+
+        The Northstar Technologies tee sheet uses a div-based layout:
+        - Available slots: <span class="custom-free-slot-span">Available</span>
+        - Immediate parent: <div class="ui-bar ui-bar-a custom-free-slot-div">
+        - Row container: <div class="block-available"> (ancestor level ~6)
+        - Time is embedded in the row container's text content (e.g., "07:46 AM")
+
+        Returns:
+            List of (time, element) tuples for available slots
+        """
+        available_slots: list[tuple[time, Any]] = []
+
+        available_spans = search_context.find_elements(
+            By.CSS_SELECTOR, "span.custom-free-slot-span"
+        )
+
+        if available_spans:
+            logger.info(f"Found {len(available_spans)} available slot spans (div-based layout)")
+            for span in available_spans:
+                try:
+                    row_container = self._find_row_container(span)
+                    if row_container is None:
+                        logger.debug("Could not find row container for slot")
+                        continue
+
+                    slot_time = self._extract_time_from_container(row_container)
+                    if slot_time:
+                        available_slots.append((slot_time, span))
+                        logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')}")
+                    else:
+                        logger.debug("Could not extract time from row container")
+
+                except (NoSuchElementException, ValueError) as e:
+                    logger.debug(f"Could not parse div-based slot: {e}")
+                    continue
+
+        if not available_slots:
+            logger.info("No div-based slots found, trying table-based layout fallback")
+            try:
+                reserve_buttons = search_context.find_elements(
+                    By.XPATH,
+                    ".//a[contains(text(), 'Reserve')] | .//button[contains(text(), 'Reserve')]",
+                )
+
+                for button in reserve_buttons:
+                    try:
+                        row = button.find_element(By.XPATH, "./ancestor::tr")
+                        time_cell = row.find_element(By.CSS_SELECTOR, "td:first-child, .time-cell")
+                        time_text = time_cell.text.strip()
+
+                        slot_time = self._parse_time(time_text)
+                        if slot_time:
+                            available_slots.append((slot_time, button))
+
+                    except (NoSuchElementException, ValueError) as e:
+                        logger.debug(f"Could not parse table slot: {e}")
+                        continue
+
+            except NoSuchElementException:
+                pass
+
+            try:
+                available_links = search_context.find_elements(
+                    By.XPATH, ".//a[contains(text(), 'Available')]"
+                )
+
+                for link in available_links:
+                    try:
+                        row = link.find_element(By.XPATH, "./ancestor::tr")
+                        time_cell = row.find_element(By.CSS_SELECTOR, "td:first-child, .time-cell")
+                        time_text = time_cell.text.strip()
+
+                        slot_time = self._parse_time(time_text)
+                        if slot_time:
+                            available_slots.append((slot_time, link))
+
+                    except (NoSuchElementException, ValueError) as e:
+                        logger.debug(f"Could not parse available link: {e}")
+                        continue
+
+            except NoSuchElementException:
+                pass
+
+        available_slots.sort(key=lambda x: x[0])
+        logger.info(f"Total available slots found: {len(available_slots)}")
+        return available_slots
+
+    def _find_row_container(self, span: Any) -> Any | None:
+        """
+        Find the row container element for an available slot span.
+
+        The DOM structure is:
+        - span.custom-free-slot-span (level 0)
+        - div.ui-bar.ui-bar-a.custom-free-slot-div (level 1, immediate parent)
+        - ... intermediate divs ...
+        - div.block-available (level ~6, the row container with time info)
+
+        Args:
+            span: The span element with class "custom-free-slot-span"
+
+        Returns:
+            The row container element, or None if not found
+        """
+        row_container_selectors = [
+            "./ancestor::div[contains(@class, 'block-available')][1]",
+            "./ancestor::div[contains(@class, 'ui-grid-a') and contains(@class, 'full-width')][1]",
+            "./ancestor::div[contains(@class, 'teetime-row')][1]",
+        ]
+
+        for selector in row_container_selectors:
+            try:
+                container = span.find_element(By.XPATH, selector)
+                return container
+            except NoSuchElementException:
+                continue
+
+        try:
+            current = span
+            for _ in range(10):
+                current = current.find_element(By.XPATH, "./..")
+                text_content = current.get_attribute("textContent") or ""
+
+                if re.search(r"\d{1,2}:\d{2}\s*[AP]M", text_content, re.IGNORECASE):
+                    return current
+        except (NoSuchElementException, Exception):
+            pass
+
+        return None
+
+    def _extract_time_from_container(self, container: Any) -> time | None:
+        """
+        Extract the tee time from a row container element.
+
+        The time may be in a dedicated element or embedded in the container's text.
+        Uses textContent for more reliable extraction than element.text.
+
+        Args:
+            container: The row container element
+
+        Returns:
+            The parsed time, or None if extraction fails
+        """
+        try:
+            time_selectors = [
+                ".teetime-player-col-4",
+                "[class*='time']",
+                ".time-cell",
+            ]
+            for selector in time_selectors:
+                try:
+                    time_element = container.find_element(By.CSS_SELECTOR, selector)
+                    time_text = time_element.text.strip()
+                    if time_text:
+                        slot_time = self._parse_time(time_text)
+                        if slot_time:
+                            return slot_time
+                except NoSuchElementException:
+                    continue
+        except Exception:
+            pass
+
+        try:
+            text_content = container.get_attribute("textContent") or container.text or ""
+
+            time_match = re.search(r"\b(\d{1,2}:\d{2}\s*[AP]M)\b", text_content, re.IGNORECASE)
+            if time_match:
+                slot_time = self._parse_time(time_match.group(1))
+                if slot_time:
+                    return slot_time
+
+            time_match_24h = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", text_content)
+            if time_match_24h:
+                slot_time = self._parse_time(time_match_24h.group(0))
+                if slot_time:
+                    return slot_time
+        except Exception as e:
+            logger.debug(f"Error extracting time from container text: {e}")
+
+        return None
+
+    def _parse_time(self, time_text: str) -> time | None:
+        """Parse a time string like '07:30 AM' or '12:42 PM' into a time object."""
+        original_text = time_text
+        time_text = time_text.strip().upper()
+
+        if not time_text:
+            return None
+
+        formats = ["%I:%M %p", "%I:%M%p", "%H:%M"]
+
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(time_text, fmt)
+                return parsed.time()
+            except ValueError:
+                continue
+
+        logger.warning(f"Failed to parse time string: '{original_text}' (normalized: '{time_text}')")
+        return None
+
+
+    def _capture_diagnostic_info(self, driver: webdriver.Chrome, context: str) -> None:
+        """
+        Capture diagnostic information (screenshot and page source) on failure.
+
+        Args:
+            driver: The WebDriver instance
+            context: Description of what operation failed
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            screenshot_path = f"/tmp/walden_debug_{context}_{timestamp}.png"
+            html_path = f"/tmp/walden_debug_{context}_{timestamp}.html"
+
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"Saved debug screenshot to {screenshot_path}")
+
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info(f"Saved debug HTML to {html_path}")
+
+        except Exception as e:
+            logger.warning(f"Failed to capture diagnostic info: {e}")
+
+    @with_retry(max_attempts=2, backoff_base=1.0)
+    def _complete_booking_sync(
+        self,
+        driver: webdriver.Chrome,
+        reserve_element: Any,
+        booked_time: time,
+        num_players: int,
+    ) -> BookingResult:
+        """
+        Complete the booking by clicking Reserve, selecting player count, and confirming.
+
+        Args:
+            driver: The WebDriver instance
+            reserve_element: The Reserve button/link element to click
+            booked_time: The time being booked
+            num_players: Number of players (1-4)
+
+        Returns:
+            BookingResult with booking outcome
+        """
+        try:
+            driver.execute_script("arguments[0].scrollIntoView(true);", reserve_element)
+
+            wait = WebDriverWait(driver, 10)
+            wait.until(expected_conditions.element_to_be_clickable(reserve_element))
+
+            reserve_element.click()
+            logger.info("Clicked Reserve button")
+
+            try:
+                wait.until(
+                    expected_conditions.presence_of_element_located(
+                        (By.CSS_SELECTOR, ".modal, .dialog, [class*='popup'], form[class*='booking'], [class*='confirm']")
+                    )
+                )
+            except TimeoutException:
+                pass
+
+            self._select_player_count_sync(driver, num_players)
+
+            try:
+                confirm_button = wait.until(
+                    expected_conditions.element_to_be_clickable(
+                        (
+                            By.XPATH,
+                            "//button[contains(text(), 'Confirm')] | "
+                            "//button[contains(text(), 'Submit')] | "
+                            "//button[contains(text(), 'Book')] | "
+                            "//input[@type='submit']",
+                        )
+                    )
+                )
+                current_url = driver.current_url
+                confirm_button.click()
+                logger.info("Clicked confirmation button")
+
+                try:
+                    wait.until(expected_conditions.url_changes(current_url))
+                except TimeoutException:
+                    wait.until(
+                        expected_conditions.presence_of_element_located(
+                            (By.XPATH, "//*[contains(text(), 'success') or contains(text(), 'confirm') or contains(text(), 'thank')]")
+                        )
+                    )
+
+            except TimeoutException:
+                logger.info("No confirmation dialog found - booking may be direct")
+
+            confirmation_number = self._extract_confirmation_number(driver)
+
+            if self._verify_booking_success(driver):
+                return BookingResult(
+                    success=True,
+                    booked_time=booked_time,
+                    confirmation_number=confirmation_number,
+                )
+            else:
+                self._capture_diagnostic_info(driver, "booking_verification_failed")
+                return BookingResult(
+                    success=False,
+                    error_message="Booking may not have completed successfully",
+                    booked_time=booked_time,
+                )
+
+        except TimeoutException as e:
+            logger.error(f"Booking confirmation timeout: {e}")
+            self._capture_diagnostic_info(driver, "booking_timeout")
+            return BookingResult(
+                success=False,
+                error_message=f"Booking confirmation timeout: {str(e)}",
+            )
+        except WebDriverException as e:
+            logger.error(f"Booking click error: {e}")
+            self._capture_diagnostic_info(driver, "booking_error")
             return BookingResult(
                 success=False,
                 error_message=f"Booking error: {str(e)}",
             )
 
-    async def get_available_times(self, date: date) -> list[time]:
-        if not await self.login():
-            return []
+    def _extract_confirmation_number(self, driver: webdriver.Chrome) -> str | None:
+        """Try to extract a confirmation number from the page after booking."""
+        try:
+            page_source = driver.page_source
+            page_text_lower = page_source.lower()
 
-        return []
+            if (
+                "confirmation" in page_text_lower
+                or "booked" in page_text_lower
+                or "reserved" in page_text_lower
+            ):
+                patterns = [
+                    r"confirmation[:\s#]*([A-Z0-9-]+)",
+                    r"booking[:\s#]*([A-Z0-9-]+)",
+                    r"reference[:\s#]*([A-Z0-9-]+)",
+                ]
+
+                for pattern in patterns:
+                    match = re.search(pattern, page_source, re.IGNORECASE)
+                    if match:
+                        return match.group(1)
+
+        except Exception as e:
+            logger.debug(f"Could not extract confirmation number: {e}")
+
+        return None
+
+
+    def _verify_booking_success(self, driver: webdriver.Chrome) -> bool:
+        """
+        Verify that the booking was successful by checking page content.
+
+        Returns False if verification is ambiguous - we should not assume success
+        without positive confirmation.
+        """
+        try:
+            page_text = driver.page_source.lower()
+
+            success_indicators = [
+                "successfully",
+                "confirmed",
+                "booked",
+                "reservation complete",
+                "thank you",
+                "your tee time",
+            ]
+
+            failure_indicators = [
+                "error",
+                "failed",
+                "unavailable",
+                "could not",
+                "unable to",
+                "already booked",
+                "no longer available",
+            ]
+
+            for indicator in failure_indicators:
+                if indicator in page_text:
+                    logger.warning(f"Found failure indicator: {indicator}")
+                    return False
+
+            for indicator in success_indicators:
+                if indicator in page_text:
+                    logger.info(f"Found success indicator: {indicator}")
+                    return True
+
+            logger.warning(
+                "No clear success or failure indicators found - treating as failure. "
+                "URL: %s",
+                driver.current_url,
+            )
+            return False
+
+        except Exception as e:
+            logger.error(f"Error verifying booking: {e}")
+            return False
+
+    async def get_available_times(self, target_date: date) -> list[time]:
+        """
+        Get all available tee times for a given date.
+
+        This method runs the entire workflow in a background thread:
+        1. Creates a new WebDriver instance
+        2. Logs in to the member portal
+        3. Navigates to the tee time page
+        4. Retrieves available time slots
+        5. Closes the WebDriver
+
+        Args:
+            target_date: The date to check availability for
+
+        Returns:
+            List of available times
+        """
+        return await asyncio.to_thread(self._get_available_times_sync, target_date)
+
+    def _get_available_times_sync(self, target_date: date) -> list[time]:
+        """Synchronous implementation with full driver lifecycle."""
+        driver = self._create_driver()
+        try:
+            if not self._perform_login(driver):
+                return []
+
+            driver.get(self.TEE_TIME_URL)
+
+            wait = WebDriverWait(driver, 15)
+            wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
+
+            self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
+            self._select_date_sync(driver, target_date)
+
+            wait.until(
+                expected_conditions.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form")
+                )
+            )
+
+            available_slots = self._find_available_slots(driver)
+            return [slot_time for slot_time, _ in available_slots]
+
+        except WebDriverException as e:
+            logger.error(f"Error getting available times: {e}")
+            return []
+        finally:
+            driver.quit()
 
     async def cancel_booking(self, confirmation_number: str) -> bool:
+        """
+        Cancel an existing booking.
+
+        Note: This is a placeholder - actual cancellation flow needs to be implemented
+        based on the site cancellation interface.
+
+        Args:
+            confirmation_number: The booking confirmation number
+
+        Returns:
+            True if cancellation was successful, False otherwise
+        """
+        logger.warning("Cancellation not yet implemented")
         return False
 
     async def close(self) -> None:
-        if self._page:
-            await self._page.close()
-            self._page = None
+        """
+        Close any resources.
 
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
+        Note: With the refactored design, each operation manages its own WebDriver
+        lifecycle, so there is nothing to clean up here. This method is kept for
+        interface compatibility.
+        """
+        pass
 
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
-        self._logged_in = False
 
 
 class MockWaldenProvider(ReservationProvider):
+    """Mock provider for testing without hitting the real booking system."""
+
     def __init__(self) -> None:
-        self._logged_in = False
+        pass
 
     async def login(self) -> bool:
-        self._logged_in = True
         return True
 
     async def book_tee_time(
         self,
-        date: date,
-        time: time,
+        target_date: date,
+        target_time: time,
         num_players: int,
         fallback_window_minutes: int = 30,
     ) -> BookingResult:
@@ -142,15 +1143,15 @@ class MockWaldenProvider(ReservationProvider):
 
         return BookingResult(
             success=True,
-            booked_time=time,
+            booked_time=target_time,
             confirmation_number=f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}",
         )
 
-    async def get_available_times(self, date: date) -> list[time]:
-        base_time = datetime.combine(date, datetime.min.time().replace(hour=7))
+    async def get_available_times(self, target_date: date) -> list[time]:
+        base_time = datetime.combine(target_date, datetime.min.time().replace(hour=7))
         times = []
         for i in range(20):
-            slot_time = (base_time + timedelta(minutes=i * 10)).time()
+            slot_time = (base_time + timedelta(minutes=i * 8)).time()
             times.append(slot_time)
         return times
 
