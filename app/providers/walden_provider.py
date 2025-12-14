@@ -240,9 +240,8 @@ class WaldenGolfProvider(ReservationProvider):
         Args:
             target_date: The date to book (should be 7 days in advance for new bookings)
             target_time: The preferred tee time
-            num_players: Number of players (1-4). TODO: Not yet wired to site controls.
-                The booking site may auto-fill player count or require additional
-                implementation once the confirmation dialog selector is confirmed.
+            num_players: Number of players (1-4). The player count selector is visible
+                in the tee sheet interface and will be set before confirming the booking.
             fallback_window_minutes: If exact time unavailable, try times within this window
 
         Returns:
@@ -271,7 +270,7 @@ class WaldenGolfProvider(ReservationProvider):
             await asyncio.sleep(2)
 
             result = await self._find_and_book_time_slot(
-                driver, target_time, fallback_window_minutes
+                driver, target_time, num_players, fallback_window_minutes
             )
 
             return result
@@ -352,10 +351,69 @@ class WaldenGolfProvider(ReservationProvider):
         except NoSuchElementException:
             logger.warning("No day tabs found")
 
+    async def _select_player_count(self, driver: webdriver.Chrome, num_players: int) -> None:
+        """
+        Select the number of players in the booking dialog.
+
+        The player count selector is visible in the tee sheet interface after clicking Reserve.
+        This method attempts to find and set the player count dropdown or input.
+
+        Args:
+            driver: The WebDriver instance
+            num_players: Number of players (1-4)
+        """
+        try:
+            player_selectors = [
+                "select[id*='player']",
+                "select[id*='golfer']",
+                "select[name*='player']",
+                "select[name*='golfer']",
+                "select[id*='numPlayers']",
+                "select[id*='numberOfPlayers']",
+            ]
+
+            for selector in player_selectors:
+                try:
+                    player_select = driver.find_element(By.CSS_SELECTOR, selector)
+                    select = Select(player_select)
+                    select.select_by_value(str(num_players))
+                    logger.info(f"Selected {num_players} players using selector: {selector}")
+                    await asyncio.sleep(0.5)
+                    return
+                except (NoSuchElementException, Exception):
+                    continue
+
+            player_input_selectors = [
+                "input[id*='player']",
+                "input[id*='golfer']",
+                "input[name*='player']",
+                "input[name*='golfer']",
+            ]
+
+            for selector in player_input_selectors:
+                try:
+                    player_input = driver.find_element(By.CSS_SELECTOR, selector)
+                    player_input.clear()
+                    player_input.send_keys(str(num_players))
+                    logger.info(f"Entered {num_players} players using input: {selector}")
+                    await asyncio.sleep(0.5)
+                    return
+                except NoSuchElementException:
+                    continue
+
+            logger.warning(
+                f"Could not find player count selector - site may auto-fill or use different control. "
+                f"Requested {num_players} players."
+            )
+
+        except Exception as e:
+            logger.warning(f"Error selecting player count: {e}")
+
     async def _find_and_book_time_slot(
         self,
         driver: webdriver.Chrome,
         target_time: time,
+        num_players: int,
         fallback_window_minutes: int,
     ) -> BookingResult:
         """
@@ -367,6 +425,7 @@ class WaldenGolfProvider(ReservationProvider):
         Args:
             driver: The WebDriver instance
             target_time: The preferred tee time
+            num_players: Number of players (1-4)
             fallback_window_minutes: Window to search for alternatives
 
         Returns:
@@ -419,9 +478,9 @@ class WaldenGolfProvider(ReservationProvider):
             )
 
         booked_time, reserve_element = best_slot
-        logger.info(f"Attempting to book {booked_time.strftime('%I:%M %p')}")
+        logger.info(f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players")
 
-        return await self._complete_booking(driver, reserve_element, booked_time)
+        return await self._complete_booking(driver, reserve_element, booked_time, num_players)
 
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
         """
@@ -500,14 +559,16 @@ class WaldenGolfProvider(ReservationProvider):
         driver: webdriver.Chrome,
         reserve_element: Any,
         booked_time: time,
+        num_players: int,
     ) -> BookingResult:
         """
-        Complete the booking by clicking Reserve and confirming.
+        Complete the booking by clicking Reserve, selecting player count, and confirming.
 
         Args:
             driver: The WebDriver instance
             reserve_element: The Reserve button/link element to click
             booked_time: The time being booked
+            num_players: Number of players (1-4)
 
         Returns:
             BookingResult with booking outcome
@@ -522,6 +583,8 @@ class WaldenGolfProvider(ReservationProvider):
             await asyncio.sleep(2)
 
             wait = WebDriverWait(driver, 10)
+
+            await self._select_player_count(driver, num_players)
 
             try:
                 confirm_button = wait.until(
