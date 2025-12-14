@@ -6,7 +6,7 @@ import google.generativeai as genai
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
 
-SYSTEM_PROMPT = """You are a helpful assistant for booking golf tee times at Walden Golf Club.
+SYSTEM_PROMPT = """You are a helpful assistant for booking golf tee times at Northgate Country Club.
 Your job is to understand the user's intent and extract structured information from their messages.
 
 The user can:
@@ -18,7 +18,8 @@ The user can:
 
 When parsing booking requests:
 - Dates can be relative (e.g., "Saturday", "next week", "tomorrow") or absolute (e.g., "December 20")
-- Times are typically morning times for golf (e.g., "8am", "7:30", "early morning")
+- Times can range from early morning to late afternoon (e.g., "8am", "7:30", "2pm", "5:30pm")
+- Tee times are available from opening until 5:54pm
 - Number of players defaults to 4 if not specified
 - "Same as last week" means repeat the previous booking
 
@@ -231,7 +232,7 @@ class GeminiService:
         if any(word in message_lower for word in ["help", "how", "what"]):
             return ParsedIntent(
                 intent="help",
-                response_message="I can help you book tee times at Walden Golf Club! Just tell me the date, time, and number of players. For example: 'Book Saturday 8am for 4 players'",
+                response_message="I can help you book tee times at Northgate Country Club! Just tell me the date, time, and number of players. For example: 'Book Saturday 8am for 4 players'",
             )
 
         if message_lower in ["yes", "confirm", "ok", "sure", "yeah"]:

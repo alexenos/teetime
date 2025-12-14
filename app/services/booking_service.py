@@ -1,3 +1,10 @@
+"""
+Booking service for managing tee time reservations.
+
+This module provides the core business logic for handling SMS conversations,
+processing booking requests, and executing reservations at the scheduled time.
+"""
+
 import uuid
 from datetime import datetime, timedelta
 
@@ -18,24 +25,64 @@ from app.services.sms_service import sms_service
 
 
 class BookingService:
+    """
+    Manages tee time booking requests and SMS conversations.
+
+    This service handles the full lifecycle of booking requests:
+    1. Receiving and parsing SMS messages via Gemini LLM
+    2. Managing conversation state to collect booking details
+    3. Scheduling booking jobs for execution at the reservation open time
+    4. Executing bookings via the reservation provider
+    5. Sending confirmation/failure notifications via SMS
+
+    Note: Currently uses in-memory storage for sessions and bookings.
+    Data will be lost on restart. Future versions will use the database.
+
+    Attributes:
+        _sessions: In-memory store of user conversation sessions.
+        _bookings: In-memory store of booking records.
+        _reservation_provider: Provider for executing bookings on the club website.
+    """
+
     def __init__(self) -> None:
+        """Initialize the booking service with empty in-memory stores."""
         self._sessions: dict[str, UserSession] = {}
         self._bookings: dict[str, TeeTimeBooking] = {}
         self._reservation_provider: ReservationProvider | None = None
 
     def set_reservation_provider(self, provider: ReservationProvider) -> None:
+        """Set the reservation provider for executing bookings."""
         self._reservation_provider = provider
 
     def get_session(self, phone_number: str) -> UserSession:
+        """Get or create a session for the given phone number."""
         if phone_number not in self._sessions:
             self._sessions[phone_number] = UserSession(phone_number=phone_number)
         return self._sessions[phone_number]
 
     def update_session(self, session: UserSession) -> None:
+        """Update the session's last interaction time and save it."""
         session.last_interaction = datetime.utcnow()
         self._sessions[session.phone_number] = session
 
     async def handle_incoming_message(self, phone_number: str, message: str) -> str:
+        """
+        Process an incoming SMS message and return a response.
+
+        This is the main entry point for SMS messages. It:
+        1. Gets or creates a session for the user
+        2. Builds context from the current conversation state
+        3. Parses the message using Gemini LLM
+        4. Processes the parsed intent and generates a response
+        5. Updates the session state
+
+        Args:
+            phone_number: The sender's phone number.
+            message: The text content of the SMS.
+
+        Returns:
+            The response message to send back to the user.
+        """
         session = self.get_session(phone_number)
 
         context = None
@@ -53,6 +100,7 @@ class BookingService:
         return response
 
     async def _process_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
+        """Route the parsed intent to the appropriate handler."""
         if parsed.intent == "book":
             return await self._handle_book_intent(session, parsed)
         elif parsed.intent == "confirm":
@@ -187,8 +235,9 @@ class BookingService:
         return execution_time
 
     def _get_help_message(self) -> str:
+        """Return a help message explaining how to use the booking service."""
         return (
-            "I can help you book tee times at Walden Golf Club!\n\n"
+            "I can help you book tee times at Northgate Country Club!\n\n"
             "Try saying:\n"
             "- 'Book Saturday 8am for 4 players'\n"
             "- 'Check my bookings'\n"
@@ -197,6 +246,23 @@ class BookingService:
         )
 
     async def execute_booking(self, booking_id: str) -> bool:
+        """
+        Execute a scheduled booking by attempting to reserve on the club website.
+
+        This method is called by the scheduler at the reservation open time
+        (6:30am CT, 7 days before the requested date). It:
+        1. Retrieves the booking record
+        2. Updates status to IN_PROGRESS
+        3. Calls the reservation provider to book on the club website
+        4. Updates status to SUCCESS or FAILED based on result
+        5. Sends SMS notification to the user
+
+        Args:
+            booking_id: The unique identifier of the booking to execute.
+
+        Returns:
+            True if the booking was successful, False otherwise.
+        """
         booking = self._bookings.get(booking_id)
         if not booking:
             return False
