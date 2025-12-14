@@ -820,53 +820,117 @@ class WaldenGolfProvider(ReservationProvider):
 
         return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
 
-    def _find_empty_slots(self, search_context: Any) -> list[tuple[time, Any]]:
+    def _find_empty_slots(
+        self, search_context: Any, min_available_spots: int = 4
+    ) -> list[tuple[time, Any]]:
         """
-        Find completely empty time slots that have all 4 spots available.
+        Find time slots that have at least min_available_spots available.
 
-        Empty slots on the Walden Golf tee sheet have:
-        - An "Available" link followed by a "Reserve" link
-        - No player names in the row
-        - The row structure: <li><label>TIME</label><a>Available</a><a>Reserve</a></li>
+        The Walden Golf tee sheet structure:
+        - Each time slot is a <li class="ui-datascroller-item">
+        - Available spots are marked with <span class="custom-free-slot-span">Available</span>
+        - A slot with 4 "Available" spans is completely empty
+        - A slot with fewer spans has some spots already booked
+
+        Args:
+            search_context: The WebDriver element to search within
+            min_available_spots: Minimum number of available spots required (default 4)
 
         Returns:
-            List of (time, reserve_element) tuples for empty slots
+            List of (time, clickable_element) tuples for slots with enough spots
         """
         empty_slots: list[tuple[time, Any]] = []
 
         try:
-            # Find all Reserve links - these indicate completely empty slots
-            reserve_links = search_context.find_elements(
-                By.XPATH,
-                ".//a[contains(text(), 'Reserve')]"
+            # Find all time slot list items
+            slot_items = search_context.find_elements(
+                By.CSS_SELECTOR, "li.ui-datascroller-item"
             )
 
-            logger.info(f"Found {len(reserve_links)} Reserve links")
+            logger.info(f"Found {len(slot_items)} time slot items")
 
-            for reserve_link in reserve_links:
+            for slot_item in slot_items:
                 try:
-                    # Get the parent <li> element which contains the time
-                    parent_li = reserve_link.find_element(By.XPATH, "./ancestor::li[1]")
-                    
-                    # Find the time label in the parent
-                    time_label = parent_li.find_element(By.TAG_NAME, "label")
-                    time_text = time_label.text.strip()
-                    
-                    slot_time = self._parse_time(time_text)
-                    if slot_time:
-                        empty_slots.append((slot_time, reserve_link))
-                        logger.debug(f"Found empty slot at {slot_time.strftime('%I:%M %p')}")
+                    # Count the number of "Available" spans in this slot
+                    available_spans = slot_item.find_elements(
+                        By.CSS_SELECTOR, "span.custom-free-slot-span"
+                    )
+                    num_available = len(available_spans)
 
-                except (NoSuchElementException, ValueError) as e:
-                    logger.debug(f"Could not parse empty slot: {e}")
+                    if num_available >= min_available_spots:
+                        # This slot has enough available spots
+                        # Extract the time from the slot
+                        slot_time = self._extract_time_from_slot_item(slot_item)
+                        
+                        if slot_time:
+                            # Get the first Available span as the clickable element
+                            clickable = available_spans[0] if available_spans else slot_item
+                            empty_slots.append((slot_time, clickable))
+                            logger.debug(
+                                f"Found slot at {slot_time.strftime('%I:%M %p')} "
+                                f"with {num_available} available spots"
+                            )
+
+                except Exception as e:
+                    logger.debug(f"Could not process slot item: {e}")
                     continue
 
         except NoSuchElementException:
-            logger.debug("No Reserve links found")
+            logger.debug("No slot items found")
 
         empty_slots.sort(key=lambda x: x[0])
-        logger.info(f"Total empty slots found: {len(empty_slots)}")
+        logger.info(
+            f"Total slots with {min_available_spots}+ available spots: {len(empty_slots)}"
+        )
         return empty_slots
+
+    def _extract_time_from_slot_item(self, slot_item: Any) -> time | None:
+        """
+        Extract the time from a time slot list item.
+
+        The time is typically in a <label> element or in the slot's text content.
+
+        Args:
+            slot_item: The <li> element containing the time slot
+
+        Returns:
+            The parsed time, or None if not found
+        """
+        try:
+            # Try to find a label element with the time
+            try:
+                time_label = slot_item.find_element(By.TAG_NAME, "label")
+                time_text = time_label.text.strip()
+                if time_text:
+                    parsed = self._parse_time(time_text)
+                    if parsed:
+                        return parsed
+            except NoSuchElementException:
+                pass
+
+            # Try to find time in the slot's text content
+            slot_text = slot_item.text
+            # Look for time pattern like "07:46 AM" or "1:30 PM"
+            time_pattern = r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b'
+            import re
+            match = re.search(time_pattern, slot_text)
+            if match:
+                return self._parse_time(match.group(1))
+
+            # Try to find time in any span or div
+            for tag in ["span", "div"]:
+                elements = slot_item.find_elements(By.TAG_NAME, tag)
+                for elem in elements:
+                    text = elem.text.strip()
+                    if text:
+                        parsed = self._parse_time(text)
+                        if parsed:
+                            return parsed
+
+        except Exception as e:
+            logger.debug(f"Error extracting time from slot item: {e}")
+
+        return None
 
 
     @with_retry(max_attempts=3, backoff_base=0.5)
