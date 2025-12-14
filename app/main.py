@@ -2,7 +2,6 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import bookings, health, webhooks
 from app.models.database import init_db
@@ -29,13 +28,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS middleware configuration
+# Note: Wide-open CORS with allow_credentials=True is a security anti-pattern.
+# For production with a web frontend, configure specific allowed origins via
+# environment variables. Currently disabled since the primary interface is
+# Twilio webhooks (server-to-server) which don't require CORS.
+# TODO: Add CORS_ALLOWED_ORIGINS setting when a web frontend is added.
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=settings.cors_allowed_origins,  # Configure in settings
+#     allow_credentials=False,  # Only enable if needed with specific origins
+#     allow_methods=["GET", "POST", "DELETE"],
+#     allow_headers=["*"],
+# )
 
 app.include_router(health.router)
 app.include_router(webhooks.router)

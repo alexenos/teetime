@@ -21,9 +21,29 @@ class SMSService:
             self._validator = RequestValidator(settings.twilio_auth_token)
         return self._validator
 
-    def validate_request(self, url: str, params: dict, signature: str) -> bool:
+    def validate_request(self, url: str, params: dict, signature: str | None) -> bool:
+        """
+        Validate a Twilio webhook request signature.
+
+        Security behavior:
+        - If twilio_auth_token is NOT set (dev mode): Always returns True (skip validation)
+        - If twilio_auth_token IS set (production): Requires valid signature header
+          - Missing signature header -> returns False (reject request)
+          - Invalid signature -> returns False (reject request)
+          - Valid signature -> returns True (allow request)
+
+        Args:
+            url: The full URL of the webhook request.
+            params: The form parameters from the request.
+            signature: The X-Twilio-Signature header value (may be None).
+
+        Returns:
+            True if the request is valid, False otherwise.
+        """
         if not settings.twilio_auth_token:
             return True
+        if not signature:
+            return False
         return self.validator.validate(url, params, signature)
 
     async def send_sms(self, to_number: str, message: str) -> str | None:

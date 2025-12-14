@@ -15,13 +15,19 @@ async def handle_incoming_sms(
     body: str = Form(..., alias="Body"),
     x_twilio_signature: str = Header(None, alias="X-Twilio-Signature"),
 ) -> str:
+    """
+    Handle incoming SMS messages from Twilio.
+
+    Security: When Twilio credentials are configured (twilio_auth_token is set),
+    the X-Twilio-Signature header is required and validated. In dev mode (no
+    credentials), validation is skipped to allow local testing.
+    """
     url = str(request.url)
     form_data = await request.form()
     params = {key: value for key, value in form_data.items()}
 
-    if x_twilio_signature:
-        if not sms_service.validate_request(url, params, x_twilio_signature):
-            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    if not sms_service.validate_request(url, params, x_twilio_signature):
+        raise HTTPException(status_code=403, detail="Invalid or missing Twilio signature")
 
     response_message = await booking_service.handle_incoming_message(from_number, body)
 
