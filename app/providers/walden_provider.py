@@ -631,6 +631,10 @@ class WaldenGolfProvider(ReservationProvider):
         For players 2, 3, 4, we need to click the "TBD" button to register them
         as TBD Registered Guests.
 
+        Note: After clicking a TBD button, the DOM updates and element references
+        become stale. We re-find the player rows after each click to avoid
+        stale element reference errors.
+
         Args:
             driver: The WebDriver instance
             num_tbd_guests: Number of TBD guests to add (1-3)
@@ -642,29 +646,31 @@ class WaldenGolfProvider(ReservationProvider):
             # Wait for the player table to update after selecting player count
             time_module.sleep(2)
             
-            # The player table has rows for each player
-            # Each row has a "TBD" button that we need to click for guests
-            # The button has class "btn-tbd" or similar
-            
             tbd_buttons_added = 0
             
-            # Find all player rows in the table
-            # Player rows are in the playersTable with data-ri attribute
-            player_rows = driver.find_elements(
-                By.CSS_SELECTOR, 
-                "[id*='playersTable'] tbody tr[data-ri]"
-            )
-            
-            logger.info(f"Found {len(player_rows)} player rows")
-            
-            # Skip the first row (primary player) and process the rest
-            for i, row in enumerate(player_rows[1:], start=2):
-                if tbd_buttons_added >= num_tbd_guests:
+            # Process each guest slot one at a time, re-finding rows after each click
+            # to avoid stale element references
+            for guest_index in range(num_tbd_guests):
+                player_num = guest_index + 2  # Players 2, 3, 4
+                
+                # Re-find player rows each iteration to avoid stale references
+                player_rows = driver.find_elements(
+                    By.CSS_SELECTOR, 
+                    "[id*='playersTable'] tbody tr[data-ri]"
+                )
+                
+                if guest_index == 0:
+                    logger.info(f"Found {len(player_rows)} player rows")
+                
+                # Check if we have enough rows
+                if len(player_rows) <= guest_index + 1:
+                    logger.warning(f"Not enough player rows for player {player_num}")
                     break
+                
+                row = player_rows[guest_index + 1]  # Skip first row (primary player)
                 
                 try:
                     # Look for the TBD button in this row
-                    # The button might have various selectors
                     tbd_button = None
                     tbd_selectors = [
                         "a[id*='tbd']",
@@ -684,9 +690,9 @@ class WaldenGolfProvider(ReservationProvider):
                     if tbd_button:
                         # Click the TBD button
                         driver.execute_script("arguments[0].click();", tbd_button)
-                        logger.info(f"Clicked TBD button for player {i}")
+                        logger.info(f"Clicked TBD button for player {player_num}")
                         tbd_buttons_added += 1
-                        time_module.sleep(0.5)  # Wait for the form to update
+                        time_module.sleep(1)  # Wait for the form to update
                     else:
                         # If no TBD button, try to find the player name input and type "TBD"
                         try:
@@ -697,14 +703,14 @@ class WaldenGolfProvider(ReservationProvider):
                             if not player_input.get_attribute("disabled"):
                                 player_input.clear()
                                 player_input.send_keys("TBD Registered Guest")
-                                logger.info(f"Entered TBD Registered Guest for player {i}")
+                                logger.info(f"Entered TBD Registered Guest for player {player_num}")
                                 tbd_buttons_added += 1
                                 time_module.sleep(0.5)
                         except NoSuchElementException:
-                            logger.warning(f"Could not find TBD button or input for player {i}")
+                            logger.warning(f"Could not find TBD button or input for player {player_num}")
                 
                 except Exception as e:
-                    logger.warning(f"Error adding TBD guest for player {i}: {e}")
+                    logger.warning(f"Error adding TBD guest for player {player_num}: {e}")
             
             if tbd_buttons_added == num_tbd_guests:
                 logger.info(f"Successfully added {tbd_buttons_added} TBD Registered Guests")
@@ -846,11 +852,17 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Find time slots that have at least min_available_spots available.
 
-        The Walden Golf tee sheet structure:
-        - Each time slot is a <li class="ui-datascroller-item">
-        - Available spots are marked with <span class="custom-free-slot-span">Available</span>
-        - A slot with 4 "Available" spans is completely empty
-        - A slot with fewer spans has some spots already booked
+        The Walden Golf tee sheet has two different slot structures:
+        
+        1. Completely empty slots (all 4 spots available):
+           - The slot div has class="Empty"
+           - Contains a "reserve_button" element with "Reserve" text
+           - Structure: <div class="Empty">...<a id="...reserve_button">Reserve</a>...</div>
+        
+        2. Partially filled slots (1-3 spots available):
+           - The slot div has class="Reserved"
+           - Contains <span class="custom-free-slot-span">Available</span> for each open spot
+           - Count the spans to determine available spots
 
         Args:
             search_context: The WebDriver element to search within
@@ -860,6 +872,8 @@ class WaldenGolfProvider(ReservationProvider):
             List of (time, clickable_element) tuples for slots with enough spots
         """
         empty_slots: list[tuple[time, Any]] = []
+        completely_empty_count = 0
+        partial_slots_count = 0
 
         try:
             # Find all time slot list items
@@ -871,7 +885,39 @@ class WaldenGolfProvider(ReservationProvider):
 
             for slot_item in slot_items:
                 try:
-                    # Count the number of "Available" spans in this slot
+                    # First check for completely empty slots (class="Empty" with reserve_button)
+                    # These have all 4 spots available
+                    empty_divs = slot_item.find_elements(
+                        By.CSS_SELECTOR, "div.Empty"
+                    )
+                    
+                    if empty_divs:
+                        # This is a completely empty slot - all 4 spots available
+                        if min_available_spots <= 4:
+                            slot_time = self._extract_time_from_slot_item(slot_item)
+                            if slot_time:
+                                # Find the reserve button or the Available link
+                                reserve_btn = None
+                                try:
+                                    reserve_btn = slot_item.find_element(
+                                        By.CSS_SELECTOR, "a[id*='reserve_button']"
+                                    )
+                                except NoSuchElementException:
+                                    try:
+                                        reserve_btn = slot_item.find_element(
+                                            By.CSS_SELECTOR, "a.slot-link"
+                                        )
+                                    except NoSuchElementException:
+                                        reserve_btn = slot_item
+                                
+                                empty_slots.append((slot_time, reserve_btn))
+                                completely_empty_count += 1
+                                logger.debug(
+                                    f"Found completely empty slot at {slot_time.strftime('%I:%M %p')}"
+                                )
+                        continue
+                    
+                    # Check for partially filled slots (class="Reserved" with Available spans)
                     available_spans = slot_item.find_elements(
                         By.CSS_SELECTOR, "span.custom-free-slot-span"
                     )
@@ -879,15 +925,15 @@ class WaldenGolfProvider(ReservationProvider):
 
                     if num_available >= min_available_spots:
                         # This slot has enough available spots
-                        # Extract the time from the slot
                         slot_time = self._extract_time_from_slot_item(slot_item)
                         
                         if slot_time:
                             # Get the first Available span as the clickable element
                             clickable = available_spans[0] if available_spans else slot_item
                             empty_slots.append((slot_time, clickable))
+                            partial_slots_count += 1
                             logger.debug(
-                                f"Found slot at {slot_time.strftime('%I:%M %p')} "
+                                f"Found partial slot at {slot_time.strftime('%I:%M %p')} "
                                 f"with {num_available} available spots"
                             )
 
@@ -900,7 +946,8 @@ class WaldenGolfProvider(ReservationProvider):
 
         empty_slots.sort(key=lambda x: x[0])
         logger.info(
-            f"Total slots with {min_available_spots}+ available spots: {len(empty_slots)}"
+            f"Found {completely_empty_count} completely empty slots and "
+            f"{partial_slots_count} partial slots with {min_available_spots}+ spots"
         )
         return empty_slots
 
