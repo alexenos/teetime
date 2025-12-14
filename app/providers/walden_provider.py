@@ -458,6 +458,17 @@ class WaldenGolfProvider(ReservationProvider):
                         if day_el.is_displayed() and day_el.is_enabled():
                             day_el.click()
                             logger.info(f"Selected day {day_str} from calendar")
+                            # Wait for page to reload after date selection
+                            time_module.sleep(2)
+                            # Wait for tee time slots to appear
+                            try:
+                                WebDriverWait(driver, 10).until(
+                                    expected_conditions.presence_of_element_located(
+                                        (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time']")
+                                    )
+                                )
+                            except TimeoutException:
+                                logger.debug("Tee time slots not found after calendar selection")
                             return True
 
                 except TimeoutException:
@@ -672,7 +683,23 @@ class WaldenGolfProvider(ReservationProvider):
 
                     slot_time = self._extract_time_from_container(row_container)
                     if slot_time:
-                        available_slots.append((slot_time, span))
+                        # Find the clickable "Available" link inside the span
+                        # The span contains an <a> link with class "custom-free-slot-link"
+                        clickable_element = None
+                        try:
+                            # Look for the Available link inside the span
+                            clickable_element = span.find_element(
+                                By.CSS_SELECTOR, "a.custom-free-slot-link"
+                            )
+                        except NoSuchElementException:
+                            try:
+                                # Fallback: any <a> link inside the span
+                                clickable_element = span.find_element(By.TAG_NAME, "a")
+                            except NoSuchElementException:
+                                # Last resort: use the span itself
+                                clickable_element = span
+                        
+                        available_slots.append((slot_time, clickable_element))
                         logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')}")
                     else:
                         logger.debug("Could not extract time from row container")
@@ -890,12 +917,18 @@ class WaldenGolfProvider(ReservationProvider):
             BookingResult with booking outcome
         """
         try:
-            driver.execute_script("arguments[0].scrollIntoView(true);", reserve_element)
+            # Scroll element into view with offset to account for sticky header
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", 
+                reserve_element
+            )
+            time_module.sleep(0.5)  # Wait for scroll to complete
 
             wait = WebDriverWait(driver, 10)
             wait.until(expected_conditions.element_to_be_clickable(reserve_element))
 
-            reserve_element.click()
+            # Use JavaScript click to bypass any overlay issues
+            driver.execute_script("arguments[0].click();", reserve_element)
             logger.info("Clicked Reserve button")
 
             try:
@@ -910,20 +943,50 @@ class WaldenGolfProvider(ReservationProvider):
             self._select_player_count_sync(driver, num_players)
 
             try:
-                confirm_button = wait.until(
-                    expected_conditions.element_to_be_clickable(
-                        (
-                            By.XPATH,
-                            "//button[contains(text(), 'Confirm')] | "
-                            "//button[contains(text(), 'Submit')] | "
-                            "//button[contains(text(), 'Book')] | "
-                            "//input[@type='submit']",
+                # Wait for the booking form to load
+                time_module.sleep(2)
+                
+                # Scroll down to make sure the Book Now button is visible
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time_module.sleep(1)
+                
+                # Look for "Book Now" link/button - it's an <a> element on Walden Golf
+                # Try to find by ID first (most reliable), then by text content
+                confirm_button = None
+                try:
+                    # First try to find by ID (most specific)
+                    confirm_button = driver.find_element(
+                        By.CSS_SELECTOR, "a[id*='bookTeeTimeAction']"
+                    )
+                    logger.info("Found Book Now button by ID")
+                except NoSuchElementException:
+                    # Fallback to XPath with text content
+                    confirm_button = wait.until(
+                        expected_conditions.element_to_be_clickable(
+                            (
+                                By.XPATH,
+                                "//a[contains(., 'Book Now')] | "
+                                "//a[contains(., 'Book')] | "
+                                "//button[contains(., 'Confirm')] | "
+                                "//button[contains(., 'Submit')] | "
+                                "//button[contains(., 'Book')] | "
+                                "//input[@type='submit']",
+                            )
                         )
                     )
+                
+                logger.info(f"Found Book Now button: {confirm_button.get_attribute('id')}")
+                
+                # Scroll to the button and use JavaScript click
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", 
+                    confirm_button
                 )
+                time_module.sleep(0.5)
+                
                 current_url = driver.current_url
-                confirm_button.click()
-                logger.info("Clicked confirmation button")
+                driver.execute_script("arguments[0].click();", confirm_button)
+                logger.info("Clicked Book Now button")
 
                 try:
                     wait.until(expected_conditions.url_changes(current_url))
