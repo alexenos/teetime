@@ -1,12 +1,16 @@
 import asyncio
+import functools
 import logging
 import re
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 from selenium import webdriver
 from selenium.common.exceptions import (
+    ElementClickInterceptedException,
     NoSuchElementException,
+    StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
 )
@@ -21,6 +25,59 @@ from app.config import settings
 from app.providers.base import BookingResult, ReservationProvider
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+TRANSIENT_EXCEPTIONS = (
+    StaleElementReferenceException,
+    ElementClickInterceptedException,
+    TimeoutException,
+)
+
+
+def with_retry(
+    max_attempts: int = 3,
+    backoff_base: float = 0.5,
+    exceptions: tuple[type[Exception], ...] = TRANSIENT_EXCEPTIONS,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """
+    Decorator for retrying operations that may fail due to transient Selenium issues.
+
+    Uses exponential backoff between attempts. Only retries on specified exception types.
+
+    Args:
+        max_attempts: Maximum number of attempts (default 3)
+        backoff_base: Base delay in seconds, doubled each attempt (default 0.5)
+        exceptions: Tuple of exception types to retry on
+    """
+
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            last_exception: Exception | None = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt < max_attempts - 1:
+                        delay = backoff_base * (2**attempt)
+                        logger.warning(
+                            f"Attempt {attempt + 1}/{max_attempts} failed for {func.__name__}: {e}. "
+                            f"Retrying in {delay:.1f}s..."
+                        )
+                        import time as time_module
+
+                        time_module.sleep(delay)
+                    else:
+                        logger.error(
+                            f"All {max_attempts} attempts failed for {func.__name__}: {e}"
+                        )
+            raise last_exception  # type: ignore[misc]
+
+        return wrapper
+
+    return decorator
 
 
 class WaldenGolfProvider(ReservationProvider):
@@ -51,6 +108,19 @@ class WaldenGolfProvider(ReservationProvider):
         self._driver: webdriver.Chrome | None = None
         self._logged_in: bool = False
 
+    async def __aenter__(self) -> "WaldenGolfProvider":
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
+        """Async context manager exit - ensures cleanup even on exceptions."""
+        await self.close()
+
     def _create_driver(self) -> webdriver.Chrome:
         """Create a headless Chrome WebDriver instance."""
         options = Options()
@@ -78,7 +148,6 @@ class WaldenGolfProvider(ReservationProvider):
             },
         )
 
-        driver.implicitly_wait(10)
         return driver
 
     def _ensure_driver(self) -> webdriver.Chrome:
@@ -164,10 +233,16 @@ class WaldenGolfProvider(ReservationProvider):
         5. Finds the requested time slot (or nearest available within fallback window)
         6. Clicks Reserve and confirms the booking
 
+        Note: Selenium operations are synchronous and will block the event loop.
+        This is acceptable for scheduled background jobs (Cloud Run Jobs) but callers
+        in async contexts should consider using asyncio.to_thread() if needed.
+
         Args:
             target_date: The date to book (should be 7 days in advance for new bookings)
             target_time: The preferred tee time
-            num_players: Number of players (1-4)
+            num_players: Number of players (1-4). TODO: Not yet wired to site controls.
+                The booking site may auto-fill player count or require additional
+                implementation once the confirmation dialog selector is confirmed.
             fallback_window_minutes: If exact time unavailable, try times within this window
 
         Returns:
@@ -498,9 +573,14 @@ class WaldenGolfProvider(ReservationProvider):
     def _extract_confirmation_number(self, driver: webdriver.Chrome) -> str | None:
         """Try to extract a confirmation number from the page after booking."""
         try:
-            page_text = driver.page_source.lower()
+            page_source = driver.page_source
+            page_text_lower = page_source.lower()
 
-            if "confirmation" in page_text or "booked" in page_text or "reserved" in page_text:
+            if (
+                "confirmation" in page_text_lower
+                or "booked" in page_text_lower
+                or "reserved" in page_text_lower
+            ):
                 patterns = [
                     r"confirmation[:\s#]*([A-Z0-9-]+)",
                     r"booking[:\s#]*([A-Z0-9-]+)",
@@ -508,7 +588,7 @@ class WaldenGolfProvider(ReservationProvider):
                 ]
 
                 for pattern in patterns:
-                    match = re.search(pattern, driver.page_source, re.IGNORECASE)
+                    match = re.search(pattern, page_source, re.IGNORECASE)
                     if match:
                         return match.group(1)
 
