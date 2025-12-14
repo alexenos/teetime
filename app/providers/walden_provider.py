@@ -206,9 +206,13 @@ class WaldenGolfProvider(ReservationProvider):
             password_input.send_keys(settings.walden_password)
 
             submit_button = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+            current_url = driver.current_url
             submit_button.click()
 
-            time_module.sleep(3)
+            try:
+                wait.until(expected_conditions.url_changes(current_url))
+            except TimeoutException:
+                pass
 
             if "login" not in driver.current_url.lower() or "home" in driver.current_url.lower():
                 logger.info(f"Login successful. Current URL: {driver.current_url}")
@@ -293,7 +297,11 @@ class WaldenGolfProvider(ReservationProvider):
             self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
             self._select_date_sync(driver, target_date)
 
-            time_module.sleep(2)
+            wait.until(
+                expected_conditions.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form")
+                )
+            )
 
             result = self._find_and_book_time_slot_sync(
                 driver, target_time, num_players, fallback_window_minutes
@@ -326,7 +334,11 @@ class WaldenGolfProvider(ReservationProvider):
                 if course_name.lower() in option.text.lower():
                     select.select_by_visible_text(option.text)
                     logger.info(f"Selected course: {option.text}")
-                    time_module.sleep(1)
+                    wait = WebDriverWait(driver, 10)
+                    try:
+                        wait.until(expected_conditions.staleness_of(course_select))
+                    except TimeoutException:
+                        pass
                     return
 
             logger.warning(f"Course '{course_name}' not found in dropdown, using default")
@@ -335,49 +347,156 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info("No course dropdown found - may already be on correct course page")
 
     def _select_date_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
-        """Select the target date using the date picker or day tabs."""
-        try:
-            date_str = target_date.strftime("%m/%d/%Y")
+        """
+        Select the target date using various date selection mechanisms.
 
-            date_input = driver.find_element(By.CSS_SELECTOR, "input[type='text'][id*='date']")
-            date_input.clear()
-            date_input.send_keys(date_str)
-            logger.info(f"Entered date: {date_str}")
+        The Northstar Technologies tee sheet may use different date selection methods:
+        1. Date input field (various selectors)
+        2. Date picker widget
+        3. Day-of-week tabs
+        4. Calendar navigation
 
-            time_module.sleep(1)
+        This method tries multiple approaches in order of likelihood.
+        """
+        date_str = target_date.strftime("%m/%d/%Y")
+        date_str_alt = target_date.strftime("%Y-%m-%d")
 
+        date_input_selectors = [
+            "input[type='text'][id*='date']",
+            "input[type='date']",
+            "input[id*='date']",
+            "input[name*='date']",
+            "input[class*='date']",
+            "input[placeholder*='date' i]",
+            "input[placeholder*='mm/dd' i]",
+            ".datepicker input",
+            "[data-date] input",
+        ]
+
+        for selector in date_input_selectors:
             try:
-                search_button = driver.find_element(
-                    By.CSS_SELECTOR, "button[type='submit'], input[type='submit']"
-                )
-                search_button.click()
-                time_module.sleep(2)
+                date_input = driver.find_element(By.CSS_SELECTOR, selector)
+                input_type = date_input.get_attribute("type")
+
+                date_input.clear()
+                if input_type == "date":
+                    date_input.send_keys(date_str_alt)
+                else:
+                    date_input.send_keys(date_str)
+                logger.info(f"Entered date {date_str} using selector: {selector}")
+
+                wait = WebDriverWait(driver, 5)
+                try:
+                    search_button = wait.until(
+                        expected_conditions.element_to_be_clickable(
+                            (By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button.search, .btn-search")
+                        )
+                    )
+                    search_button.click()
+                    logger.info("Clicked search/submit button after date entry")
+                except TimeoutException:
+                    pass
+
+                return
+
             except NoSuchElementException:
-                pass
+                continue
 
-        except NoSuchElementException:
-            logger.info("No date input found, trying day tabs...")
-            self._select_date_via_tabs_sync(driver, target_date)
+        logger.info("No date input found with standard selectors, trying day tabs...")
+        if self._select_date_via_tabs_sync(driver, target_date):
+            return
 
-    def _select_date_via_tabs_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
-        """Select date using the day-of-week tabs if date picker not available."""
+        logger.info("Day tabs not found, trying calendar picker...")
+        self._select_date_via_calendar_sync(driver, target_date)
+
+    def _select_date_via_calendar_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
+        """
+        Select date using a calendar picker widget if available.
+
+        Returns:
+            True if date was selected successfully, False otherwise.
+        """
+        try:
+            calendar_triggers = driver.find_elements(
+                By.CSS_SELECTOR,
+                ".calendar-trigger, .datepicker-trigger, [class*='calendar'], "
+                "button[aria-label*='calendar' i], .ui-datepicker-trigger, "
+                "span.icon-calendar, i.fa-calendar"
+            )
+
+            if calendar_triggers:
+                calendar_triggers[0].click()
+                logger.info("Clicked calendar trigger")
+
+                wait = WebDriverWait(driver, 5)
+                try:
+                    wait.until(
+                        expected_conditions.presence_of_element_located(
+                            (By.CSS_SELECTOR, ".ui-datepicker, .datepicker, [class*='calendar-popup']")
+                        )
+                    )
+
+                    day_str = str(target_date.day)
+                    day_elements = driver.find_elements(
+                        By.XPATH,
+                        f"//td[@data-date='{target_date.day}'] | "
+                        f"//a[text()='{day_str}'] | "
+                        f"//td[contains(@class, 'day') and text()='{day_str}']"
+                    )
+
+                    for day_el in day_elements:
+                        if day_el.is_displayed() and day_el.is_enabled():
+                            day_el.click()
+                            logger.info(f"Selected day {day_str} from calendar")
+                            return True
+
+                except TimeoutException:
+                    logger.debug("Calendar popup did not appear")
+
+        except Exception as e:
+            logger.debug(f"Calendar selection failed: {e}")
+
+        return False
+
+    def _select_date_via_tabs_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
+        """
+        Select date using the day-of-week tabs if date picker not available.
+
+        Returns:
+            True if date was selected successfully, False otherwise.
+        """
         day_name = target_date.strftime("%A")
+        date_str = target_date.strftime("%m/%d")
 
         try:
             day_tabs = driver.find_elements(
-                By.CSS_SELECTOR, ".day-tab, [class*='day'], a[href*='day']"
+                By.CSS_SELECTOR,
+                ".day-tab, [class*='day-tab'], a[href*='day'], "
+                "[data-day], .teetime-day-tab, .nav-tabs a"
             )
+
             for tab in day_tabs:
-                if day_name.lower() in tab.text.lower():
-                    tab.click()
-                    logger.info(f"Clicked day tab: {day_name}")
-                    time_module.sleep(2)
-                    return
+                tab_text = tab.text.lower()
+                if day_name.lower() in tab_text or date_str in tab.text:
+                    wait = WebDriverWait(driver, 10)
+                    try:
+                        wait.until(expected_conditions.element_to_be_clickable(tab))
+                        tab.click()
+                        logger.info(f"Clicked day tab: {day_name}")
+                        wait.until(
+                            expected_conditions.staleness_of(tab)
+                        )
+                    except TimeoutException:
+                        tab.click()
+                        logger.info(f"Clicked day tab (no staleness wait): {day_name}")
+                    return True
 
             logger.warning(f"Could not find day tab for {day_name}")
+            return False
 
         except NoSuchElementException:
             logger.warning("No day tabs found")
+            return False
 
 
     def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> None:
@@ -516,57 +635,110 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Find all available time slots in the tee sheet.
 
+        The Northstar Technologies tee sheet uses a div-based layout (not tables):
+        - Available slots: <span class="custom-free-slot-span">Available</span>
+        - Container: <div class="custom-free-slot-div">
+        - Time displayed in elements with class "teetime-player-col-4"
+
         Returns:
             List of (time, element) tuples for available slots
         """
         available_slots: list[tuple[time, Any]] = []
 
-        try:
-            reserve_buttons = search_context.find_elements(
-                By.XPATH,
-                ".//a[contains(text(), 'Reserve')] | .//button[contains(text(), 'Reserve')]",
-            )
+        available_spans = search_context.find_elements(
+            By.CSS_SELECTOR, "span.custom-free-slot-span"
+        )
 
-            for button in reserve_buttons:
+        if available_spans:
+            logger.info(f"Found {len(available_spans)} available slot spans (div-based layout)")
+            for span in available_spans:
                 try:
-                    row = button.find_element(By.XPATH, "./ancestor::tr")
-                    time_cell = row.find_element(By.CSS_SELECTOR, "td:first-child, .time-cell")
-                    time_text = time_cell.text.strip()
+                    slot_container = span.find_element(By.XPATH, "./ancestor::div[contains(@class, 'custom-free-slot-div')]")
+
+                    row_container = slot_container.find_element(By.XPATH, "./ancestor::div[contains(@class, 'ui-bar') or contains(@class, 'teetime-row')]")
+
+                    time_element = row_container.find_element(
+                        By.CSS_SELECTOR, ".teetime-player-col-4, [class*='time'], .time-cell"
+                    )
+                    time_text = time_element.text.strip()
+
+                    if not time_text:
+                        time_elements = row_container.find_elements(By.XPATH, ".//span[contains(@class, 'teetime')]")
+                        for te in time_elements:
+                            text = te.text.strip()
+                            if text and re.match(r"\d{1,2}:\d{2}", text):
+                                time_text = text
+                                break
 
                     slot_time = self._parse_time(time_text)
                     if slot_time:
-                        available_slots.append((slot_time, button))
+                        available_slots.append((slot_time, span))
+                        logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')}")
 
                 except (NoSuchElementException, ValueError) as e:
-                    logger.debug(f"Could not parse slot: {e}")
+                    logger.debug(f"Could not parse div-based slot: {e}")
+                    try:
+                        parent = span.find_element(By.XPATH, "./..")
+                        all_text = parent.text
+                        time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM)?)", all_text, re.IGNORECASE)
+                        if time_match:
+                            slot_time = self._parse_time(time_match.group(1))
+                            if slot_time:
+                                available_slots.append((slot_time, span))
+                                logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')} (fallback)")
+                    except Exception:
+                        pass
                     continue
 
-        except NoSuchElementException:
-            logger.warning("No Reserve buttons found")
+        if not available_slots:
+            logger.info("No div-based slots found, trying table-based layout fallback")
+            try:
+                reserve_buttons = search_context.find_elements(
+                    By.XPATH,
+                    ".//a[contains(text(), 'Reserve')] | .//button[contains(text(), 'Reserve')]",
+                )
 
-        try:
-            available_links = search_context.find_elements(
-                By.XPATH, ".//a[contains(text(), 'Available')]"
-            )
+                for button in reserve_buttons:
+                    try:
+                        row = button.find_element(By.XPATH, "./ancestor::tr")
+                        time_cell = row.find_element(By.CSS_SELECTOR, "td:first-child, .time-cell")
+                        time_text = time_cell.text.strip()
 
-            for link in available_links:
-                try:
-                    row = link.find_element(By.XPATH, "./ancestor::tr")
-                    time_cell = row.find_element(By.CSS_SELECTOR, "td:first-child, .time-cell")
-                    time_text = time_cell.text.strip()
+                        slot_time = self._parse_time(time_text)
+                        if slot_time:
+                            available_slots.append((slot_time, button))
 
-                    slot_time = self._parse_time(time_text)
-                    if slot_time:
-                        available_slots.append((slot_time, link))
+                    except (NoSuchElementException, ValueError) as e:
+                        logger.debug(f"Could not parse table slot: {e}")
+                        continue
 
-                except (NoSuchElementException, ValueError) as e:
-                    logger.debug(f"Could not parse available slot: {e}")
-                    continue
+            except NoSuchElementException:
+                pass
 
-        except NoSuchElementException:
-            pass
+            try:
+                available_links = search_context.find_elements(
+                    By.XPATH, ".//a[contains(text(), 'Available')]"
+                )
+
+                for link in available_links:
+                    try:
+                        row = link.find_element(By.XPATH, "./ancestor::tr")
+                        time_cell = row.find_element(By.CSS_SELECTOR, "td:first-child, .time-cell")
+                        time_text = time_cell.text.strip()
+
+                        slot_time = self._parse_time(time_text)
+                        if slot_time:
+                            available_slots.append((slot_time, link))
+
+                    except (NoSuchElementException, ValueError) as e:
+                        logger.debug(f"Could not parse available link: {e}")
+                        continue
+
+            except NoSuchElementException:
+                pass
 
         available_slots.sort(key=lambda x: x[0])
+        logger.info(f"Total available slots found: {len(available_slots)}")
         return available_slots
 
     def _parse_time(self, time_text: str) -> time | None:
@@ -606,14 +778,21 @@ class WaldenGolfProvider(ReservationProvider):
         """
         try:
             driver.execute_script("arguments[0].scrollIntoView(true);", reserve_element)
-            time_module.sleep(0.5)
+
+            wait = WebDriverWait(driver, 10)
+            wait.until(expected_conditions.element_to_be_clickable(reserve_element))
 
             reserve_element.click()
             logger.info("Clicked Reserve button")
 
-            time_module.sleep(2)
-
-            wait = WebDriverWait(driver, 10)
+            try:
+                wait.until(
+                    expected_conditions.presence_of_element_located(
+                        (By.CSS_SELECTOR, ".modal, .dialog, [class*='popup'], form[class*='booking'], [class*='confirm']")
+                    )
+                )
+            except TimeoutException:
+                pass
 
             self._select_player_count_sync(driver, num_players)
 
@@ -629,9 +808,18 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                     )
                 )
+                current_url = driver.current_url
                 confirm_button.click()
                 logger.info("Clicked confirmation button")
-                time_module.sleep(2)
+
+                try:
+                    wait.until(expected_conditions.url_changes(current_url))
+                except TimeoutException:
+                    wait.until(
+                        expected_conditions.presence_of_element_located(
+                            (By.XPATH, "//*[contains(text(), 'success') or contains(text(), 'confirm') or contains(text(), 'thank')]")
+                        )
+                    )
 
             except TimeoutException:
                 logger.info("No confirmation dialog found - booking may be direct")
@@ -766,7 +954,11 @@ class WaldenGolfProvider(ReservationProvider):
             self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
             self._select_date_sync(driver, target_date)
 
-            time_module.sleep(2)
+            wait.until(
+                expected_conditions.presence_of_element_located(
+                    (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form")
+                )
+            )
 
             available_slots = self._find_available_slots(driver)
             return [slot_time for slot_time, _ in available_slots]
