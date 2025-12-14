@@ -109,7 +109,17 @@ class WaldenGolfProvider(ReservationProvider):
     TEE_TIME_INTERVAL_MINUTES = 8
 
     def __init__(self) -> None:
-        pass
+        """
+        Initialize the WaldenGolfProvider.
+
+        Validates that required credentials are configured. Logs a warning if
+        credentials are missing - operations will fail at login time.
+        """
+        if not settings.walden_member_number or not settings.walden_password:
+            logger.warning(
+                "Walden Golf credentials not configured. "
+                "Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD environment variables."
+            )
 
     async def __aenter__(self) -> "WaldenGolfProvider":
         """Async context manager entry."""
@@ -631,6 +641,7 @@ class WaldenGolfProvider(ReservationProvider):
         return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
 
 
+    @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
         """
         Find all available time slots in the tee sheet.
@@ -743,7 +754,11 @@ class WaldenGolfProvider(ReservationProvider):
 
     def _parse_time(self, time_text: str) -> time | None:
         """Parse a time string like '07:30 AM' or '12:42 PM' into a time object."""
+        original_text = time_text
         time_text = time_text.strip().upper()
+
+        if not time_text:
+            return None
 
         formats = ["%I:%M %p", "%I:%M%p", "%H:%M"]
 
@@ -754,9 +769,34 @@ class WaldenGolfProvider(ReservationProvider):
             except ValueError:
                 continue
 
+        logger.warning(f"Failed to parse time string: '{original_text}' (normalized: '{time_text}')")
         return None
 
 
+    def _capture_diagnostic_info(self, driver: webdriver.Chrome, context: str) -> None:
+        """
+        Capture diagnostic information (screenshot and page source) on failure.
+
+        Args:
+            driver: The WebDriver instance
+            context: Description of what operation failed
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            screenshot_path = f"/tmp/walden_debug_{context}_{timestamp}.png"
+            html_path = f"/tmp/walden_debug_{context}_{timestamp}.html"
+
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"Saved debug screenshot to {screenshot_path}")
+
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            logger.info(f"Saved debug HTML to {html_path}")
+
+        except Exception as e:
+            logger.warning(f"Failed to capture diagnostic info: {e}")
+
+    @with_retry(max_attempts=2, backoff_base=1.0)
     def _complete_booking_sync(
         self,
         driver: webdriver.Chrome,
@@ -833,6 +873,7 @@ class WaldenGolfProvider(ReservationProvider):
                     confirmation_number=confirmation_number,
                 )
             else:
+                self._capture_diagnostic_info(driver, "booking_verification_failed")
                 return BookingResult(
                     success=False,
                     error_message="Booking may not have completed successfully",
@@ -841,12 +882,14 @@ class WaldenGolfProvider(ReservationProvider):
 
         except TimeoutException as e:
             logger.error(f"Booking confirmation timeout: {e}")
+            self._capture_diagnostic_info(driver, "booking_timeout")
             return BookingResult(
                 success=False,
                 error_message=f"Booking confirmation timeout: {str(e)}",
             )
         except WebDriverException as e:
             logger.error(f"Booking click error: {e}")
+            self._capture_diagnostic_info(driver, "booking_error")
             return BookingResult(
                 success=False,
                 error_message=f"Booking error: {str(e)}",
@@ -881,7 +924,12 @@ class WaldenGolfProvider(ReservationProvider):
 
 
     def _verify_booking_success(self, driver: webdriver.Chrome) -> bool:
-        """Verify that the booking was successful by checking page content."""
+        """
+        Verify that the booking was successful by checking page content.
+
+        Returns False if verification is ambiguous - we should not assume success
+        without positive confirmation.
+        """
         try:
             page_text = driver.page_source.lower()
 
@@ -891,6 +939,7 @@ class WaldenGolfProvider(ReservationProvider):
                 "booked",
                 "reservation complete",
                 "thank you",
+                "your tee time",
             ]
 
             failure_indicators = [
@@ -899,6 +948,8 @@ class WaldenGolfProvider(ReservationProvider):
                 "unavailable",
                 "could not",
                 "unable to",
+                "already booked",
+                "no longer available",
             ]
 
             for indicator in failure_indicators:
@@ -911,10 +962,12 @@ class WaldenGolfProvider(ReservationProvider):
                     logger.info(f"Found success indicator: {indicator}")
                     return True
 
-            if "home" in driver.current_url.lower() or "tee" in driver.current_url.lower():
-                return True
-
-            return True
+            logger.warning(
+                "No clear success or failure indicators found - treating as failure. "
+                "URL: %s",
+                driver.current_url,
+            )
+            return False
 
         except Exception as e:
             logger.error(f"Error verifying booking: {e}")
