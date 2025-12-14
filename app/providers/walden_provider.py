@@ -2,6 +2,7 @@ import asyncio
 import functools
 import logging
 import re
+import time as time_module
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any, TypeVar
@@ -66,8 +67,6 @@ def with_retry(
                             f"Attempt {attempt + 1}/{max_attempts} failed for {func.__name__}: {e}. "
                             f"Retrying in {delay:.1f}s..."
                         )
-                        import time as time_module
-
                         time_module.sleep(delay)
                     else:
                         logger.error(
@@ -94,6 +93,11 @@ class WaldenGolfProvider(ReservationProvider):
     6. Confirm the booking
 
     Time slots are in 8-minute intervals for Northgate (e.g., 07:30, 07:38, 07:46).
+
+    Implementation Note:
+        All public async methods use asyncio.to_thread() to run blocking Selenium
+        operations in a background thread. Each operation manages its own WebDriver
+        lifecycle (create -> use -> quit) to avoid thread-affinity issues.
     """
 
     BASE_URL = "https://www.waldengolf.com"
@@ -105,8 +109,7 @@ class WaldenGolfProvider(ReservationProvider):
     TEE_TIME_INTERVAL_MINUTES = 8
 
     def __init__(self) -> None:
-        self._driver: webdriver.Chrome | None = None
-        self._logged_in: bool = False
+        pass
 
     async def __aenter__(self) -> "WaldenGolfProvider":
         """Async context manager entry."""
@@ -118,7 +121,7 @@ class WaldenGolfProvider(ReservationProvider):
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        """Async context manager exit - ensures cleanup even on exceptions."""
+        """Async context manager exit."""
         await self.close()
 
     def _create_driver(self) -> webdriver.Chrome:
@@ -150,32 +153,39 @@ class WaldenGolfProvider(ReservationProvider):
 
         return driver
 
-    def _ensure_driver(self) -> webdriver.Chrome:
-        """Ensure we have an active WebDriver instance."""
-        if self._driver is None:
-            self._driver = self._create_driver()
-        return self._driver
-
     async def login(self) -> bool:
         """
         Log in to the Walden Golf member portal.
 
-        Uses the member number and password from settings to authenticate.
-        The login form uses Liferay's standard login portlet.
+        This method creates a temporary driver, logs in, and closes it.
+        It is primarily useful for testing credentials.
 
         Returns:
             True if login was successful, False otherwise.
         """
-        if self._logged_in:
-            return True
+        return await asyncio.to_thread(self._login_sync)
 
-        driver = self._ensure_driver()
+    def _login_sync(self) -> bool:
+        """Synchronous login implementation with full driver lifecycle."""
+        driver = self._create_driver()
+        try:
+            return self._perform_login(driver)
+        finally:
+            driver.quit()
 
+    def _perform_login(self, driver: webdriver.Chrome) -> bool:
+        """
+        Perform the login flow on an existing driver.
+
+        Args:
+            driver: The WebDriver instance to use
+
+        Returns:
+            True if login was successful, False otherwise.
+        """
         try:
             logger.info("Navigating to login page...")
             driver.get(self.LOGIN_URL)
-
-            await asyncio.sleep(2)
 
             wait = WebDriverWait(driver, 15)
             member_input = wait.until(
@@ -198,10 +208,9 @@ class WaldenGolfProvider(ReservationProvider):
             submit_button = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
             submit_button.click()
 
-            await asyncio.sleep(3)
+            time_module.sleep(3)
 
             if "login" not in driver.current_url.lower() or "home" in driver.current_url.lower():
-                self._logged_in = True
                 logger.info(f"Login successful. Current URL: {driver.current_url}")
                 return True
 
@@ -215,6 +224,7 @@ class WaldenGolfProvider(ReservationProvider):
             logger.error(f"Login WebDriver error: {e}")
             return False
 
+
     async def book_tee_time(
         self,
         target_date: date,
@@ -225,51 +235,67 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Book a tee time at Northgate Country Club.
 
-        This method:
-        1. Logs in if not already authenticated
-        2. Navigates to the tee time booking page
-        3. Selects the Northgate course
-        4. Selects the target date
+        This method runs the entire booking workflow in a background thread:
+        1. Creates a new WebDriver instance
+        2. Logs in to the member portal
+        3. Navigates to the tee time booking page
+        4. Selects the Northgate course and target date
         5. Finds the requested time slot (or nearest available within fallback window)
-        6. Clicks Reserve and confirms the booking
+        6. Clicks Reserve, selects player count, and confirms the booking
+        7. Closes the WebDriver
 
-        Note: Selenium operations are synchronous and will block the event loop.
-        This is acceptable for scheduled background jobs (Cloud Run Jobs) but callers
-        in async contexts should consider using asyncio.to_thread() if needed.
+        The async interface is genuinely non-blocking - all Selenium operations
+        run in a dedicated thread via asyncio.to_thread().
 
         Args:
             target_date: The date to book (should be 7 days in advance for new bookings)
             target_time: The preferred tee time
-            num_players: Number of players (1-4). The player count selector is visible
-                in the tee sheet interface and will be set before confirming the booking.
+            num_players: Number of players (1-4)
             fallback_window_minutes: If exact time unavailable, try times within this window
 
         Returns:
             BookingResult with success status, booked time, and confirmation details
         """
-        if not await self.login():
-            return BookingResult(
-                success=False,
-                error_message="Failed to log in to Walden Golf",
-            )
+        return await asyncio.to_thread(
+            self._book_tee_time_sync,
+            target_date,
+            target_time,
+            num_players,
+            fallback_window_minutes,
+        )
 
-        driver = self._ensure_driver()
+    def _book_tee_time_sync(
+        self,
+        target_date: date,
+        target_time: time,
+        num_players: int,
+        fallback_window_minutes: int,
+    ) -> BookingResult:
+        """
+        Synchronous booking implementation with full driver lifecycle.
 
+        Creates driver, performs booking, and ensures cleanup in finally block.
+        """
+        driver = self._create_driver()
         try:
+            if not self._perform_login(driver):
+                return BookingResult(
+                    success=False,
+                    error_message="Failed to log in to Walden Golf",
+                )
+
             logger.info("Navigating to tee time booking page...")
             driver.get(self.TEE_TIME_URL)
-            await asyncio.sleep(3)
 
             wait = WebDriverWait(driver, 15)
             wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
 
-            await self._select_course(driver, self.NORTHGATE_COURSE_NAME)
+            self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
+            self._select_date_sync(driver, target_date)
 
-            await self._select_date(driver, target_date)
+            time_module.sleep(2)
 
-            await asyncio.sleep(2)
-
-            result = await self._find_and_book_time_slot(
+            result = self._find_and_book_time_slot_sync(
                 driver, target_time, num_players, fallback_window_minutes
             )
 
@@ -287,8 +313,10 @@ class WaldenGolfProvider(ReservationProvider):
                 success=False,
                 error_message=f"Booking error: {str(e)}",
             )
+        finally:
+            driver.quit()
 
-    async def _select_course(self, driver: webdriver.Chrome, course_name: str) -> None:
+    def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> None:
         """Select the course from the dropdown."""
         try:
             course_select = driver.find_element(By.CSS_SELECTOR, "select[id*='course']")
@@ -298,7 +326,7 @@ class WaldenGolfProvider(ReservationProvider):
                 if course_name.lower() in option.text.lower():
                     select.select_by_visible_text(option.text)
                     logger.info(f"Selected course: {option.text}")
-                    await asyncio.sleep(1)
+                    time_module.sleep(1)
                     return
 
             logger.warning(f"Course '{course_name}' not found in dropdown, using default")
@@ -306,7 +334,7 @@ class WaldenGolfProvider(ReservationProvider):
         except NoSuchElementException:
             logger.info("No course dropdown found - may already be on correct course page")
 
-    async def _select_date(self, driver: webdriver.Chrome, target_date: date) -> None:
+    def _select_date_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
         """Select the target date using the date picker or day tabs."""
         try:
             date_str = target_date.strftime("%m/%d/%Y")
@@ -316,22 +344,22 @@ class WaldenGolfProvider(ReservationProvider):
             date_input.send_keys(date_str)
             logger.info(f"Entered date: {date_str}")
 
-            await asyncio.sleep(1)
+            time_module.sleep(1)
 
             try:
                 search_button = driver.find_element(
                     By.CSS_SELECTOR, "button[type='submit'], input[type='submit']"
                 )
                 search_button.click()
-                await asyncio.sleep(2)
+                time_module.sleep(2)
             except NoSuchElementException:
                 pass
 
         except NoSuchElementException:
             logger.info("No date input found, trying day tabs...")
-            await self._select_date_via_tabs(driver, target_date)
+            self._select_date_via_tabs_sync(driver, target_date)
 
-    async def _select_date_via_tabs(self, driver: webdriver.Chrome, target_date: date) -> None:
+    def _select_date_via_tabs_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
         """Select date using the day-of-week tabs if date picker not available."""
         day_name = target_date.strftime("%A")
 
@@ -343,7 +371,7 @@ class WaldenGolfProvider(ReservationProvider):
                 if day_name.lower() in tab.text.lower():
                     tab.click()
                     logger.info(f"Clicked day tab: {day_name}")
-                    await asyncio.sleep(2)
+                    time_module.sleep(2)
                     return
 
             logger.warning(f"Could not find day tab for {day_name}")
@@ -351,7 +379,8 @@ class WaldenGolfProvider(ReservationProvider):
         except NoSuchElementException:
             logger.warning("No day tabs found")
 
-    async def _select_player_count(self, driver: webdriver.Chrome, num_players: int) -> None:
+
+    def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> None:
         """
         Select the number of players in the booking dialog.
 
@@ -378,7 +407,7 @@ class WaldenGolfProvider(ReservationProvider):
                     select = Select(player_select)
                     select.select_by_value(str(num_players))
                     logger.info(f"Selected {num_players} players using selector: {selector}")
-                    await asyncio.sleep(0.5)
+                    time_module.sleep(0.5)
                     return
                 except (NoSuchElementException, Exception):
                     continue
@@ -396,7 +425,7 @@ class WaldenGolfProvider(ReservationProvider):
                     player_input.clear()
                     player_input.send_keys(str(num_players))
                     logger.info(f"Entered {num_players} players using input: {selector}")
-                    await asyncio.sleep(0.5)
+                    time_module.sleep(0.5)
                     return
                 except NoSuchElementException:
                     continue
@@ -409,7 +438,7 @@ class WaldenGolfProvider(ReservationProvider):
         except Exception as e:
             logger.warning(f"Error selecting player count: {e}")
 
-    async def _find_and_book_time_slot(
+    def _find_and_book_time_slot_sync(
         self,
         driver: webdriver.Chrome,
         target_time: time,
@@ -480,7 +509,8 @@ class WaldenGolfProvider(ReservationProvider):
         booked_time, reserve_element = best_slot
         logger.info(f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players")
 
-        return await self._complete_booking(driver, reserve_element, booked_time, num_players)
+        return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+
 
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
         """
@@ -554,7 +584,8 @@ class WaldenGolfProvider(ReservationProvider):
 
         return None
 
-    async def _complete_booking(
+
+    def _complete_booking_sync(
         self,
         driver: webdriver.Chrome,
         reserve_element: Any,
@@ -575,16 +606,16 @@ class WaldenGolfProvider(ReservationProvider):
         """
         try:
             driver.execute_script("arguments[0].scrollIntoView(true);", reserve_element)
-            await asyncio.sleep(0.5)
+            time_module.sleep(0.5)
 
             reserve_element.click()
             logger.info("Clicked Reserve button")
 
-            await asyncio.sleep(2)
+            time_module.sleep(2)
 
             wait = WebDriverWait(driver, 10)
 
-            await self._select_player_count(driver, num_players)
+            self._select_player_count_sync(driver, num_players)
 
             try:
                 confirm_button = wait.until(
@@ -600,7 +631,7 @@ class WaldenGolfProvider(ReservationProvider):
                 )
                 confirm_button.click()
                 logger.info("Clicked confirmation button")
-                await asyncio.sleep(2)
+                time_module.sleep(2)
 
             except TimeoutException:
                 logger.info("No confirmation dialog found - booking may be direct")
@@ -660,6 +691,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         return None
 
+
     def _verify_booking_success(self, driver: webdriver.Chrome) -> bool:
         """Verify that the booking was successful by checking page content."""
         try:
@@ -704,24 +736,37 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Get all available tee times for a given date.
 
+        This method runs the entire workflow in a background thread:
+        1. Creates a new WebDriver instance
+        2. Logs in to the member portal
+        3. Navigates to the tee time page
+        4. Retrieves available time slots
+        5. Closes the WebDriver
+
         Args:
             target_date: The date to check availability for
 
         Returns:
             List of available times
         """
-        if not await self.login():
-            return []
+        return await asyncio.to_thread(self._get_available_times_sync, target_date)
 
-        driver = self._ensure_driver()
-
+    def _get_available_times_sync(self, target_date: date) -> list[time]:
+        """Synchronous implementation with full driver lifecycle."""
+        driver = self._create_driver()
         try:
-            driver.get(self.TEE_TIME_URL)
-            await asyncio.sleep(3)
+            if not self._perform_login(driver):
+                return []
 
-            await self._select_course(driver, self.NORTHGATE_COURSE_NAME)
-            await self._select_date(driver, target_date)
-            await asyncio.sleep(2)
+            driver.get(self.TEE_TIME_URL)
+
+            wait = WebDriverWait(driver, 15)
+            wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
+
+            self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
+            self._select_date_sync(driver, target_date)
+
+            time_module.sleep(2)
 
             available_slots = self._find_available_slots(driver)
             return [slot_time for slot_time, _ in available_slots]
@@ -729,13 +774,15 @@ class WaldenGolfProvider(ReservationProvider):
         except WebDriverException as e:
             logger.error(f"Error getting available times: {e}")
             return []
+        finally:
+            driver.quit()
 
     async def cancel_booking(self, confirmation_number: str) -> bool:
         """
         Cancel an existing booking.
 
         Note: This is a placeholder - actual cancellation flow needs to be implemented
-        based on the site's cancellation interface.
+        based on the site cancellation interface.
 
         Args:
             confirmation_number: The booking confirmation number
@@ -747,25 +794,24 @@ class WaldenGolfProvider(ReservationProvider):
         return False
 
     async def close(self) -> None:
-        """Close the WebDriver and clean up resources."""
-        if self._driver:
-            try:
-                self._driver.quit()
-            except WebDriverException:
-                pass
-            self._driver = None
+        """
+        Close any resources.
 
-        self._logged_in = False
+        Note: With the refactored design, each operation manages its own WebDriver
+        lifecycle, so there is nothing to clean up here. This method is kept for
+        interface compatibility.
+        """
+        pass
+
 
 
 class MockWaldenProvider(ReservationProvider):
     """Mock provider for testing without hitting the real booking system."""
 
     def __init__(self) -> None:
-        self._logged_in = False
+        pass
 
     async def login(self) -> bool:
-        self._logged_in = True
         return True
 
     async def book_tee_time(
