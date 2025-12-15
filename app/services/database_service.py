@@ -5,7 +5,6 @@ This module provides async CRUD operations for BookingRecord and SessionRecord,
 handling conversion between Pydantic schemas and SQLAlchemy models.
 """
 
-import json
 from datetime import datetime
 
 from sqlalchemy import select
@@ -82,8 +81,9 @@ class DatabaseService:
         """Convert a SessionRecord SQLAlchemy model to a UserSession Pydantic model."""
         pending_request = None
         if record.pending_request_json:
-            pending_data = json.loads(record.pending_request_json)
-            pending_request = TeeTimeRequest(**pending_data)
+            pending_request = TeeTimeRequest.model_validate_json(
+                record.pending_request_json
+            )
         return UserSession(
             phone_number=record.phone_number,
             state=record.state,
