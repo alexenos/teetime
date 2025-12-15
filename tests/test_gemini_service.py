@@ -5,7 +5,7 @@ These tests verify the LLM-powered message parsing and intent extraction
 functionality, including the mock fallback when the API is not configured.
 """
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,32 +24,61 @@ class TestGeminiServiceResolveRelativeDate:
 
     def test_resolve_today(self, gemini_service: GeminiService) -> None:
         """Test resolving 'today'."""
-        result = gemini_service._resolve_relative_date("today")
-        assert result == datetime.now().date()
+        # Use a fixed date to avoid flakiness at midnight
+        fixed_now = datetime(2025, 6, 15, 12, 0, 0)  # A Sunday
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._resolve_relative_date("today")
+            assert result == date(2025, 6, 15)
 
     def test_resolve_tomorrow(self, gemini_service: GeminiService) -> None:
         """Test resolving 'tomorrow'."""
-        result = gemini_service._resolve_relative_date("tomorrow")
-        assert result == datetime.now().date() + timedelta(days=1)
+        # Use a fixed date to avoid flakiness at midnight
+        fixed_now = datetime(2025, 6, 15, 12, 0, 0)  # A Sunday
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._resolve_relative_date("tomorrow")
+            assert result == date(2025, 6, 16)
 
     def test_resolve_day_of_week(self, gemini_service: GeminiService) -> None:
         """Test resolving day of week names."""
-        days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        today = datetime.now().date()
+        # Use a fixed date (Sunday June 15, 2025) to make tests deterministic
+        fixed_now = datetime(2025, 6, 15, 12, 0, 0)  # A Sunday
+        days_expected = {
+            "monday": date(2025, 6, 16),
+            "tuesday": date(2025, 6, 17),
+            "wednesday": date(2025, 6, 18),
+            "thursday": date(2025, 6, 19),
+            "friday": date(2025, 6, 20),
+            "saturday": date(2025, 6, 21),
+            "sunday": date(2025, 6, 22),  # Next Sunday, not today
+        }
 
-        for day_name in days:
-            result = gemini_service._resolve_relative_date(day_name)
-            assert result is not None
-            assert result > today or result == today + timedelta(days=7)
-            assert result.strftime("%A").lower() == day_name
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            for day_name, expected_date in days_expected.items():
+                result = gemini_service._resolve_relative_date(day_name)
+                assert result is not None
+                assert (
+                    result == expected_date
+                ), f"Expected {expected_date} for {day_name}, got {result}"
+                assert result.strftime("%A").lower() == day_name
 
     def test_resolve_day_of_week_case_insensitive(self, gemini_service: GeminiService) -> None:
         """Test that day of week resolution is case insensitive."""
-        result_lower = gemini_service._resolve_relative_date("saturday")
-        result_upper = gemini_service._resolve_relative_date("Saturday")
-        result_mixed = gemini_service._resolve_relative_date("SATURDAY")
+        # Use a fixed date to avoid flakiness
+        fixed_now = datetime(2025, 6, 15, 12, 0, 0)
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result_lower = gemini_service._resolve_relative_date("saturday")
+            result_upper = gemini_service._resolve_relative_date("Saturday")
+            result_mixed = gemini_service._resolve_relative_date("SATURDAY")
 
-        assert result_lower == result_upper == result_mixed
+            assert result_lower == result_upper == result_mixed
 
     def test_resolve_iso_date(self, gemini_service: GeminiService) -> None:
         """Test resolving ISO format date."""

@@ -82,15 +82,12 @@ class TestBookingServiceBookings:
         assert booking.status == BookingStatus.SCHEDULED
         assert booking.scheduled_execution_time is not None
 
-    def test_get_booking_exists(
+    @pytest.mark.asyncio
+    async def test_get_booking_exists(
         self, booking_service: BookingService, sample_request: TeeTimeRequest
     ) -> None:
         """Test getting an existing booking."""
-        import asyncio
-
-        booking = asyncio.get_event_loop().run_until_complete(
-            booking_service.create_booking("+15551234567", sample_request)
-        )
+        booking = await booking_service.create_booking("+15551234567", sample_request)
 
         retrieved = booking_service.get_booking(booking.id)
         assert retrieved is not None

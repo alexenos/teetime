@@ -169,11 +169,16 @@ class TestMockWaldenProviderConfirmationNumbers:
         assert len(result.confirmation_number) > 5
 
     @pytest.mark.asyncio
-    async def test_confirmation_numbers_generated(self, mock_provider: MockWaldenProvider) -> None:
-        """Test that each booking gets a confirmation number."""
+    async def test_confirmation_numbers_are_distinct(
+        self, mock_provider: MockWaldenProvider
+    ) -> None:
+        """Test that each booking gets a distinct confirmation number."""
+        import asyncio
+
         target_date = date.today() + timedelta(days=7)
         target_time = time(8, 0)
 
+        confirmation_numbers: list[str] = []
         for _ in range(3):
             result = await mock_provider.book_tee_time(
                 target_date=target_date,
@@ -182,3 +187,12 @@ class TestMockWaldenProviderConfirmationNumbers:
             )
             assert result.confirmation_number is not None
             assert result.confirmation_number.startswith("MOCK-")
+            confirmation_numbers.append(result.confirmation_number)
+            # Sleep 1 second to ensure timestamp-based IDs are different
+            # (MockWaldenProvider uses second-precision timestamps)
+            await asyncio.sleep(1.0)
+
+        # Verify all confirmation numbers are distinct
+        assert (
+            len(set(confirmation_numbers)) == 3
+        ), f"Expected 3 distinct confirmation numbers, got: {confirmation_numbers}"

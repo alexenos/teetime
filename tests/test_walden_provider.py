@@ -138,7 +138,11 @@ class TestWaldenProviderIntegration:
         for t in times[:10]:
             print(f"  - {t.strftime('%I:%M %p')}")
 
-        assert len(times) >= 0
+        # Verify result is a list of valid time objects
+        assert isinstance(times, list)
+        for t in times:
+            assert hasattr(t, "hour")
+            assert hasattr(t, "minute")
 
 
 class TestWaldenProviderConfirmationExtraction:
