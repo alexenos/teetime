@@ -108,6 +108,7 @@ class WaldenGolfProvider(ReservationProvider):
 
     NORTHGATE_COURSE_NAME = "Northgate"
     TEE_TIME_INTERVAL_MINUTES = 8
+    MAX_PLAYERS = 4  # Maximum players per tee time slot
 
     def __init__(self) -> None:
         """
@@ -148,10 +149,10 @@ class WaldenGolfProvider(ReservationProvider):
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option("useAutomationExtension", False)
 
-        # Try to use a specific ChromeDriver path if available (for version compatibility)
-        # Fall back to ChromeDriverManager if not found
-        chromedriver_path = "/tmp/chromedriver-linux64/chromedriver"
-        if os.path.exists(chromedriver_path):
+        # Check for ChromeDriver path from environment variable first,
+        # then fall back to ChromeDriverManager for automatic version management
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if chromedriver_path and os.path.exists(chromedriver_path):
             service = Service(chromedriver_path)
         else:
             service = Service(ChromeDriverManager().install())
@@ -847,30 +848,32 @@ class WaldenGolfProvider(ReservationProvider):
         return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
 
     def _find_empty_slots(
-        self, search_context: Any, min_available_spots: int = 4
+        self, search_context: Any, min_available_spots: int | None = None
     ) -> list[tuple[time, Any]]:
         """
         Find time slots that have at least min_available_spots available.
 
         The Walden Golf tee sheet has two different slot structures:
         
-        1. Completely empty slots (all 4 spots available):
+        1. Completely empty slots (all MAX_PLAYERS spots available):
            - The slot div has class="Empty"
            - Contains a "reserve_button" element with "Reserve" text
            - Structure: <div class="Empty">...<a id="...reserve_button">Reserve</a>...</div>
         
-        2. Partially filled slots (1-3 spots available):
+        2. Partially filled slots (1 to MAX_PLAYERS-1 spots available):
            - The slot div has class="Reserved"
            - Contains <span class="custom-free-slot-span">Available</span> for each open spot
            - Count the spans to determine available spots
 
         Args:
             search_context: The WebDriver element to search within
-            min_available_spots: Minimum number of available spots required (default 4)
+            min_available_spots: Minimum number of available spots required (default MAX_PLAYERS)
 
         Returns:
             List of (time, clickable_element) tuples for slots with enough spots
         """
+        if min_available_spots is None:
+            min_available_spots = self.MAX_PLAYERS
         empty_slots: list[tuple[time, Any]] = []
         completely_empty_count = 0
         partial_slots_count = 0
@@ -886,14 +889,14 @@ class WaldenGolfProvider(ReservationProvider):
             for slot_item in slot_items:
                 try:
                     # First check for completely empty slots (class="Empty" with reserve_button)
-                    # These have all 4 spots available
+                    # These have all MAX_PLAYERS spots available
                     empty_divs = slot_item.find_elements(
                         By.CSS_SELECTOR, "div.Empty"
                     )
                     
                     if empty_divs:
-                        # This is a completely empty slot - all 4 spots available
-                        if min_available_spots <= 4:
+                        # This is a completely empty slot - all MAX_PLAYERS spots available
+                        if min_available_spots <= self.MAX_PLAYERS:
                             slot_time = self._extract_time_from_slot_item(slot_item)
                             if slot_time:
                                 # Find the reserve button or the Available link
@@ -979,7 +982,6 @@ class WaldenGolfProvider(ReservationProvider):
             slot_text = slot_item.text
             # Look for time pattern like "07:46 AM" or "1:30 PM"
             time_pattern = r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b'
-            import re
             match = re.search(time_pattern, slot_text)
             if match:
                 return self._parse_time(match.group(1))
@@ -1288,13 +1290,25 @@ class WaldenGolfProvider(ReservationProvider):
             except TimeoutException:
                 pass
 
-            self._select_player_count_sync(driver, num_players)
+            if not self._select_player_count_sync(driver, num_players):
+                self._capture_diagnostic_info(driver, "player_count_selection_failed")
+                return BookingResult(
+                    success=False,
+                    error_message=f"Failed to select {num_players} players",
+                    booked_time=booked_time,
+                )
 
             # If booking for multiple players, add TBD Registered Guests for the additional slots
             if num_players > 1:
                 num_tbd_guests = num_players - 1
                 logger.info(f"Adding {num_tbd_guests} TBD Registered Guests")
-                self._add_tbd_registered_guests_sync(driver, num_tbd_guests)
+                if not self._add_tbd_registered_guests_sync(driver, num_tbd_guests):
+                    self._capture_diagnostic_info(driver, "tbd_guest_registration_failed")
+                    return BookingResult(
+                        success=False,
+                        error_message=f"Failed to add {num_tbd_guests} TBD Registered Guests",
+                        booked_time=booked_time,
+                    )
 
             try:
                 # Wait for the booking form to load
