@@ -609,7 +609,10 @@ class WaldenGolfProvider(ReservationProvider):
                     logger.info(f"Selected {num_players} players using selector: {selector}")
                     time_module.sleep(0.5)
                     return True
-                except (NoSuchElementException, Exception):
+                except NoSuchElementException:
+                    continue
+                except Exception as e:
+                    logger.debug(f"Unexpected error trying selector {selector}: {e}")
                     continue
 
             logger.warning(
