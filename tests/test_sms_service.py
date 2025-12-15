@@ -174,9 +174,7 @@ class TestSMSServiceBookingNotifications:
             assert "Time slot not available" in call_args[1]
 
     @pytest.mark.asyncio
-    async def test_send_booking_failure_with_alternatives(
-        self, sms_service: SMSService
-    ) -> None:
+    async def test_send_booking_failure_with_alternatives(self, sms_service: SMSService) -> None:
         """Test sending booking failure with alternatives."""
         with patch.object(sms_service, "send_sms") as mock_send:
             mock_send.return_value = "mock_sid"

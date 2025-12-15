@@ -131,9 +131,7 @@ class GeminiService:
             except ValueError:
                 return None
 
-    async def parse_message(
-        self, message: str, context: str | None = None
-    ) -> ParsedIntent:
+    async def parse_message(self, message: str, context: str | None = None) -> ParsedIntent:
         if not self.model:
             return self._mock_parse(message)
 
@@ -185,7 +183,9 @@ class GeminiService:
     def _mock_parse(self, message: str) -> ParsedIntent:
         message_lower = message.lower()
 
-        if any(word in message_lower for word in ["book", "reserve", "tee time", "saturday", "sunday"]):
+        if any(
+            word in message_lower for word in ["book", "reserve", "tee time", "saturday", "sunday"]
+        ):
             today = datetime.now().date()
             if "saturday" in message_lower:
                 days_until_saturday = (5 - today.weekday()) % 7

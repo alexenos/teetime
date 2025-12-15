@@ -199,9 +199,7 @@ class TestBookingServiceIntentHandling:
     """Tests for intent processing methods."""
 
     @pytest.mark.asyncio
-    async def test_handle_book_intent_complete(
-        self, booking_service: BookingService
-    ) -> None:
+    async def test_handle_book_intent_complete(self, booking_service: BookingService) -> None:
         """Test handling a complete book intent."""
         session = booking_service.get_session("+15551234567")
         request = TeeTimeRequest(
@@ -236,9 +234,7 @@ class TestBookingServiceIntentHandling:
         assert response == "What date would you like?"
 
     @pytest.mark.asyncio
-    async def test_handle_confirm_intent_success(
-        self, booking_service: BookingService
-    ) -> None:
+    async def test_handle_confirm_intent_success(self, booking_service: BookingService) -> None:
         """Test handling a confirm intent with pending request."""
         session = booking_service.get_session("+15551234567")
         session.state = ConversationState.AWAITING_CONFIRMATION
@@ -264,9 +260,7 @@ class TestBookingServiceIntentHandling:
         assert "nothing to confirm" in response.lower()
 
     @pytest.mark.asyncio
-    async def test_handle_status_intent_no_bookings(
-        self, booking_service: BookingService
-    ) -> None:
+    async def test_handle_status_intent_no_bookings(self, booking_service: BookingService) -> None:
         """Test handling a status intent with no bookings."""
         session = booking_service.get_session("+15551234567")
 
@@ -285,9 +279,7 @@ class TestBookingServiceIntentHandling:
         assert "upcoming bookings" in response.lower()
 
     @pytest.mark.asyncio
-    async def test_handle_cancel_intent_no_bookings(
-        self, booking_service: BookingService
-    ) -> None:
+    async def test_handle_cancel_intent_no_bookings(self, booking_service: BookingService) -> None:
         """Test handling a cancel intent with no bookings."""
         session = booking_service.get_session("+15551234567")
         parsed = ParsedIntent(intent="cancel")
@@ -372,9 +364,7 @@ class TestBookingServiceExecuteBooking:
         assert booking.status == BookingStatus.FAILED
 
     @pytest.mark.asyncio
-    async def test_execute_booking_not_found(
-        self, booking_service: BookingService
-    ) -> None:
+    async def test_execute_booking_not_found(self, booking_service: BookingService) -> None:
         """Test executing a non-existent booking."""
         result = await booking_service.execute_booking("nonexistent")
         assert result is False
@@ -452,9 +442,7 @@ class TestBookingServiceIncomingMessage:
     """Tests for handle_incoming_message method."""
 
     @pytest.mark.asyncio
-    async def test_handle_incoming_message(
-        self, booking_service: BookingService
-    ) -> None:
+    async def test_handle_incoming_message(self, booking_service: BookingService) -> None:
         """Test handling an incoming SMS message."""
         with patch("app.services.booking_service.gemini_service") as mock_gemini:
             mock_gemini.parse_message = AsyncMock(
@@ -464,9 +452,7 @@ class TestBookingServiceIncomingMessage:
                 )
             )
 
-            response = await booking_service.handle_incoming_message(
-                "+15551234567", "help"
-            )
+            response = await booking_service.handle_incoming_message("+15551234567", "help")
 
         assert response == "I can help you book tee times!"
 

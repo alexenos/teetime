@@ -284,14 +284,10 @@ class TestGeminiServiceParseMessage:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_parse_message_api_error_fallback(
-        self, gemini_service: GeminiService
-    ) -> None:
+    async def test_parse_message_api_error_fallback(self, gemini_service: GeminiService) -> None:
         """Test that parse_message falls back to mock on API error."""
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(
-                side_effect=Exception("API Error")
-            )
+            gemini_service._model.generate_content = MagicMock(side_effect=Exception("API Error"))
 
             result = await gemini_service.parse_message("Book Saturday")
 

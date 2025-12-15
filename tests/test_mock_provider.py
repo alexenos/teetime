@@ -51,9 +51,7 @@ class TestMockWaldenProviderBookTeeTime:
         assert result.error_message is None
 
     @pytest.mark.asyncio
-    async def test_book_tee_time_different_times(
-        self, mock_provider: MockWaldenProvider
-    ) -> None:
+    async def test_book_tee_time_different_times(self, mock_provider: MockWaldenProvider) -> None:
         """Test booking at different times."""
         target_date = date.today() + timedelta(days=7)
 
@@ -100,9 +98,7 @@ class TestMockWaldenProviderGetAvailableTimes:
         assert len(result) > 0
 
     @pytest.mark.asyncio
-    async def test_get_available_times_valid_times(
-        self, mock_provider: MockWaldenProvider
-    ) -> None:
+    async def test_get_available_times_valid_times(self, mock_provider: MockWaldenProvider) -> None:
         """Test that returned times are valid time objects."""
         target_date = date.today() + timedelta(days=7)
 
@@ -131,17 +127,13 @@ class TestMockWaldenProviderCancelBooking:
     """Tests for the cancel_booking method."""
 
     @pytest.mark.asyncio
-    async def test_cancel_booking_always_succeeds(
-        self, mock_provider: MockWaldenProvider
-    ) -> None:
+    async def test_cancel_booking_always_succeeds(self, mock_provider: MockWaldenProvider) -> None:
         """Test that cancel_booking always returns True."""
         result = await mock_provider.cancel_booking("MOCK-123456")
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_cancel_booking_any_confirmation(
-        self, mock_provider: MockWaldenProvider
-    ) -> None:
+    async def test_cancel_booking_any_confirmation(self, mock_provider: MockWaldenProvider) -> None:
         """Test cancelling with any confirmation number."""
         for conf_num in ["MOCK-123", "CONF-456", "ABC123"]:
             result = await mock_provider.cancel_booking(conf_num)
@@ -161,9 +153,7 @@ class TestMockWaldenProviderConfirmationNumbers:
     """Tests for confirmation number generation."""
 
     @pytest.mark.asyncio
-    async def test_confirmation_number_format(
-        self, mock_provider: MockWaldenProvider
-    ) -> None:
+    async def test_confirmation_number_format(self, mock_provider: MockWaldenProvider) -> None:
         """Test that confirmation numbers have the expected format."""
         target_date = date.today() + timedelta(days=7)
         target_time = time(8, 0)
@@ -179,9 +169,7 @@ class TestMockWaldenProviderConfirmationNumbers:
         assert len(result.confirmation_number) > 5
 
     @pytest.mark.asyncio
-    async def test_confirmation_numbers_generated(
-        self, mock_provider: MockWaldenProvider
-    ) -> None:
+    async def test_confirmation_numbers_generated(self, mock_provider: MockWaldenProvider) -> None:
         """Test that each booking gets a confirmation number."""
         target_date = date.today() + timedelta(days=7)
         target_time = time(8, 0)

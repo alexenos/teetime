@@ -112,7 +112,10 @@ class BookingService:
         elif parsed.intent == "help":
             return parsed.response_message or self._get_help_message()
         else:
-            return parsed.response_message or "I'm not sure I understood. Try 'Book Saturday 8am for 4 players'."
+            return (
+                parsed.response_message
+                or "I'm not sure I understood. Try 'Book Saturday 8am for 4 players'."
+            )
 
     async def _handle_book_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         if not parsed.tee_time_request:
@@ -167,7 +170,9 @@ class BookingService:
         if not user_bookings:
             return "You don't have any scheduled bookings. Would you like to book a tee time?"
 
-        pending = [b for b in user_bookings if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED]]
+        pending = [
+            b for b in user_bookings if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED]
+        ]
         if not pending:
             return "You don't have any upcoming bookings. Would you like to book a tee time?"
 
@@ -198,9 +203,7 @@ class BookingService:
 
         return "Which booking would you like to cancel? Reply with the date."
 
-    async def create_booking(
-        self, phone_number: str, request: TeeTimeRequest
-    ) -> TeeTimeBooking:
+    async def create_booking(self, phone_number: str, request: TeeTimeRequest) -> TeeTimeBooking:
         """
         Create a new booking record and schedule it for execution.
 
@@ -386,9 +389,7 @@ class BookingService:
             return False
 
     def get_pending_bookings(self) -> list[TeeTimeBooking]:
-        return [
-            b for b in self._bookings.values() if b.status == BookingStatus.SCHEDULED
-        ]
+        return [b for b in self._bookings.values() if b.status == BookingStatus.SCHEDULED]
 
 
 booking_service = BookingService()
