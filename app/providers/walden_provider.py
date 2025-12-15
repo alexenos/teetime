@@ -70,9 +70,7 @@ def with_retry(
                         )
                         time_module.sleep(delay)
                     else:
-                        logger.error(
-                            f"All {max_attempts} attempts failed for {func.__name__}: {e}"
-                        )
+                        logger.error(f"All {max_attempts} attempts failed for {func.__name__}: {e}")
             raise last_exception  # type: ignore[misc]
 
         return wrapper
@@ -246,7 +244,6 @@ class WaldenGolfProvider(ReservationProvider):
             logger.error(f"Login WebDriver error: {e}")
             return False
 
-
     async def book_tee_time(
         self,
         target_date: date,
@@ -317,7 +314,10 @@ class WaldenGolfProvider(ReservationProvider):
 
             wait.until(
                 expected_conditions.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form")
+                    (
+                        By.CSS_SELECTOR,
+                        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                    )
                 )
             )
 
@@ -407,7 +407,10 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     search_button = wait.until(
                         expected_conditions.element_to_be_clickable(
-                            (By.CSS_SELECTOR, "button[type='submit'], input[type='submit'], button.search, .btn-search")
+                            (
+                                By.CSS_SELECTOR,
+                                "button[type='submit'], input[type='submit'], button.search, .btn-search",
+                            )
                         )
                     )
                     search_button.click()
@@ -439,7 +442,7 @@ class WaldenGolfProvider(ReservationProvider):
                 By.CSS_SELECTOR,
                 ".calendar-trigger, .datepicker-trigger, [class*='calendar'], "
                 "button[aria-label*='calendar' i], .ui-datepicker-trigger, "
-                "span.icon-calendar, i.fa-calendar"
+                "span.icon-calendar, i.fa-calendar",
             )
 
             if calendar_triggers:
@@ -450,7 +453,10 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     wait.until(
                         expected_conditions.presence_of_element_located(
-                            (By.CSS_SELECTOR, ".ui-datepicker, .datepicker, [class*='calendar-popup']")
+                            (
+                                By.CSS_SELECTOR,
+                                ".ui-datepicker, .datepicker, [class*='calendar-popup']",
+                            )
                         )
                     )
 
@@ -459,7 +465,7 @@ class WaldenGolfProvider(ReservationProvider):
                         By.XPATH,
                         f"//td[@data-date='{target_date.day}'] | "
                         f"//a[text()='{day_str}'] | "
-                        f"//td[contains(@class, 'day') and text()='{day_str}']"
+                        f"//td[contains(@class, 'day') and text()='{day_str}']",
                     )
 
                     for day_el in day_elements:
@@ -472,7 +478,10 @@ class WaldenGolfProvider(ReservationProvider):
                             try:
                                 WebDriverWait(driver, 10).until(
                                     expected_conditions.presence_of_element_located(
-                                        (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time']")
+                                        (
+                                            By.CSS_SELECTOR,
+                                            ".custom-free-slot-span, .teetime-row, [class*='tee-time']",
+                                        )
                                     )
                                 )
                             except TimeoutException:
@@ -501,7 +510,7 @@ class WaldenGolfProvider(ReservationProvider):
             day_tabs = driver.find_elements(
                 By.CSS_SELECTOR,
                 ".day-tab, [class*='day-tab'], a[href*='day'], "
-                "[data-day], .teetime-day-tab, .nav-tabs a"
+                "[data-day], .teetime-day-tab, .nav-tabs a",
             )
 
             for tab in day_tabs:
@@ -512,9 +521,7 @@ class WaldenGolfProvider(ReservationProvider):
                         wait.until(expected_conditions.element_to_be_clickable(tab))
                         tab.click()
                         logger.info(f"Clicked day tab: {day_name}")
-                        wait.until(
-                            expected_conditions.staleness_of(tab)
-                        )
+                        wait.until(expected_conditions.staleness_of(tab))
                     except TimeoutException:
                         tab.click()
                         logger.info(f"Clicked day tab (no staleness wait): {day_name}")
@@ -526,7 +533,6 @@ class WaldenGolfProvider(ReservationProvider):
         except NoSuchElementException:
             logger.warning("No day tabs found")
             return False
-
 
     def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> bool:
         """
@@ -545,18 +551,18 @@ class WaldenGolfProvider(ReservationProvider):
         try:
             # Wait for the player count button group to appear
             time_module.sleep(1)
-            
+
             # The Walden Golf site uses a button group with class "reservation-players"
             # Each button contains a radio input with value 1, 2, 3, or 4
             # The button div has class "ui-button" and we need to click the one with the correct value
-            
+
             # First try to find the button group
             button_group_selectors = [
                 ".reservation-players",
                 ".ui-selectonebutton",
                 "[class*='players-sel']",
             ]
-            
+
             button_group = None
             for selector in button_group_selectors:
                 try:
@@ -565,7 +571,7 @@ class WaldenGolfProvider(ReservationProvider):
                     break
                 except NoSuchElementException:
                     continue
-            
+
             if button_group:
                 # Find the button with the correct value
                 # The button contains a radio input with the value we want
@@ -576,13 +582,13 @@ class WaldenGolfProvider(ReservationProvider):
                     )
                     # Get the parent div (the clickable button)
                     button_div = radio_input.find_element(By.XPATH, "./..")
-                    
+
                     # Check if the button is disabled
                     button_classes = button_div.get_attribute("class") or ""
                     if "ui-state-disabled" in button_classes:
                         logger.warning(f"Player count {num_players} button is disabled")
                         return False
-                    
+
                     # Click the button
                     driver.execute_script("arguments[0].click();", button_div)
                     logger.info(f"Selected {num_players} players using button group")
@@ -590,7 +596,7 @@ class WaldenGolfProvider(ReservationProvider):
                     return True
                 except NoSuchElementException:
                     logger.warning(f"Could not find radio input for {num_players} players")
-            
+
             # Fallback: try dropdown selectors
             player_selectors = [
                 "select[id*='player']",
@@ -649,30 +655,29 @@ class WaldenGolfProvider(ReservationProvider):
         try:
             # Wait for the player table to update after selecting player count
             time_module.sleep(2)
-            
+
             tbd_buttons_added = 0
-            
+
             # Process each guest slot one at a time, re-finding rows after each click
             # to avoid stale element references
             for guest_index in range(num_tbd_guests):
                 player_num = guest_index + 2  # Players 2, 3, 4
-                
+
                 # Re-find player rows each iteration to avoid stale references
                 player_rows = driver.find_elements(
-                    By.CSS_SELECTOR, 
-                    "[id*='playersTable'] tbody tr[data-ri]"
+                    By.CSS_SELECTOR, "[id*='playersTable'] tbody tr[data-ri]"
                 )
-                
+
                 if guest_index == 0:
                     logger.info(f"Found {len(player_rows)} player rows")
-                
+
                 # Check if we have enough rows
                 if len(player_rows) <= guest_index + 1:
                     logger.warning(f"Not enough player rows for player {player_num}")
                     break
-                
+
                 row = player_rows[guest_index + 1]  # Skip first row (primary player)
-                
+
                 try:
                     # Look for the TBD button in this row
                     tbd_button = None
@@ -683,14 +688,14 @@ class WaldenGolfProvider(ReservationProvider):
                         "a[class*='tbd']",
                         "span[class*='tbd']",
                     ]
-                    
+
                     for selector in tbd_selectors:
                         try:
                             tbd_button = row.find_element(By.CSS_SELECTOR, selector)
                             break
                         except NoSuchElementException:
                             continue
-                    
+
                     if tbd_button:
                         # Click the TBD button
                         driver.execute_script("arguments[0].click();", tbd_button)
@@ -711,18 +716,18 @@ class WaldenGolfProvider(ReservationProvider):
                                 tbd_buttons_added += 1
                                 time_module.sleep(0.5)
                         except NoSuchElementException:
-                            logger.warning(f"Could not find TBD button or input for player {player_num}")
-                
+                            logger.warning(
+                                f"Could not find TBD button or input for player {player_num}"
+                            )
+
                 except Exception as e:
                     logger.warning(f"Error adding TBD guest for player {player_num}: {e}")
-            
+
             if tbd_buttons_added == num_tbd_guests:
                 logger.info(f"Successfully added {tbd_buttons_added} TBD Registered Guests")
                 return True
             else:
-                logger.warning(
-                    f"Only added {tbd_buttons_added} of {num_tbd_guests} TBD guests"
-                )
+                logger.warning(f"Only added {tbd_buttons_added} of {num_tbd_guests} TBD guests")
                 return tbd_buttons_added > 0
 
         except Exception as e:
@@ -771,25 +776,33 @@ class WaldenGolfProvider(ReservationProvider):
         # For multi-player bookings, find slots with enough available spots
         # This ensures we don't book a slot that can't accommodate all players
         if num_players > 1:
-            slots_with_capacity = self._find_empty_slots(search_context, min_available_spots=num_players)
+            slots_with_capacity = self._find_empty_slots(
+                search_context, min_available_spots=num_players
+            )
             if slots_with_capacity:
-                logger.info(f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots")
-                
+                logger.info(
+                    f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots"
+                )
+
                 best_slot = None
                 best_diff = float("inf")
-                
+
                 for slot_time, slot_element in slots_with_capacity:
                     slot_minutes = slot_time.hour * 60 + slot_time.minute
                     diff = abs(slot_minutes - target_minutes)
-                    
+
                     if diff <= fallback_window_minutes and diff < best_diff:
                         best_diff = diff
                         best_slot = (slot_time, slot_element)
-                
+
                 if best_slot:
                     booked_time, reserve_element = best_slot
-                    logger.info(f"Attempting to book slot at {booked_time.strftime('%I:%M %p')} for {num_players} players")
-                    return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+                    logger.info(
+                        f"Attempting to book slot at {booked_time.strftime('%I:%M %p')} for {num_players} players"
+                    )
+                    return self._complete_booking_sync(
+                        driver, reserve_element, booked_time, num_players
+                    )
                 else:
                     # No slots with enough capacity within the fallback window
                     # Return error with helpful information
@@ -800,7 +813,9 @@ class WaldenGolfProvider(ReservationProvider):
                             f"No time slots with {num_players} available spots within "
                             f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
                         ),
-                        alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}" if all_times else None,
+                        alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}"
+                        if all_times
+                        else None,
                     )
             else:
                 # No slots with enough capacity on this date
@@ -846,7 +861,9 @@ class WaldenGolfProvider(ReservationProvider):
             )
 
         booked_time, reserve_element = best_slot
-        logger.info(f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players")
+        logger.info(
+            f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players"
+        )
 
         return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
 
@@ -857,12 +874,12 @@ class WaldenGolfProvider(ReservationProvider):
         Find time slots that have at least min_available_spots available.
 
         The Walden Golf tee sheet has two different slot structures:
-        
+
         1. Completely empty slots (all MAX_PLAYERS spots available):
            - The slot div has class="Empty"
            - Contains a "reserve_button" element with "Reserve" text
            - Structure: <div class="Empty">...<a id="...reserve_button">Reserve</a>...</div>
-        
+
         2. Partially filled slots (1 to MAX_PLAYERS-1 spots available):
            - The slot div has class="Reserved"
            - Contains <span class="custom-free-slot-span">Available</span> for each open spot
@@ -883,9 +900,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         try:
             # Find all time slot list items
-            slot_items = search_context.find_elements(
-                By.CSS_SELECTOR, "li.ui-datascroller-item"
-            )
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
 
             logger.info(f"Found {len(slot_items)} time slot items")
 
@@ -893,10 +908,8 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     # First check for completely empty slots (class="Empty" with reserve_button)
                     # These have all MAX_PLAYERS spots available
-                    empty_divs = slot_item.find_elements(
-                        By.CSS_SELECTOR, "div.Empty"
-                    )
-                    
+                    empty_divs = slot_item.find_elements(By.CSS_SELECTOR, "div.Empty")
+
                     if empty_divs:
                         # This is a completely empty slot - all MAX_PLAYERS spots available
                         if min_available_spots <= self.MAX_PLAYERS:
@@ -915,14 +928,14 @@ class WaldenGolfProvider(ReservationProvider):
                                         )
                                     except NoSuchElementException:
                                         reserve_btn = slot_item
-                                
+
                                 empty_slots.append((slot_time, reserve_btn))
                                 completely_empty_count += 1
                                 logger.debug(
                                     f"Found completely empty slot at {slot_time.strftime('%I:%M %p')}"
                                 )
                         continue
-                    
+
                     # Check for partially filled slots (class="Reserved" with Available spans)
                     available_spans = slot_item.find_elements(
                         By.CSS_SELECTOR, "span.custom-free-slot-span"
@@ -932,7 +945,7 @@ class WaldenGolfProvider(ReservationProvider):
                     if num_available >= min_available_spots:
                         # This slot has enough available spots
                         slot_time = self._extract_time_from_slot_item(slot_item)
-                        
+
                         if slot_time:
                             # Get the first Available span as the clickable element
                             clickable = available_spans[0] if available_spans else slot_item
@@ -984,7 +997,7 @@ class WaldenGolfProvider(ReservationProvider):
             # Try to find time in the slot's text content
             slot_text = slot_item.text
             # Look for time pattern like "07:46 AM" or "1:30 PM"
-            time_pattern = r'\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b'
+            time_pattern = r"\b(\d{1,2}:\d{2}\s*[AaPp][Mm])\b"
             match = re.search(time_pattern, slot_text)
             if match:
                 return self._parse_time(match.group(1))
@@ -1003,7 +1016,6 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"Error extracting time from slot item: {e}")
 
         return None
-
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
@@ -1051,7 +1063,7 @@ class WaldenGolfProvider(ReservationProvider):
                             except NoSuchElementException:
                                 # Last resort: use the span itself
                                 clickable_element = span
-                        
+
                         available_slots.append((slot_time, clickable_element))
                         logger.debug(f"Found available slot at {slot_time.strftime('%I:%M %p')}")
                     else:
@@ -1222,9 +1234,10 @@ class WaldenGolfProvider(ReservationProvider):
             except ValueError:
                 continue
 
-        logger.warning(f"Failed to parse time string: '{original_text}' (normalized: '{time_text}')")
+        logger.warning(
+            f"Failed to parse time string: '{original_text}' (normalized: '{time_text}')"
+        )
         return None
-
 
     def _capture_diagnostic_info(self, driver: webdriver.Chrome, context: str) -> None:
         """
@@ -1272,8 +1285,7 @@ class WaldenGolfProvider(ReservationProvider):
         try:
             # Scroll element into view with offset to account for sticky header
             driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", 
-                reserve_element
+                "arguments[0].scrollIntoView({block: 'center'});", reserve_element
             )
             time_module.sleep(0.5)  # Wait for scroll to complete
 
@@ -1287,7 +1299,10 @@ class WaldenGolfProvider(ReservationProvider):
             try:
                 wait.until(
                     expected_conditions.presence_of_element_located(
-                        (By.CSS_SELECTOR, ".modal, .dialog, [class*='popup'], form[class*='booking'], [class*='confirm']")
+                        (
+                            By.CSS_SELECTOR,
+                            ".modal, .dialog, [class*='popup'], form[class*='booking'], [class*='confirm']",
+                        )
                     )
                 )
             except TimeoutException:
@@ -1316,11 +1331,11 @@ class WaldenGolfProvider(ReservationProvider):
             try:
                 # Wait for the booking form to load
                 time_module.sleep(2)
-                
+
                 # Scroll down to make sure the Book Now button is visible
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time_module.sleep(1)
-                
+
                 # Look for "Book Now" link/button - it's an <a> element on Walden Golf
                 # Try to find by ID first (most reliable), then by text content
                 confirm_button = None
@@ -1345,16 +1360,15 @@ class WaldenGolfProvider(ReservationProvider):
                             )
                         )
                     )
-                
+
                 logger.info(f"Found Book Now button: {confirm_button.get_attribute('id')}")
-                
+
                 # Scroll to the button and use JavaScript click
                 driver.execute_script(
-                    "arguments[0].scrollIntoView({block: 'center'});", 
-                    confirm_button
+                    "arguments[0].scrollIntoView({block: 'center'});", confirm_button
                 )
                 time_module.sleep(0.5)
-                
+
                 current_url = driver.current_url
                 driver.execute_script("arguments[0].click();", confirm_button)
                 logger.info("Clicked Book Now button")
@@ -1364,7 +1378,10 @@ class WaldenGolfProvider(ReservationProvider):
                 except TimeoutException:
                     wait.until(
                         expected_conditions.presence_of_element_located(
-                            (By.XPATH, "//*[contains(text(), 'success') or contains(text(), 'confirm') or contains(text(), 'thank')]")
+                            (
+                                By.XPATH,
+                                "//*[contains(text(), 'success') or contains(text(), 'confirm') or contains(text(), 'thank')]",
+                            )
                         )
                     )
 
@@ -1429,7 +1446,6 @@ class WaldenGolfProvider(ReservationProvider):
 
         return None
 
-
     def _verify_booking_success(self, driver: webdriver.Chrome) -> bool:
         """
         Verify that the booking was successful by checking page content.
@@ -1470,8 +1486,7 @@ class WaldenGolfProvider(ReservationProvider):
                     return True
 
             logger.warning(
-                "No clear success or failure indicators found - treating as failure. "
-                "URL: %s",
+                "No clear success or failure indicators found - treating as failure. " "URL: %s",
                 driver.current_url,
             )
             return False
@@ -1516,7 +1531,10 @@ class WaldenGolfProvider(ReservationProvider):
 
             wait.until(
                 expected_conditions.presence_of_element_located(
-                    (By.CSS_SELECTOR, ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form")
+                    (
+                        By.CSS_SELECTOR,
+                        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                    )
                 )
             )
 
@@ -1554,7 +1572,6 @@ class WaldenGolfProvider(ReservationProvider):
         interface compatibility.
         """
         pass
-
 
 
 class MockWaldenProvider(ReservationProvider):

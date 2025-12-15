@@ -138,7 +138,169 @@ class TestWaldenProviderIntegration:
         for t in times[:10]:
             print(f"  - {t.strftime('%I:%M %p')}")
 
-        assert len(times) >= 0
+        # Verify result is a list of valid time objects
+        assert isinstance(times, list)
+        for t in times:
+            assert hasattr(t, "hour")
+            assert hasattr(t, "minute")
+
+
+class TestWaldenProviderConfirmationExtraction:
+    """Tests for confirmation number extraction logic."""
+
+    def test_extract_confirmation_with_confirmation_keyword(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test extracting confirmation number when 'confirmation' keyword present."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        # The regex pattern is: confirmation[:\s#]*([A-Z0-9-]+)
+        # So "Confirmation: ABC123-456" or "Confirmation #ABC123" works
+        mock_driver.page_source = """
+        <html>
+            <body>
+                <h1>Booking Confirmed</h1>
+                <p>Confirmation: ABC123-456</p>
+            </body>
+        </html>
+        """
+        result = provider._extract_confirmation_number(mock_driver)
+        assert result == "ABC123-456"
+
+    def test_extract_confirmation_with_booking_keyword(self, provider: WaldenGolfProvider) -> None:
+        """Test extracting confirmation number with 'booking' keyword."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        # The regex pattern is: booking[:\s#]*([A-Z0-9-]+)
+        # Need "booked" in page for the check, and "Booking:" for the pattern
+        mock_driver.page_source = """
+        <html>
+            <body>
+                <h1>Reservation Booked</h1>
+                <p>Booking #REF-789XYZ</p>
+            </body>
+        </html>
+        """
+        result = provider._extract_confirmation_number(mock_driver)
+        assert result == "REF-789XYZ"
+
+    def test_extract_confirmation_with_reference_keyword(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test extracting confirmation number with 'reference' keyword."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = """
+        <html>
+            <body>
+                <h1>Reserved</h1>
+                <p>Reference: GOLF-2024-001</p>
+            </body>
+        </html>
+        """
+        result = provider._extract_confirmation_number(mock_driver)
+        assert result == "GOLF-2024-001"
+
+    def test_extract_confirmation_no_match(self, provider: WaldenGolfProvider) -> None:
+        """Test that None is returned when no confirmation number found."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = """
+        <html>
+            <body>
+                <h1>Welcome</h1>
+                <p>Please select a tee time.</p>
+            </body>
+        </html>
+        """
+        result = provider._extract_confirmation_number(mock_driver)
+        assert result is None
+
+
+class TestWaldenProviderBookingVerification:
+    """Tests for booking success verification logic."""
+
+    def test_verify_success_with_successfully(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'successfully' indicator returns True."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Your tee time was successfully booked!</body></html>"
+        result = provider._verify_booking_success(mock_driver)
+        assert result is True
+
+    def test_verify_success_with_confirmed(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'confirmed' indicator returns True."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Your reservation is confirmed.</body></html>"
+        result = provider._verify_booking_success(mock_driver)
+        assert result is True
+
+    def test_verify_success_with_thank_you(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'thank you' indicator returns True."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Thank you for your reservation!</body></html>"
+        result = provider._verify_booking_success(mock_driver)
+        assert result is True
+
+    def test_verify_failure_with_error(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'error' indicator returns False."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = (
+            "<html><body>An error occurred while processing your request.</body></html>"
+        )
+        result = provider._verify_booking_success(mock_driver)
+        assert result is False
+
+    def test_verify_failure_with_unavailable(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'unavailable' indicator returns False."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>This time slot is unavailable.</body></html>"
+        result = provider._verify_booking_success(mock_driver)
+        assert result is False
+
+    def test_verify_failure_with_already_booked(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'already booked' indicator returns False."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>This slot is already booked.</body></html>"
+        result = provider._verify_booking_success(mock_driver)
+        assert result is False
+
+    def test_verify_failure_takes_precedence(self, provider: WaldenGolfProvider) -> None:
+        """Test that failure indicators take precedence over success indicators."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        # Page has both success and failure indicators - failure should win
+        mock_driver.page_source = (
+            "<html><body>Successfully detected an error in your booking.</body></html>"
+        )
+        result = provider._verify_booking_success(mock_driver)
+        assert result is False
+
+    def test_verify_ambiguous_returns_false(self, provider: WaldenGolfProvider) -> None:
+        """Test that ambiguous page content returns False."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Loading...</body></html>"
+        mock_driver.current_url = "https://example.com/booking"
+        result = provider._verify_booking_success(mock_driver)
+        assert result is False
 
 
 class TestWaldenProviderMock:
