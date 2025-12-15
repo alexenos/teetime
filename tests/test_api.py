@@ -61,16 +61,25 @@ class TestBookingsEndpoints:
             "fallback_window_minutes": 30,
         }
 
-        response = test_client.post("/bookings/", json=request_data)
+        with patch("app.services.booking_service.database_service") as mock_db:
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["phone_number"] == "+15551234567"
-        assert data["requested_date"] == "2025-12-20"
-        assert data["requested_time"] == "08:00:00"
-        assert data["num_players"] == 4
-        assert data["status"] == "scheduled"
-        assert data["id"] is not None
+            async def create_booking_side_effect(
+                booking: TeeTimeBooking,
+            ) -> TeeTimeBooking:
+                return booking
+
+            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+
+            response = test_client.post("/bookings/", json=request_data)
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["phone_number"] == "+15551234567"
+            assert data["requested_date"] == "2025-12-20"
+            assert data["requested_time"] == "08:00:00"
+            assert data["num_players"] == 4
+            assert data["status"] == "scheduled"
+            assert data["id"] is not None
 
     def test_create_booking_default_players(self, test_client: TestClient) -> None:
         """Test creating a booking with default num_players."""
@@ -80,16 +89,25 @@ class TestBookingsEndpoints:
             "requested_time": "09:00:00",
         }
 
-        response = test_client.post("/bookings/", json=request_data)
+        with patch("app.services.booking_service.database_service") as mock_db:
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["num_players"] == 4
+            async def create_booking_side_effect(
+                booking: TeeTimeBooking,
+            ) -> TeeTimeBooking:
+                return booking
+
+            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+
+            response = test_client.post("/bookings/", json=request_data)
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["num_players"] == 4
 
     def test_list_bookings_empty(self, test_client: TestClient) -> None:
         """Test listing bookings when none exist."""
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_bookings.return_value = []
+            mock_service.get_bookings = AsyncMock(return_value=[])
 
             response = test_client.get("/bookings/")
 
@@ -109,7 +127,7 @@ class TestBookingsEndpoints:
         )
 
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_bookings.return_value = [sample_booking]
+            mock_service.get_bookings = AsyncMock(return_value=[sample_booking])
 
             response = test_client.get("/bookings/?phone_number=%2B15551234567")
 
@@ -131,7 +149,7 @@ class TestBookingsEndpoints:
         )
 
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking.return_value = sample_booking
+            mock_service.get_booking = AsyncMock(return_value=sample_booking)
 
             response = test_client.get("/bookings/abc12345")
 
@@ -143,7 +161,7 @@ class TestBookingsEndpoints:
     def test_get_booking_not_found(self, test_client: TestClient) -> None:
         """Test getting a non-existent booking."""
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking.return_value = None
+            mock_service.get_booking = AsyncMock(return_value=None)
 
             response = test_client.get("/bookings/nonexistent")
 
@@ -163,7 +181,7 @@ class TestBookingsEndpoints:
         )
 
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.cancel_booking.return_value = sample_booking
+            mock_service.cancel_booking = AsyncMock(return_value=sample_booking)
 
             response = test_client.delete("/bookings/abc12345")
 
@@ -175,7 +193,7 @@ class TestBookingsEndpoints:
     def test_cancel_booking_not_found(self, test_client: TestClient) -> None:
         """Test cancelling a non-existent booking."""
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.cancel_booking.return_value = None
+            mock_service.cancel_booking = AsyncMock(return_value=None)
 
             response = test_client.delete("/bookings/nonexistent")
 
@@ -196,7 +214,7 @@ class TestBookingsEndpoints:
         )
 
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking.return_value = sample_booking
+            mock_service.get_booking = AsyncMock(return_value=sample_booking)
             mock_service.execute_booking = AsyncMock(return_value=True)
 
             response = test_client.post("/bookings/abc12345/execute")
@@ -209,7 +227,7 @@ class TestBookingsEndpoints:
     def test_execute_booking_not_found(self, test_client: TestClient) -> None:
         """Test executing a non-existent booking."""
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking.return_value = None
+            mock_service.get_booking = AsyncMock(return_value=None)
 
             response = test_client.post("/bookings/nonexistent/execute")
 
@@ -294,7 +312,7 @@ class TestWebhookEndpoints:
 
 
 class TestBookingsEndpointsIntegration:
-    """Integration tests for booking endpoints using the actual service."""
+    """Integration tests for booking endpoints using mocked database service."""
 
     def test_create_and_get_booking(self, test_client: TestClient) -> None:
         """Test creating and then retrieving a booking."""
@@ -305,16 +323,30 @@ class TestBookingsEndpointsIntegration:
             "num_players": 2,
         }
 
-        create_response = test_client.post("/bookings/", json=request_data)
-        assert create_response.status_code == 200
-        booking_id = create_response.json()["id"]
+        created_booking = None
 
-        get_response = test_client.get(f"/bookings/{booking_id}")
-        assert get_response.status_code == 200
-        data = get_response.json()
-        assert data["id"] == booking_id
-        assert data["phone_number"] == "+15559999999"
-        assert data["num_players"] == 2
+        with patch("app.services.booking_service.database_service") as mock_db:
+
+            async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                nonlocal created_booking
+                created_booking = booking
+                return booking
+
+            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+
+            create_response = test_client.post("/bookings/", json=request_data)
+            assert create_response.status_code == 200
+            booking_id = create_response.json()["id"]
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=created_booking)
+
+            get_response = test_client.get(f"/bookings/{booking_id}")
+            assert get_response.status_code == 200
+            data = get_response.json()
+            assert data["id"] == booking_id
+            assert data["phone_number"] == "+15559999999"
+            assert data["num_players"] == 2
 
     def test_create_and_cancel_booking(self, test_client: TestClient) -> None:
         """Test creating and then cancelling a booking."""
@@ -324,14 +356,36 @@ class TestBookingsEndpointsIntegration:
             "requested_time": "11:00:00",
         }
 
-        create_response = test_client.post("/bookings/", json=request_data)
-        assert create_response.status_code == 200
-        booking_id = create_response.json()["id"]
+        created_booking = None
 
-        cancel_response = test_client.delete(f"/bookings/{booking_id}")
-        assert cancel_response.status_code == 200
-        assert cancel_response.json()["status"] == "cancelled"
+        with patch("app.services.booking_service.database_service") as mock_db:
 
-        get_response = test_client.get(f"/bookings/{booking_id}")
-        assert get_response.status_code == 200
-        assert get_response.json()["status"] == "cancelled"
+            async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                nonlocal created_booking
+                created_booking = booking
+                return booking
+
+            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+
+            create_response = test_client.post("/bookings/", json=request_data)
+            assert create_response.status_code == 200
+            booking_id = create_response.json()["id"]
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=created_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            cancel_response = test_client.delete(f"/bookings/{booking_id}")
+            assert cancel_response.status_code == 200
+            assert cancel_response.json()["status"] == "cancelled"
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=created_booking)
+
+            get_response = test_client.get(f"/bookings/{booking_id}")
+            assert get_response.status_code == 200
+            assert get_response.json()["status"] == "cancelled"

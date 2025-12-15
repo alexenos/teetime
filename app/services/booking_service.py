@@ -20,6 +20,7 @@ from app.models.schemas import (
     UserSession,
 )
 from app.providers.base import ReservationProvider
+from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.sms_service import sms_service
 
@@ -35,35 +36,29 @@ class BookingService:
     4. Executing bookings via the reservation provider
     5. Sending confirmation/failure notifications via SMS
 
-    Note: Currently uses in-memory storage for sessions and bookings.
-    Data will be lost on restart. Future versions will use the database.
+    Uses database storage for sessions and bookings via DatabaseService,
+    ensuring data persists across restarts.
 
     Attributes:
-        _sessions: In-memory store of user conversation sessions.
-        _bookings: In-memory store of booking records.
         _reservation_provider: Provider for executing bookings on the club website.
     """
 
     def __init__(self) -> None:
-        """Initialize the booking service with empty in-memory stores."""
-        self._sessions: dict[str, UserSession] = {}
-        self._bookings: dict[str, TeeTimeBooking] = {}
+        """Initialize the booking service."""
         self._reservation_provider: ReservationProvider | None = None
 
     def set_reservation_provider(self, provider: ReservationProvider) -> None:
         """Set the reservation provider for executing bookings."""
         self._reservation_provider = provider
 
-    def get_session(self, phone_number: str) -> UserSession:
+    async def get_session(self, phone_number: str) -> UserSession:
         """Get or create a session for the given phone number."""
-        if phone_number not in self._sessions:
-            self._sessions[phone_number] = UserSession(phone_number=phone_number)
-        return self._sessions[phone_number]
+        return await database_service.get_or_create_session(phone_number)
 
-    def update_session(self, session: UserSession) -> None:
+    async def update_session(self, session: UserSession) -> None:
         """Update the session's last interaction time and save it."""
         session.last_interaction = datetime.utcnow()
-        self._sessions[session.phone_number] = session
+        await database_service.update_session(session)
 
     async def handle_incoming_message(self, phone_number: str, message: str) -> str:
         """
@@ -83,7 +78,7 @@ class BookingService:
         Returns:
             The response message to send back to the user.
         """
-        session = self.get_session(phone_number)
+        session = await self.get_session(phone_number)
 
         context = None
         if session.state != ConversationState.IDLE:
@@ -95,7 +90,7 @@ class BookingService:
 
         response = await self._process_intent(session, parsed)
 
-        self.update_session(session)
+        await self.update_session(session)
 
         return response
 
@@ -163,9 +158,7 @@ class BookingService:
             )
 
     async def _handle_status_intent(self, session: UserSession) -> str:
-        user_bookings = [
-            b for b in self._bookings.values() if b.phone_number == session.phone_number
-        ]
+        user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
 
         if not user_bookings:
             return "You don't have any scheduled bookings. Would you like to book a tee time?"
@@ -185,19 +178,18 @@ class BookingService:
         return "Your upcoming bookings:\n" + "\n".join(status_lines)
 
     async def _handle_cancel_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
-        user_bookings = [
-            b
-            for b in self._bookings.values()
-            if b.phone_number == session.phone_number
-            and b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED]
+        user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
+        cancellable = [
+            b for b in user_bookings if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED]
         ]
 
-        if not user_bookings:
+        if not cancellable:
             return "You don't have any bookings to cancel."
 
-        if len(user_bookings) == 1:
-            booking = user_bookings[0]
+        if len(cancellable) == 1:
+            booking = cancellable[0]
             booking.status = BookingStatus.CANCELLED
+            await database_service.update_booking(booking)
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             return f"Your booking for {date_str} has been cancelled."
 
@@ -229,10 +221,9 @@ class BookingService:
             scheduled_execution_time=execution_time,
         )
 
-        self._bookings[booking_id] = booking
-        return booking
+        return await database_service.create_booking(booking)
 
-    def get_booking(self, booking_id: str) -> TeeTimeBooking | None:
+    async def get_booking(self, booking_id: str) -> TeeTimeBooking | None:
         """
         Get a booking by its ID.
 
@@ -242,9 +233,9 @@ class BookingService:
         Returns:
             The booking if found, None otherwise.
         """
-        return self._bookings.get(booking_id)
+        return await database_service.get_booking(booking_id)
 
-    def get_bookings(
+    async def get_bookings(
         self, phone_number: str | None = None, status: BookingStatus | None = None
     ) -> list[TeeTimeBooking]:
         """
@@ -257,17 +248,9 @@ class BookingService:
         Returns:
             List of matching bookings.
         """
-        bookings = list(self._bookings.values())
+        return await database_service.get_bookings(phone_number=phone_number, status=status)
 
-        if phone_number:
-            bookings = [b for b in bookings if b.phone_number == phone_number]
-
-        if status:
-            bookings = [b for b in bookings if b.status == status]
-
-        return bookings
-
-    def cancel_booking(self, booking_id: str) -> TeeTimeBooking | None:
+    async def cancel_booking(self, booking_id: str) -> TeeTimeBooking | None:
         """
         Cancel a booking by its ID.
 
@@ -277,7 +260,7 @@ class BookingService:
         Returns:
             The cancelled booking if found and cancellable, None otherwise.
         """
-        booking = self._bookings.get(booking_id)
+        booking = await database_service.get_booking(booking_id)
         if not booking:
             return None
 
@@ -285,7 +268,7 @@ class BookingService:
             return None
 
         booking.status = BookingStatus.CANCELLED
-        return booking
+        return await database_service.update_booking(booking)
 
     def _calculate_execution_time(self, target_date: datetime.date) -> datetime:
         tz = pytz.timezone(settings.timezone)
@@ -334,19 +317,21 @@ class BookingService:
         Returns:
             True if the booking was successful, False otherwise.
         """
-        booking = self.get_booking(booking_id)
+        booking = await self.get_booking(booking_id)
         if not booking:
             return False
 
         if not self._reservation_provider:
             booking.status = BookingStatus.FAILED
             booking.error_message = "Reservation provider not configured"
+            await database_service.update_booking(booking)
             await sms_service.send_booking_failure(
                 booking.phone_number, "System not configured for booking"
             )
             return False
 
         booking.status = BookingStatus.IN_PROGRESS
+        await database_service.update_booking(booking)
 
         try:
             result = await self._reservation_provider.book_tee_time(
@@ -360,6 +345,7 @@ class BookingService:
                 booking.status = BookingStatus.SUCCESS
                 booking.actual_booked_time = result.booked_time
                 booking.confirmation_number = result.confirmation_number
+                await database_service.update_booking(booking)
 
                 date_str = booking.request.requested_date.strftime("%A, %B %d")
                 time_str = (result.booked_time or booking.request.requested_time).strftime(
@@ -374,6 +360,7 @@ class BookingService:
             else:
                 booking.status = BookingStatus.FAILED
                 booking.error_message = result.error_message
+                await database_service.update_booking(booking)
 
                 await sms_service.send_booking_failure(
                     booking.phone_number,
@@ -385,11 +372,12 @@ class BookingService:
         except Exception as e:
             booking.status = BookingStatus.FAILED
             booking.error_message = str(e)
+            await database_service.update_booking(booking)
             await sms_service.send_booking_failure(booking.phone_number, str(e))
             return False
 
-    def get_pending_bookings(self) -> list[TeeTimeBooking]:
-        return [b for b in self._bookings.values() if b.status == BookingStatus.SCHEDULED]
+    async def get_pending_bookings(self) -> list[TeeTimeBooking]:
+        return await database_service.get_bookings(status=BookingStatus.SCHEDULED)
 
 
 booking_service = BookingService()
