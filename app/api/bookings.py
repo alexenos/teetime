@@ -55,7 +55,7 @@ async def create_booking(request: CreateBookingRequest) -> BookingResponse:
 async def list_bookings(
     phone_number: str | None = None, status: BookingStatus | None = None
 ) -> list[BookingResponse]:
-    bookings = booking_service.get_bookings(phone_number=phone_number, status=status)
+    bookings = await booking_service.get_bookings(phone_number=phone_number, status=status)
 
     return [
         BookingResponse(
@@ -74,7 +74,7 @@ async def list_bookings(
 
 @router.get("/{booking_id}", response_model=BookingResponse)
 async def get_booking(booking_id: str) -> BookingResponse:
-    booking = booking_service.get_booking(booking_id)
+    booking = await booking_service.get_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
@@ -92,7 +92,7 @@ async def get_booking(booking_id: str) -> BookingResponse:
 
 @router.delete("/{booking_id}")
 async def cancel_booking(booking_id: str) -> dict:
-    booking = booking_service.cancel_booking(booking_id)
+    booking = await booking_service.cancel_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found or cannot be cancelled")
 
@@ -101,7 +101,7 @@ async def cancel_booking(booking_id: str) -> dict:
 
 @router.post("/{booking_id}/execute")
 async def execute_booking(booking_id: str) -> dict:
-    booking = booking_service.get_booking(booking_id)
+    booking = await booking_service.get_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
