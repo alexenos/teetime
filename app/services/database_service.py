@@ -81,9 +81,7 @@ class DatabaseService:
         """Convert a SessionRecord SQLAlchemy model to a UserSession Pydantic model."""
         pending_request = None
         if record.pending_request_json:
-            pending_request = TeeTimeRequest.model_validate_json(
-                record.pending_request_json
-            )
+            pending_request = TeeTimeRequest.model_validate_json(record.pending_request_json)
         return UserSession(
             phone_number=record.phone_number,
             state=record.state,
