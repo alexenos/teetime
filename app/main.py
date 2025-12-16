@@ -1,17 +1,28 @@
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.api import bookings, health, jobs, webhooks
+from app.config import settings
 from app.models.database import init_db
 from app.providers.walden_provider import MockWaldenProvider
 from app.services.booking_service import booking_service
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
+
+    if not settings.scheduler_api_key:
+        logger.warning(
+            "SCHEDULER_API_KEY is not configured. "
+            "The /jobs/execute-due-bookings endpoint will return 500 errors. "
+            "Set SCHEDULER_API_KEY environment variable for production use."
+        )
 
     provider = MockWaldenProvider()
     booking_service.set_reservation_provider(provider)

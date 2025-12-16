@@ -386,21 +386,19 @@ class BookingService:
         A booking is due when its scheduled_execution_time is <= current_time.
         This is used by the Cloud Scheduler job to find bookings to execute.
 
+        The filtering is performed at the database layer for efficiency.
+        Timezone handling: scheduled_execution_time is stored as naive datetime
+        in CT wall-clock time. We strip tzinfo from current_time to ensure
+        consistent naive-to-naive comparison in the database query.
+
         Args:
-            current_time: The current time (timezone-aware) to compare against.
+            current_time: The current time (timezone-aware in CT) to compare against.
 
         Returns:
             List of bookings that are due for execution.
         """
-        scheduled_bookings = await database_service.get_bookings(status=BookingStatus.SCHEDULED)
-        due_bookings = []
-        for booking in scheduled_bookings:
-            if (
-                booking.scheduled_execution_time
-                and booking.scheduled_execution_time <= current_time
-            ):
-                due_bookings.append(booking)
-        return due_bookings
+        naive_current_time = current_time.replace(tzinfo=None)
+        return await database_service.get_due_bookings(naive_current_time)
 
 
 booking_service = BookingService()
