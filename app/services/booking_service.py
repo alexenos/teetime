@@ -379,5 +379,28 @@ class BookingService:
     async def get_pending_bookings(self) -> list[TeeTimeBooking]:
         return await database_service.get_bookings(status=BookingStatus.SCHEDULED)
 
+    async def get_due_bookings(self, current_time: datetime) -> list[TeeTimeBooking]:
+        """
+        Get all scheduled bookings that are due for execution.
+
+        A booking is due when its scheduled_execution_time is <= current_time.
+        This is used by the Cloud Scheduler job to find bookings to execute.
+
+        Args:
+            current_time: The current time (timezone-aware) to compare against.
+
+        Returns:
+            List of bookings that are due for execution.
+        """
+        scheduled_bookings = await database_service.get_bookings(status=BookingStatus.SCHEDULED)
+        due_bookings = []
+        for booking in scheduled_bookings:
+            if (
+                booking.scheduled_execution_time
+                and booking.scheduled_execution_time <= current_time
+            ):
+                due_bookings.append(booking)
+        return due_bookings
+
 
 booking_service = BookingService()

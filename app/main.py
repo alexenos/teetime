@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import bookings, health, webhooks
+from app.api import bookings, health, jobs, webhooks
 from app.models.database import init_db
 from app.providers.walden_provider import MockWaldenProvider
 from app.services.booking_service import booking_service
@@ -45,3 +45,4 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(webhooks.router)
 app.include_router(bookings.router)
+app.include_router(jobs.router)

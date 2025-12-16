@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     days_in_advance: int = 7
     max_tee_times_per_day: int = 2
 
+    scheduler_api_key: str = ""
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
