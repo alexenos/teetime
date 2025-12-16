@@ -344,12 +344,15 @@ class TestJobsTimeout:
         test_client: TestClient,
         sample_booking: TeeTimeBooking,
     ) -> None:
-        """Test that booking timeout is properly handled."""
-        import asyncio
+        """Test that booking timeout is properly handled.
 
-        async def slow_execute(*args, **kwargs):
-            await asyncio.sleep(10)
-            return True
+        Uses deterministic mocking of asyncio.wait_for to raise TimeoutError
+        immediately, avoiding flaky timing-dependent tests.
+        """
+
+        async def mock_wait_for(coro, timeout):
+            coro.close()
+            raise TimeoutError()
 
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
@@ -357,9 +360,9 @@ class TestJobsTimeout:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_booking = slow_execute
+                mock_service.execute_booking = AsyncMock(return_value=True)
 
-                with patch("app.api.jobs.BOOKING_EXECUTION_TIMEOUT_SECONDS", 0.1):
+                with patch("asyncio.wait_for", mock_wait_for):
                     response = test_client.post(
                         "/jobs/execute-due-bookings",
                         headers={"X-Scheduler-API-Key": "test-api-key"},
@@ -449,3 +452,207 @@ class TestJobExecutionModels:
         assert result.succeeded == 1
         assert result.failed == 1
         assert len(result.results) == 2
+
+
+class TestJobsIntegration:
+    """Integration-style tests that exercise the real booking_service -> database_service chain.
+
+    These tests verify the actual call chain from jobs.py through to the database layer,
+    without mocking the intermediate services. Only the reservation provider is mocked
+    since we don't want to make real HTTP calls to the golf booking website.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_integration(self) -> None:
+        """Test that jobs.py correctly passes timezone-aware time through the service chain.
+
+        This test exercises the real path:
+        jobs.py (creates tz-aware now) -> booking_service.get_due_bookings(now)
+        -> database_service.get_due_bookings(naive_time)
+
+        Verifies that timezone stripping happens correctly and the database query works.
+        """
+        import pytz
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.models.database import Base
+        from app.services.booking_service import BookingService
+        from app.services.database_service import DatabaseService
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        test_session_local = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        with patch("app.services.database_service.AsyncSessionLocal", test_session_local):
+            db_service = DatabaseService()
+
+            due_booking = TeeTimeBooking(
+                id="integration-due",
+                phone_number="+15551234567",
+                request=TeeTimeRequest(
+                    requested_date=date(2025, 12, 20),
+                    requested_time=time(8, 0),
+                    num_players=4,
+                ),
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+            )
+            future_booking = TeeTimeBooking(
+                id="integration-future",
+                phone_number="+15559999999",
+                request=TeeTimeRequest(
+                    requested_date=date(2025, 12, 25),
+                    requested_time=time(9, 0),
+                    num_players=2,
+                ),
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 18, 6, 30),
+            )
+
+            await db_service.create_booking(due_booking)
+            await db_service.create_booking(future_booking)
+
+            with patch("app.services.booking_service.database_service", db_service):
+                booking_svc = BookingService()
+
+                tz = pytz.timezone("America/Chicago")
+                current_time = tz.localize(datetime(2025, 12, 13, 6, 31))
+
+                result = await booking_svc.get_due_bookings(current_time)
+
+                assert len(result) == 1
+                assert result[0].id == "integration-due"
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_execute_booking_transitions_to_in_progress_before_provider(
+        self,
+    ) -> None:
+        """Test that execute_booking sets status to IN_PROGRESS before calling provider.
+
+        This verifies the idempotency claim in the docstring: bookings are transitioned
+        to IN_PROGRESS before execution, so retries won't re-execute started bookings.
+        """
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.models.database import Base
+        from app.providers.base import BookingResult
+        from app.services.booking_service import BookingService
+        from app.services.database_service import DatabaseService
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        test_session_local = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        status_during_provider_call = None
+
+        async def capture_status_provider(*args, **kwargs):
+            nonlocal status_during_provider_call
+            booking = await db_service.get_booking("test-idempotency")
+            status_during_provider_call = booking.status if booking else None
+            return BookingResult(
+                success=True,
+                booked_time=time(8, 0),
+                confirmation_number="CONF123",
+            )
+
+        with patch("app.services.database_service.AsyncSessionLocal", test_session_local):
+            db_service = DatabaseService()
+
+            booking = TeeTimeBooking(
+                id="test-idempotency",
+                phone_number="+15551234567",
+                request=TeeTimeRequest(
+                    requested_date=date(2025, 12, 20),
+                    requested_time=time(8, 0),
+                    num_players=4,
+                ),
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+            )
+            await db_service.create_booking(booking)
+
+            with patch("app.services.booking_service.database_service", db_service):
+                with patch("app.services.booking_service.sms_service") as mock_sms:
+                    mock_sms.send_booking_confirmation = AsyncMock()
+
+                    booking_svc = BookingService()
+
+                    mock_provider = AsyncMock()
+                    mock_provider.book_tee_time = capture_status_provider
+                    booking_svc.set_reservation_provider(mock_provider)
+
+                    result = await booking_svc.execute_booking("test-idempotency")
+
+                    assert result is True
+                    assert status_during_provider_call == BookingStatus.IN_PROGRESS
+
+                    final_booking = await db_service.get_booking("test-idempotency")
+                    assert final_booking is not None
+                    assert final_booking.status == BookingStatus.SUCCESS
+
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_excludes_in_progress(self) -> None:
+        """Test that get_due_bookings excludes IN_PROGRESS bookings.
+
+        This verifies that if a booking is already being executed (IN_PROGRESS),
+        it won't be returned by get_due_bookings, preventing duplicate execution
+        on Cloud Scheduler retries.
+        """
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.models.database import Base
+        from app.services.database_service import DatabaseService
+
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        test_session_local = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        with patch("app.services.database_service.AsyncSessionLocal", test_session_local):
+            db_service = DatabaseService()
+
+            scheduled_booking = TeeTimeBooking(
+                id="scheduled-booking",
+                phone_number="+15551234567",
+                request=TeeTimeRequest(
+                    requested_date=date(2025, 12, 20),
+                    requested_time=time(8, 0),
+                    num_players=4,
+                ),
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+            )
+            in_progress_booking = TeeTimeBooking(
+                id="in-progress-booking",
+                phone_number="+15559999999",
+                request=TeeTimeRequest(
+                    requested_date=date(2025, 12, 20),
+                    requested_time=time(9, 0),
+                    num_players=2,
+                ),
+                status=BookingStatus.IN_PROGRESS,
+                scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+            )
+
+            await db_service.create_booking(scheduled_booking)
+            await db_service.create_booking(in_progress_booking)
+
+            due_before = datetime(2025, 12, 13, 6, 31)
+            result = await db_service.get_due_bookings(due_before)
+
+            assert len(result) == 1
+            assert result[0].id == "scheduled-booking"
+
+        await engine.dispose()
