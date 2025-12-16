@@ -363,11 +363,34 @@ class TestBookingServiceIntentHandling:
         sample_session: UserSession,
         sample_booking: TeeTimeBooking,
     ) -> None:
-        """Test handling a cancel intent with one booking."""
+        """Test handling a cancel intent with one booking asks for confirmation."""
         parsed = ParsedIntent(intent="cancel")
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
+            mock_db.update_session = AsyncMock()
+
+            response = await booking_service._handle_cancel_intent(sample_session, parsed)
+            # Now asks for confirmation instead of immediately cancelling
+            assert "are you sure" in response.lower()
+            assert sample_session.pending_cancellation_id == sample_booking.id
+
+    @pytest.mark.asyncio
+    async def test_handle_cancel_intent_confirm_cancellation(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_booking: TeeTimeBooking,
+    ) -> None:
+        """Test confirming a pending cancellation."""
+        # Set up session with pending cancellation
+        sample_session.pending_cancellation_id = sample_booking.id
+        parsed = ParsedIntent(intent="cancel", raw_message="yes")
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+            mock_db.update_session = AsyncMock()
 
             async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
@@ -375,6 +398,7 @@ class TestBookingServiceIntentHandling:
             mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
             response = await booking_service._handle_cancel_intent(sample_session, parsed)
             assert "cancelled" in response.lower()
+            assert sample_session.pending_cancellation_id is None
 
 
 class TestBookingServiceProcessIntent:

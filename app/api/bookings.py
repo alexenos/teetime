@@ -91,10 +91,39 @@ async def get_booking(booking_id: str) -> BookingResponse:
 
 
 @router.delete("/{booking_id}")
-async def cancel_booking(booking_id: str) -> dict:
-    booking = await booking_service.cancel_booking(booking_id)
+async def cancel_booking(booking_id: str, phone_number: str) -> dict:
+    """
+    Cancel a booking by its ID.
+
+    Requires the phone_number associated with the booking for authorization.
+    This prevents unauthorized users from cancelling other users' bookings.
+
+    Args:
+        booking_id: The unique identifier of the booking to cancel.
+        phone_number: The phone number that must match the booking's phone number.
+
+    Returns:
+        A dict with status and booking_id on success.
+
+    Raises:
+        HTTPException 403: If phone_number doesn't match the booking's phone number.
+        HTTPException 404: If booking not found or cannot be cancelled.
+    """
+    # First verify the booking exists and the phone number matches
+    booking = await booking_service.get_booking(booking_id)
     if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found or cannot be cancelled")
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    if booking.phone_number != phone_number:
+        raise HTTPException(
+            status_code=403,
+            detail="Unauthorized: phone number does not match booking owner",
+        )
+
+    # Now proceed with cancellation
+    cancelled_booking = await booking_service.cancel_booking(booking_id)
+    if not cancelled_booking:
+        raise HTTPException(status_code=404, detail="Booking cannot be cancelled")
 
     return {"status": "cancelled", "booking_id": booking_id}
 

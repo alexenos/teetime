@@ -147,10 +147,11 @@ class GeminiService:
                     if hasattr(part, "function_call"):
                         fc = part.function_call
                         args = dict(fc.args)
-                        return self._build_parsed_intent(args)
+                        return self._build_parsed_intent(args, raw_message=message)
 
             return ParsedIntent(
                 intent="unclear",
+                raw_message=message,
                 response_message="I'm not sure I understood that. Could you please rephrase?",
             )
 
@@ -158,7 +159,7 @@ class GeminiService:
             print(f"Gemini API error: {e}")
             return self._mock_parse(message)
 
-    def _build_parsed_intent(self, args: dict) -> ParsedIntent:
+    def _build_parsed_intent(self, args: dict, raw_message: str | None = None) -> ParsedIntent:
         intent = args.get("intent", "unclear")
         tee_time_request = None
 
@@ -175,6 +176,7 @@ class GeminiService:
 
         return ParsedIntent(
             intent=intent,
+            raw_message=raw_message,
             tee_time_request=tee_time_request,
             clarification_needed=args.get("clarification_needed"),
             response_message=args.get("response_message", ""),
@@ -209,6 +211,7 @@ class GeminiService:
 
             return ParsedIntent(
                 intent="book",
+                raw_message=message,
                 tee_time_request=TeeTimeRequest(
                     requested_date=target_date,
                     requested_time=default_time,
@@ -220,29 +223,34 @@ class GeminiService:
         if any(word in message_lower for word in ["status", "booking", "scheduled"]):
             return ParsedIntent(
                 intent="status",
+                raw_message=message,
                 response_message="Let me check your upcoming bookings...",
             )
 
         if any(word in message_lower for word in ["cancel", "remove", "delete"]):
             return ParsedIntent(
                 intent="cancel",
+                raw_message=message,
                 response_message="Which booking would you like to cancel?",
             )
 
         if any(word in message_lower for word in ["help", "how", "what"]):
             return ParsedIntent(
                 intent="help",
+                raw_message=message,
                 response_message="I can help you book tee times at Northgate Country Club! Just tell me the date, time, and number of players. For example: 'Book Saturday 8am for 4 players'",
             )
 
         if message_lower in ["yes", "confirm", "ok", "sure", "yeah"]:
             return ParsedIntent(
                 intent="confirm",
+                raw_message=message,
                 response_message="Great! I'll schedule that booking for you.",
             )
 
         return ParsedIntent(
             intent="unclear",
+            raw_message=message,
             response_message="I'm not sure I understood. You can say things like 'Book Saturday 8am for 4 players' or 'Check my bookings'.",
         )
 

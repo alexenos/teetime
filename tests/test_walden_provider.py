@@ -347,58 +347,92 @@ class TestWaldenProviderMock:
 class TestWaldenProviderCancellation:
     """Tests for booking cancellation logic."""
 
-    def test_verify_cancellation_success_with_cancelled(self, provider: WaldenGolfProvider) -> None:
-        """Test that 'cancelled' indicator returns True."""
+    def test_verify_cancellation_success_with_cancelled_successfully(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that 'cancelled successfully' indicator returns True."""
         from unittest.mock import MagicMock
 
         mock_driver = MagicMock()
-        mock_driver.page_source = "<html><body>Your reservation has been cancelled.</body></html>"
+        # Mock the reservations form element
+        mock_form = MagicMock()
+        mock_form.text = "Reservation Cancelled Successfully"
+        mock_driver.find_element.return_value = mock_form
         result = provider._verify_cancellation_success(mock_driver)
         assert result is True
 
-    def test_verify_cancellation_success_with_canceled(self, provider: WaldenGolfProvider) -> None:
-        """Test that 'canceled' (US spelling) indicator returns True."""
+    def test_verify_cancellation_success_with_reservation_cancelled(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that 'reservation cancelled' indicator returns True."""
         from unittest.mock import MagicMock
+        from selenium.common.exceptions import NoSuchElementException
 
         mock_driver = MagicMock()
-        mock_driver.page_source = "<html><body>Reservation canceled successfully.</body></html>"
+        # Mock form not found, fall back to page source
+        mock_driver.find_element.side_effect = NoSuchElementException()
+        mock_driver.page_source = "<html><body>Reservation Cancelled successfully.</body></html>"
         result = provider._verify_cancellation_success(mock_driver)
         assert result is True
 
-    def test_verify_cancellation_success_with_removed(self, provider: WaldenGolfProvider) -> None:
-        """Test that 'removed' indicator returns True."""
+    def test_verify_cancellation_failure_with_error_cancelling(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that 'error cancelling' indicator returns False."""
         from unittest.mock import MagicMock
 
         mock_driver = MagicMock()
-        mock_driver.page_source = "<html><body>Your booking has been removed.</body></html>"
-        result = provider._verify_cancellation_success(mock_driver)
-        assert result is True
-
-    def test_verify_cancellation_failure_with_error(self, provider: WaldenGolfProvider) -> None:
-        """Test that 'error' indicator returns False."""
-        from unittest.mock import MagicMock
-
-        mock_driver = MagicMock()
-        mock_driver.page_source = "<html><body>An error occurred during cancellation.</body></html>"
+        mock_form = MagicMock()
+        mock_form.text = "Error cancelling your reservation"
+        mock_driver.find_element.return_value = mock_form
         result = provider._verify_cancellation_success(mock_driver)
         assert result is False
 
-    def test_verify_cancellation_failure_with_unable(self, provider: WaldenGolfProvider) -> None:
-        """Test that 'unable' indicator returns False."""
+    def test_verify_cancellation_failure_with_unable_to_cancel(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that 'unable to cancel' indicator returns False."""
         from unittest.mock import MagicMock
 
         mock_driver = MagicMock()
-        mock_driver.page_source = "<html><body>Unable to cancel your reservation.</body></html>"
+        mock_form = MagicMock()
+        mock_form.text = "Unable to cancel your reservation"
+        mock_driver.find_element.return_value = mock_form
         result = provider._verify_cancellation_success(mock_driver)
         assert result is False
 
-    def test_verify_cancellation_ambiguous_returns_true(self, provider: WaldenGolfProvider) -> None:
-        """Test that ambiguous page content returns True (assumes success)."""
+    def test_verify_cancellation_ambiguous_returns_false(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that ambiguous page content returns False (pessimistic/fail-safe)."""
         from unittest.mock import MagicMock
+        from selenium.common.exceptions import NoSuchElementException
 
         mock_driver = MagicMock()
+        # Mock form not found
+        mock_driver.find_element.side_effect = NoSuchElementException()
         mock_driver.page_source = "<html><body>Processing your request...</body></html>"
         result = provider._verify_cancellation_success(mock_driver)
+        assert result is False
+
+    def test_verify_cancellation_success_with_row_removed(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that verification succeeds when target row is no longer present."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_form = MagicMock()
+        mock_form.text = "My Reservations"  # No success/failure indicators
+        # Mock finding rows but none match the target
+        mock_row = MagicMock()
+        mock_row.text = "12/20/2025 - Tee Time - 9:00 AM"  # Different date/time
+        mock_form.find_elements.return_value = [mock_row]
+        mock_driver.find_element.return_value = mock_form
+        # Target date/time not found in rows = success
+        result = provider._verify_cancellation_success(
+            mock_driver, target_date="12/16/2025", target_time="3:22 PM"
+        )
         assert result is True
 
 

@@ -188,26 +188,56 @@ class BookingService:
         if not cancellable:
             return "You don't have any bookings to cancel."
 
+        # Check if user is confirming a pending cancellation
+        if session.pending_cancellation_id:
+            # User is responding to a confirmation prompt
+            message_lower = parsed.raw_message.lower() if parsed.raw_message else ""
+            if any(word in message_lower for word in ["yes", "confirm", "ok", "sure", "y"]):
+                booking = await database_service.get_booking(session.pending_cancellation_id)
+                if booking:
+                    date_str = booking.request.requested_date.strftime("%A, %B %d")
+                    session.pending_cancellation_id = None
+                    await self.update_session(session)
+
+                    if booking.status == BookingStatus.SUCCESS:
+                        success = await self._cancel_confirmed_booking(booking)
+                        if success:
+                            return (
+                                f"Your confirmed booking for {date_str} has been cancelled "
+                                "on the website."
+                            )
+                        else:
+                            return (
+                                f"I was unable to cancel your booking for {date_str} on the "
+                                "website. Please contact the club directly to cancel."
+                            )
+                    else:
+                        booking.status = BookingStatus.CANCELLED
+                        await database_service.update_booking(booking)
+                        return f"Your booking for {date_str} has been cancelled."
+            else:
+                # User declined or gave unclear response
+                session.pending_cancellation_id = None
+                await self.update_session(session)
+                return "Cancellation cancelled. Your booking remains active."
+
+        # Always ask for confirmation before cancelling, even for single bookings
         if len(cancellable) == 1:
             booking = cancellable[0]
             date_str = booking.request.requested_date.strftime("%A, %B %d")
+            time_str = booking.request.requested_time.strftime("%I:%M %p")
+            status_label = "confirmed" if booking.status == BookingStatus.SUCCESS else "scheduled"
 
-            if booking.status == BookingStatus.SUCCESS:
-                success = await self._cancel_confirmed_booking(booking)
-                if success:
-                    return (
-                        f"Your confirmed booking for {date_str} has been cancelled on the website."
-                    )
-                else:
-                    return (
-                        f"I was unable to cancel your booking for {date_str} on the website. "
-                        "Please contact the club directly to cancel."
-                    )
-            else:
-                booking.status = BookingStatus.CANCELLED
-                await database_service.update_booking(booking)
-                return f"Your booking for {date_str} has been cancelled."
+            # Store the pending cancellation and ask for confirmation
+            session.pending_cancellation_id = booking.id
+            await self.update_session(session)
 
+            return (
+                f"Are you sure you want to cancel your {status_label} booking for "
+                f"{date_str} at {time_str}? Reply 'yes' to confirm."
+            )
+
+        # Multiple bookings - ask which one to cancel
         status_lines = []
         for booking in cancellable:
             date_str = booking.request.requested_date.strftime("%A, %B %d")
