@@ -194,5 +194,27 @@ class DatabaseService:
         new_session = UserSession(phone_number=phone_number)
         return await self.create_session(new_session)
 
+    async def get_due_bookings(self, due_before: datetime) -> list[TeeTimeBooking]:
+        """
+        Get all scheduled bookings that are due for execution.
+
+        This performs the filtering at the database layer for efficiency.
+
+        Args:
+            due_before: Datetime to compare against (naive, in CT wall-clock time).
+                        Bookings with scheduled_execution_time <= due_before are returned.
+
+        Returns:
+            List of bookings that are due for execution.
+        """
+        async with AsyncSessionLocal() as db:
+            query = select(BookingRecord).where(
+                BookingRecord.status == BookingStatus.SCHEDULED,
+                BookingRecord.scheduled_execution_time <= due_before,
+            )
+            result = await db.execute(query)
+            records = result.scalars().all()
+            return [self._record_to_booking(r) for r in records]
+
 
 database_service = DatabaseService()
