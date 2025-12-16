@@ -366,6 +366,7 @@ class TestWaldenProviderCancellation:
     ) -> None:
         """Test that 'reservation cancelled' indicator returns True."""
         from unittest.mock import MagicMock
+
         from selenium.common.exceptions import NoSuchElementException
 
         mock_driver = MagicMock()
@@ -406,6 +407,7 @@ class TestWaldenProviderCancellation:
     ) -> None:
         """Test that ambiguous page content returns False (pessimistic/fail-safe)."""
         from unittest.mock import MagicMock
+
         from selenium.common.exceptions import NoSuchElementException
 
         mock_driver = MagicMock()
