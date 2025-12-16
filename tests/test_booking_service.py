@@ -212,20 +212,77 @@ class TestBookingServiceBookings:
             assert result is None
 
     @pytest.mark.asyncio
-    async def test_cancel_booking_already_completed(
+    async def test_cancel_booking_failed_status(
         self, booking_service: BookingService, sample_request: TeeTimeRequest
     ) -> None:
-        """Test that completed bookings cannot be cancelled."""
-        completed_booking = TeeTimeBooking(
+        """Test that FAILED bookings cannot be cancelled."""
+        failed_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.FAILED,
+        )
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=failed_booking)
+            result = await booking_service.cancel_booking(failed_booking.id)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_success_status(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that cancelling a SUCCESS booking calls _cancel_confirmed_booking and updates status."""
+        success_booking = TeeTimeBooking(
             id="test1234",
             phone_number="+15551234567",
             request=sample_request,
             status=BookingStatus.SUCCESS,
+            actual_booked_time=time(8, 0),
         )
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_booking = AsyncMock(return_value=completed_booking)
-            result = await booking_service.cancel_booking(completed_booking.id)
+            mock_db.get_booking = AsyncMock(return_value=success_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.cancel_booking = AsyncMock(return_value=True)
+            booking_service.set_reservation_provider(mock_provider)
+
+            result = await booking_service.cancel_booking(success_booking.id)
+
+            mock_provider.cancel_booking.assert_called_once()
+            assert result is not None
+            assert result.status == BookingStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_success_provider_fails(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that when provider returns False, the service returns None and status is unchanged."""
+        success_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.SUCCESS,
+            actual_booked_time=time(8, 0),
+        )
+        original_status = success_booking.status
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=success_booking)
+
+            mock_provider = MagicMock()
+            mock_provider.cancel_booking = AsyncMock(return_value=False)
+            booking_service.set_reservation_provider(mock_provider)
+
+            result = await booking_service.cancel_booking(success_booking.id)
+
+            mock_provider.cancel_booking.assert_called_once()
             assert result is None
+            assert success_booking.status == original_status
 
     @pytest.mark.asyncio
     async def test_get_pending_bookings(
@@ -399,6 +456,61 @@ class TestBookingServiceIntentHandling:
             response = await booking_service._handle_cancel_intent(sample_session, parsed)
             assert "cancelled" in response.lower()
             assert sample_session.pending_cancellation_id is None
+
+    @pytest.mark.asyncio
+    async def test_handle_cancel_intent_decline_cancellation(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_booking: TeeTimeBooking,
+    ) -> None:
+        """Test that responding 'no' to confirmation clears pending_cancellation_id."""
+        sample_session.pending_cancellation_id = sample_booking.id
+        parsed = ParsedIntent(intent="cancel", raw_message="no")
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
+            mock_db.update_session = AsyncMock()
+
+            response = await booking_service._handle_cancel_intent(sample_session, parsed)
+
+            assert "remains active" in response.lower()
+            assert sample_session.pending_cancellation_id is None
+
+    @pytest.mark.asyncio
+    async def test_handle_cancel_intent_multiple_bookings(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_request: TeeTimeRequest,
+    ) -> None:
+        """Test that when user has >1 cancellable booking, response lists them."""
+        booking1 = TeeTimeBooking(
+            id="booking1",
+            phone_number=sample_session.phone_number,
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+        )
+        booking2 = TeeTimeBooking(
+            id="booking2",
+            phone_number=sample_session.phone_number,
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 21),
+                requested_time=time(9, 0),
+                num_players=2,
+            ),
+            status=BookingStatus.SUCCESS,
+        )
+        parsed = ParsedIntent(intent="cancel")
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booking1, booking2])
+
+            response = await booking_service._handle_cancel_intent(sample_session, parsed)
+
+            assert "which booking" in response.lower()
+            assert "Saturday, December 20" in response
+            assert "Sunday, December 21" in response
 
 
 class TestBookingServiceProcessIntent:
