@@ -184,9 +184,7 @@ class TestBookingsEndpoints:
             mock_service.get_booking = AsyncMock(return_value=sample_booking)
             mock_service.cancel_booking = AsyncMock(return_value=sample_booking)
 
-            response = test_client.delete(
-                "/bookings/abc12345?phone_number=%2B15551234567"
-            )
+            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
 
             assert response.status_code == 200
             data = response.json()
@@ -198,9 +196,7 @@ class TestBookingsEndpoints:
         with patch("app.api.bookings.booking_service") as mock_service:
             mock_service.get_booking = AsyncMock(return_value=None)
 
-            response = test_client.delete(
-                "/bookings/nonexistent?phone_number=%2B15551234567"
-            )
+            response = test_client.delete("/bookings/nonexistent?phone_number=%2B15551234567")
 
             assert response.status_code == 404
             assert "not found" in response.json()["detail"]
@@ -220,9 +216,7 @@ class TestBookingsEndpoints:
         with patch("app.api.bookings.booking_service") as mock_service:
             mock_service.get_booking = AsyncMock(return_value=sample_booking)
 
-            response = test_client.delete(
-                "/bookings/abc12345?phone_number=%2B15559999999"
-            )
+            response = test_client.delete("/bookings/abc12345?phone_number=%2B15559999999")
 
             assert response.status_code == 403
             assert "Unauthorized" in response.json()["detail"]

@@ -1838,7 +1838,10 @@ class WaldenGolfProvider(ReservationProvider):
             return False
 
     def _verify_cancellation_success(
-        self, driver: webdriver.Chrome, target_date: str | None = None, target_time: str | None = None
+        self,
+        driver: webdriver.Chrome,
+        target_date: str | None = None,
+        target_time: str | None = None,
     ) -> bool:
         """
         Verify that the cancellation was successful by checking page content.
