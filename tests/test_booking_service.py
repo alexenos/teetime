@@ -610,3 +610,95 @@ class TestBookingServiceHelpMessage:
         assert "Northgate" in help_msg
         assert "Book" in help_msg or "book" in help_msg
         assert "6:30" in help_msg or "6:30am" in help_msg.lower()
+
+
+class TestBookingServiceGetDueBookings:
+    """Tests for get_due_bookings method with timezone handling."""
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_calls_database_service(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Test that get_due_bookings calls database_service.get_due_bookings."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        current_time = tz.localize(datetime(2025, 12, 13, 6, 30))
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_due_bookings = AsyncMock(return_value=[sample_booking])
+
+            result = await booking_service.get_due_bookings(current_time)
+
+            assert len(result) == 1
+            assert result[0].id == sample_booking.id
+            mock_db.get_due_bookings.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_strips_timezone(self, booking_service: BookingService) -> None:
+        """Test that get_due_bookings strips tzinfo for naive DB comparison."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        current_time = tz.localize(datetime(2025, 12, 13, 6, 30))
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_due_bookings = AsyncMock(return_value=[])
+
+            await booking_service.get_due_bookings(current_time)
+
+            call_args = mock_db.get_due_bookings.call_args[0][0]
+            assert call_args.tzinfo is None
+            assert call_args == datetime(2025, 12, 13, 6, 30)
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_returns_empty_list(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test that get_due_bookings returns empty list when no bookings are due."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        current_time = tz.localize(datetime(2025, 12, 13, 6, 30))
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_due_bookings = AsyncMock(return_value=[])
+
+            result = await booking_service.get_due_bookings(current_time)
+
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_returns_multiple_bookings(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that get_due_bookings returns multiple due bookings."""
+        import pytz
+
+        booking1 = TeeTimeBooking(
+            id="booking1",
+            phone_number="+15551111111",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        booking2 = TeeTimeBooking(
+            id="booking2",
+            phone_number="+15552222222",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 29),
+        )
+
+        tz = pytz.timezone("America/Chicago")
+        current_time = tz.localize(datetime(2025, 12, 13, 6, 30))
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_due_bookings = AsyncMock(return_value=[booking1, booking2])
+
+            result = await booking_service.get_due_bookings(current_time)
+
+            assert len(result) == 2
+            result_ids = {b.id for b in result}
+            assert "booking1" in result_ids
+            assert "booking2" in result_ids

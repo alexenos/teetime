@@ -749,3 +749,178 @@ class TestConversationStateTransitions:
 
         assert result.state == ConversationState.IDLE
         assert result.pending_request is None
+
+
+class TestGetDueBookings:
+    """Tests for get_due_bookings method with database-level filtering."""
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_returns_due_bookings(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that get_due_bookings returns bookings with scheduled_execution_time <= due_before."""
+        due_booking = TeeTimeBooking(
+            id="due1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        await database_service.create_booking(due_booking)
+
+        due_before = datetime(2025, 12, 13, 6, 31)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert len(result) == 1
+        assert result[0].id == "due1234"
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_excludes_future_bookings(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that get_due_bookings excludes bookings scheduled for the future."""
+        future_booking = TeeTimeBooking(
+            id="future1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 20, 6, 30),
+        )
+        await database_service.create_booking(future_booking)
+
+        due_before = datetime(2025, 12, 13, 6, 30)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_excludes_non_scheduled_status(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that get_due_bookings only returns SCHEDULED bookings."""
+        success_booking = TeeTimeBooking(
+            id="success1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.SUCCESS,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        failed_booking = TeeTimeBooking(
+            id="failed1234",
+            phone_number="+15552222222",
+            request=sample_request,
+            status=BookingStatus.FAILED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        cancelled_booking = TeeTimeBooking(
+            id="cancelled1234",
+            phone_number="+15553333333",
+            request=sample_request,
+            status=BookingStatus.CANCELLED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+
+        await database_service.create_booking(success_booking)
+        await database_service.create_booking(failed_booking)
+        await database_service.create_booking(cancelled_booking)
+
+        due_before = datetime(2025, 12, 13, 6, 31)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_mixed_bookings(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test get_due_bookings with a mix of due, future, and non-scheduled bookings."""
+        due_scheduled = TeeTimeBooking(
+            id="due_scheduled",
+            phone_number="+15551111111",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        future_scheduled = TeeTimeBooking(
+            id="future_scheduled",
+            phone_number="+15552222222",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 20, 6, 30),
+        )
+        due_success = TeeTimeBooking(
+            id="due_success",
+            phone_number="+15553333333",
+            request=sample_request,
+            status=BookingStatus.SUCCESS,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        another_due_scheduled = TeeTimeBooking(
+            id="another_due_scheduled",
+            phone_number="+15554444444",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 29),
+        )
+
+        await database_service.create_booking(due_scheduled)
+        await database_service.create_booking(future_scheduled)
+        await database_service.create_booking(due_success)
+        await database_service.create_booking(another_due_scheduled)
+
+        due_before = datetime(2025, 12, 13, 6, 30)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert len(result) == 2
+        result_ids = {b.id for b in result}
+        assert "due_scheduled" in result_ids
+        assert "another_due_scheduled" in result_ids
+        assert "future_scheduled" not in result_ids
+        assert "due_success" not in result_ids
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_exact_time_match(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that bookings with exact scheduled_execution_time == due_before are included."""
+        exact_booking = TeeTimeBooking(
+            id="exact1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+        await database_service.create_booking(exact_booking)
+
+        due_before = datetime(2025, 12, 13, 6, 30)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert len(result) == 1
+        assert result[0].id == "exact1234"
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_empty_database(self, database_service: DatabaseService) -> None:
+        """Test get_due_bookings returns empty list when no bookings exist."""
+        due_before = datetime(2025, 12, 13, 6, 30)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_due_bookings_excludes_null_execution_time(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that bookings with null scheduled_execution_time are excluded."""
+        null_time_booking = TeeTimeBooking(
+            id="null1234",
+            phone_number="+15551234567",
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=None,
+        )
+        await database_service.create_booking(null_time_booking)
+
+        due_before = datetime(2025, 12, 13, 6, 30)
+        result = await database_service.get_due_bookings(due_before)
+
+        assert len(result) == 0
