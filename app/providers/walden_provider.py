@@ -1633,9 +1633,21 @@ class WaldenGolfProvider(ReservationProvider):
             return False
 
         try:
-            reservation_rows = driver.find_elements(
-                By.CSS_SELECTOR, "table tbody tr, .reservation-row, [class*='reservation'] tr"
-            )
+            reservations_form = None
+            try:
+                reservations_form = driver.find_element(
+                    By.CSS_SELECTOR, "form[name*='memberReservations']"
+                )
+                logger.info("Found reservations form, scoping search to it")
+            except NoSuchElementException:
+                logger.warning("Reservations form not found, searching entire page")
+
+            if reservations_form:
+                reservation_rows = reservations_form.find_elements(
+                    By.CSS_SELECTOR, "table tbody tr"
+                )
+            else:
+                reservation_rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
 
             logger.info(f"Found {len(reservation_rows)} potential reservation rows")
 
@@ -1643,7 +1655,7 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     row_text = row.text.lower()
 
-                    if "tee time" not in row_text and "northgate" not in row_text:
+                    if "tee time" not in row_text:
                         continue
 
                     date_match = False
@@ -1738,25 +1750,42 @@ class WaldenGolfProvider(ReservationProvider):
             except Exception:
                 pass
 
-            confirm_selectors = [
+            css_selectors = [
                 "button[class*='confirm']",
                 "button[class*='yes']",
                 "input[type='submit'][value*='Yes']",
                 "input[type='submit'][value*='Confirm']",
-                "button:contains('Yes')",
-                "button:contains('Confirm')",
-                ".ui-dialog button:contains('Yes')",
                 ".modal button[class*='primary']",
             ]
 
-            for selector in confirm_selectors:
+            for selector in css_selectors:
                 try:
                     confirm_btn = driver.find_element(By.CSS_SELECTOR, selector)
                     if confirm_btn.is_displayed():
-                        logger.info(f"Found confirm button with selector: {selector}")
+                        logger.info(f"Found confirm button with CSS selector: {selector}")
                         confirm_btn.click()
                         time_module.sleep(1)
-                        break
+                        return self._verify_cancellation_success(driver)
+                except NoSuchElementException:
+                    continue
+
+            xpath_selectors = [
+                "//button[contains(text(), 'Yes')]",
+                "//button[contains(text(), 'Confirm')]",
+                "//button[contains(text(), 'OK')]",
+                "//a[contains(text(), 'Yes')]",
+                "//a[contains(text(), 'Confirm')]",
+                "//*[contains(@class, 'ui-dialog')]//button[contains(text(), 'Yes')]",
+            ]
+
+            for xpath in xpath_selectors:
+                try:
+                    confirm_btn = driver.find_element(By.XPATH, xpath)
+                    if confirm_btn.is_displayed():
+                        logger.info(f"Found confirm button with XPath: {xpath}")
+                        confirm_btn.click()
+                        time_module.sleep(1)
+                        return self._verify_cancellation_success(driver)
                 except NoSuchElementException:
                     continue
 
