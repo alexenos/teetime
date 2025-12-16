@@ -344,5 +344,63 @@ class TestWaldenProviderMock:
         assert match.group(1) == "07:30 AM"
 
 
+class TestWaldenProviderCancellation:
+    """Tests for booking cancellation logic."""
+
+    def test_verify_cancellation_success_with_cancelled(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'cancelled' indicator returns True."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Your reservation has been cancelled.</body></html>"
+        result = provider._verify_cancellation_success(mock_driver)
+        assert result is True
+
+    def test_verify_cancellation_success_with_canceled(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'canceled' (US spelling) indicator returns True."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Reservation canceled successfully.</body></html>"
+        result = provider._verify_cancellation_success(mock_driver)
+        assert result is True
+
+    def test_verify_cancellation_success_with_removed(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'removed' indicator returns True."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Your booking has been removed.</body></html>"
+        result = provider._verify_cancellation_success(mock_driver)
+        assert result is True
+
+    def test_verify_cancellation_failure_with_error(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'error' indicator returns False."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>An error occurred during cancellation.</body></html>"
+        result = provider._verify_cancellation_success(mock_driver)
+        assert result is False
+
+    def test_verify_cancellation_failure_with_unable(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'unable' indicator returns False."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Unable to cancel your reservation.</body></html>"
+        result = provider._verify_cancellation_success(mock_driver)
+        assert result is False
+
+    def test_verify_cancellation_ambiguous_returns_true(self, provider: WaldenGolfProvider) -> None:
+        """Test that ambiguous page content returns True (assumes success)."""
+        from unittest.mock import MagicMock
+
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html><body>Processing your request...</body></html>"
+        result = provider._verify_cancellation_success(mock_driver)
+        assert result is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
