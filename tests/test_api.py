@@ -181,9 +181,10 @@ class TestBookingsEndpoints:
         )
 
         with patch("app.api.bookings.booking_service") as mock_service:
+            mock_service.get_booking = AsyncMock(return_value=sample_booking)
             mock_service.cancel_booking = AsyncMock(return_value=sample_booking)
 
-            response = test_client.delete("/bookings/abc12345")
+            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
 
             assert response.status_code == 200
             data = response.json()
@@ -193,12 +194,32 @@ class TestBookingsEndpoints:
     def test_cancel_booking_not_found(self, test_client: TestClient) -> None:
         """Test cancelling a non-existent booking."""
         with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.cancel_booking = AsyncMock(return_value=None)
+            mock_service.get_booking = AsyncMock(return_value=None)
 
-            response = test_client.delete("/bookings/nonexistent")
+            response = test_client.delete("/bookings/nonexistent?phone_number=%2B15551234567")
 
             assert response.status_code == 404
-            assert "not found or cannot be cancelled" in response.json()["detail"]
+            assert "not found" in response.json()["detail"]
+
+    def test_cancel_booking_unauthorized(self, test_client: TestClient) -> None:
+        """Test cancelling a booking with wrong phone number."""
+        sample_booking = TeeTimeBooking(
+            id="abc12345",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+            ),
+            status=BookingStatus.SCHEDULED,
+        )
+
+        with patch("app.api.bookings.booking_service") as mock_service:
+            mock_service.get_booking = AsyncMock(return_value=sample_booking)
+
+            response = test_client.delete("/bookings/abc12345?phone_number=%2B15559999999")
+
+            assert response.status_code == 403
+            assert "Unauthorized" in response.json()["detail"]
 
     def test_execute_booking_success(self, test_client: TestClient) -> None:
         """Test executing a booking."""
@@ -350,8 +371,9 @@ class TestBookingsEndpointsIntegration:
 
     def test_create_and_cancel_booking(self, test_client: TestClient) -> None:
         """Test creating and then cancelling a booking."""
+        phone_number = "+15558888888"
         request_data = {
-            "phone_number": "+15558888888",
+            "phone_number": phone_number,
             "requested_date": "2025-12-26",
             "requested_time": "11:00:00",
         }
@@ -379,7 +401,9 @@ class TestBookingsEndpointsIntegration:
 
             mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
 
-            cancel_response = test_client.delete(f"/bookings/{booking_id}")
+            cancel_response = test_client.delete(
+                f"/bookings/{booking_id}?phone_number=%2B15558888888"
+            )
             assert cancel_response.status_code == 200
             assert cancel_response.json()["status"] == "cancelled"
 

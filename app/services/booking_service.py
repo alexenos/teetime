@@ -180,20 +180,111 @@ class BookingService:
     async def _handle_cancel_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
         cancellable = [
-            b for b in user_bookings if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED]
+            b
+            for b in user_bookings
+            if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED, BookingStatus.SUCCESS]
         ]
 
         if not cancellable:
             return "You don't have any bookings to cancel."
 
+        # Check if user is confirming a pending cancellation
+        if session.pending_cancellation_id:
+            # User is responding to a confirmation prompt
+            message_lower = parsed.raw_message.lower() if parsed.raw_message else ""
+            if any(word in message_lower for word in ["yes", "confirm", "ok", "sure", "y"]):
+                booking = await database_service.get_booking(session.pending_cancellation_id)
+                if booking:
+                    date_str = booking.request.requested_date.strftime("%A, %B %d")
+                    session.pending_cancellation_id = None
+                    await self.update_session(session)
+
+                    if booking.status == BookingStatus.SUCCESS:
+                        success = await self._cancel_confirmed_booking(booking)
+                        if success:
+                            return (
+                                f"Your confirmed booking for {date_str} has been cancelled "
+                                "on the website."
+                            )
+                        else:
+                            return (
+                                f"I was unable to cancel your booking for {date_str} on the "
+                                "website. Please contact the club directly to cancel."
+                            )
+                    else:
+                        booking.status = BookingStatus.CANCELLED
+                        await database_service.update_booking(booking)
+                        return f"Your booking for {date_str} has been cancelled."
+            else:
+                # User declined or gave unclear response
+                session.pending_cancellation_id = None
+                await self.update_session(session)
+                return "Cancellation cancelled. Your booking remains active."
+
+        # Always ask for confirmation before cancelling, even for single bookings
         if len(cancellable) == 1:
             booking = cancellable[0]
-            booking.status = BookingStatus.CANCELLED
-            await database_service.update_booking(booking)
             date_str = booking.request.requested_date.strftime("%A, %B %d")
-            return f"Your booking for {date_str} has been cancelled."
+            time_str = booking.request.requested_time.strftime("%I:%M %p")
+            status_label = "confirmed" if booking.status == BookingStatus.SUCCESS else "scheduled"
 
-        return "Which booking would you like to cancel? Reply with the date."
+            # Store the pending cancellation and ask for confirmation
+            session.pending_cancellation_id = booking.id
+            await self.update_session(session)
+
+            return (
+                f"Are you sure you want to cancel your {status_label} booking for "
+                f"{date_str} at {time_str}? Reply 'yes' to confirm."
+            )
+
+        # Multiple bookings - ask which one to cancel
+        status_lines = []
+        for booking in cancellable:
+            date_str = booking.request.requested_date.strftime("%A, %B %d")
+            time_str = booking.request.requested_time.strftime("%I:%M %p")
+            status_label = "confirmed" if booking.status == BookingStatus.SUCCESS else "scheduled"
+            status_lines.append(f"- {date_str} at {time_str} ({status_label})")
+
+        return "Which booking would you like to cancel? Reply with the date.\n" + "\n".join(
+            status_lines
+        )
+
+    async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> bool:
+        """
+        Cancel a confirmed booking on the club website.
+
+        This method calls the reservation provider to cancel the booking on the
+        actual website, then updates the booking status in the database.
+
+        Args:
+            booking: The confirmed booking to cancel.
+
+        Returns:
+            True if cancellation was successful, False otherwise.
+        """
+        if not self._reservation_provider:
+            return False
+
+        booked_time = booking.actual_booked_time or booking.request.requested_time
+        cancellation_id = (
+            f"{booking.request.requested_date.strftime('%Y-%m-%d')}_"
+            f"{booked_time.strftime('%H:%M')}"
+        )
+
+        try:
+            success = await self._reservation_provider.cancel_booking(cancellation_id)
+
+            if success:
+                booking.status = BookingStatus.CANCELLED
+                await database_service.update_booking(booking)
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            booking.error_message = f"Cancellation failed: {str(e)}"
+            await database_service.update_booking(booking)
+            return False
 
     async def create_booking(self, phone_number: str, request: TeeTimeRequest) -> TeeTimeBooking:
         """
@@ -254,6 +345,10 @@ class BookingService:
         """
         Cancel a booking by its ID.
 
+        For PENDING/SCHEDULED bookings, this simply updates the status to CANCELLED.
+        For SUCCESS bookings (already confirmed on the website), this calls the
+        reservation provider to cancel on the actual website.
+
         Args:
             booking_id: The unique identifier of the booking to cancel.
 
@@ -264,8 +359,18 @@ class BookingService:
         if not booking:
             return None
 
-        if booking.status not in [BookingStatus.PENDING, BookingStatus.SCHEDULED]:
+        if booking.status not in [
+            BookingStatus.PENDING,
+            BookingStatus.SCHEDULED,
+            BookingStatus.SUCCESS,
+        ]:
             return None
+
+        if booking.status == BookingStatus.SUCCESS:
+            success = await self._cancel_confirmed_booking(booking)
+            if not success:
+                return None
+            return await database_service.get_booking(booking_id)
 
         booking.status = BookingStatus.CANCELLED
         return await database_service.update_booking(booking)

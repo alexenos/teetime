@@ -1549,18 +1549,394 @@ class WaldenGolfProvider(ReservationProvider):
 
     async def cancel_booking(self, confirmation_number: str) -> bool:
         """
-        Cancel an existing booking.
+        Cancel an existing booking on the Walden Golf website.
 
-        Note: This is a placeholder - actual cancellation flow needs to be implemented
-        based on the site cancellation interface.
+        This method navigates to the member home page where reservations are displayed,
+        finds the reservation matching the confirmation number (which contains date/time info),
+        and clicks the cancel button.
+
+        The confirmation_number format is expected to be: "YYYY-MM-DD_HH:MM" (e.g., "2025-12-19_09:46")
+        This allows us to identify the correct reservation by date and time.
 
         Args:
-            confirmation_number: The booking confirmation number
+            confirmation_number: The booking identifier in format "YYYY-MM-DD_HH:MM"
 
         Returns:
             True if cancellation was successful, False otherwise
         """
-        logger.warning("Cancellation not yet implemented")
+        return await asyncio.to_thread(self._cancel_booking_sync, confirmation_number)
+
+    def _cancel_booking_sync(self, confirmation_number: str) -> bool:
+        """
+        Synchronous cancellation implementation with full driver lifecycle.
+
+        Creates driver, performs cancellation, and ensures cleanup in finally block.
+        Includes retry logic for transient failures (slow page loads, missed clicks).
+        """
+        max_retries = 3
+        retry_delay = 2
+
+        driver = self._create_driver()
+        try:
+            if not self._perform_login(driver):
+                logger.error("Failed to log in for cancellation")
+                return False
+
+            logger.info(f"Attempting to cancel booking: {confirmation_number}")
+
+            for attempt in range(max_retries):
+                try:
+                    logger.info(
+                        f"Navigating to member home page for reservations "
+                        f"(attempt {attempt + 1}/{max_retries})..."
+                    )
+                    driver.get(self.DASHBOARD_URL)
+
+                    wait = WebDriverWait(driver, 15)
+                    wait.until(
+                        expected_conditions.presence_of_element_located(
+                            (By.CSS_SELECTOR, "form, .reservations, [class*='reservation']")
+                        )
+                    )
+
+                    time_module.sleep(2)
+
+                    result = self._find_and_cancel_reservation_sync(driver, confirmation_number)
+                    if result:
+                        return True
+
+                    # If we didn't find/cancel the reservation, it might be a timing issue
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            f"Cancellation attempt {attempt + 1} failed, "
+                            f"retrying in {retry_delay} seconds..."
+                        )
+                        time_module.sleep(retry_delay)
+                        driver.refresh()
+                        continue
+
+                    return False
+
+                except TimeoutException as e:
+                    logger.warning(f"Cancellation timeout on attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying in {retry_delay} seconds...")
+                        time_module.sleep(retry_delay)
+                        continue
+                    logger.error(f"Cancellation failed after {max_retries} attempts")
+                    return False
+
+            return False
+
+        except WebDriverException as e:
+            logger.error(f"Cancellation WebDriver error: {e}")
+            return False
+        finally:
+            driver.quit()
+
+    def _find_and_cancel_reservation_sync(
+        self, driver: webdriver.Chrome, confirmation_number: str
+    ) -> bool:
+        """
+        Find and cancel a specific reservation on the member home page.
+
+        The confirmation_number is expected to be in format "YYYY-MM-DD_HH:MM".
+        We parse this to match against the reservation date and time displayed on the page.
+
+        Args:
+            driver: The WebDriver instance
+            confirmation_number: The booking identifier in format "YYYY-MM-DD_HH:MM"
+
+        Returns:
+            True if cancellation was successful, False otherwise
+        """
+        try:
+            target_date_str, target_time_str = confirmation_number.split("_")
+            target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+            target_time = datetime.strptime(target_time_str, "%H:%M").time()
+
+            display_date = target_date.strftime("%m/%d/%Y")
+            display_time_12h = target_time.strftime("%I:%M %p").lstrip("0")
+
+            logger.info(f"Looking for reservation on {display_date} at {display_time_12h}")
+        except (ValueError, AttributeError) as e:
+            logger.error(f"Invalid confirmation number format: {confirmation_number}. Error: {e}")
+            return False
+
+        try:
+            reservations_form = None
+            try:
+                reservations_form = driver.find_element(
+                    By.CSS_SELECTOR, "form[name*='memberReservations']"
+                )
+                logger.info("Found reservations form, scoping search to it")
+            except NoSuchElementException:
+                logger.warning("Reservations form not found, searching entire page")
+
+            if reservations_form:
+                reservation_rows = reservations_form.find_elements(
+                    By.CSS_SELECTOR, "table tbody tr"
+                )
+            else:
+                reservation_rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
+
+            logger.info(f"Found {len(reservation_rows)} potential reservation rows")
+
+            for row in reservation_rows:
+                try:
+                    row_text = row.text.lower()
+
+                    if "tee time" not in row_text:
+                        continue
+
+                    date_match = False
+                    time_match = False
+
+                    if display_date in row.text:
+                        date_match = True
+                    else:
+                        alt_date = target_date.strftime("%m/%d/%y")
+                        if alt_date in row.text:
+                            date_match = True
+
+                    time_variations = [
+                        display_time_12h,
+                        target_time.strftime("%H:%M"),
+                        target_time.strftime("%I:%M%p").lstrip("0"),
+                        target_time.strftime("%I:%M %p"),
+                    ]
+                    for time_var in time_variations:
+                        if time_var.lower() in row_text or time_var in row.text:
+                            time_match = True
+                            break
+
+                    if date_match and time_match:
+                        logger.info(f"Found matching reservation row: {row.text[:100]}...")
+
+                        cancel_link = None
+                        try:
+                            cancel_link = row.find_element(
+                                By.CSS_SELECTOR,
+                                "a[aria-label='Cancel Reservation'], "
+                                "a[title='Cancel Reservation'], "
+                                "a[class*='cancel'], "
+                                "button[class*='cancel']",
+                            )
+                        except NoSuchElementException:
+                            cancel_links = row.find_elements(By.TAG_NAME, "a")
+                            for link in cancel_links:
+                                if (
+                                    "cancel" in link.get_attribute("aria-label").lower()
+                                    if link.get_attribute("aria-label")
+                                    else False
+                                ):
+                                    cancel_link = link
+                                    break
+                                if (
+                                    "cancel" in link.get_attribute("title").lower()
+                                    if link.get_attribute("title")
+                                    else False
+                                ):
+                                    cancel_link = link
+                                    break
+
+                        if cancel_link:
+                            logger.info("Clicking cancel button...")
+                            cancel_link.click()
+
+                            return self._confirm_cancellation_sync(
+                                driver, display_date, display_time_12h
+                            )
+                        else:
+                            logger.warning("Cancel link not found in matching row")
+
+                except StaleElementReferenceException:
+                    continue
+
+            logger.warning(f"No matching reservation found for {confirmation_number}")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error finding reservation: {e}")
+            return False
+
+    def _confirm_cancellation_sync(
+        self,
+        driver: webdriver.Chrome,
+        target_date: str | None = None,
+        target_time: str | None = None,
+    ) -> bool:
+        """
+        Handle any confirmation dialog that appears after clicking cancel.
+
+        Args:
+            driver: The WebDriver instance
+            target_date: The date of the reservation being cancelled (for verification)
+            target_time: The time of the reservation being cancelled (for verification)
+
+        Returns:
+            True if cancellation was confirmed successfully, False otherwise
+        """
+        try:
+            time_module.sleep(1)
+
+            try:
+                alert = driver.switch_to.alert
+                logger.info(f"Alert detected: {alert.text}")
+                alert.accept()
+                logger.info("Alert accepted")
+                time_module.sleep(1)
+                return self._verify_cancellation_success(driver, target_date, target_time)
+            except Exception:
+                pass
+
+            css_selectors = [
+                "button[class*='confirm']",
+                "button[class*='yes']",
+                "input[type='submit'][value*='Yes']",
+                "input[type='submit'][value*='Confirm']",
+                ".modal button[class*='primary']",
+            ]
+
+            for selector in css_selectors:
+                try:
+                    confirm_btn = driver.find_element(By.CSS_SELECTOR, selector)
+                    if confirm_btn.is_displayed():
+                        logger.info(f"Found confirm button with CSS selector: {selector}")
+                        confirm_btn.click()
+                        time_module.sleep(1)
+                        return self._verify_cancellation_success(driver, target_date, target_time)
+                except NoSuchElementException:
+                    continue
+
+            xpath_selectors = [
+                "//button[contains(text(), 'Yes')]",
+                "//button[contains(text(), 'Confirm')]",
+                "//button[contains(text(), 'OK')]",
+                "//a[contains(text(), 'Yes')]",
+                "//a[contains(text(), 'Confirm')]",
+                "//*[contains(@class, 'ui-dialog')]//button[contains(text(), 'Yes')]",
+            ]
+
+            for xpath in xpath_selectors:
+                try:
+                    confirm_btn = driver.find_element(By.XPATH, xpath)
+                    if confirm_btn.is_displayed():
+                        logger.info(f"Found confirm button with XPath: {xpath}")
+                        confirm_btn.click()
+                        time_module.sleep(1)
+                        return self._verify_cancellation_success(driver, target_date, target_time)
+                except NoSuchElementException:
+                    continue
+
+            time_module.sleep(2)
+
+            return self._verify_cancellation_success(driver, target_date, target_time)
+
+        except Exception as e:
+            logger.error(f"Error confirming cancellation: {e}")
+            return False
+
+    def _verify_cancellation_success(
+        self,
+        driver: webdriver.Chrome,
+        target_date: str | None = None,
+        target_time: str | None = None,
+    ) -> bool:
+        """
+        Verify that the cancellation was successful by checking page content.
+
+        This method uses multiple verification strategies:
+        1. Look for explicit success/failure messages within the reservations form
+        2. If target_date and target_time are provided, verify the reservation row is gone
+        3. Default to False if no positive confirmation is found (fail-safe)
+
+        Args:
+            driver: The WebDriver instance
+            target_date: The date of the cancelled reservation (for row verification)
+            target_time: The time of the cancelled reservation (for row verification)
+
+        Returns:
+            True if cancellation is confirmed successful, False otherwise
+        """
+        # First, try to find the reservations form to scope our search
+        reservations_text = ""
+        try:
+            reservations_form = driver.find_element(
+                By.CSS_SELECTOR, "form[name*='memberReservations']"
+            )
+            reservations_text = reservations_form.text.lower()
+            logger.info("Scoped verification to reservations form")
+        except NoSuchElementException:
+            # Fall back to page source but log a warning
+            logger.warning("Reservations form not found, using full page for verification")
+            reservations_text = driver.page_source.lower()
+
+        # Check for explicit success messages (scoped to reservations area)
+        success_indicators = [
+            "cancelled successfully",
+            "canceled successfully",
+            "reservation cancelled",
+            "reservation canceled",
+            "successfully cancelled",
+            "successfully canceled",
+        ]
+
+        # Check for explicit failure messages
+        failure_indicators = [
+            "error cancelling",
+            "error canceling",
+            "failed to cancel",
+            "unable to cancel",
+            "cannot cancel",
+            "cancellation failed",
+        ]
+
+        # Check for failure indicators first
+        for indicator in failure_indicators:
+            if indicator in reservations_text:
+                logger.warning(f"Cancellation failed - found '{indicator}' in reservations area")
+                return False
+
+        # Check for success indicators
+        for indicator in success_indicators:
+            if indicator in reservations_text:
+                logger.info(f"Cancellation confirmed - found '{indicator}' in reservations area")
+                return True
+
+        # If we have target date/time, verify the reservation row is gone
+        if target_date and target_time:
+            try:
+                reservations_form = driver.find_element(
+                    By.CSS_SELECTOR, "form[name*='memberReservations']"
+                )
+                rows = reservations_form.find_elements(By.CSS_SELECTOR, "table tbody tr")
+
+                for row in rows:
+                    row_text = row.text.lower()
+                    if "tee time" in row_text:
+                        # Check if this row matches our cancelled reservation
+                        if target_date.lower() in row_text and target_time.lower() in row_text:
+                            logger.warning(
+                                f"Reservation row still present for {target_date} {target_time}"
+                            )
+                            return False
+
+                # Row not found - reservation was removed
+                logger.info(
+                    f"Reservation row for {target_date} {target_time} no longer present - "
+                    "cancellation confirmed"
+                )
+                return True
+
+            except NoSuchElementException:
+                logger.warning("Could not verify reservation removal - form not found")
+
+        # No positive confirmation found - fail-safe: return False
+        logger.warning(
+            "No explicit success confirmation found and could not verify row removal - "
+            "treating as failed"
+        )
         return False
 
     async def close(self) -> None:

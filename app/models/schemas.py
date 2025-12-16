@@ -138,6 +138,8 @@ class UserSession(BaseModel):
         state: Current conversation state (see ConversationState).
         pending_request: Partially or fully built TeeTimeRequest being
             constructed through the conversation. None when IDLE.
+        pending_cancellation_id: ID of a booking awaiting cancellation confirmation.
+            Set when user requests to cancel and we're waiting for them to confirm.
         last_interaction: Timestamp of the user's last message. Used for
             session timeout logic.
     """
@@ -145,6 +147,7 @@ class UserSession(BaseModel):
     phone_number: str
     state: ConversationState = ConversationState.IDLE
     pending_request: TeeTimeRequest | None = None
+    pending_cancellation_id: str | None = None
     last_interaction: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -165,6 +168,8 @@ class ParsedIntent(BaseModel):
             - "help": User is asking for help or information
             - "confirm": User is confirming a pending action
             - "unclear": Could not determine user's intent
+        raw_message: The original user message text. Used for confirmation
+            flows where we need to check the exact response.
         tee_time_request: Extracted booking details if intent is "book".
             May be partial if user didn't provide all information.
         booking_id: ID of the booking to modify/cancel (if applicable).
@@ -174,6 +179,7 @@ class ParsedIntent(BaseModel):
     """
 
     intent: str = Field(..., description="The user's intent: book, modify, cancel, status, help")
+    raw_message: str | None = None
     tee_time_request: TeeTimeRequest | None = None
     booking_id: str | None = None
     clarification_needed: str | None = None
