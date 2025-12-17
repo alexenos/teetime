@@ -221,6 +221,27 @@ class TestBookingsEndpoints:
             assert response.status_code == 403
             assert "Unauthorized" in response.json()["detail"]
 
+    def test_cancel_booking_cannot_cancel(self, test_client: TestClient) -> None:
+        """Test 404 when booking exists and phone matches but status is not cancellable."""
+        failed_booking = TeeTimeBooking(
+            id="abc12345",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+            ),
+            status=BookingStatus.FAILED,
+        )
+
+        with patch("app.api.bookings.booking_service") as mock_service:
+            mock_service.get_booking = AsyncMock(return_value=failed_booking)
+            mock_service.cancel_booking = AsyncMock(return_value=None)
+
+            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
+
+            assert response.status_code == 404
+            assert "cannot be cancelled" in response.json()["detail"]
+
     def test_execute_booking_success(self, test_client: TestClient) -> None:
         """Test executing a booking."""
         sample_booking = TeeTimeBooking(
