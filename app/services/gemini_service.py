@@ -76,7 +76,7 @@ class GeminiService:
             if settings.gemini_api_key:
                 genai.configure(api_key=settings.gemini_api_key)
                 self._model = genai.GenerativeModel(
-                    model_name="gemini-1.5-flash",
+                    model_name="gemini-2.0-flash",
                     system_instruction=SYSTEM_PROMPT,
                     tools=[{"function_declarations": FUNCTION_DECLARATIONS}],
                 )

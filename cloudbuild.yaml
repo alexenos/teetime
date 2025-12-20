@@ -1,0 +1,42 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest'
+      - '.'
+
+  # Push the container image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime']
+
+  # Initialize Terraform
+  - name: 'hashicorp/terraform:1.6'
+    dir: 'terraform'
+    args:
+      - 'init'
+      - '-input=false'
+
+  # Apply Terraform (deploys infrastructure and updates Cloud Run with new image)
+  - name: 'hashicorp/terraform:1.6'
+    dir: 'terraform'
+    args:
+      - 'apply'
+      - '-auto-approve'
+      - '-input=false'
+      - '-var=project_id=$PROJECT_ID'
+      - '-var=region=${_REGION}'
+      - '-var=container_image=${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
+
+substitutions:
+  _REGION: us-central1
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
