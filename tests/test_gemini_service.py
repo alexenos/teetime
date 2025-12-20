@@ -322,6 +322,144 @@ class TestGeminiServiceParseMessage:
 
             assert result.intent == "book"
 
+    @pytest.mark.asyncio
+    async def test_parse_message_successful_api_response(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Test that parse_message correctly processes a successful Gemini API response."""
+        mock_function_call = MagicMock()
+        mock_function_call.args = {
+            "intent": "book",
+            "requested_date": "2025-12-20",
+            "requested_time": "08:00",
+            "num_players": 4,
+            "response_message": "I'll book Saturday December 20 at 8am for 4 players.",
+        }
+
+        mock_part = MagicMock()
+        mock_part.function_call = mock_function_call
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+
+            result = await gemini_service.parse_message("Book Saturday 8am for 4 players")
+
+            assert result.intent == "book"
+            assert result.tee_time_request is not None
+            assert result.tee_time_request.requested_date == date(2025, 12, 20)
+            assert result.tee_time_request.requested_time == time(8, 0)
+            assert result.tee_time_request.num_players == 4
+            assert "I'll book" in result.response_message
+
+    @pytest.mark.asyncio
+    async def test_parse_message_no_function_call_in_response(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Test that parse_message returns unclear intent when no function call in response."""
+        mock_part = MagicMock(spec=[])
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+
+            result = await gemini_service.parse_message("random gibberish")
+
+            assert result.intent == "unclear"
+            assert "not sure I understood" in result.response_message
+
+    @pytest.mark.asyncio
+    async def test_parse_message_empty_candidates(self, gemini_service: GeminiService) -> None:
+        """Test that parse_message returns unclear intent when response has no candidates."""
+        mock_response = MagicMock()
+        mock_response.candidates = []
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+
+            result = await gemini_service.parse_message("test message")
+
+            assert result.intent == "unclear"
+
+    @pytest.mark.asyncio
+    async def test_parse_message_status_intent(self, gemini_service: GeminiService) -> None:
+        """Test that parse_message correctly processes a status intent from API."""
+        mock_function_call = MagicMock()
+        mock_function_call.args = {
+            "intent": "status",
+            "response_message": "Let me check your bookings.",
+        }
+
+        mock_part = MagicMock()
+        mock_part.function_call = mock_function_call
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+
+            result = await gemini_service.parse_message("What are my bookings?")
+
+            assert result.intent == "status"
+            assert result.tee_time_request is None
+            assert "check your bookings" in result.response_message
+
+    @pytest.mark.asyncio
+    async def test_parse_message_with_clarification_needed(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Test that parse_message correctly handles clarification_needed from API."""
+        mock_function_call = MagicMock()
+        mock_function_call.args = {
+            "intent": "book",
+            "clarification_needed": "What time would you like to play?",
+            "response_message": "I need more details about your booking.",
+        }
+
+        mock_part = MagicMock()
+        mock_part.function_call = mock_function_call
+
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+
+            result = await gemini_service.parse_message("Book Saturday")
+
+            assert result.intent == "book"
+            assert result.tee_time_request is None
+            assert result.clarification_needed == "What time would you like to play?"
+
 
 class TestGeminiServiceModel:
     """Tests for the model property."""
