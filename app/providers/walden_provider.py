@@ -1725,18 +1725,12 @@ class WaldenGolfProvider(ReservationProvider):
                         except NoSuchElementException:
                             cancel_links = row.find_elements(By.TAG_NAME, "a")
                             for link in cancel_links:
-                                if (
-                                    "cancel" in link.get_attribute("aria-label").lower()
-                                    if link.get_attribute("aria-label")
-                                    else False
-                                ):
+                                aria_label = link.get_attribute("aria-label")
+                                if aria_label and "cancel" in aria_label.lower():
                                     cancel_link = link
                                     break
-                                if (
-                                    "cancel" in link.get_attribute("title").lower()
-                                    if link.get_attribute("title")
-                                    else False
-                                ):
+                                title = link.get_attribute("title")
+                                if title and "cancel" in title.lower():
                                     cancel_link = link
                                     break
 

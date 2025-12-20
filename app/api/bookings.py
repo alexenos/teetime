@@ -91,7 +91,7 @@ async def get_booking(booking_id: str) -> BookingResponse:
 
 
 @router.delete("/{booking_id}")
-async def cancel_booking(booking_id: str, phone_number: str) -> dict:
+async def cancel_booking(booking_id: str, phone_number: str) -> dict[str, str]:
     """
     Cancel a booking by its ID.
 
@@ -129,7 +129,7 @@ async def cancel_booking(booking_id: str, phone_number: str) -> dict:
 
 
 @router.post("/{booking_id}/execute")
-async def execute_booking(booking_id: str) -> dict:
+async def execute_booking(booking_id: str) -> dict[str, str | bool | None]:
     booking = await booking_service.get_booking(booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")

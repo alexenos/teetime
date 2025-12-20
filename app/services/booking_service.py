@@ -6,7 +6,7 @@ processing booking requests, and executing reservations at the scheduled time.
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytz
 
@@ -375,7 +375,7 @@ class BookingService:
         booking.status = BookingStatus.CANCELLED
         return await database_service.update_booking(booking)
 
-    def _calculate_execution_time(self, target_date: datetime.date) -> datetime:
+    def _calculate_execution_time(self, target_date: date) -> datetime:
         tz = pytz.timezone(settings.timezone)
 
         booking_open_date = target_date - timedelta(days=settings.days_in_advance)
@@ -440,8 +440,8 @@ class BookingService:
 
         try:
             result = await self._reservation_provider.book_tee_time(
-                date=booking.request.requested_date,
-                time=booking.request.requested_time,
+                target_date=booking.request.requested_date,
+                target_time=booking.request.requested_time,
                 num_players=booking.request.num_players,
                 fallback_window_minutes=booking.request.fallback_window_minutes,
             )
