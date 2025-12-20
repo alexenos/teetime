@@ -129,6 +129,11 @@ resource "google_cloud_run_v2_service" "teetime" {
         value = tostring(var.days_in_advance)
       }
 
+      env {
+        name  = "SCHEDULER_SERVICE_ACCOUNT"
+        value = google_service_account.scheduler.email
+      }
+
       dynamic "env" {
         for_each = toset(local.secrets)
         content {
@@ -214,6 +219,38 @@ resource "google_artifact_registry_repository_iam_member" "cloud_build_writer" {
   member     = "serviceAccount:${google_service_account.cloud_build.email}"
 }
 
+# Cloud Build trigger for auto-deploy on push to main
+# Note: Requires GitHub connection to be set up first via Cloud Build console
+resource "google_cloudbuild_trigger" "deploy_main" {
+  name        = "${local.service_name}-deploy-main"
+  description = "Deploy TeeTime to Cloud Run on push to main"
+  location    = var.region
+
+  github {
+    owner = var.github_owner
+    name  = var.github_repo
+    push {
+      branch = "^${var.github_branch}$"
+    }
+  }
+
+  filename        = "cloudbuild.yaml"
+  service_account = google_service_account.cloud_build.id
+
+  substitutions = {
+    _REGION       = var.region
+    _SERVICE_NAME = local.service_name
+  }
+
+  depends_on = [
+    google_project_service.apis,
+    google_project_iam_member.cloud_build_run_admin,
+    google_project_iam_member.cloud_build_sa_user,
+    google_project_iam_member.cloud_build_logs_writer,
+    google_artifact_registry_repository_iam_member.cloud_build_writer,
+  ]
+}
+
 resource "google_service_account" "scheduler" {
   account_id   = "${local.service_name}-scheduler"
   display_name = "TeeTime Cloud Scheduler Service Account"
@@ -239,6 +276,7 @@ resource "google_cloud_scheduler_job" "execute_bookings" {
 
     oidc_token {
       service_account_email = google_service_account.scheduler.email
+      audience              = google_cloud_run_v2_service.teetime.uri
     }
   }
 
@@ -269,6 +307,7 @@ resource "google_sql_database_instance" "teetime" {
 
     ip_configuration {
       ipv4_enabled = true
+      require_ssl  = true
     }
   }
 

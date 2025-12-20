@@ -2,7 +2,8 @@
 Scheduled job endpoints for Cloud Scheduler integration.
 
 This module provides endpoints that are called by Cloud Scheduler to execute
-scheduled booking operations. These endpoints are secured with an API key.
+scheduled booking operations. These endpoints are secured with OIDC token
+authentication (preferred) or a legacy API key.
 """
 
 import asyncio
@@ -11,7 +12,9 @@ from datetime import date, datetime, time
 from enum import Enum
 
 import pytz
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from google.auth import exceptions as google_auth_exceptions
+from google.oauth2 import id_token
 from pydantic import BaseModel
 
 from app.config import settings
@@ -48,25 +51,77 @@ class JobExecutionResult(BaseModel):
     results: list[JobExecutionItem]
 
 
-def verify_scheduler_api_key(
-    x_scheduler_api_key: str = Header(..., description="API key for scheduler authentication"),
+def verify_oidc_token(authorization: str, request: Request) -> bool:
+    """
+    Verify OIDC token from Cloud Scheduler.
+
+    Returns True if the token is valid and from the expected service account.
+    """
+    if not authorization.startswith("Bearer "):
+        return False
+
+    token = authorization[7:]  # Remove "Bearer " prefix
+
+    try:
+        # Verify the token and get claims
+        # The audience should be the Cloud Run service URL
+        claims = id_token.verify_oauth2_token(token, None)
+
+        # Verify the email matches the expected scheduler service account
+        email = claims.get("email", "")
+        if settings.scheduler_service_account and email != settings.scheduler_service_account:
+            logger.warning(
+                f"OIDC token email mismatch: expected {settings.scheduler_service_account}, got {email}"
+            )
+            return False
+
+        logger.info(f"OIDC token verified for service account: {email}")
+        return True
+    except google_auth_exceptions.GoogleAuthError as e:
+        logger.warning(f"OIDC token verification failed: {e}")
+        return False
+    except ValueError as e:
+        logger.warning(f"OIDC token validation error: {e}")
+        return False
+
+
+def verify_scheduler_auth(
+    request: Request,
+    authorization: str | None = Header(None, description="Bearer token for OIDC authentication"),
+    x_scheduler_api_key: str | None = Header(
+        None, description="Legacy API key for scheduler authentication"
+    ),
 ) -> None:
-    """Verify the API key provided by Cloud Scheduler."""
-    if not settings.scheduler_api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Scheduler API key not configured on server",
-        )
-    if x_scheduler_api_key != settings.scheduler_api_key:
+    """
+    Verify scheduler authentication using OIDC token (preferred) or legacy API key.
+
+    Cloud Scheduler sends an OIDC token in the Authorization header.
+    For backward compatibility, also accepts X-Scheduler-API-Key header.
+    """
+    # Try OIDC token first (preferred method)
+    if authorization:
+        if verify_oidc_token(authorization, request):
+            return
+
+    # Fall back to legacy API key
+    if x_scheduler_api_key:
+        if settings.scheduler_api_key and x_scheduler_api_key == settings.scheduler_api_key:
+            return
         raise HTTPException(
             status_code=401,
             detail="Invalid scheduler API key",
         )
 
+    # No valid authentication provided
+    raise HTTPException(
+        status_code=401,
+        detail="Authentication required. Provide OIDC token or X-Scheduler-API-Key header.",
+    )
+
 
 @router.post("/execute-due-bookings", response_model=JobExecutionResult)
 async def execute_due_bookings(
-    _: None = Depends(verify_scheduler_api_key),
+    _: None = Depends(verify_scheduler_auth),
 ) -> JobExecutionResult:
     """
     Execute all bookings that are due for execution.
@@ -75,7 +130,7 @@ async def execute_due_bookings(
     It finds all SCHEDULED bookings where scheduled_execution_time <= now
     and executes them sequentially with per-booking timeouts.
 
-    Security: Requires X-Scheduler-API-Key header matching the configured key.
+    Security: Accepts OIDC token from Cloud Scheduler (preferred) or legacy API key.
 
     Idempotency: Bookings are transitioned to IN_PROGRESS before execution,
     so retries will not re-execute already-started bookings.

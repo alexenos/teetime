@@ -7,7 +7,7 @@ set -e
 PROJECT_ID="${1:-teetime}"
 REGION="${2:-us-central1}"
 SERVICE_NAME="teetime"
-IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
+IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT_ID}/${SERVICE_NAME}/${SERVICE_NAME}"
 
 echo "=== TeeTime Cloud Run Deployment ==="
 echo "Project: ${PROJECT_ID}"
@@ -36,8 +36,16 @@ gcloud config set project "${PROJECT_ID}"
 echo "Enabling required APIs..."
 gcloud services enable cloudbuild.googleapis.com
 gcloud services enable run.googleapis.com
-gcloud services enable containerregistry.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
 gcloud services enable secretmanager.googleapis.com
+
+# Create Artifact Registry repository if it doesn't exist
+echo "Ensuring Artifact Registry repository exists..."
+gcloud artifacts repositories describe "${SERVICE_NAME}" --location="${REGION}" 2>/dev/null || \
+    gcloud artifacts repositories create "${SERVICE_NAME}" \
+        --repository-format=docker \
+        --location="${REGION}" \
+        --description="Docker repository for TeeTime application"
 
 # Build and push the container image
 echo "Building container image..."

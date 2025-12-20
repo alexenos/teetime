@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     max_tee_times_per_day: int = 2
 
     scheduler_api_key: str = ""
+    scheduler_service_account: str = ""
 
     class Config:
         env_file = ".env"
