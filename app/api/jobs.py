@@ -65,7 +65,7 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
     try:
         # Verify the token and get claims
         # The audience should be the Cloud Run service URL
-        claims = id_token.verify_oauth2_token(token, None)
+        claims = id_token.verify_oauth2_token(token, None)  # type: ignore[no-untyped-call]
 
         # Verify the email matches the expected scheduler service account
         email = claims.get("email", "")
