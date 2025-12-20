@@ -1,11 +1,17 @@
 steps:
   # Build the container image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/teetime:$COMMIT_SHA', '.']
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest'
+      - '.'
 
-  # Push the container image to Container Registry
+  # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/teetime:$COMMIT_SHA']
+    args: ['push', '--all-tags', '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime']
 
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -15,26 +21,18 @@ steps:
       - 'deploy'
       - 'teetime'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/teetime:$COMMIT_SHA'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
       - '--region'
       - '${_REGION}'
       - '--platform'
       - 'managed'
-      - '--allow-unauthenticated'
-      - '--memory'
-      - '1Gi'
-      - '--cpu'
-      - '1'
-      - '--timeout'
-      - '300'
-      - '--set-env-vars'
-      - 'TIMEZONE=America/Chicago,BOOKING_OPEN_HOUR=6,BOOKING_OPEN_MINUTE=30,DAYS_IN_ADVANCE=7'
 
 substitutions:
   _REGION: us-central1
 
 images:
-  - 'gcr.io/$PROJECT_ID/teetime:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY

@@ -80,140 +80,101 @@ poetry run mypy app
 
 See `.env.example` for all configuration options.
 
-## GCP Deployment
+## GCP Deployment (Terraform)
+
+All GCP infrastructure is managed via Terraform in the `terraform/` directory.
 
 ### Prerequisites
 
 1. Google Cloud account with billing enabled
 2. GCP project created (e.g., "teetime")
 3. `gcloud` CLI installed and authenticated
+4. Terraform >= 1.0 installed
+5. GitHub repository connected to Cloud Build (one-time setup)
 
-### Auto-Deploy on Push to Main (Recommended)
+### Initial Setup
 
-Set up a Cloud Build trigger to automatically deploy when you push to the main branch:
-
-1. Connect your GitHub repository to Cloud Build:
+1. Create a GCS bucket for Terraform state:
    ```bash
-   # Enable required APIs
-   gcloud services enable cloudbuild.googleapis.com run.googleapis.com containerregistry.googleapis.com secretmanager.googleapis.com
-
-   # Go to Cloud Build triggers page and connect your GitHub repo:
-   # https://console.cloud.google.com/cloud-build/triggers
+   PROJECT_ID="teetime"
+   gsutil mb -p $PROJECT_ID gs://${PROJECT_ID}-terraform-state
+   gsutil versioning set on gs://${PROJECT_ID}-terraform-state
    ```
 
-2. Create the Cloud Build trigger:
+2. Connect GitHub to Cloud Build (one-time, via console):
+   - Go to https://console.cloud.google.com/cloud-build/triggers
+   - Click "Connect Repository" and follow the OAuth flow to connect your GitHub account
+   - Select the `alexenos/teetime` repository
+
+3. Configure Terraform variables:
    ```bash
-   gcloud builds triggers create github \
-       --repo-name=teetime \
-       --repo-owner=alexenos \
-       --branch-pattern="^main$" \
-       --build-config=cloudbuild.yaml \
-       --name=teetime-deploy-main
+   cd terraform
+   cp terraform.tfvars.example terraform.tfvars
+   # Edit terraform.tfvars with your project settings
    ```
 
-3. Grant Cloud Build permission to deploy to Cloud Run:
+4. Initialize and apply Terraform:
    ```bash
-   PROJECT_ID=$(gcloud config get-value project)
-   PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
-   
-   # Grant Cloud Run Admin role
-   gcloud projects add-iam-policy-binding $PROJECT_ID \
-       --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-       --role="roles/run.admin"
-   
-   # Grant Service Account User role
-   gcloud projects add-iam-policy-binding $PROJECT_ID \
-       --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-       --role="roles/iam.serviceAccountUser"
+   terraform init -backend-config="bucket=${PROJECT_ID}-terraform-state"
+   terraform plan
+   terraform apply
    ```
 
-Now every push to `main` will automatically build and deploy to Cloud Run.
+### Add Secret Values
 
-### Quick Deploy (Manual)
-
-Run the deployment script for a one-time manual deploy:
+Terraform creates the secret containers but not the values (for security). Add values via gcloud:
 
 ```bash
-./deploy.sh teetime us-central1
+echo -n "your_twilio_sid" | gcloud secrets versions add TWILIO_ACCOUNT_SID --data-file=-
+echo -n "your_twilio_token" | gcloud secrets versions add TWILIO_AUTH_TOKEN --data-file=-
+echo -n "+1234567890" | gcloud secrets versions add TWILIO_PHONE_NUMBER --data-file=-
+echo -n "your_gemini_key" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
+echo -n "your_member_number" | gcloud secrets versions add WALDEN_MEMBER_NUMBER --data-file=-
+echo -n "your_password" | gcloud secrets versions add WALDEN_PASSWORD --data-file=-
+echo -n "your_scheduler_key" | gcloud secrets versions add SCHEDULER_API_KEY --data-file=-
+echo -n "+1234567890" | gcloud secrets versions add USER_PHONE_NUMBER --data-file=-
 ```
 
-This will enable required APIs, build the container, and deploy to Cloud Run.
+### First Deployment
 
-### Manual Deployment Steps
-
-1. Enable required APIs:
-   ```bash
-   gcloud services enable cloudbuild.googleapis.com run.googleapis.com containerregistry.googleapis.com secretmanager.googleapis.com
-   ```
-
-2. Build and push the container:
-   ```bash
-   gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/teetime .
-   ```
-
-3. Deploy to Cloud Run:
-   ```bash
-   gcloud run deploy teetime \
-       --image gcr.io/YOUR_PROJECT_ID/teetime \
-       --region us-central1 \
-       --platform managed \
-       --allow-unauthenticated \
-       --memory 1Gi
-   ```
-
-### Configure Secrets
-
-Store sensitive credentials in Secret Manager:
+After Terraform creates the infrastructure, trigger the first build:
 
 ```bash
-# Create secrets
-echo -n "your_twilio_sid" | gcloud secrets create TWILIO_ACCOUNT_SID --data-file=-
-echo -n "your_twilio_token" | gcloud secrets create TWILIO_AUTH_TOKEN --data-file=-
-echo -n "your_twilio_phone" | gcloud secrets create TWILIO_PHONE_NUMBER --data-file=-
-echo -n "your_gemini_key" | gcloud secrets create GEMINI_API_KEY --data-file=-
-echo -n "your_walden_member" | gcloud secrets create WALDEN_MEMBER_NUMBER --data-file=-
-echo -n "your_walden_password" | gcloud secrets create WALDEN_PASSWORD --data-file=-
-echo -n "your_scheduler_key" | gcloud secrets create SCHEDULER_API_KEY --data-file=-
-
-# Grant Cloud Run access to secrets
-gcloud run services update teetime --region us-central1 \
-    --set-secrets="TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_PHONE_NUMBER=TWILIO_PHONE_NUMBER:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,WALDEN_MEMBER_NUMBER=WALDEN_MEMBER_NUMBER:latest,WALDEN_PASSWORD=WALDEN_PASSWORD:latest,SCHEDULER_API_KEY=SCHEDULER_API_KEY:latest"
+# Push to main to trigger auto-deployment, or manually trigger:
+gcloud builds submit --config=cloudbuild.yaml .
 ```
 
 ### Configure Twilio Webhook
 
-1. Get your Cloud Run service URL:
-   ```bash
-   gcloud run services describe teetime --region us-central1 --format="value(status.url)"
-   ```
-
-2. In Twilio Console, set the webhook URL for your phone number to:
-   ```
-   https://YOUR_SERVICE_URL/webhooks/twilio/sms
-   ```
-
-### Set Up Cloud Scheduler
-
-Create a Cloud Scheduler job to execute due bookings every minute:
+Get the Cloud Run URL from Terraform output and configure in Twilio:
 
 ```bash
-gcloud scheduler jobs create http teetime-execute-bookings \
-    --location us-central1 \
-    --schedule "* * * * *" \
-    --uri "https://YOUR_SERVICE_URL/jobs/execute-due-bookings" \
-    --http-method POST \
-    --headers "X-Scheduler-API-Key=YOUR_SCHEDULER_API_KEY"
+cd terraform
+terraform output cloud_run_url
+# Configure this URL + /webhooks/twilio/sms in Twilio Console
 ```
 
-### Database Setup (Production)
+### Optional: Enable Cloud SQL
 
-For production, use Cloud SQL instead of SQLite:
+To use PostgreSQL instead of SQLite, set `enable_cloud_sql = true` in terraform.tfvars:
 
-1. Create a Cloud SQL PostgreSQL instance
-2. Set the `DATABASE_URL` environment variable:
-   ```
-   DATABASE_URL=postgresql+asyncpg://user:password@/dbname?host=/cloudsql/PROJECT:REGION:INSTANCE
-   ```
+```hcl
+enable_cloud_sql    = true
+cloud_sql_tier      = "db-f1-micro"
+cloud_sql_disk_size = 10
+```
+
+Then run `terraform apply`. This adds ~$7-10/month cost.
+
+### Terraform Resources Created
+
+The Terraform configuration manages:
+- Cloud Run service with auto-scaling
+- Artifact Registry repository
+- Secret Manager secrets (containers only)
+- Cloud Scheduler job for booking execution
+- IAM service accounts and bindings
+- Cloud SQL PostgreSQL (optional)
 
 ## License
 
