@@ -14,6 +14,7 @@ from enum import Enum
 import pytz
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from google.auth import exceptions as google_auth_exceptions
+from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from pydantic import BaseModel
 
@@ -56,6 +57,7 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
     Verify OIDC token from Cloud Scheduler.
 
     Returns True if the token is valid and from the expected service account.
+    The audience is validated against the Cloud Run service URL (base URL without path).
     """
     if not authorization.startswith("Bearer "):
         return False
@@ -63,9 +65,15 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
     token = authorization[7:]  # Remove "Bearer " prefix
 
     try:
+        # Build the expected audience from the request URL (base URL without path)
+        # Cloud Scheduler sends the Cloud Run service URL as the audience
+        audience = str(request.base_url).rstrip("/")
+
+        # Create a proper transport request for fetching Google's public keys
+        transport_request = google_requests.Request()
+
         # Verify the token and get claims
-        # The audience should be the Cloud Run service URL
-        claims = id_token.verify_oauth2_token(token, None)  # type: ignore[no-untyped-call]
+        claims = id_token.verify_oauth2_token(token, transport_request, audience=audience)  # type: ignore[no-untyped-call]
 
         # Verify the email matches the expected scheduler service account
         email = claims.get("email", "")
