@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Golf tee time reservation application with SMS interface and LLM-powered natural language understanding"
 authors = ["Devin AI <devin@cognition.ai>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"

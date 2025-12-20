@@ -15,8 +15,6 @@ RUN poetry config virtualenvs.create false \
 
 COPY . .
 
-RUN poetry install --no-interaction --no-ansi --only-root
-
 RUN playwright install chromium --with-deps
 
 EXPOSE 8080
