@@ -154,27 +154,25 @@ terraform output cloud_run_url
 # Configure this URL + /webhooks/twilio/sms in Twilio Console
 ```
 
-### Optional: Enable Cloud SQL
+### Cloud SQL Database
 
-To use PostgreSQL instead of SQLite, set `enable_cloud_sql = true` in terraform.tfvars:
+Cloud SQL PostgreSQL is enabled by default for data durability (~$7-10/month). This ensures your booking data persists even when Cloud Run scales to zero.
+
+To disable Cloud SQL (not recommended for production), set in terraform.tfvars:
 
 ```hcl
-enable_cloud_sql    = true
-cloud_sql_tier      = "db-f1-micro"
-cloud_sql_disk_size = 10
+enable_cloud_sql = false
 ```
-
-Then run `terraform apply`. This adds ~$7-10/month cost.
 
 ### Terraform Resources Created
 
 The Terraform configuration manages:
 - Cloud Run service with auto-scaling
+- Cloud SQL PostgreSQL database (enabled by default)
 - Artifact Registry repository
 - Secret Manager secrets (containers only)
 - Cloud Scheduler job for booking execution
 - IAM service accounts and bindings
-- Cloud SQL PostgreSQL (optional)
 
 ## License
 

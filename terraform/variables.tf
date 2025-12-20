@@ -76,9 +76,9 @@ variable "days_in_advance" {
 }
 
 variable "enable_cloud_sql" {
-  description = "Enable Cloud SQL PostgreSQL instance (adds cost)"
+  description = "Enable Cloud SQL PostgreSQL instance (adds ~$7-10/month)"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "cloud_sql_tier" {
