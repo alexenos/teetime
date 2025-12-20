@@ -13,19 +13,23 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', '--all-tags', '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime']
 
-  # Deploy container image to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+  # Initialize Terraform
+  - name: 'hashicorp/terraform:1.6'
+    dir: 'terraform'
     args:
-      - 'run'
-      - 'deploy'
-      - 'teetime'
-      - '--image'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
-      - '--region'
-      - '${_REGION}'
-      - '--platform'
-      - 'managed'
+      - 'init'
+      - '-input=false'
+
+  # Apply Terraform (deploys infrastructure and updates Cloud Run with new image)
+  - name: 'hashicorp/terraform:1.6'
+    dir: 'terraform'
+    args:
+      - 'apply'
+      - '-auto-approve'
+      - '-input=false'
+      - '-var=project_id=$PROJECT_ID'
+      - '-var=region=${_REGION}'
+      - '-var=container_image=${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
 
 substitutions:
   _REGION: us-central1

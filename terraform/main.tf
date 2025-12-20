@@ -9,6 +9,7 @@ terraform {
   }
 
   backend "gcs" {
+    bucket = "teetime-terraform-state"
     prefix = "terraform/state"
   }
 }
@@ -100,7 +101,7 @@ resource "google_cloud_run_v2_service" "teetime" {
     }
 
     containers {
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/${local.service_name}/${local.service_name}:latest"
+      image = var.container_image != "" ? var.container_image : "${var.region}-docker.pkg.dev/${var.project_id}/${local.service_name}/${local.service_name}:latest"
 
       resources {
         limits = {
@@ -217,6 +218,37 @@ resource "google_artifact_registry_repository_iam_member" "cloud_build_writer" {
   repository = google_artifact_registry_repository.teetime.name
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
+# IAM permissions for Cloud Build to run Terraform
+resource "google_storage_bucket_iam_member" "cloud_build_state_access" {
+  bucket = "teetime-terraform-state"
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
+resource "google_project_iam_member" "cloud_build_secret_admin" {
+  project = var.project_id
+  role    = "roles/secretmanager.admin"
+  member  = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
+resource "google_project_iam_member" "cloud_build_cloudsql_admin" {
+  project = var.project_id
+  role    = "roles/cloudsql.admin"
+  member  = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
+resource "google_project_iam_member" "cloud_build_scheduler_admin" {
+  project = var.project_id
+  role    = "roles/cloudscheduler.admin"
+  member  = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
+resource "google_project_iam_member" "cloud_build_service_usage" {
+  project = var.project_id
+  role    = "roles/serviceusage.serviceUsageAdmin"
+  member  = "serviceAccount:${google_service_account.cloud_build.email}"
 }
 
 # Cloud Build trigger for auto-deploy on push to main

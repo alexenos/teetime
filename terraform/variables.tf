@@ -92,3 +92,9 @@ variable "cloud_sql_disk_size" {
   type        = number
   default     = 10
 }
+
+variable "container_image" {
+  description = "Container image to deploy (passed from Cloud Build)"
+  type        = string
+  default     = ""
+}
