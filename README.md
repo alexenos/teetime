@@ -88,9 +88,50 @@ See `.env.example` for all configuration options.
 2. GCP project created (e.g., "teetime")
 3. `gcloud` CLI installed and authenticated
 
-### Quick Deploy
+### Auto-Deploy on Push to Main (Recommended)
 
-Run the deployment script:
+Set up a Cloud Build trigger to automatically deploy when you push to the main branch:
+
+1. Connect your GitHub repository to Cloud Build:
+   ```bash
+   # Enable required APIs
+   gcloud services enable cloudbuild.googleapis.com run.googleapis.com containerregistry.googleapis.com secretmanager.googleapis.com
+
+   # Go to Cloud Build triggers page and connect your GitHub repo:
+   # https://console.cloud.google.com/cloud-build/triggers
+   ```
+
+2. Create the Cloud Build trigger:
+   ```bash
+   gcloud builds triggers create github \
+       --repo-name=teetime \
+       --repo-owner=alexenos \
+       --branch-pattern="^main$" \
+       --build-config=cloudbuild.yaml \
+       --name=teetime-deploy-main
+   ```
+
+3. Grant Cloud Build permission to deploy to Cloud Run:
+   ```bash
+   PROJECT_ID=$(gcloud config get-value project)
+   PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+   
+   # Grant Cloud Run Admin role
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+       --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+       --role="roles/run.admin"
+   
+   # Grant Service Account User role
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+       --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+       --role="roles/iam.serviceAccountUser"
+   ```
+
+Now every push to `main` will automatically build and deploy to Cloud Run.
+
+### Quick Deploy (Manual)
+
+Run the deployment script for a one-time manual deploy:
 
 ```bash
 ./deploy.sh teetime us-central1
