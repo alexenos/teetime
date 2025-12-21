@@ -58,8 +58,8 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
 
     Returns True if the token is valid and from the expected service account.
     The audience is validated against the Cloud Run service URL (base URL without path).
-    Accepts both http:// and https:// schemes since Cloud Run may report http://
-    internally while Cloud Scheduler sends https:// audience.
+    Forces https:// scheme since Cloud Scheduler sends https:// audience but Cloud Run
+    behind a load balancer may report http:// internally.
     """
     if not authorization.startswith("Bearer "):
         return False
@@ -68,34 +68,20 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
 
     try:
         # Build the expected audience from the request URL (base URL without path)
-        # Cloud Scheduler sends the Cloud Run service URL as the audience
-        # Accept both http:// and https:// since Cloud Run behind a load balancer
-        # reports http:// internally but Cloud Scheduler uses https://
+        # Cloud Scheduler sends the Cloud Run service URL as the audience with https://
+        # Force https:// since Cloud Run behind a load balancer reports http:// internally
         base_url = str(request.base_url).rstrip("/")
-        audiences = [base_url]
         if base_url.startswith("http://"):
-            audiences.append(base_url.replace("http://", "https://", 1))
-        elif base_url.startswith("https://"):
-            audiences.append(base_url.replace("https://", "http://", 1))
+            audience = base_url.replace("http://", "https://", 1)
+        else:
+            audience = base_url
 
         # Create a proper transport request for fetching Google's public keys
         transport_request = google_requests.Request()  # type: ignore[no-untyped-call]
 
-        # Try each audience until one succeeds
-        claims = None
-        last_error = None
-        for audience in audiences:
-            try:
-                claims = id_token.verify_oauth2_token(token, transport_request, audience=audience)  # type: ignore[no-untyped-call]
-                logger.info(f"OIDC token verified with audience: {audience}")
-                break
-            except (google_auth_exceptions.GoogleAuthError, ValueError) as e:
-                last_error = e
-                continue
-
-        if claims is None:
-            logger.warning(f"OIDC token verification failed: {last_error}")
-            return False
+        # Verify the token and get claims
+        claims = id_token.verify_oauth2_token(token, transport_request, audience=audience)  # type: ignore[no-untyped-call]
+        logger.info(f"OIDC token verified with audience: {audience}")
 
         # Verify the email matches the expected scheduler service account
         email = claims.get("email", "")
@@ -107,8 +93,11 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
 
         logger.info(f"OIDC token verified for service account: {email}")
         return True
-    except Exception as e:
-        logger.warning(f"OIDC token verification error: {e}")
+    except google_auth_exceptions.GoogleAuthError as e:
+        logger.warning(f"OIDC token verification failed: {e}")
+        return False
+    except ValueError as e:
+        logger.warning(f"OIDC token validation error: {e}")
         return False
 
 
