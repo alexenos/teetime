@@ -98,3 +98,9 @@ variable "container_image" {
   type        = string
   default     = ""
 }
+
+variable "oidc_audience" {
+  description = "OIDC audience for Cloud Scheduler authentication. Set to the Cloud Run service URL after initial deployment. Leave empty to use API key auth."
+  type        = string
+  default     = ""
+}
