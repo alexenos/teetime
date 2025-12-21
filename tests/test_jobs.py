@@ -79,6 +79,146 @@ def failed_booking(sample_request: TeeTimeRequest) -> TeeTimeBooking:
     )
 
 
+class TestOIDCAuthentication:
+    """Tests for OIDC token authentication on the jobs endpoint."""
+
+    def test_oidc_auth_fails_when_audience_not_configured(self, test_client: TestClient) -> None:
+        """Test that OIDC auth fails when OIDC_AUDIENCE is not configured."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = ""
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = ""
+
+            response = test_client.post(
+                "/jobs/execute-due-bookings",
+                headers={"Authorization": "Bearer fake-token"},
+            )
+
+            assert response.status_code == 401
+            assert "Authentication failed" in response.json()["detail"]
+
+    def test_oidc_auth_fails_with_invalid_bearer_format(self, test_client: TestClient) -> None:
+        """Test that OIDC auth fails when Authorization header doesn't start with Bearer."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = "https://test.run.app"
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = ""
+
+            response = test_client.post(
+                "/jobs/execute-due-bookings",
+                headers={"Authorization": "Basic fake-token"},
+            )
+
+            assert response.status_code == 401
+
+    def test_oidc_auth_fails_with_invalid_token(self, test_client: TestClient) -> None:
+        """Test that OIDC auth fails when token verification fails."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = "https://test.run.app"
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = ""
+
+            with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
+                from google.auth import exceptions as google_auth_exceptions
+
+                mock_verify.side_effect = google_auth_exceptions.GoogleAuthError("Invalid token")
+
+                response = test_client.post(
+                    "/jobs/execute-due-bookings",
+                    headers={"Authorization": "Bearer invalid-token"},
+                )
+
+                assert response.status_code == 401
+
+    def test_oidc_auth_fails_with_wrong_service_account(self, test_client: TestClient) -> None:
+        """Test that OIDC auth fails when service account doesn't match."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = "https://test.run.app"
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = "expected@project.iam.gserviceaccount.com"
+
+            with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
+                mock_verify.return_value = {"email": "wrong@project.iam.gserviceaccount.com"}
+
+                response = test_client.post(
+                    "/jobs/execute-due-bookings",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+
+                assert response.status_code == 401
+
+    def test_oidc_auth_succeeds_with_valid_token(self, test_client: TestClient) -> None:
+        """Test that OIDC auth succeeds with valid token and matching service account."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = "https://test.run.app"
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = "scheduler@project.iam.gserviceaccount.com"
+            mock_settings.timezone = "America/Chicago"
+
+            with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
+                mock_verify.return_value = {"email": "scheduler@project.iam.gserviceaccount.com"}
+
+                with patch("app.api.jobs.booking_service") as mock_service:
+                    mock_service.get_due_bookings = AsyncMock(return_value=[])
+
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+
+                    assert response.status_code == 200
+                    mock_verify.assert_called_once()
+                    call_args = mock_verify.call_args
+                    assert call_args[0][0] == "valid-token"
+                    assert call_args[1]["audience"] == "https://test.run.app"
+
+    def test_oidc_auth_succeeds_without_service_account_check(
+        self, test_client: TestClient
+    ) -> None:
+        """Test that OIDC auth succeeds when scheduler_service_account is not configured."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = "https://test.run.app"
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = ""
+            mock_settings.timezone = "America/Chicago"
+
+            with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
+                mock_verify.return_value = {"email": "any@project.iam.gserviceaccount.com"}
+
+                with patch("app.api.jobs.booking_service") as mock_service:
+                    mock_service.get_due_bookings = AsyncMock(return_value=[])
+
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+
+                    assert response.status_code == 200
+
+    def test_oidc_audience_trailing_slash_stripped(self, test_client: TestClient) -> None:
+        """Test that trailing slash is stripped from OIDC_AUDIENCE."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.oidc_audience = "https://test.run.app/"
+            mock_settings.scheduler_api_key = ""
+            mock_settings.scheduler_service_account = ""
+            mock_settings.timezone = "America/Chicago"
+
+            with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
+                mock_verify.return_value = {"email": "scheduler@project.iam.gserviceaccount.com"}
+
+                with patch("app.api.jobs.booking_service") as mock_service:
+                    mock_service.get_due_bookings = AsyncMock(return_value=[])
+
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+
+                    assert response.status_code == 200
+                    call_args = mock_verify.call_args
+                    assert call_args[1]["audience"] == "https://test.run.app"
+
+
 class TestJobsAuthentication:
     """Tests for API key authentication on the jobs endpoint."""
 
