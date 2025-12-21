@@ -57,9 +57,8 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
     Verify OIDC token from Cloud Scheduler.
 
     Returns True if the token is valid and from the expected service account.
-    The audience is validated against the Cloud Run service URL (base URL without path).
-    Forces https:// scheme since Cloud Scheduler sends https:// audience but Cloud Run
-    behind a load balancer may report http:// internally.
+    The audience is validated against the configured OIDC_AUDIENCE setting.
+    This must match the audience configured in Cloud Scheduler's OIDC token.
     """
     if not authorization.startswith("Bearer "):
         return False
@@ -67,14 +66,12 @@ def verify_oidc_token(authorization: str, request: Request) -> bool:
     token = authorization[7:]  # Remove "Bearer " prefix
 
     try:
-        # Build the expected audience from the request URL (base URL without path)
-        # Cloud Scheduler sends the Cloud Run service URL as the audience with https://
-        # Force https:// since Cloud Run behind a load balancer reports http:// internally
-        base_url = str(request.base_url).rstrip("/")
-        if base_url.startswith("http://"):
-            audience = base_url.replace("http://", "https://", 1)
-        else:
-            audience = base_url
+        # Use explicitly configured audience (most secure - no guessing)
+        if not settings.oidc_audience:
+            logger.error("OIDC_AUDIENCE not configured - cannot verify OIDC tokens")
+            return False
+
+        audience = settings.oidc_audience.rstrip("/")
 
         # Create a proper transport request for fetching Google's public keys
         transport_request = google_requests.Request()  # type: ignore[no-untyped-call]
