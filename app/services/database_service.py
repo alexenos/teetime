@@ -141,7 +141,7 @@ class DatabaseService:
             record.actual_booked_time = booking.actual_booked_time  # type: ignore[assignment]
             record.confirmation_number = booking.confirmation_number  # type: ignore[assignment]
             record.error_message = booking.error_message  # type: ignore[assignment]
-            record.updated_at = datetime.utcnow()  # type: ignore[assignment]
+            record.updated_at = datetime.now(datetime.UTC)  # type: ignore[assignment]
 
             await db.commit()
             await db.refresh(record)
