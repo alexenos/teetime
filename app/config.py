@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
-    twilio_channel: str = "sms"  # "sms" or "whatsapp"
+    twilio_channel: str = "whatsapp"  # "sms" or "whatsapp"
 
     gemini_api_key: str = ""
 
