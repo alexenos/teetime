@@ -376,6 +376,13 @@ class BookingService:
         return await database_service.update_booking(booking)
 
     def _calculate_execution_time(self, target_date: date) -> datetime:
+        """
+        Calculate when the booking should be executed.
+
+        Returns a naive datetime representing CT wall-clock time.
+        The timezone is used for DST-correct calculation but stripped
+        before returning to match the database schema (timestamp without timezone).
+        """
         tz = pytz.timezone(settings.timezone)
 
         booking_open_date = target_date - timedelta(days=settings.days_in_advance)
@@ -391,7 +398,9 @@ class BookingService:
             )
         )
 
-        return execution_time
+        # Return naive datetime (strip timezone) for database storage
+        # The value represents CT wall-clock time
+        return execution_time.replace(tzinfo=None)
 
     def _get_help_message(self) -> str:
         """Return a help message explaining how to use the booking service."""
