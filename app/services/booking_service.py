@@ -6,7 +6,7 @@ processing booking requests, and executing reservations at the scheduled time.
 """
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytz
 
@@ -57,7 +57,7 @@ class BookingService:
 
     async def update_session(self, session: UserSession) -> None:
         """Update the session's last interaction time and save it."""
-        session.last_interaction = datetime.utcnow()
+        session.last_interaction = datetime.now(UTC).replace(tzinfo=None)
         await database_service.update_session(session)
 
     async def handle_incoming_message(self, phone_number: str, message: str) -> str:
