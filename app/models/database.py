@@ -6,11 +6,13 @@ user session state. These models mirror the Pydantic schemas but are
 designed for database persistence.
 """
 
+from collections.abc import AsyncGenerator
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import Column, Date, DateTime, Enum, Integer, String, Text, Time
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 from app.models.schemas import BookingStatus, ConversationState
@@ -60,7 +62,7 @@ class BookingRecord(Base):
     requested_time = Column(Time, nullable=False)
     num_players = Column(Integer, default=4)
     fallback_window_minutes = Column(Integer, default=30)
-    status = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
+    status: Column[Any] = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
     scheduled_execution_time = Column(DateTime, nullable=True)
     actual_booked_time = Column(Time, nullable=True)
     confirmation_number = Column(String(100), nullable=True)
@@ -90,7 +92,7 @@ class SessionRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     phone_number = Column(String(20), unique=True, nullable=False, index=True)
-    state = Column(Enum(ConversationState), default=ConversationState.IDLE)
+    state: Column[Any] = Column(Enum(ConversationState), default=ConversationState.IDLE)
     pending_request_json = Column(Text, nullable=True)
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
@@ -102,10 +104,10 @@ engine = create_async_engine(
     echo=False,
 )
 
-AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-async def get_db() -> AsyncSession:
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         yield session
 

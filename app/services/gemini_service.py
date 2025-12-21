@@ -74,8 +74,8 @@ class GeminiService:
     def model(self) -> Any:
         if self._model is None:
             if settings.gemini_api_key:
-                genai.configure(api_key=settings.gemini_api_key)
-                self._model = genai.GenerativeModel(
+                genai.configure(api_key=settings.gemini_api_key)  # type: ignore[attr-defined]
+                self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
                     model_name="gemini-2.0-flash",
                     system_instruction=SYSTEM_PROMPT,
                     tools=[{"function_declarations": FUNCTION_DECLARATIONS}],
@@ -159,7 +159,9 @@ class GeminiService:
             print(f"Gemini API error: {e}")
             return self._mock_parse(message)
 
-    def _build_parsed_intent(self, args: dict, raw_message: str | None = None) -> ParsedIntent:
+    def _build_parsed_intent(
+        self, args: dict[str, Any], raw_message: str | None = None
+    ) -> ParsedIntent:
         intent = args.get("intent", "unclear")
         tee_time_request = None
 

@@ -24,7 +24,7 @@ async def handle_incoming_sms(
     """
     url = str(request.url)
     form_data = await request.form()
-    params = {key: value for key, value in form_data.items()}
+    params = {key: str(value) for key, value in form_data.items()}
 
     if not sms_service.validate_request(url, params, x_twilio_signature):
         raise HTTPException(status_code=403, detail="Invalid or missing Twilio signature")
@@ -42,7 +42,7 @@ async def handle_sms_status(
     message_status: str = Form(..., alias="MessageStatus"),
     to_number: str = Form(None, alias="To"),
     error_code: str = Form(None, alias="ErrorCode"),
-) -> dict:
+) -> dict[str, str]:
     print(f"SMS Status Update - SID: {message_sid}, Status: {message_status}")
     if error_code:
         print(f"Error Code: {error_code}")

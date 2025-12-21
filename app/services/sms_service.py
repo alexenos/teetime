@@ -21,7 +21,7 @@ class SMSService:
             self._validator = RequestValidator(settings.twilio_auth_token)
         return self._validator
 
-    def validate_request(self, url: str, params: dict, signature: str | None) -> bool:
+    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
         """
         Validate a Twilio webhook request signature.
 
@@ -44,7 +44,7 @@ class SMSService:
             return True
         if not signature:
             return False
-        return self.validator.validate(url, params, signature)
+        return bool(self.validator.validate(url, params, signature))
 
     async def send_sms(self, to_number: str, message: str) -> str | None:
         if not settings.twilio_account_sid or not settings.twilio_auth_token:
@@ -57,7 +57,7 @@ class SMSService:
                 from_=settings.twilio_phone_number,
                 to=to_number,
             )
-            return result.sid
+            return str(result.sid) if result.sid else None
         except Exception as e:
             print(f"Error sending SMS: {e}")
             return None

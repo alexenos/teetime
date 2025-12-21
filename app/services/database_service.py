@@ -47,22 +47,22 @@ class DatabaseService:
     def _record_to_booking(self, record: BookingRecord) -> TeeTimeBooking:
         """Convert a BookingRecord SQLAlchemy model to a TeeTimeBooking Pydantic model."""
         request = TeeTimeRequest(
-            requested_date=record.requested_date,
-            requested_time=record.requested_time,
-            num_players=record.num_players,
-            fallback_window_minutes=record.fallback_window_minutes,
+            requested_date=record.requested_date,  # type: ignore[arg-type]
+            requested_time=record.requested_time,  # type: ignore[arg-type]
+            num_players=record.num_players,  # type: ignore[arg-type]
+            fallback_window_minutes=record.fallback_window_minutes,  # type: ignore[arg-type]
         )
         return TeeTimeBooking(
-            id=record.booking_id,
-            phone_number=record.phone_number,
+            id=record.booking_id,  # type: ignore[arg-type]
+            phone_number=record.phone_number,  # type: ignore[arg-type]
             request=request,
-            status=record.status,
-            scheduled_execution_time=record.scheduled_execution_time,
-            actual_booked_time=record.actual_booked_time,
-            confirmation_number=record.confirmation_number,
-            error_message=record.error_message,
-            created_at=record.created_at,
-            updated_at=record.updated_at,
+            status=record.status,  # type: ignore[arg-type]
+            scheduled_execution_time=record.scheduled_execution_time,  # type: ignore[arg-type]
+            actual_booked_time=record.actual_booked_time,  # type: ignore[arg-type]
+            confirmation_number=record.confirmation_number,  # type: ignore[arg-type]
+            error_message=record.error_message,  # type: ignore[arg-type]
+            created_at=record.created_at,  # type: ignore[arg-type]
+            updated_at=record.updated_at,  # type: ignore[arg-type]
         )
 
     def _session_to_record(self, session: UserSession) -> SessionRecord:
@@ -81,12 +81,14 @@ class DatabaseService:
         """Convert a SessionRecord SQLAlchemy model to a UserSession Pydantic model."""
         pending_request = None
         if record.pending_request_json:
-            pending_request = TeeTimeRequest.model_validate_json(record.pending_request_json)
+            pending_request = TeeTimeRequest.model_validate_json(
+                record.pending_request_json  # type: ignore[arg-type]
+            )
         return UserSession(
-            phone_number=record.phone_number,
-            state=record.state,
+            phone_number=record.phone_number,  # type: ignore[arg-type]
+            state=record.state,  # type: ignore[arg-type]
             pending_request=pending_request,
-            last_interaction=record.last_interaction,
+            last_interaction=record.last_interaction,  # type: ignore[arg-type]
         )
 
     async def create_booking(self, booking: TeeTimeBooking) -> TeeTimeBooking:
@@ -135,11 +137,11 @@ class DatabaseService:
             if not record:
                 raise ValueError(f"Booking {booking.id} not found")
 
-            record.status = booking.status
-            record.actual_booked_time = booking.actual_booked_time
-            record.confirmation_number = booking.confirmation_number
-            record.error_message = booking.error_message
-            record.updated_at = datetime.utcnow()
+            record.status = booking.status  # type: ignore[assignment]
+            record.actual_booked_time = booking.actual_booked_time  # type: ignore[assignment]
+            record.confirmation_number = booking.confirmation_number  # type: ignore[assignment]
+            record.error_message = booking.error_message  # type: ignore[assignment]
+            record.updated_at = datetime.utcnow()  # type: ignore[assignment]
 
             await db.commit()
             await db.refresh(record)
@@ -175,12 +177,12 @@ class DatabaseService:
             if not record:
                 raise ValueError(f"Session for {session.phone_number} not found")
 
-            record.state = session.state
+            record.state = session.state  # type: ignore[assignment]
             pending_json = None
             if session.pending_request:
                 pending_json = session.pending_request.model_dump_json()
-            record.pending_request_json = pending_json
-            record.last_interaction = session.last_interaction
+            record.pending_request_json = pending_json  # type: ignore[assignment]
+            record.last_interaction = session.last_interaction  # type: ignore[assignment]
 
             await db.commit()
             await db.refresh(record)
