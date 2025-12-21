@@ -21,6 +21,9 @@ provider "google" {
 
 locals {
   service_name = "teetime"
+  # Derive the stable Cloud Run URL from known values (avoids self-reference)
+  # Format: https://{service}-{project_number}.{region}.run.app
+  cloud_run_url = "https://${local.service_name}-${data.google_project.project.number}.${var.region}.run.app"
   apis = [
     "run.googleapis.com",
     "cloudbuild.googleapis.com",
@@ -135,12 +138,9 @@ resource "google_cloud_run_v2_service" "teetime" {
         value = google_service_account.scheduler.email
       }
 
-      dynamic "env" {
-        for_each = var.oidc_audience != "" ? [1] : []
-        content {
-          name  = "OIDC_AUDIENCE"
-          value = var.oidc_audience
-        }
+      env {
+        name  = "OIDC_AUDIENCE"
+        value = local.cloud_run_url
       }
 
       dynamic "env" {
@@ -312,11 +312,11 @@ resource "google_cloud_scheduler_job" "execute_bookings" {
 
   http_target {
     http_method = "POST"
-    uri         = "${google_cloud_run_v2_service.teetime.uri}/jobs/execute-due-bookings"
+    uri         = "${local.cloud_run_url}/jobs/execute-due-bookings"
 
     oidc_token {
       service_account_email = google_service_account.scheduler.email
-      audience              = google_cloud_run_v2_service.teetime.uri
+      audience              = local.cloud_run_url
     }
   }
 
