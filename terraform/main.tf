@@ -135,6 +135,11 @@ resource "google_cloud_run_v2_service" "teetime" {
         value = google_service_account.scheduler.email
       }
 
+      env {
+        name  = "OIDC_AUDIENCE"
+        value = google_cloud_run_v2_service.teetime.uri
+      }
+
       dynamic "env" {
         for_each = toset(local.secrets)
         content {

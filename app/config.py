@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     scheduler_api_key: str = ""
     scheduler_service_account: str = ""
+    oidc_audience: str = ""  # Expected OIDC audience (Cloud Run service URL)
 
     class Config:
         env_file = ".env"
