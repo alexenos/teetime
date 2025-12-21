@@ -316,3 +316,93 @@ class TestTwilioSMSProviderProperties:
 
             assert validator1 is validator2
             mock_validator_class.assert_called_once()
+
+
+class TestTwilioSMSProviderWhatsApp:
+    """Tests for WhatsApp channel support in TwilioSMSProvider."""
+
+    def test_normalize_phone_number_strips_whatsapp_prefix(self) -> None:
+        """Test that normalize_phone_number strips the whatsapp: prefix."""
+        result = TwilioSMSProvider.normalize_phone_number("whatsapp:+15551234567")
+        assert result == "+15551234567"
+
+    def test_normalize_phone_number_preserves_plain_number(self) -> None:
+        """Test that normalize_phone_number preserves numbers without prefix."""
+        result = TwilioSMSProvider.normalize_phone_number("+15551234567")
+        assert result == "+15551234567"
+
+    def test_is_whatsapp_true_when_configured(self) -> None:
+        """Test that is_whatsapp returns True when channel is whatsapp."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_channel = "whatsapp"
+
+            provider = TwilioSMSProvider()
+            assert provider.is_whatsapp is True
+
+    def test_is_whatsapp_false_when_sms(self) -> None:
+        """Test that is_whatsapp returns False when channel is sms."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_channel = "sms"
+
+            provider = TwilioSMSProvider()
+            assert provider.is_whatsapp is False
+
+    def test_is_whatsapp_case_insensitive(self) -> None:
+        """Test that is_whatsapp is case insensitive."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_channel = "WhatsApp"
+
+            provider = TwilioSMSProvider()
+            assert provider.is_whatsapp is True
+
+    def test_format_phone_for_whatsapp_channel(self) -> None:
+        """Test that phone numbers are formatted with whatsapp: prefix for WhatsApp channel."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_channel = "whatsapp"
+
+            provider = TwilioSMSProvider()
+            result = provider._format_phone_for_channel("+15551234567")
+            assert result == "whatsapp:+15551234567"
+
+    def test_format_phone_for_sms_channel(self) -> None:
+        """Test that phone numbers are not modified for SMS channel."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_channel = "sms"
+
+            provider = TwilioSMSProvider()
+            result = provider._format_phone_for_channel("+15551234567")
+            assert result == "+15551234567"
+
+    def test_format_phone_avoids_double_prefix(self) -> None:
+        """Test that format doesn't double-prefix numbers already with whatsapp:."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_channel = "whatsapp"
+
+            provider = TwilioSMSProvider()
+            result = provider._format_phone_for_channel("whatsapp:+15551234567")
+            assert result == "whatsapp:+15551234567"
+
+    @pytest.mark.asyncio
+    async def test_send_sms_uses_whatsapp_format(self) -> None:
+        """Test that send_sms uses whatsapp: prefix when channel is whatsapp."""
+        with patch("app.providers.twilio_provider.settings") as mock_settings:
+            mock_settings.twilio_account_sid = "test_sid"
+            mock_settings.twilio_auth_token = "test_token"
+            mock_settings.twilio_phone_number = "+15559999999"
+            mock_settings.twilio_channel = "whatsapp"
+
+            provider = TwilioSMSProvider()
+            mock_client = MagicMock()
+            mock_message = MagicMock()
+            mock_message.sid = "SM123456"
+            mock_client.messages.create.return_value = mock_message
+
+            with patch.object(provider, "_client", mock_client):
+                result = await provider.send_sms("+15551234567", "Hello!")
+
+            assert result.success is True
+            mock_client.messages.create.assert_called_once_with(
+                body="Hello!",
+                from_="whatsapp:+15559999999",
+                to="whatsapp:+15551234567",
+            )
