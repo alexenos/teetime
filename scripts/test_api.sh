@@ -15,7 +15,7 @@
 
 # Configuration
 BASE_URL="${1:-https://teetime-746475271596.us-central1.run.app}"
-TEST_PHONE="+15551234567"
+TEST_PHONE="+17132011357"
 
 # Colors for output
 RED='\033[0;31m'
