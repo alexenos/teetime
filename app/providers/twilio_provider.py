@@ -26,7 +26,7 @@ class TwilioSMSProvider(SMSProvider):
             self._validator = RequestValidator(settings.twilio_auth_token)
         return self._validator
 
-    def validate_request(self, url: str, params: dict, signature: str | None) -> bool:
+    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
         """
         Validate a Twilio webhook request signature.
 
@@ -84,7 +84,7 @@ class MockSMSProvider(SMSProvider):
     def __init__(self) -> None:
         self.sent_messages: list[dict] = []
 
-    def validate_request(self, url: str, params: dict, signature: str | None) -> bool:
+    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
         """Always return True for mock provider."""
         return True
 

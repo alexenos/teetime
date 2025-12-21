@@ -80,9 +80,99 @@ poetry run mypy app
 
 See `.env.example` for all configuration options.
 
-## Deployment
+## GCP Deployment (Terraform)
 
-The application is designed to run on Google Cloud Run with Cloud Scheduler for timed booking execution.
+All GCP infrastructure is managed via Terraform in the `terraform/` directory.
+
+### Prerequisites
+
+1. Google Cloud account with billing enabled
+2. GCP project created (e.g., "teetime")
+3. `gcloud` CLI installed and authenticated
+4. Terraform >= 1.0 installed
+5. GitHub repository connected to Cloud Build (one-time setup)
+
+### Initial Setup
+
+1. Create a GCS bucket for Terraform state:
+   ```bash
+   PROJECT_ID="teetime"
+   gsutil mb -p $PROJECT_ID gs://${PROJECT_ID}-terraform-state
+   gsutil versioning set on gs://${PROJECT_ID}-terraform-state
+   ```
+
+2. Connect GitHub to Cloud Build (one-time, via console):
+   - Go to https://console.cloud.google.com/cloud-build/triggers
+   - Click "Connect Repository" and follow the OAuth flow to connect your GitHub account
+   - Select the `alexenos/teetime` repository
+
+3. Configure Terraform variables:
+   ```bash
+   cd terraform
+   cp terraform.tfvars.example terraform.tfvars
+   # Edit terraform.tfvars with your project settings
+   ```
+
+4. Initialize and apply Terraform:
+   ```bash
+   terraform init -backend-config="bucket=${PROJECT_ID}-terraform-state"
+   terraform plan
+   terraform apply
+   ```
+
+### Add Secret Values
+
+Terraform creates the secret containers but not the values (for security). Add values via gcloud:
+
+```bash
+echo -n "your_twilio_sid" | gcloud secrets versions add TWILIO_ACCOUNT_SID --data-file=-
+echo -n "your_twilio_token" | gcloud secrets versions add TWILIO_AUTH_TOKEN --data-file=-
+echo -n "+1234567890" | gcloud secrets versions add TWILIO_PHONE_NUMBER --data-file=-
+echo -n "your_gemini_key" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
+echo -n "your_member_number" | gcloud secrets versions add WALDEN_MEMBER_NUMBER --data-file=-
+echo -n "your_password" | gcloud secrets versions add WALDEN_PASSWORD --data-file=-
+echo -n "your_scheduler_key" | gcloud secrets versions add SCHEDULER_API_KEY --data-file=-
+echo -n "+1234567890" | gcloud secrets versions add USER_PHONE_NUMBER --data-file=-
+```
+
+### First Deployment
+
+After Terraform creates the infrastructure, trigger the first build:
+
+```bash
+# Push to main to trigger auto-deployment, or manually trigger:
+gcloud builds submit --config=cloudbuild.yaml .
+```
+
+### Configure Twilio Webhook
+
+Get the Cloud Run URL from Terraform output and configure in Twilio:
+
+```bash
+cd terraform
+terraform output cloud_run_url
+# Configure this URL + /webhooks/twilio/sms in Twilio Console
+```
+
+### Cloud SQL Database
+
+Cloud SQL PostgreSQL is enabled by default for data durability (~$7-10/month). This ensures your booking data persists even when Cloud Run scales to zero.
+
+To disable Cloud SQL (not recommended for production), set in terraform.tfvars:
+
+```hcl
+enable_cloud_sql = false
+```
+
+### Terraform Resources Created
+
+The Terraform configuration manages:
+- Cloud Run service with auto-scaling
+- Cloud SQL PostgreSQL database (enabled by default)
+- Artifact Registry repository
+- Secret Manager secrets (containers only)
+- Cloud Scheduler job for booking execution
+- IAM service accounts and bindings
 
 ## License
 

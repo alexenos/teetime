@@ -6,7 +6,7 @@ processing booking requests, and executing reservations at the scheduled time.
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytz
 
@@ -57,7 +57,7 @@ class BookingService:
 
     async def update_session(self, session: UserSession) -> None:
         """Update the session's last interaction time and save it."""
-        session.last_interaction = datetime.utcnow()
+        session.last_interaction = datetime.now(UTC).replace(tzinfo=None)
         await database_service.update_session(session)
 
     async def handle_incoming_message(self, phone_number: str, message: str) -> str:
@@ -375,7 +375,14 @@ class BookingService:
         booking.status = BookingStatus.CANCELLED
         return await database_service.update_booking(booking)
 
-    def _calculate_execution_time(self, target_date: datetime.date) -> datetime:
+    def _calculate_execution_time(self, target_date: date) -> datetime:
+        """
+        Calculate when the booking should be executed.
+
+        Returns a naive datetime representing CT wall-clock time.
+        The timezone is used for DST-correct calculation but stripped
+        before returning to match the database schema (timestamp without timezone).
+        """
         tz = pytz.timezone(settings.timezone)
 
         booking_open_date = target_date - timedelta(days=settings.days_in_advance)
@@ -391,7 +398,9 @@ class BookingService:
             )
         )
 
-        return execution_time
+        # Return naive datetime (strip timezone) for database storage
+        # The value represents CT wall-clock time
+        return execution_time.replace(tzinfo=None)
 
     def _get_help_message(self) -> str:
         """Return a help message explaining how to use the booking service."""
@@ -440,8 +449,8 @@ class BookingService:
 
         try:
             result = await self._reservation_provider.book_tee_time(
-                date=booking.request.requested_date,
-                time=booking.request.requested_time,
+                target_date=booking.request.requested_date,
+                target_time=booking.request.requested_time,
                 num_players=booking.request.num_players,
                 fallback_window_minutes=booking.request.fallback_window_minutes,
             )

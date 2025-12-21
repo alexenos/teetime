@@ -33,7 +33,7 @@ class SMSService:
         """Set a custom SMS provider (useful for testing)."""
         self._provider = provider
 
-    def validate_request(self, url: str, params: dict, signature: str | None) -> bool:
+    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
         """
         Validate a webhook request signature.
 

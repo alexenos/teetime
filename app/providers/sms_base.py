@@ -13,7 +13,7 @@ class SMSProvider(ABC):
     """Abstract base class for SMS providers."""
 
     @abstractmethod
-    def validate_request(self, url: str, params: dict, signature: str | None) -> bool:
+    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
         """
         Validate an incoming webhook request signature.
 
