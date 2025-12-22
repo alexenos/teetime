@@ -8,6 +8,27 @@ from app.services.sms_service import sms_service
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
+def get_external_url(request: Request) -> str:
+    """
+    Reconstruct the external URL from forwarded headers.
+
+    Cloud Run and other proxies pass the original URL via X-Forwarded-* headers.
+    Twilio signs requests using the external URL, so we must reconstruct it
+    for signature validation to work correctly.
+    """
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.headers.get(
+        "host", request.url.netloc
+    )
+    path = request.url.path
+    query = request.url.query
+
+    url = f"{proto}://{host}{path}"
+    if query:
+        url = f"{url}?{query}"
+    return url
+
+
 @router.post("/twilio/sms", response_class=PlainTextResponse)
 async def handle_incoming_sms(
     request: Request,
@@ -26,7 +47,7 @@ async def handle_incoming_sms(
     Note: For WhatsApp messages, the From/To numbers arrive with 'whatsapp:' prefix.
     We normalize these to plain E.164 format for consistent session/DB handling.
     """
-    url = str(request.url)
+    url = get_external_url(request)
     form_data = await request.form()
     params = {key: str(value) for key, value in form_data.items()}
 
