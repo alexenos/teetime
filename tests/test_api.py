@@ -53,9 +53,13 @@ class TestBookingsEndpoints:
 
     def test_create_booking(self, test_client: TestClient) -> None:
         """Test creating a new booking via POST /bookings/."""
+        from datetime import datetime
+
+        import pytz
+
         request_data = {
             "phone_number": "+15551234567",
-            "requested_date": "2025-12-20",
+            "requested_date": "2025-12-30",
             "requested_time": "08:00:00",
             "num_players": 4,
             "fallback_window_minutes": 30,
@@ -70,12 +74,19 @@ class TestBookingsEndpoints:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            response = test_client.post("/bookings/", json=request_data)
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 22, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                response = test_client.post("/bookings/", json=request_data)
 
             assert response.status_code == 200
             data = response.json()
             assert data["phone_number"] == "+15551234567"
-            assert data["requested_date"] == "2025-12-20"
+            assert data["requested_date"] == "2025-12-30"
             assert data["requested_time"] == "08:00:00"
             assert data["num_players"] == 4
             assert data["status"] == "scheduled"
@@ -83,9 +94,13 @@ class TestBookingsEndpoints:
 
     def test_create_booking_default_players(self, test_client: TestClient) -> None:
         """Test creating a booking with default num_players."""
+        from datetime import datetime
+
+        import pytz
+
         request_data = {
             "phone_number": "+15551234567",
-            "requested_date": "2025-12-21",
+            "requested_date": "2025-12-30",
             "requested_time": "09:00:00",
         }
 
@@ -98,7 +113,14 @@ class TestBookingsEndpoints:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            response = test_client.post("/bookings/", json=request_data)
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 22, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                response = test_client.post("/bookings/", json=request_data)
 
             assert response.status_code == 200
             data = response.json()
@@ -417,9 +439,13 @@ class TestBookingsEndpointsIntegration:
 
     def test_create_and_get_booking(self, test_client: TestClient) -> None:
         """Test creating and then retrieving a booking."""
+        from datetime import datetime
+
+        import pytz
+
         request_data = {
             "phone_number": "+15559999999",
-            "requested_date": "2025-12-25",
+            "requested_date": "2025-12-30",
             "requested_time": "10:00:00",
             "num_players": 2,
         }
@@ -435,9 +461,16 @@ class TestBookingsEndpointsIntegration:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            create_response = test_client.post("/bookings/", json=request_data)
-            assert create_response.status_code == 200
-            booking_id = create_response.json()["id"]
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 22, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                create_response = test_client.post("/bookings/", json=request_data)
+                assert create_response.status_code == 200
+                booking_id = create_response.json()["id"]
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_booking = AsyncMock(return_value=created_booking)
@@ -451,10 +484,14 @@ class TestBookingsEndpointsIntegration:
 
     def test_create_and_cancel_booking(self, test_client: TestClient) -> None:
         """Test creating and then cancelling a booking."""
+        from datetime import datetime
+
+        import pytz
+
         phone_number = "+15558888888"
         request_data = {
             "phone_number": phone_number,
-            "requested_date": "2025-12-26",
+            "requested_date": "2025-12-30",
             "requested_time": "11:00:00",
         }
 
@@ -469,9 +506,16 @@ class TestBookingsEndpointsIntegration:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            create_response = test_client.post("/bookings/", json=request_data)
-            assert create_response.status_code == 200
-            booking_id = create_response.json()["id"]
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 22, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                create_response = test_client.post("/bookings/", json=request_data)
+                assert create_response.status_code == 200
+                booking_id = create_response.json()["id"]
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_booking = AsyncMock(return_value=created_booking)
