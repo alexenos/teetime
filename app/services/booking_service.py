@@ -340,10 +340,18 @@ class BookingService:
 
         created_booking = await database_service.create_booking(booking)
 
+        # Compare in timezone-aware space for robustness.
+        # execution_time is naive (CT wall-clock), so we localize it.
+        # This approach is safe even if _calculate_execution_time() is later
+        # changed to return an aware datetime.
         tz = pytz.timezone(settings.timezone)
-        now = datetime.now(tz).replace(tzinfo=None)
+        now_ct = datetime.now(tz)
+        if execution_time.tzinfo is None:
+            exec_ct = tz.localize(execution_time)
+        else:
+            exec_ct = execution_time.astimezone(tz)
 
-        if execution_time <= now:
+        if exec_ct <= now_ct:
             await self.execute_booking(created_booking.id)
             return await database_service.get_booking(created_booking.id) or created_booking
 
