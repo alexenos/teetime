@@ -5,13 +5,32 @@ These tests verify the FastAPI endpoints for health checks, bookings,
 and Twilio webhooks using the TestClient.
 """
 
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytz
 from fastapi.testclient import TestClient
 
 from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
+
+
+def _future_date(days_ahead: int = 30) -> date:
+    """
+    Get a date in the future relative to today in CT timezone.
+
+    Using a large offset (default 30 days) ensures the booking's execution time
+    (7 days before the requested date) is always in the future, avoiding the
+    immediate execution path without needing to mock datetime.
+    """
+    tz = pytz.timezone("America/Chicago")
+    today_ct = datetime.now(tz).date()
+    return today_ct + timedelta(days=days_ahead)
+
+
+def _future_date_str(days_ahead: int = 30) -> str:
+    """Get a future date as an ISO format string for API requests."""
+    return _future_date(days_ahead).isoformat()
 
 
 @pytest.fixture
@@ -53,9 +72,10 @@ class TestBookingsEndpoints:
 
     def test_create_booking(self, test_client: TestClient) -> None:
         """Test creating a new booking via POST /bookings/."""
+        future_date = _future_date_str()
         request_data = {
             "phone_number": "+15551234567",
-            "requested_date": "2025-12-20",
+            "requested_date": future_date,
             "requested_time": "08:00:00",
             "num_players": 4,
             "fallback_window_minutes": 30,
@@ -75,7 +95,7 @@ class TestBookingsEndpoints:
             assert response.status_code == 200
             data = response.json()
             assert data["phone_number"] == "+15551234567"
-            assert data["requested_date"] == "2025-12-20"
+            assert data["requested_date"] == future_date
             assert data["requested_time"] == "08:00:00"
             assert data["num_players"] == 4
             assert data["status"] == "scheduled"
@@ -85,7 +105,7 @@ class TestBookingsEndpoints:
         """Test creating a booking with default num_players."""
         request_data = {
             "phone_number": "+15551234567",
-            "requested_date": "2025-12-21",
+            "requested_date": _future_date_str(),
             "requested_time": "09:00:00",
         }
 
@@ -419,7 +439,7 @@ class TestBookingsEndpointsIntegration:
         """Test creating and then retrieving a booking."""
         request_data = {
             "phone_number": "+15559999999",
-            "requested_date": "2025-12-25",
+            "requested_date": _future_date_str(),
             "requested_time": "10:00:00",
             "num_players": 2,
         }
@@ -454,7 +474,7 @@ class TestBookingsEndpointsIntegration:
         phone_number = "+15558888888"
         request_data = {
             "phone_number": phone_number,
-            "requested_date": "2025-12-26",
+            "requested_date": _future_date_str(),
             "requested_time": "11:00:00",
         }
 

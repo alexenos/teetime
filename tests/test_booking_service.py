@@ -99,22 +99,37 @@ class TestBookingServiceBookings:
     """Tests for booking CRUD operations."""
 
     @pytest.mark.asyncio
-    async def test_create_booking(
-        self, booking_service: BookingService, sample_request: TeeTimeRequest
-    ) -> None:
-        """Test creating a new booking."""
+    async def test_create_booking(self, booking_service: BookingService) -> None:
+        """Test creating a new booking with a future execution time."""
+        import pytz
+
+        future_request = TeeTimeRequest(
+            requested_date=date(2025, 12, 30),
+            requested_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=30,
+        )
+
         with patch("app.services.booking_service.database_service") as mock_db:
 
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
-            booking = await booking_service.create_booking("+15551234567", sample_request)
+
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 22, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                booking = await booking_service.create_booking("+15551234567", future_request)
 
             assert booking.id is not None
             assert len(booking.id) == 8
             assert booking.phone_number == "+15551234567"
-            assert booking.request == sample_request
+            assert booking.request == future_request
             assert booking.status == BookingStatus.SCHEDULED
             assert booking.scheduled_execution_time is not None
 
@@ -309,6 +324,282 @@ class TestBookingServiceExecutionTime:
         assert exec_time.minute == 30
 
 
+class TestBookingServiceImmediateExecution:
+    """Tests for immediate booking execution when execution time is in the past."""
+
+    @pytest.mark.asyncio
+    async def test_create_booking_executes_immediately_when_past(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test that booking is executed immediately when execution time is in the past."""
+        import pytz
+
+        past_request = TeeTimeRequest(
+            requested_date=date(2025, 12, 15),
+            requested_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=30,
+        )
+
+        created_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=past_request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 8, 6, 30),
+        )
+
+        executed_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=past_request,
+            status=BookingStatus.SUCCESS,
+            scheduled_execution_time=datetime(2025, 12, 8, 6, 30),
+            actual_booked_time=time(8, 0),
+            confirmation_number="CONF123",
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.create_booking = AsyncMock(return_value=created_booking)
+            mock_db.get_booking = AsyncMock(return_value=executed_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(
+                    success=True,
+                    booked_time=time(8, 0),
+                    confirmation_number="CONF123",
+                )
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+
+                with patch("app.services.booking_service.datetime") as mock_datetime:
+                    tz = pytz.timezone("America/Chicago")
+                    mock_now = datetime(2025, 12, 22, 10, 0)
+                    mock_datetime.now.return_value = tz.localize(mock_now)
+                    mock_datetime.combine = datetime.combine
+                    mock_datetime.min = datetime.min
+
+                    result = await booking_service.create_booking("+15551234567", past_request)
+
+            mock_provider.book_tee_time.assert_called_once()
+            assert result.status == BookingStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_create_booking_schedules_when_future(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test that booking is scheduled (not executed) when execution time is in the future."""
+        import pytz
+
+        future_request = TeeTimeRequest(
+            requested_date=date(2025, 12, 29),
+            requested_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=30,
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+
+            async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock()
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 20, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                result = await booking_service.create_booking("+15551234567", future_request)
+
+            mock_provider.book_tee_time.assert_not_called()
+            assert result.status == BookingStatus.SCHEDULED
+
+    @pytest.mark.asyncio
+    async def test_create_booking_executes_immediately_when_exactly_now(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test that booking is executed immediately when execution time equals current time."""
+        import pytz
+
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 29),
+            requested_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=30,
+        )
+
+        created_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 22, 6, 30),
+        )
+
+        executed_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=request,
+            status=BookingStatus.SUCCESS,
+            scheduled_execution_time=datetime(2025, 12, 22, 6, 30),
+            actual_booked_time=time(8, 0),
+            confirmation_number="CONF123",
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.create_booking = AsyncMock(return_value=created_booking)
+            mock_db.get_booking = AsyncMock(return_value=executed_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(
+                    success=True,
+                    booked_time=time(8, 0),
+                    confirmation_number="CONF123",
+                )
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+
+                with patch("app.services.booking_service.datetime") as mock_datetime:
+                    tz = pytz.timezone("America/Chicago")
+                    mock_now = datetime(2025, 12, 22, 6, 30)
+                    mock_datetime.now.return_value = tz.localize(mock_now)
+                    mock_datetime.combine = datetime.combine
+                    mock_datetime.min = datetime.min
+
+                    result = await booking_service.create_booking("+15551234567", request)
+
+            mock_provider.book_tee_time.assert_called_once()
+            assert result.status == BookingStatus.SUCCESS
+
+
+class TestBookingServiceConfirmIntentImmediateExecution:
+    """Tests for _handle_confirm_intent with immediate execution."""
+
+    @pytest.mark.asyncio
+    async def test_handle_confirm_intent_immediate_success(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test that confirm intent returns success message when booking succeeds immediately."""
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 15),
+            requested_time=time(8, 0),
+            num_players=4,
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=request,
+        )
+
+        success_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=request,
+            status=BookingStatus.SUCCESS,
+            actual_booked_time=time(8, 0),
+        )
+
+        with patch.object(
+            booking_service, "create_booking", new=AsyncMock(return_value=success_booking)
+        ):
+            response = await booking_service._handle_confirm_intent(session)
+
+        assert "confirmed" in response.lower()
+        assert "reserved" in response.lower()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_request is None
+
+    @pytest.mark.asyncio
+    async def test_handle_confirm_intent_immediate_failure(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test that confirm intent returns failure message when booking fails immediately."""
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 15),
+            requested_time=time(8, 0),
+            num_players=4,
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=request,
+        )
+
+        failed_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=request,
+            status=BookingStatus.FAILED,
+            error_message="Time slot not available",
+        )
+
+        with patch.object(
+            booking_service, "create_booking", new=AsyncMock(return_value=failed_booking)
+        ):
+            response = await booking_service._handle_confirm_intent(session)
+
+        assert "failed" in response.lower()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_request is None
+
+    @pytest.mark.asyncio
+    async def test_handle_confirm_intent_scheduled(self, booking_service: BookingService) -> None:
+        """Test that confirm intent returns scheduled message when booking is scheduled for future."""
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 29),
+            requested_time=time(8, 0),
+            num_players=4,
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=request,
+        )
+
+        scheduled_booking = TeeTimeBooking(
+            id="test1234",
+            phone_number="+15551234567",
+            request=request,
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 22, 6, 30),
+        )
+
+        with patch.object(
+            booking_service, "create_booking", new=AsyncMock(return_value=scheduled_booking)
+        ):
+            response = await booking_service._handle_confirm_intent(session)
+
+        assert "scheduled" in response.lower()
+        assert "booking window opens" in response.lower()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_request is None
+
+
 class TestBookingServiceIntentHandling:
     """Tests for intent processing methods."""
 
@@ -348,14 +639,20 @@ class TestBookingServiceIntentHandling:
         assert response == "What date would you like?"
 
     @pytest.mark.asyncio
-    async def test_handle_confirm_intent_success(
-        self, booking_service: BookingService, sample_request: TeeTimeRequest
-    ) -> None:
-        """Test handling a confirm intent with pending request."""
+    async def test_handle_confirm_intent_success(self, booking_service: BookingService) -> None:
+        """Test handling a confirm intent with pending request (future execution time)."""
+        import pytz
+
+        future_request = TeeTimeRequest(
+            requested_date=date(2025, 12, 30),
+            requested_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=30,
+        )
         session = UserSession(
             phone_number="+15551234567",
             state=ConversationState.AWAITING_CONFIRMATION,
-            pending_request=sample_request,
+            pending_request=future_request,
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
@@ -364,7 +661,15 @@ class TestBookingServiceIntentHandling:
                 return booking
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
-            response = await booking_service._handle_confirm_intent(session)
+
+            with patch("app.services.booking_service.datetime") as mock_datetime:
+                tz = pytz.timezone("America/Chicago")
+                mock_now = datetime(2025, 12, 22, 10, 0)
+                mock_datetime.now.return_value = tz.localize(mock_now)
+                mock_datetime.combine = datetime.combine
+                mock_datetime.min = datetime.min
+
+                response = await booking_service._handle_confirm_intent(session)
 
             assert "scheduled" in response.lower() or "received" in response.lower()
             assert session.state == ConversationState.IDLE

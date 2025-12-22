@@ -142,8 +142,30 @@ class BookingService:
         request = booking.request
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
-        exec_time = booking.scheduled_execution_time
 
+        if booking.status == BookingStatus.SUCCESS:
+            booked_time_str = (
+                booking.actual_booked_time.strftime("%I:%M %p")
+                if booking.actual_booked_time
+                else time_str
+            )
+            return (
+                f"Booking confirmed! Reserved {date_str} at {booked_time_str} "
+                f"for {request.num_players} players."
+            )
+        elif booking.status == BookingStatus.FAILED:
+            return (
+                f"Booking attempted for {date_str} at {time_str} "
+                f"for {request.num_players} players, but it failed. "
+                f"I'll text you with more details."
+            )
+        elif booking.status == BookingStatus.IN_PROGRESS:
+            return (
+                f"Booking in progress for {date_str} at {time_str} "
+                f"for {request.num_players} players. I'll text you with the result."
+            )
+
+        exec_time = booking.scheduled_execution_time
         if exec_time:
             exec_str = exec_time.strftime("%A at %I:%M %p CT")
             return (
@@ -293,6 +315,10 @@ class BookingService:
         This is the public API for creating bookings, used by both the SMS
         conversation flow and the REST API.
 
+        If the calculated execution time is in the past (i.e., the booking window
+        has already opened), the booking is executed immediately instead of being
+        scheduled for later.
+
         Args:
             phone_number: The phone number to associate with the booking.
             request: The tee time request details.
@@ -312,7 +338,24 @@ class BookingService:
             scheduled_execution_time=execution_time,
         )
 
-        return await database_service.create_booking(booking)
+        created_booking = await database_service.create_booking(booking)
+
+        # Compare in timezone-aware space for robustness.
+        # execution_time is naive (CT wall-clock), so we localize it.
+        # This approach is safe even if _calculate_execution_time() is later
+        # changed to return an aware datetime.
+        tz = pytz.timezone(settings.timezone)
+        now_ct = datetime.now(tz)
+        if execution_time.tzinfo is None:
+            exec_ct = tz.localize(execution_time)
+        else:
+            exec_ct = execution_time.astimezone(tz)
+
+        if exec_ct <= now_ct:
+            await self.execute_booking(created_booking.id)
+            return await database_service.get_booking(created_booking.id) or created_booking
+
+        return created_booking
 
     async def get_booking(self, booking_id: str) -> TeeTimeBooking | None:
         """
