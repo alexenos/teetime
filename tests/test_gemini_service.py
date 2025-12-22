@@ -130,6 +130,9 @@ class TestGeminiServiceBuildParsedIntent:
 
     def test_build_book_intent_complete(self, gemini_service: GeminiService) -> None:
         """Test building a complete book intent."""
+        # Use a fixed date in the past relative to a mocked "today" to test the safety check
+        # doesn't incorrectly adjust future dates
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)  # Mock today as Dec 15, 2025
         args = {
             "intent": "book",
             "requested_date": "2025-12-20",
@@ -138,7 +141,10 @@ class TestGeminiServiceBuildParsedIntent:
             "response_message": "I'll book that for you!",
         }
 
-        result = gemini_service._build_parsed_intent(args)
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._build_parsed_intent(args)
 
         assert result.intent == "book"
         assert result.tee_time_request is not None
@@ -327,6 +333,9 @@ class TestGeminiServiceParseMessage:
         self, gemini_service: GeminiService
     ) -> None:
         """Test that parse_message correctly processes a successful Gemini API response."""
+        # Mock today as Dec 15, 2025 so Dec 20, 2025 is in the future
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)
+
         mock_function_call = MagicMock()
         mock_function_call.args = {
             "intent": "book",
@@ -351,7 +360,10 @@ class TestGeminiServiceParseMessage:
         with patch.object(gemini_service, "_model", MagicMock()):
             gemini_service._model.generate_content = MagicMock(return_value=mock_response)
 
-            result = await gemini_service.parse_message("Book Saturday 8am for 4 players")
+            with patch("app.services.gemini_service.datetime") as mock_datetime:
+                mock_datetime.now.return_value = fixed_now
+                mock_datetime.strptime = datetime.strptime
+                result = await gemini_service.parse_message("Book Saturday 8am for 4 players")
 
             assert result.intent == "book"
             assert result.tee_time_request is not None
