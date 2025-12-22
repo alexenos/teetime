@@ -277,6 +277,65 @@ class TestBookingsEndpoints:
             assert response.json()["detail"] == "Booking not found"
 
 
+class TestGetExternalUrl:
+    """Tests for the get_external_url helper function."""
+
+    def test_get_external_url_with_forwarded_headers(self) -> None:
+        """Test URL reconstruction with X-Forwarded-* headers (Cloud Run scenario)."""
+        from unittest.mock import MagicMock
+
+        from app.api.webhooks import get_external_url
+
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "teetime-123.us-central1.run.app",
+            "host": "localhost:8080",
+        }
+        mock_request.url.scheme = "http"
+        mock_request.url.netloc = "localhost:8080"
+        mock_request.url.path = "/webhooks/twilio/sms"
+        mock_request.url.query = ""
+
+        result = get_external_url(mock_request)
+
+        assert result == "https://teetime-123.us-central1.run.app/webhooks/twilio/sms"
+
+    def test_get_external_url_without_forwarded_headers(self) -> None:
+        """Test URL reconstruction without forwarded headers (local dev)."""
+        from unittest.mock import MagicMock
+
+        from app.api.webhooks import get_external_url
+
+        mock_request = MagicMock()
+        mock_request.headers = {"host": "localhost:8000"}
+        mock_request.url.scheme = "http"
+        mock_request.url.netloc = "localhost:8000"
+        mock_request.url.path = "/webhooks/twilio/sms"
+        mock_request.url.query = ""
+
+        result = get_external_url(mock_request)
+
+        assert result == "http://localhost:8000/webhooks/twilio/sms"
+
+    def test_get_external_url_with_query_string(self) -> None:
+        """Test URL reconstruction preserves query string."""
+        from unittest.mock import MagicMock
+
+        from app.api.webhooks import get_external_url
+
+        mock_request = MagicMock()
+        mock_request.headers = {"host": "example.com"}
+        mock_request.url.scheme = "https"
+        mock_request.url.netloc = "example.com"
+        mock_request.url.path = "/webhooks/twilio/sms"
+        mock_request.url.query = "foo=bar"
+
+        result = get_external_url(mock_request)
+
+        assert result == "https://example.com/webhooks/twilio/sms?foo=bar"
+
+
 class TestWebhookEndpoints:
     """Tests for Twilio webhook endpoints."""
 
