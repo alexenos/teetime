@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from app.api import bookings, health, jobs, webhooks
 from app.config import settings
 from app.models.database import init_db
-from app.providers.walden_provider import MockWaldenProvider
+from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
 from app.services.booking_service import booking_service
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Set SCHEDULER_API_KEY environment variable for production use."
         )
 
-    provider = MockWaldenProvider()
+    if settings.walden_member_number and settings.walden_password:
+        logger.info("Walden Golf credentials configured - using real WaldenGolfProvider")
+        provider = WaldenGolfProvider()
+    else:
+        logger.warning(
+            "Walden Golf credentials not configured - using MockWaldenProvider. "
+            "Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD for real bookings."
+        )
+        provider = MockWaldenProvider()
     booking_service.set_reservation_provider(provider)
 
     yield
