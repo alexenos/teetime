@@ -302,23 +302,23 @@ class WaldenGolfProvider(ReservationProvider):
         )
         driver = self._create_driver()
         try:
-            logger.info("BOOKING_DEBUG: Step 1/5 - Logging in to Walden Golf")
+            logger.debug("BOOKING_DEBUG: Step 1/5 - Logging in to Walden Golf")
             if not self._perform_login(driver):
                 logger.error("BOOKING_DEBUG: Login failed")
                 return BookingResult(
                     success=False,
                     error_message="Failed to log in to Walden Golf",
                 )
-            logger.info("BOOKING_DEBUG: Login successful")
+            logger.debug("BOOKING_DEBUG: Login successful")
 
-            logger.info("BOOKING_DEBUG: Step 2/5 - Navigating to tee time booking page")
+            logger.debug("BOOKING_DEBUG: Step 2/5 - Navigating to tee time booking page")
             driver.get(self.TEE_TIME_URL)
 
             wait = WebDriverWait(driver, 15)
             wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
-            logger.info(f"BOOKING_DEBUG: Tee time page loaded. URL: {driver.current_url}")
+            logger.debug(f"BOOKING_DEBUG: Tee time page loaded. URL: {driver.current_url}")
 
-            logger.info("BOOKING_DEBUG: Step 3/5 - Selecting course and date")
+            logger.debug("BOOKING_DEBUG: Step 3/5 - Selecting course and date")
             self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
             self._select_date_sync(driver, target_date)
 
@@ -330,9 +330,9 @@ class WaldenGolfProvider(ReservationProvider):
                     )
                 )
             )
-            logger.info("BOOKING_DEBUG: Course and date selection complete")
+            logger.debug("BOOKING_DEBUG: Course and date selection complete")
 
-            logger.info("BOOKING_DEBUG: Step 4/5 - Finding and booking time slot")
+            logger.debug("BOOKING_DEBUG: Step 4/5 - Finding and booking time slot")
             result = self._find_and_book_time_slot_sync(
                 driver, target_time, num_players, fallback_window_minutes
             )
@@ -359,7 +359,7 @@ class WaldenGolfProvider(ReservationProvider):
                 error_message=f"Booking error: {str(e)}",
             )
         finally:
-            logger.info("BOOKING_DEBUG: === BOOKING ATTEMPT COMPLETE - Closing driver ===")
+            logger.debug("BOOKING_DEBUG: === BOOKING ATTEMPT COMPLETE - Closing driver ===")
             driver.quit()
 
     def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> None:
@@ -399,7 +399,7 @@ class WaldenGolfProvider(ReservationProvider):
         day_name = target_date.strftime("%A")
         date_str = target_date.strftime("%m/%d/%Y")
         date_str_alt = target_date.strftime("%Y-%m-%d")
-        logger.info(f"BOOKING_DEBUG: Selecting date {target_date} ({day_name})")
+        logger.debug(f"BOOKING_DEBUG: Selecting date {target_date} ({day_name})")
 
         date_input_selectors = [
             "input[type='text'][id*='date']",
@@ -449,12 +449,12 @@ class WaldenGolfProvider(ReservationProvider):
             "BOOKING_DEBUG: No date input found with standard selectors, trying day tabs..."
         )
         if self._select_date_via_tabs_sync(driver, target_date):
-            logger.info("BOOKING_DEBUG: Date selection via tabs successful")
+            logger.debug("BOOKING_DEBUG: Date selection via tabs successful")
             return
 
-        logger.info("BOOKING_DEBUG: Day tabs not found, trying calendar picker...")
+        logger.debug("BOOKING_DEBUG: Day tabs not found, trying calendar picker...")
         if self._select_date_via_calendar_sync(driver, target_date):
-            logger.info("BOOKING_DEBUG: Date selection via calendar successful")
+            logger.debug("BOOKING_DEBUG: Date selection via calendar successful")
         else:
             logger.warning("BOOKING_DEBUG: All date selection methods failed")
 
@@ -533,7 +533,7 @@ class WaldenGolfProvider(ReservationProvider):
         """
         day_name = target_date.strftime("%A")
         date_str = target_date.strftime("%m/%d")
-        logger.info(f"BOOKING_DEBUG: Looking for day tab for {day_name} ({date_str})")
+        logger.debug(f"BOOKING_DEBUG: Looking for day tab for {day_name} ({date_str})")
 
         try:
             day_tabs = driver.find_elements(
@@ -541,7 +541,7 @@ class WaldenGolfProvider(ReservationProvider):
                 ".day-tab, [class*='day-tab'], a[href*='day'], "
                 "[data-day], .teetime-day-tab, .nav-tabs a",
             )
-            logger.info(f"BOOKING_DEBUG: Found {len(day_tabs)} potential day tabs")
+            logger.debug(f"BOOKING_DEBUG: Found {len(day_tabs)} potential day tabs")
 
             for i, tab in enumerate(day_tabs):
                 tab_text = tab.text.lower()
@@ -551,7 +551,7 @@ class WaldenGolfProvider(ReservationProvider):
                     try:
                         wait.until(expected_conditions.element_to_be_clickable(tab))
                         tab.click()
-                        logger.info(f"BOOKING_DEBUG: Clicked day tab: {day_name}")
+                        logger.debug(f"BOOKING_DEBUG: Clicked day tab: {day_name}")
                         wait.until(expected_conditions.staleness_of(tab))
                     except TimeoutException:
                         tab.click()
@@ -584,7 +584,9 @@ class WaldenGolfProvider(ReservationProvider):
             True if player count was successfully selected, False otherwise
         """
         try:
-            logger.info(f"BOOKING_DEBUG: Starting player count selection for {num_players} players")
+            logger.debug(
+                f"BOOKING_DEBUG: Starting player count selection for {num_players} players"
+            )
             # Wait for the player count button group to appear
             time_module.sleep(1)
 
@@ -647,7 +649,7 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                         return False
 
-                    logger.info(f"BOOKING_DEBUG: Successfully selected {num_players} players")
+                    logger.debug(f"BOOKING_DEBUG: Successfully selected {num_players} players")
                     return True
                 except NoSuchElementException:
                     logger.warning(
@@ -702,7 +704,7 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             True if expected number of rows found, False otherwise
         """
-        logger.info(f"BOOKING_DEBUG: Verifying {expected_players} player rows appeared")
+        logger.debug(f"BOOKING_DEBUG: Verifying {expected_players} player rows appeared")
 
         # Wait a bit for the DOM to update after player count selection
         time_module.sleep(2)
@@ -734,7 +736,7 @@ class WaldenGolfProvider(ReservationProvider):
         # Log diagnostic info about what we found
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
-            logger.info(f"BOOKING_DEBUG: Page has {len(tables)} tables total")
+            logger.debug(f"BOOKING_DEBUG: Page has {len(tables)} tables total")
             for i, table in enumerate(tables[:5]):
                 table_id = table.get_attribute("id") or "no-id"
                 table_class = table.get_attribute("class") or "no-class"
@@ -810,7 +812,7 @@ class WaldenGolfProvider(ReservationProvider):
                         break
 
                 if guest_index == 0:
-                    logger.info(f"BOOKING_DEBUG: Initial player row count: {len(player_rows)}")
+                    logger.debug(f"BOOKING_DEBUG: Initial player row count: {len(player_rows)}")
                     if len(player_rows) == 0:
                         # Log page structure for debugging
                         try:
@@ -1536,7 +1538,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             # Use JavaScript click to bypass any overlay issues
             driver.execute_script("arguments[0].click();", reserve_element)
-            logger.info("BOOKING_DEBUG: Clicked Reserve button")
+            logger.debug("BOOKING_DEBUG: Clicked Reserve button")
 
             try:
                 wait.until(
@@ -1547,11 +1549,11 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                     )
                 )
-                logger.info("BOOKING_DEBUG: Booking dialog/modal appeared")
+                logger.debug("BOOKING_DEBUG: Booking dialog/modal appeared")
             except TimeoutException:
-                logger.info("BOOKING_DEBUG: No modal detected, continuing with page")
+                logger.debug("BOOKING_DEBUG: No modal detected, continuing with page")
 
-            logger.info(f"BOOKING_DEBUG: Selecting player count: {num_players}")
+            logger.debug(f"BOOKING_DEBUG: Selecting player count: {num_players}")
             if not self._select_player_count_sync(driver, num_players):
                 logger.error(f"BOOKING_DEBUG: Failed to select {num_players} players")
                 self._capture_diagnostic_info(driver, "player_count_selection_failed")
@@ -1560,12 +1562,12 @@ class WaldenGolfProvider(ReservationProvider):
                     error_message=f"Failed to select {num_players} players",
                     booked_time=booked_time,
                 )
-            logger.info("BOOKING_DEBUG: Player count selection successful")
+            logger.debug("BOOKING_DEBUG: Player count selection successful")
 
             # If booking for multiple players, add TBD Registered Guests for the additional slots
             if num_players > 1:
                 num_tbd_guests = num_players - 1
-                logger.info(f"BOOKING_DEBUG: Adding {num_tbd_guests} TBD Registered Guests")
+                logger.debug(f"BOOKING_DEBUG: Adding {num_tbd_guests} TBD Registered Guests")
                 if not self._add_tbd_registered_guests_sync(driver, num_tbd_guests):
                     logger.error(f"BOOKING_DEBUG: Failed to add {num_tbd_guests} TBD guests")
                     self._capture_diagnostic_info(driver, "tbd_guest_registration_failed")
@@ -1574,11 +1576,11 @@ class WaldenGolfProvider(ReservationProvider):
                         error_message=f"Failed to add {num_tbd_guests} TBD Registered Guests",
                         booked_time=booked_time,
                     )
-                logger.info("BOOKING_DEBUG: TBD guest registration successful")
+                logger.debug("BOOKING_DEBUG: TBD guest registration successful")
 
             try:
                 # Wait for the booking form to load
-                logger.info("BOOKING_DEBUG: Looking for Book Now button")
+                logger.debug("BOOKING_DEBUG: Looking for Book Now button")
                 time_module.sleep(2)
 
                 # Scroll down to make sure the Book Now button is visible
@@ -1593,9 +1595,9 @@ class WaldenGolfProvider(ReservationProvider):
                     confirm_button = driver.find_element(
                         By.CSS_SELECTOR, "a[id*='bookTeeTimeAction']"
                     )
-                    logger.info("BOOKING_DEBUG: Found Book Now button by ID")
+                    logger.debug("BOOKING_DEBUG: Found Book Now button by ID")
                 except NoSuchElementException:
-                    logger.info("BOOKING_DEBUG: Book Now button not found by ID, trying XPath")
+                    logger.debug("BOOKING_DEBUG: Book Now button not found by ID, trying XPath")
                     # Fallback to XPath with text content
                     confirm_button = wait.until(
                         expected_conditions.element_to_be_clickable(
@@ -1625,7 +1627,7 @@ class WaldenGolfProvider(ReservationProvider):
 
                 current_url = driver.current_url
                 driver.execute_script("arguments[0].click();", confirm_button)
-                logger.info("BOOKING_DEBUG: Clicked Book Now button")
+                logger.debug("BOOKING_DEBUG: Clicked Book Now button")
 
                 try:
                     wait.until(expected_conditions.url_changes(current_url))
@@ -1646,14 +1648,14 @@ class WaldenGolfProvider(ReservationProvider):
                     )
 
             except TimeoutException:
-                logger.info("BOOKING_DEBUG: No confirmation dialog found - booking may be direct")
+                logger.debug("BOOKING_DEBUG: No confirmation dialog found - booking may be direct")
 
             confirmation_number = self._extract_confirmation_number(driver)
-            logger.info(f"BOOKING_DEBUG: Extracted confirmation number: {confirmation_number}")
+            logger.debug(f"BOOKING_DEBUG: Extracted confirmation number: {confirmation_number}")
 
-            logger.info("BOOKING_DEBUG: Verifying booking success")
+            logger.debug("BOOKING_DEBUG: Verifying booking success")
             if self._verify_booking_success(driver):
-                logger.info("BOOKING_DEBUG: Booking verification PASSED")
+                logger.debug("BOOKING_DEBUG: Booking verification PASSED")
                 return BookingResult(
                     success=True,
                     booked_time=booked_time,
@@ -1759,7 +1761,7 @@ class WaldenGolfProvider(ReservationProvider):
                     found_successes.append(indicator)
 
             if found_successes:
-                logger.info(f"BOOKING_DEBUG: Found success indicator(s): {found_successes}")
+                logger.debug(f"BOOKING_DEBUG: Found success indicator(s): {found_successes}")
                 return True
 
             logger.warning(

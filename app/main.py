@@ -1,4 +1,5 @@
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,34 @@ from app.models.database import init_db
 from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
 from app.services.booking_service import booking_service
 
+
+def configure_logging() -> None:
+    """
+    Configure logging for the application.
+
+    For GCP Cloud Run, logs to stdout are automatically captured by Cloud Logging.
+    Set LOG_LEVEL=DEBUG environment variable to see BOOKING_DEBUG messages.
+    """
+    log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
+
+    # Configure root logger to capture all app logs
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+        force=True,  # Override any existing configuration
+    )
+
+    # Ensure our app loggers use the configured level
+    logging.getLogger("app").setLevel(log_level)
+
+    # Reduce noise from third-party libraries unless in debug mode
+    if log_level > logging.DEBUG:
+        logging.getLogger("selenium").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

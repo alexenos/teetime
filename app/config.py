@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     scheduler_service_account: str = ""
     oidc_audience: str = ""  # Expected OIDC audience (Cloud Run service URL)
 
+    # Logging configuration
+    log_level: str = "INFO"  # Set to "DEBUG" to see BOOKING_DEBUG messages in GCP Cloud Logs
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
