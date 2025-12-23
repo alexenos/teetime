@@ -98,3 +98,9 @@ variable "container_image" {
   type        = string
   default     = ""
 }
+
+variable "log_level" {
+  description = "Application log level (DEBUG to see BOOKING_DEBUG messages)"
+  type        = string
+  default     = "INFO"
+}
