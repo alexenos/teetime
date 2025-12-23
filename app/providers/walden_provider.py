@@ -664,12 +664,36 @@ class WaldenGolfProvider(ReservationProvider):
                 player_num = guest_index + 2  # Players 2, 3, 4
 
                 # Re-find player rows each iteration to avoid stale references
-                player_rows = driver.find_elements(
-                    By.CSS_SELECTOR, "[id*='playersTable'] tbody tr[data-ri]"
-                )
+                # Try multiple selectors for player rows as the DOM structure may vary
+                player_rows = []
+                row_selectors = [
+                    "[id*='playersTable'] tbody tr[data-ri]",
+                    "[id*='player'] tbody tr[data-ri]",
+                    "table[id*='player'] tbody tr",
+                    ".player-row",
+                    "[class*='player-row']",
+                    "form table tbody tr",
+                ]
+
+                for row_selector in row_selectors:
+                    player_rows = driver.find_elements(By.CSS_SELECTOR, row_selector)
+                    if len(player_rows) > 1:  # Need at least 2 rows (primary + guests)
+                        logger.info(f"Found {len(player_rows)} player rows using: {row_selector}")
+                        break
 
                 if guest_index == 0:
-                    logger.info(f"Found {len(player_rows)} player rows")
+                    logger.info(f"Found {len(player_rows)} player rows total")
+                    if len(player_rows) == 0:
+                        # Log page structure for debugging
+                        try:
+                            tables = driver.find_elements(By.TAG_NAME, "table")
+                            logger.warning(f"No player rows found. Page has {len(tables)} tables")
+                            for i, table in enumerate(tables[:3]):
+                                table_id = table.get_attribute("id") or "no-id"
+                                table_class = table.get_attribute("class") or "no-class"
+                                logger.debug(f"Table {i}: id={table_id}, class={table_class}")
+                        except Exception:
+                            pass
 
                 # Check if we have enough rows
                 if len(player_rows) <= guest_index + 1:
@@ -679,22 +703,80 @@ class WaldenGolfProvider(ReservationProvider):
                 row = player_rows[guest_index + 1]  # Skip first row (primary player)
 
                 try:
-                    # Look for the TBD button in this row
+                    # Look for the TBD button in this row using multiple strategies
                     tbd_button = None
+
+                    # Strategy 1: CSS selectors for TBD button/link
                     tbd_selectors = [
                         "a[id*='tbd']",
                         "span[id*='tbd']",
+                        "button[id*='tbd']",
                         "[class*='btn-tbd']",
                         "a[class*='tbd']",
                         "span[class*='tbd']",
+                        "button[class*='tbd']",
+                        "a[id*='TBD']",
+                        "span[id*='TBD']",
+                        "button[id*='TBD']",
+                        "[class*='TBD']",
+                        # Common button patterns
+                        "a.ui-commandlink",
+                        "button.ui-button",
                     ]
 
                     for selector in tbd_selectors:
                         try:
                             tbd_button = row.find_element(By.CSS_SELECTOR, selector)
-                            break
+                            if tbd_button and tbd_button.is_displayed():
+                                logger.info(f"Found TBD button using CSS: {selector}")
+                                break
+                            tbd_button = None
                         except NoSuchElementException:
                             continue
+
+                    # Strategy 2: XPath text matching for "TBD" text
+                    if not tbd_button:
+                        try:
+                            # Look for any clickable element containing "TBD" text
+                            tbd_button = row.find_element(
+                                By.XPATH,
+                                ".//a[contains(text(), 'TBD')] | "
+                                ".//span[contains(text(), 'TBD')] | "
+                                ".//button[contains(text(), 'TBD')] | "
+                                ".//*[contains(@title, 'TBD')] | "
+                                ".//*[contains(@aria-label, 'TBD')]",
+                            )
+                            if tbd_button and tbd_button.is_displayed():
+                                logger.info("Found TBD button using XPath text match")
+                        except NoSuchElementException:
+                            pass
+
+                    # Strategy 3: Look for any link/button that might be the TBD action
+                    if not tbd_button:
+                        try:
+                            # Find all clickable elements in the row
+                            clickables = row.find_elements(
+                                By.CSS_SELECTOR, "a, button, span[onclick], div[onclick]"
+                            )
+                            for elem in clickables:
+                                elem_text = elem.text.strip().lower()
+                                elem_id = (elem.get_attribute("id") or "").lower()
+                                elem_class = (elem.get_attribute("class") or "").lower()
+                                if (
+                                    "tbd" in elem_text
+                                    or "tbd" in elem_id
+                                    or "tbd" in elem_class
+                                    or "guest" in elem_text
+                                ):
+                                    if elem.is_displayed():
+                                        tbd_button = elem
+                                        logger.info(
+                                            f"Found TBD button via clickable scan: "
+                                            f"text='{elem_text}', id='{elem_id}'"
+                                        )
+                                        break
+                        except Exception as e:
+                            logger.debug(f"Clickable scan failed: {e}")
 
                     if tbd_button:
                         # Click the TBD button
@@ -704,21 +786,40 @@ class WaldenGolfProvider(ReservationProvider):
                         time_module.sleep(1)  # Wait for the form to update
                     else:
                         # If no TBD button, try to find the player name input and type "TBD"
-                        try:
-                            player_input = row.find_element(
-                                By.CSS_SELECTOR, "input[id*='player_input']"
-                            )
-                            # Check if input is enabled
-                            if not player_input.get_attribute("disabled"):
-                                player_input.clear()
-                                player_input.send_keys("TBD Registered Guest")
-                                logger.info(f"Entered TBD Registered Guest for player {player_num}")
-                                tbd_buttons_added += 1
-                                time_module.sleep(0.5)
-                        except NoSuchElementException:
+                        player_input = None
+                        input_selectors = [
+                            "input[id*='player_input']",
+                            "input[id*='player']",
+                            "input[name*='player']",
+                            "input[type='text']",
+                            "input.ui-autocomplete-input",
+                        ]
+
+                        for input_selector in input_selectors:
+                            try:
+                                player_input = row.find_element(By.CSS_SELECTOR, input_selector)
+                                if player_input and player_input.is_displayed():
+                                    break
+                                player_input = None
+                            except NoSuchElementException:
+                                continue
+
+                        if player_input and not player_input.get_attribute("disabled"):
+                            player_input.clear()
+                            player_input.send_keys("TBD Registered Guest")
+                            logger.info(f"Entered TBD Registered Guest for player {player_num}")
+                            tbd_buttons_added += 1
+                            time_module.sleep(0.5)
+                        else:
                             logger.warning(
                                 f"Could not find TBD button or input for player {player_num}"
                             )
+                            # Log row content for debugging
+                            try:
+                                row_html = row.get_attribute("innerHTML")[:500]
+                                logger.debug(f"Row HTML snippet: {row_html}")
+                            except Exception:
+                                pass
 
                 except Exception as e:
                     logger.warning(f"Error adding TBD guest for player {player_num}: {e}")

@@ -17,11 +17,13 @@ The user can:
 5. Ask for help
 
 When parsing booking requests:
-- Dates can be relative (e.g., "Saturday", "next week", "tomorrow") or absolute (e.g., "December 20")
+- Dates can be relative (e.g., "Saturday", "next week", "tomorrow") or absolute (e.g., "December 20", "12/23")
 - Times can range from early morning to late afternoon (e.g., "8am", "7:30", "2pm", "5:30pm")
 - Tee times are available from opening until 5:54pm
 - Number of players defaults to 4 if not specified
 - "Same as last week" means repeat the previous booking
+
+IMPORTANT: When the user provides a date without a year (like "12/23" or "December 30"), you MUST use the current year provided in the context. If that date has already passed this year, use next year. Always return dates in YYYY-MM-DD format with the correct year.
 
 Always be friendly and confirm details before booking.
 If information is missing, ask for clarification.
@@ -136,9 +138,17 @@ class GeminiService:
             return self._mock_parse(message)
 
         try:
-            prompt = message
+            # Always include the current date so Gemini knows what year it is
+            today = datetime.now()
+            date_context = (
+                f"Today's date is {today.strftime('%A, %B %d, %Y')} "
+                f"({today.strftime('%Y-%m-%d')})."
+            )
+
+            prompt = f"{date_context}\n\n"
             if context:
-                prompt = f"Previous context: {context}\n\nUser message: {message}"
+                prompt += f"Previous context: {context}\n\n"
+            prompt += f"User message: {message}"
 
             response = self.model.generate_content(prompt)
 
@@ -170,6 +180,18 @@ class GeminiService:
             parsed_time = self._parse_time(args["requested_time"])
 
             if resolved_date and parsed_time:
+                # Safety check: if the date is in the past, Gemini likely returned
+                # the wrong year. Adjust to the next occurrence of that date.
+                today = datetime.now().date()
+                if resolved_date < today:
+                    # The date is in the past - try adding a year
+                    try:
+                        corrected_date = resolved_date.replace(year=resolved_date.year + 1)
+                        resolved_date = corrected_date
+                    except ValueError:
+                        # Handle Feb 29 edge case
+                        pass
+
                 tee_time_request = TeeTimeRequest(
                     requested_date=resolved_date,
                     requested_time=parsed_time,
