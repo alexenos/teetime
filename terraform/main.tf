@@ -143,6 +143,11 @@ resource "google_cloud_run_v2_service" "teetime" {
         value = local.cloud_run_url
       }
 
+      env {
+        name  = "LOG_LEVEL"
+        value = var.log_level
+      }
+
       dynamic "env" {
         for_each = toset(local.secrets)
         content {
