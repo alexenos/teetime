@@ -26,3 +26,7 @@ days_in_advance    = 7
 enable_cloud_sql    = true
 cloud_sql_tier      = "db-f1-micro"
 cloud_sql_disk_size = 10
+
+# Logging configuration
+# Set to "DEBUG" to see BOOKING_DEBUG messages in GCP Cloud Logs
+log_level = "DEBUG"
