@@ -295,10 +295,19 @@ class WaldenGolfProvider(ReservationProvider):
 
         Creates driver, performs booking, and ensures cleanup in finally block.
         """
+        # Calculate time range for logging
+        target_minutes = target_time.hour * 60 + target_time.minute
+        earliest_minutes = max(0, target_minutes - fallback_window_minutes)
+        latest_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+        earliest_time = time(earliest_minutes // 60, earliest_minutes % 60)
+        latest_time = time(latest_minutes // 60, latest_minutes % 60)
+
         logger.info(
             f"BOOKING_DEBUG: === STARTING BOOKING ATTEMPT === "
-            f"date={target_date}, time={target_time}, players={num_players}, "
-            f"fallback_window={fallback_window_minutes}min"
+            f"date={target_date} ({target_date.strftime('%A')}), "
+            f"requested_time={target_time.strftime('%H:%M')}, "
+            f"time_range={earliest_time.strftime('%H:%M')}-{latest_time.strftime('%H:%M')}, "
+            f"players={num_players}, fallback_window={fallback_window_minutes}min"
         )
         driver = self._create_driver()
         try:
@@ -948,17 +957,15 @@ class WaldenGolfProvider(ReservationProvider):
                             time_module.sleep(0.5)
                         else:
                             logger.warning(
-                                f"Could not find TBD button or input for player {player_num}"
+                                f"BOOKING_DEBUG: Could not find TBD button or input for player {player_num}"
                             )
-                            # Log row content for debugging
-                            try:
-                                row_html = row.get_attribute("innerHTML")[:500]
-                                logger.debug(f"Row HTML snippet: {row_html}")
-                            except Exception:
-                                pass
+                            # Log detailed element state for debugging
+                            self._log_row_element_state(driver, row, player_num)
 
                 except Exception as e:
-                    logger.warning(f"Error adding TBD guest for player {player_num}: {e}")
+                    logger.warning(
+                        f"BOOKING_DEBUG: Error adding TBD guest for player {player_num}: {e}"
+                    )
 
             if tbd_buttons_added == num_tbd_guests:
                 logger.info(f"Successfully added {tbd_buttons_added} TBD Registered Guests")
@@ -1502,6 +1509,80 @@ class WaldenGolfProvider(ReservationProvider):
 
         except Exception as e:
             logger.warning(f"Failed to capture diagnostic info: {e}")
+
+    def _log_row_element_state(self, driver: webdriver.Chrome, row: Any, player_num: int) -> None:
+        """
+        Log detailed element state when TBD button detection fails.
+
+        Captures HTML snippet and element attributes to help debug why
+        the TBD button couldn't be found.
+
+        Args:
+            driver: The WebDriver instance
+            row: The player row element that was being processed
+            player_num: The player number (2, 3, or 4) for context
+        """
+        try:
+            # Log current page context
+            logger.debug(
+                f"BOOKING_DEBUG: TBD detection failed for player {player_num}. "
+                f"URL: {driver.current_url}, Title: {driver.title}"
+            )
+
+            # Log row HTML snippet (truncated to avoid log bloat)
+            try:
+                row_html = row.get_attribute("outerHTML")
+                # Truncate to 2KB to stay within log limits
+                if len(row_html) > 2000:
+                    row_html = row_html[:2000] + "... [truncated]"
+                logger.debug(f"BOOKING_DEBUG: Row HTML for player {player_num}: {row_html}")
+            except Exception as e:
+                logger.debug(f"BOOKING_DEBUG: Could not get row HTML: {e}")
+
+            # Log summary of clickable elements in the row
+            try:
+                clickables = row.find_elements(
+                    By.CSS_SELECTOR, "a, button, span[onclick], input, select"
+                )
+                element_summary = []
+                for i, elem in enumerate(clickables[:10]):  # Limit to first 10
+                    try:
+                        elem_info = {
+                            "tag": elem.tag_name,
+                            "id": elem.get_attribute("id") or "",
+                            "class": elem.get_attribute("class") or "",
+                            "text": (elem.text or "")[:50],
+                            "displayed": elem.is_displayed(),
+                            "enabled": elem.is_enabled(),
+                        }
+                        element_summary.append(elem_info)
+                    except Exception:
+                        continue
+
+                logger.debug(
+                    f"BOOKING_DEBUG: Clickable elements in row {player_num}: {element_summary}"
+                )
+            except Exception as e:
+                logger.debug(f"BOOKING_DEBUG: Could not enumerate clickables: {e}")
+
+            # Log the player table container if we can find it
+            try:
+                tables = driver.find_elements(
+                    By.CSS_SELECTOR, "[id*='player'], [class*='player'], table"
+                )
+                for table in tables[:3]:
+                    table_id = table.get_attribute("id") or "no-id"
+                    table_class = table.get_attribute("class") or "no-class"
+                    rows = table.find_elements(By.CSS_SELECTOR, "tr")
+                    logger.debug(
+                        f"BOOKING_DEBUG: Table context - id='{table_id}', "
+                        f"class='{table_class}', row_count={len(rows)}"
+                    )
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.debug(f"BOOKING_DEBUG: Error logging row element state: {e}")
 
     @with_retry(max_attempts=2, backoff_base=1.0)
     def _complete_booking_sync(
