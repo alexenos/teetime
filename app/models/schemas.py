@@ -117,6 +117,8 @@ class ConversationState(str, Enum):
         AWAITING_TIME: Asked the user for a time, waiting for response.
         AWAITING_PLAYERS: Asked the user for number of players, waiting for response.
         AWAITING_CONFIRMATION: All details collected, waiting for user to confirm.
+        AWAITING_CANCELLATION_SELECTION: User has multiple bookings and we asked
+            which one to cancel. Waiting for them to specify which booking.
     """
 
     IDLE = "idle"
@@ -124,6 +126,7 @@ class ConversationState(str, Enum):
     AWAITING_TIME = "awaiting_time"
     AWAITING_PLAYERS = "awaiting_players"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
+    AWAITING_CANCELLATION_SELECTION = "awaiting_cancellation_selection"
 
 
 class UserSession(BaseModel):

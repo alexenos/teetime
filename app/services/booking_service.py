@@ -96,6 +96,12 @@ class BookingService:
 
     async def _process_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         """Route the parsed intent to the appropriate handler."""
+        # Check if user is in the middle of selecting a booking to cancel
+        # This takes priority over Gemini's parsed intent to avoid misinterpreting
+        # date/time responses as new booking requests
+        if session.state == ConversationState.AWAITING_CANCELLATION_SELECTION:
+            return await self._handle_cancellation_selection(session, parsed)
+
         if parsed.intent == "book":
             return await self._handle_book_intent(session, parsed)
         elif parsed.intent == "confirm":
@@ -265,16 +271,119 @@ class BookingService:
                 f"{date_str} at {time_str}? Reply 'yes' to confirm."
             )
 
-        # Multiple bookings - ask which one to cancel
+        # Multiple bookings - ask which one to cancel and set state
+        # Sort by date/time for consistent ordering when user replies with a number
+        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
+        session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+
         status_lines = []
-        for booking in cancellable:
+        for i, booking in enumerate(cancellable, 1):
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             time_str = booking.request.requested_time.strftime("%I:%M %p")
             status_label = "confirmed" if booking.status == BookingStatus.SUCCESS else "scheduled"
-            status_lines.append(f"- {date_str} at {time_str} ({status_label})")
+            players = booking.request.num_players
+            status_lines.append(
+                f"{i}. {date_str} at {time_str} for {players} players ({status_label})"
+            )
 
-        return "Which booking would you like to cancel? Reply with the date.\n" + "\n".join(
+        return "Which booking would you like to cancel? Reply with the number.\n" + "\n".join(
             status_lines
+        )
+
+    async def _handle_cancellation_selection(
+        self, session: UserSession, parsed: ParsedIntent
+    ) -> str:
+        """
+        Handle user's response when selecting which booking to cancel.
+
+        This method is called when the session is in AWAITING_CANCELLATION_SELECTION state,
+        meaning we previously asked the user which booking they want to cancel from a list.
+        We try to match their response to one of their cancellable bookings using:
+        1. A number (e.g., "1", "2", "3") corresponding to the numbered list
+        2. A date/time extracted by Gemini as a fallback
+
+        Args:
+            session: The user's session.
+            parsed: The parsed intent from Gemini (may have extracted date/time info).
+
+        Returns:
+            Response message to send to the user.
+        """
+        user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
+        cancellable = [
+            b
+            for b in user_bookings
+            if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED, BookingStatus.SUCCESS]
+        ]
+
+        if not cancellable:
+            session.state = ConversationState.IDLE
+            return "You don't have any bookings to cancel."
+
+        # Sort by date/time for consistent ordering (same as when we displayed the list)
+        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
+
+        matched_booking = None
+        raw_message = (parsed.raw_message or "").strip()
+
+        # First, try to parse as a number (e.g., "1", "2", "3")
+        try:
+            selection_num = int(raw_message)
+            if 1 <= selection_num <= len(cancellable):
+                matched_booking = cancellable[selection_num - 1]
+        except ValueError:
+            pass
+
+        # If not a number, try to match by date/time from Gemini's parsing
+        if not matched_booking and parsed.tee_time_request:
+            target_date = parsed.tee_time_request.requested_date
+            target_time = parsed.tee_time_request.requested_time
+
+            # Find bookings matching the date
+            date_matches = [b for b in cancellable if b.request.requested_date == target_date]
+
+            if len(date_matches) == 1:
+                matched_booking = date_matches[0]
+            elif len(date_matches) > 1:
+                # Multiple bookings on same date - try to match by time
+                time_matches = [b for b in date_matches if b.request.requested_time == target_time]
+                if len(time_matches) == 1:
+                    matched_booking = time_matches[0]
+                elif len(time_matches) > 1:
+                    # Still multiple matches - tell user to use the number
+                    return (
+                        "You have multiple bookings at that time. "
+                        "Please reply with the number (1, 2, 3, etc.) from the list."
+                    )
+                else:
+                    # No exact time match, but multiple date matches
+                    # Tell user to use the number
+                    return (
+                        f"You have multiple bookings on {target_date.strftime('%B %d')}. "
+                        "Please reply with the number (1, 2, 3, etc.) from the list."
+                    )
+
+        if not matched_booking:
+            # Could not match - keep state and ask user to try again with number
+            return (
+                "I couldn't match that to a booking. "
+                "Please reply with the number (1, 2, 3, etc.) from the list."
+            )
+
+        # Found a matching booking - set up for confirmation
+        date_str = matched_booking.request.requested_date.strftime("%A, %B %d")
+        time_str = matched_booking.request.requested_time.strftime("%I:%M %p")
+        status_label = (
+            "confirmed" if matched_booking.status == BookingStatus.SUCCESS else "scheduled"
+        )
+
+        # Store the pending cancellation and transition to confirmation
+        session.pending_cancellation_id = matched_booking.id
+        session.state = ConversationState.IDLE
+
+        return (
+            f"Are you sure you want to cancel your {status_label} booking for "
+            f"{date_str} at {time_str}? Reply 'yes' to confirm."
         )
 
     async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> bool:
