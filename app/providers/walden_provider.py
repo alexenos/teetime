@@ -992,11 +992,12 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Find an available time slot and book it.
 
-        First tries the exact requested time, then searches within the fallback window
-        for the nearest available slot.
+        First scrolls through the datascroller to load all relevant time slots,
+        then searches for the requested time within the fallback window.
 
-        For 4-player bookings, prioritizes completely empty slots (with Reserve button)
-        since partially filled slots may not have enough spots.
+        Uses _find_empty_slots for all bookings (both single and multi-player)
+        to ensure both completely empty slots (with Reserve button) and partially
+        filled slots (with Available spans) are found.
 
         Args:
             driver: The WebDriver instance
@@ -1008,6 +1009,8 @@ class WaldenGolfProvider(ReservationProvider):
             BookingResult with booking outcome
         """
         target_minutes = target_time.hour * 60 + target_time.minute
+
+        self._scroll_to_load_all_slots(driver, target_time, fallback_window_minutes)
 
         northgate_section = None
         try:
@@ -1021,75 +1024,25 @@ class WaldenGolfProvider(ReservationProvider):
 
         search_context = northgate_section if northgate_section else driver
 
-        # For multi-player bookings, find slots with enough available spots
-        # This ensures we don't book a slot that can't accommodate all players
-        if num_players > 1:
-            slots_with_capacity = self._find_empty_slots(
-                search_context, min_available_spots=num_players
-            )
-            if slots_with_capacity:
-                logger.info(
-                    f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots"
-                )
+        slots_with_capacity = self._find_empty_slots(
+            search_context, min_available_spots=num_players
+        )
 
-                best_slot = None
-                best_diff = float("inf")
-
-                for slot_time, slot_element in slots_with_capacity:
-                    slot_minutes = slot_time.hour * 60 + slot_time.minute
-                    diff = abs(slot_minutes - target_minutes)
-
-                    if diff <= fallback_window_minutes and diff < best_diff:
-                        best_diff = diff
-                        best_slot = (slot_time, slot_element)
-
-                if best_slot:
-                    booked_time, reserve_element = best_slot
-                    logger.info(
-                        f"Attempting to book slot at {booked_time.strftime('%I:%M %p')} for {num_players} players"
-                    )
-                    return self._complete_booking_sync(
-                        driver, reserve_element, booked_time, num_players
-                    )
-                else:
-                    # No slots with enough capacity within the fallback window
-                    # Return error with helpful information
-                    all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
-                    return BookingResult(
-                        success=False,
-                        error_message=(
-                            f"No time slots with {num_players} available spots within "
-                            f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
-                        ),
-                        alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}"
-                        if all_times
-                        else None,
-                    )
-            else:
-                # No slots with enough capacity on this date
-                return BookingResult(
-                    success=False,
-                    error_message=(
-                        f"No time slots with {num_players} available spots found on this date. "
-                        f"All slots are either fully booked or have fewer than {num_players} spots available."
-                    ),
-                )
-
-        # For single-player bookings, use the standard available slots logic
-        available_slots = self._find_available_slots(search_context)
-
-        if not available_slots:
+        if not slots_with_capacity:
             return BookingResult(
                 success=False,
-                error_message="No available time slots found for the selected date",
+                error_message=(
+                    f"No time slots with {num_players} available spots found on this date. "
+                    f"All slots are either fully booked or have fewer than {num_players} spots available."
+                ),
             )
 
-        logger.info(f"Found {len(available_slots)} available slots")
+        logger.info(f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots")
 
         best_slot = None
         best_diff = float("inf")
 
-        for slot_time, slot_element in available_slots:
+        for slot_time, slot_element in slots_with_capacity:
             slot_minutes = slot_time.hour * 60 + slot_time.minute
             diff = abs(slot_minutes - target_minutes)
 
@@ -1097,23 +1050,116 @@ class WaldenGolfProvider(ReservationProvider):
                 best_diff = diff
                 best_slot = (slot_time, slot_element)
 
-        if best_slot is None:
-            available_times = [t.strftime("%I:%M %p") for t, _ in available_slots[:5]]
+        if best_slot:
+            booked_time, reserve_element = best_slot
+            logger.info(
+                f"Attempting to book slot at {booked_time.strftime('%I:%M %p')} for {num_players} players"
+            )
+            return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+        else:
+            all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
             return BookingResult(
                 success=False,
                 error_message=(
-                    f"No available times within {fallback_window_minutes} minutes "
-                    f"of {target_time.strftime('%I:%M %p')}"
+                    f"No time slots with {num_players} available spots within "
+                    f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
                 ),
-                alternatives=f"Available times: {', '.join(available_times)}",
+                alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}"
+                if all_times
+                else None,
             )
 
-        booked_time, reserve_element = best_slot
+    def _scroll_to_load_all_slots(
+        self,
+        driver: webdriver.Chrome,
+        target_time: time,
+        fallback_window_minutes: int,
+    ) -> None:
+        """
+        Scroll through the datascroller to load all tee time slots.
+
+        The Walden Golf tee sheet uses a PrimeFaces datascroller component that
+        lazy-loads rows as the user scrolls. This method scrolls through the
+        datascroller to ensure all relevant time slots are loaded before searching.
+
+        The scrolling stops when either:
+        1. The last visible time is past target_time + fallback_window, or
+        2. No new items appear after multiple scroll attempts
+
+        Args:
+            driver: The WebDriver instance
+            target_time: The target tee time being searched for
+            fallback_window_minutes: The fallback window in minutes
+        """
+        max_scroll_attempts = 50
+        no_change_threshold = 3
+        no_change_count = 0
+        previous_item_count = 0
+
+        target_minutes = target_time.hour * 60 + target_time.minute
+        max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+
         logger.info(
-            f"Attempting to book {booked_time.strftime('%I:%M %p')} for {num_players} players"
+            f"BOOKING_DEBUG: Starting datascroller scroll to load slots up to "
+            f"{time(max_time_minutes // 60, max_time_minutes % 60).strftime('%I:%M %p')}"
         )
 
-        return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+        for attempt in range(max_scroll_attempts):
+            try:
+                slot_items = driver.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+                current_item_count = len(slot_items)
+
+                if current_item_count == previous_item_count:
+                    no_change_count += 1
+                    if no_change_count >= no_change_threshold:
+                        logger.info(
+                            f"BOOKING_DEBUG: No new items after {no_change_threshold} scrolls. "
+                            f"Total items loaded: {current_item_count}"
+                        )
+                        break
+                else:
+                    no_change_count = 0
+                    previous_item_count = current_item_count
+
+                if slot_items:
+                    last_slot = slot_items[-1]
+                    last_time = self._extract_time_from_slot_item(last_slot)
+
+                    if last_time:
+                        last_time_minutes = last_time.hour * 60 + last_time.minute
+                        logger.debug(
+                            f"BOOKING_DEBUG: Scroll attempt {attempt + 1}: "
+                            f"{current_item_count} items, last time: {last_time.strftime('%I:%M %p')}"
+                        )
+
+                        if last_time_minutes >= max_time_minutes:
+                            logger.info(
+                                f"BOOKING_DEBUG: Loaded slots past target window. "
+                                f"Last time: {last_time.strftime('%I:%M %p')}, "
+                                f"Total items: {current_item_count}"
+                            )
+                            break
+
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'end'});", last_slot)
+                    time_module.sleep(0.3)
+
+                    datascroller = driver.find_elements(
+                        By.CSS_SELECTOR, ".ui-datascroller-content, .ui-datascroller-list"
+                    )
+                    if datascroller:
+                        driver.execute_script(
+                            "arguments[0].scrollTop = arguments[0].scrollHeight;",
+                            datascroller[0],
+                        )
+                        time_module.sleep(0.3)
+
+            except Exception as e:
+                logger.debug(f"BOOKING_DEBUG: Scroll attempt {attempt + 1} error: {e}")
+                time_module.sleep(0.2)
+
+        logger.info(
+            f"BOOKING_DEBUG: Finished scrolling. Total slot items loaded: {previous_item_count}"
+        )
 
     def _find_empty_slots(
         self, search_context: Any, min_available_spots: int | None = None
