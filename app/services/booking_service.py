@@ -272,16 +272,21 @@ class BookingService:
             )
 
         # Multiple bookings - ask which one to cancel and set state
+        # Sort by date/time for consistent ordering when user replies with a number
+        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
         session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
 
         status_lines = []
-        for booking in cancellable:
+        for i, booking in enumerate(cancellable, 1):
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             time_str = booking.request.requested_time.strftime("%I:%M %p")
             status_label = "confirmed" if booking.status == BookingStatus.SUCCESS else "scheduled"
-            status_lines.append(f"- {date_str} at {time_str} ({status_label})")
+            players = booking.request.num_players
+            status_lines.append(
+                f"{i}. {date_str} at {time_str} for {players} players ({status_label})"
+            )
 
-        return "Which booking would you like to cancel? Reply with the date.\n" + "\n".join(
+        return "Which booking would you like to cancel? Reply with the number.\n" + "\n".join(
             status_lines
         )
 
@@ -293,7 +298,9 @@ class BookingService:
 
         This method is called when the session is in AWAITING_CANCELLATION_SELECTION state,
         meaning we previously asked the user which booking they want to cancel from a list.
-        We try to match their response (date/time) to one of their cancellable bookings.
+        We try to match their response to one of their cancellable bookings using:
+        1. A number (e.g., "1", "2", "3") corresponding to the numbered list
+        2. A date/time extracted by Gemini as a fallback
 
         Args:
             session: The user's session.
@@ -313,12 +320,22 @@ class BookingService:
             session.state = ConversationState.IDLE
             return "You don't have any bookings to cancel."
 
-        # Try to match the user's response to a booking
-        # First, check if Gemini extracted a date/time from the message
-        matched_booking = None
+        # Sort by date/time for consistent ordering (same as when we displayed the list)
+        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
 
-        if parsed.tee_time_request:
-            # Gemini parsed a date (and possibly time) from the user's message
+        matched_booking = None
+        raw_message = (parsed.raw_message or "").strip()
+
+        # First, try to parse as a number (e.g., "1", "2", "3")
+        try:
+            selection_num = int(raw_message)
+            if 1 <= selection_num <= len(cancellable):
+                matched_booking = cancellable[selection_num - 1]
+        except ValueError:
+            pass
+
+        # If not a number, try to match by date/time from Gemini's parsing
+        if not matched_booking and parsed.tee_time_request:
             target_date = parsed.tee_time_request.requested_date
             target_time = parsed.tee_time_request.requested_time
 
@@ -333,29 +350,24 @@ class BookingService:
                 if len(time_matches) == 1:
                     matched_booking = time_matches[0]
                 elif len(time_matches) > 1:
-                    # Still multiple matches - ask for clarification
-                    session.state = ConversationState.IDLE
+                    # Still multiple matches - tell user to use the number
                     return (
                         "You have multiple bookings at that time. "
-                        "Please try cancelling again and specify more details."
+                        "Please reply with the number (1, 2, 3, etc.) from the list."
                     )
                 else:
                     # No exact time match, but multiple date matches
-                    # List the times available on that date
-                    times_list = ", ".join(
-                        b.request.requested_time.strftime("%I:%M %p") for b in date_matches
-                    )
+                    # Tell user to use the number
                     return (
                         f"You have multiple bookings on {target_date.strftime('%B %d')}. "
-                        f"Which time? Available: {times_list}"
+                        "Please reply with the number (1, 2, 3, etc.) from the list."
                     )
 
         if not matched_booking:
-            # Could not match - reset state and ask user to try again
-            session.state = ConversationState.IDLE
+            # Could not match - keep state and ask user to try again with number
             return (
-                "I couldn't find a booking matching that date. "
-                "Please say 'cancel' to see your bookings and try again."
+                "I couldn't match that to a booking. "
+                "Please reply with the number (1, 2, 3, etc.) from the list."
             )
 
         # Found a matching booking - set up for confirmation

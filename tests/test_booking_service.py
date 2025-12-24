@@ -880,13 +880,57 @@ class TestBookingServiceIntentHandling:
             assert sample_session.state == ConversationState.IDLE
 
     @pytest.mark.asyncio
-    async def test_cancellation_selection_no_match_resets_state(
+    async def test_cancellation_selection_by_number(
         self,
         booking_service: BookingService,
         sample_session: UserSession,
         sample_request: TeeTimeRequest,
     ) -> None:
-        """Test that when user's date doesn't match any booking, state is reset."""
+        """Test that user can select a booking to cancel by number."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+
+        booking1 = TeeTimeBooking(
+            id="booking1",
+            phone_number=sample_session.phone_number,
+            request=sample_request,  # Dec 20 at 8:00 AM
+            status=BookingStatus.SCHEDULED,
+        )
+        booking2 = TeeTimeBooking(
+            id="booking2",
+            phone_number=sample_session.phone_number,
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 21),
+                requested_time=time(9, 0),
+                num_players=2,
+            ),
+            status=BookingStatus.SUCCESS,
+        )
+
+        # User replies with "2" to select the second booking
+        parsed = ParsedIntent(
+            intent="unclear",
+            raw_message="2",
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booking1, booking2])
+
+            response = await booking_service._process_intent(sample_session, parsed)
+
+            # Should ask for confirmation to cancel booking2
+            assert "cancel" in response.lower()
+            assert "Sunday, December 21" in response
+            assert sample_session.pending_cancellation_id == "booking2"
+            assert sample_session.state == ConversationState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_no_match_keeps_state(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_request: TeeTimeRequest,
+    ) -> None:
+        """Test that when user's date doesn't match any booking, state is kept for retry."""
         sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
 
         booking1 = TeeTimeBooking(
@@ -911,10 +955,11 @@ class TestBookingServiceIntentHandling:
 
             response = await booking_service._process_intent(sample_session, parsed)
 
-            # Should indicate no match found
-            assert "couldn't find" in response.lower() or "cancel" in response.lower()
-            # State should be reset to IDLE
-            assert sample_session.state == ConversationState.IDLE
+            # Should indicate no match found and ask for number
+            assert "couldn't match" in response.lower()
+            assert "number" in response.lower()
+            # State should remain AWAITING_CANCELLATION_SELECTION so user can try again
+            assert sample_session.state == ConversationState.AWAITING_CANCELLATION_SELECTION
 
 
 class TestBookingServiceProcessIntent:

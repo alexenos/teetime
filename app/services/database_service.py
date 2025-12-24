@@ -74,6 +74,7 @@ class DatabaseService:
             phone_number=session.phone_number,
             state=session.state,
             pending_request_json=pending_json,
+            pending_cancellation_id=session.pending_cancellation_id,
             last_interaction=session.last_interaction,
         )
 
@@ -88,6 +89,7 @@ class DatabaseService:
             phone_number=record.phone_number,  # type: ignore[arg-type]
             state=record.state,  # type: ignore[arg-type]
             pending_request=pending_request,
+            pending_cancellation_id=record.pending_cancellation_id,  # type: ignore[arg-type]
             last_interaction=record.last_interaction,  # type: ignore[arg-type]
         )
 
@@ -182,6 +184,7 @@ class DatabaseService:
             if session.pending_request:
                 pending_json = session.pending_request.model_dump_json()
             record.pending_request_json = pending_json  # type: ignore[assignment]
+            record.pending_cancellation_id = session.pending_cancellation_id  # type: ignore[assignment]
             record.last_interaction = session.last_interaction  # type: ignore[assignment]
 
             await db.commit()

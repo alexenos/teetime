@@ -85,6 +85,8 @@ class SessionRecord(Base):
         state: Current conversation state (see ConversationState enum).
         pending_request_json: JSON-serialized TeeTimeRequest being built
             through the conversation. NULL when state is IDLE.
+        pending_cancellation_id: Booking ID awaiting cancellation confirmation.
+            Set when user requests to cancel and we're waiting for confirmation.
         last_interaction: Timestamp of the user's last message.
     """
 
@@ -94,6 +96,7 @@ class SessionRecord(Base):
     phone_number = Column(String(20), unique=True, nullable=False, index=True)
     state: Column[Any] = Column(Enum(ConversationState), default=ConversationState.IDLE)
     pending_request_json = Column(Text, nullable=True)
+    pending_cancellation_id = Column(String(50), nullable=True)
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
