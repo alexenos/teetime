@@ -822,6 +822,99 @@ class TestBookingServiceIntentHandling:
             assert "which booking" in response.lower()
             assert "Saturday, December 20" in response
             assert "Sunday, December 21" in response
+            # Verify session state is set to AWAITING_CANCELLATION_SELECTION
+            assert sample_session.state == ConversationState.AWAITING_CANCELLATION_SELECTION
+
+    @pytest.mark.asyncio
+    async def test_handle_cancellation_selection_matches_booking(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_request: TeeTimeRequest,
+    ) -> None:
+        """Test that when user replies with date during cancellation selection, it matches the booking."""
+        # Set up session in AWAITING_CANCELLATION_SELECTION state
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+
+        booking1 = TeeTimeBooking(
+            id="booking1",
+            phone_number=sample_session.phone_number,
+            request=sample_request,  # Dec 20 at 8:00 AM
+            status=BookingStatus.SCHEDULED,
+        )
+        booking2 = TeeTimeBooking(
+            id="booking2",
+            phone_number=sample_session.phone_number,
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 21),
+                requested_time=time(9, 0),
+                num_players=2,
+            ),
+            status=BookingStatus.SUCCESS,
+        )
+
+        # Simulate user replying with "12/20" - Gemini parses this as a booking request
+        # but since we're in AWAITING_CANCELLATION_SELECTION state, it should be handled
+        # as a cancellation selection instead
+        parsed = ParsedIntent(
+            intent="book",  # Gemini might parse date as booking intent
+            tee_time_request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booking1, booking2])
+
+            response = await booking_service._process_intent(sample_session, parsed)
+
+            # Should ask for confirmation to cancel, NOT create a new booking
+            assert "cancel" in response.lower()
+            assert "confirm" in response.lower() or "yes" in response.lower()
+            assert "Saturday, December 20" in response
+            # Session should have pending_cancellation_id set
+            assert sample_session.pending_cancellation_id == "booking1"
+            # Session state should be reset to IDLE
+            assert sample_session.state == ConversationState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_no_match_resets_state(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_request: TeeTimeRequest,
+    ) -> None:
+        """Test that when user's date doesn't match any booking, state is reset."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+
+        booking1 = TeeTimeBooking(
+            id="booking1",
+            phone_number=sample_session.phone_number,
+            request=sample_request,  # Dec 20
+            status=BookingStatus.SCHEDULED,
+        )
+
+        # User replies with a date that doesn't match any booking
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=date(2025, 12, 25),  # No booking on this date
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booking1])
+
+            response = await booking_service._process_intent(sample_session, parsed)
+
+            # Should indicate no match found
+            assert "couldn't find" in response.lower() or "cancel" in response.lower()
+            # State should be reset to IDLE
+            assert sample_session.state == ConversationState.IDLE
 
 
 class TestBookingServiceProcessIntent:
