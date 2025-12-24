@@ -134,7 +134,13 @@ class BookingService:
         if session.state != ConversationState.AWAITING_CONFIRMATION or not session.pending_request:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
-        booking = await self.create_booking(session.phone_number, session.pending_request)
+        try:
+            booking = await self.create_booking(session.phone_number, session.pending_request)
+        except ValueError as e:
+            # 48-hour restriction for multi-player bookings
+            session.pending_request = None
+            session.state = ConversationState.IDLE
+            return str(e)
 
         session.pending_request = None
         session.state = ConversationState.IDLE
@@ -319,13 +325,39 @@ class BookingService:
         has already opened), the booking is executed immediately instead of being
         scheduled for later.
 
+        Multi-player bookings (2+ players) are rejected if the tee time is within
+        48 hours, because the Walden Golf website disables TBD guest placeholders
+        within that window.
+
         Args:
             phone_number: The phone number to associate with the booking.
             request: The tee time request details.
 
         Returns:
             The created TeeTimeBooking record.
+
+        Raises:
+            ValueError: If multi-player booking is requested within 48 hours.
         """
+        # Check 48-hour restriction for multi-player bookings
+        if request.num_players > 1:
+            tz = pytz.timezone(settings.timezone)
+            now_ct = datetime.now(tz)
+
+            # Combine requested date and time into a timezone-aware datetime
+            tee_time_naive = datetime.combine(request.requested_date, request.requested_time)
+            tee_time_ct = tz.localize(tee_time_naive)
+
+            hours_until_tee_time = (tee_time_ct - now_ct).total_seconds() / 3600
+
+            if hours_until_tee_time < 48:
+                raise ValueError(
+                    f"Multi-player bookings ({request.num_players} players) cannot be made "
+                    f"within 48 hours of the tee time. The Walden Golf website disables "
+                    f"TBD guest placeholders within this window. "
+                    f"You can still book for 1 player, or choose a tee time more than 48 hours away."
+                )
+
         booking_id = str(uuid.uuid4())[:8]
 
         execution_time = self._calculate_execution_time(request.requested_date)

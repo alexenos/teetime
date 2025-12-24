@@ -37,7 +37,11 @@ async def create_booking(request: CreateBookingRequest) -> BookingResponse:
         fallback_window_minutes=request.fallback_window_minutes,
     )
 
-    booking = await booking_service.create_booking(request.phone_number, tee_time_request)
+    try:
+        booking = await booking_service.create_booking(request.phone_number, tee_time_request)
+    except ValueError as e:
+        # 48-hour restriction for multi-player bookings
+        raise HTTPException(status_code=400, detail=str(e))
 
     return BookingResponse(
         id=booking.id,
