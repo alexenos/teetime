@@ -6,16 +6,19 @@ user session state. These models mirror the Pydantic schemas but are
 designed for database persistence.
 """
 
+import logging
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column, Date, DateTime, Enum, Integer, String, Text, Time
+from sqlalchemy import Column, Date, DateTime, Enum, Integer, String, Text, Time, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 from app.models.schemas import BookingStatus, ConversationState
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -115,6 +118,38 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+async def _run_migrations(conn: Any) -> None:
+    """
+    Run idempotent schema migrations for columns added after initial deployment.
+
+    This handles the case where tables already exist but are missing new columns.
+    Uses database-specific syntax for idempotent column addition.
+    """
+    is_postgres = settings.database_url.startswith("postgresql")
+    is_sqlite = settings.database_url.startswith("sqlite")
+
+    if is_postgres:
+        await conn.execute(
+            text(
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS "
+                "pending_cancellation_id VARCHAR(50)"
+            )
+        )
+        logger.info("Checked/added pending_cancellation_id column to sessions table")
+    elif is_sqlite:
+        try:
+            await conn.execute(
+                text("ALTER TABLE sessions ADD COLUMN " "pending_cancellation_id VARCHAR(50)")
+            )
+            logger.info("Added pending_cancellation_id column to sessions table")
+        except Exception as e:
+            if "duplicate column" in str(e).lower():
+                logger.debug("pending_cancellation_id column already exists")
+            else:
+                raise
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _run_migrations(conn)
