@@ -5,6 +5,7 @@ This module provides the core business logic for handling SMS conversations,
 processing booking requests, and executing reservations at the scheduled time.
 """
 
+import re
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
@@ -101,6 +102,12 @@ class BookingService:
         # date/time responses as new booking requests
         if session.state == ConversationState.AWAITING_CANCELLATION_SELECTION:
             return await self._handle_cancellation_selection(session, parsed)
+
+        # Check if user is confirming a pending cancellation
+        # This takes priority over Gemini's parsed intent because "yes" might be
+        # parsed as "confirm" (for booking) instead of cancellation confirmation
+        if session.pending_cancellation_id:
+            return await self._handle_cancellation_confirmation(session, parsed)
 
         if parsed.intent == "book":
             return await self._handle_book_intent(session, parsed)
@@ -211,6 +218,60 @@ class BookingService:
 
         return "Your upcoming bookings:\n" + "\n".join(status_lines)
 
+    async def _handle_cancellation_confirmation(
+        self, session: UserSession, parsed: ParsedIntent
+    ) -> str:
+        """
+        Handle user's response when confirming a cancellation.
+
+        This method is called when pending_cancellation_id is set, meaning we previously
+        asked the user to confirm cancelling a specific booking. We check if their
+        response is affirmative and proceed with the cancellation.
+
+        Args:
+            session: The user's session with pending_cancellation_id set.
+            parsed: The parsed intent from Gemini.
+
+        Returns:
+            Response message to send to the user.
+        """
+        message_lower = parsed.raw_message.lower() if parsed.raw_message else ""
+
+        if any(word in message_lower for word in ["yes", "confirm", "ok", "sure", "y"]):
+            booking = await database_service.get_booking(session.pending_cancellation_id)
+
+            if not booking:
+                # Booking was deleted or doesn't exist - clear state and inform user
+                session.pending_cancellation_id = None
+                return (
+                    "I couldn't find that booking. It may have already been cancelled. "
+                    "Say 'cancel' to see your current bookings."
+                )
+
+            date_str = booking.request.requested_date.strftime("%A, %B %d")
+            session.pending_cancellation_id = None
+
+            if booking.status == BookingStatus.SUCCESS:
+                success = await self._cancel_confirmed_booking(booking)
+                if success:
+                    return (
+                        f"Your confirmed booking for {date_str} has been cancelled "
+                        "on the website."
+                    )
+                else:
+                    return (
+                        f"I was unable to cancel your booking for {date_str} on the "
+                        "website. Please contact the club directly to cancel."
+                    )
+            else:
+                booking.status = BookingStatus.CANCELLED
+                await database_service.update_booking(booking)
+                return f"Your booking for {date_str} has been cancelled."
+        else:
+            # User declined or gave unclear response
+            session.pending_cancellation_id = None
+            return "Cancellation cancelled. Your booking remains active."
+
     async def _handle_cancel_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
         cancellable = [
@@ -221,39 +282,6 @@ class BookingService:
 
         if not cancellable:
             return "You don't have any bookings to cancel."
-
-        # Check if user is confirming a pending cancellation
-        if session.pending_cancellation_id:
-            # User is responding to a confirmation prompt
-            message_lower = parsed.raw_message.lower() if parsed.raw_message else ""
-            if any(word in message_lower for word in ["yes", "confirm", "ok", "sure", "y"]):
-                booking = await database_service.get_booking(session.pending_cancellation_id)
-                if booking:
-                    date_str = booking.request.requested_date.strftime("%A, %B %d")
-                    session.pending_cancellation_id = None
-                    await self.update_session(session)
-
-                    if booking.status == BookingStatus.SUCCESS:
-                        success = await self._cancel_confirmed_booking(booking)
-                        if success:
-                            return (
-                                f"Your confirmed booking for {date_str} has been cancelled "
-                                "on the website."
-                            )
-                        else:
-                            return (
-                                f"I was unable to cancel your booking for {date_str} on the "
-                                "website. Please contact the club directly to cancel."
-                            )
-                    else:
-                        booking.status = BookingStatus.CANCELLED
-                        await database_service.update_booking(booking)
-                        return f"Your booking for {date_str} has been cancelled."
-            else:
-                # User declined or gave unclear response
-                session.pending_cancellation_id = None
-                await self.update_session(session)
-                return "Cancellation cancelled. Your booking remains active."
 
         # Always ask for confirmation before cancelling, even for single bookings
         if len(cancellable) == 1:
@@ -272,8 +300,9 @@ class BookingService:
             )
 
         # Multiple bookings - ask which one to cancel and set state
-        # Sort by date/time for consistent ordering when user replies with a number
-        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
+        # Sort by date/time/id for consistent ordering when user replies with a number
+        # The id tiebreaker ensures stable ordering even when date/time are identical
+        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time, b.id))
         session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
 
         status_lines = []
@@ -320,19 +349,20 @@ class BookingService:
             session.state = ConversationState.IDLE
             return "You don't have any bookings to cancel."
 
-        # Sort by date/time for consistent ordering (same as when we displayed the list)
-        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
+        # Sort by date/time/id for consistent ordering (same as when we displayed the list)
+        # The id tiebreaker ensures stable ordering even when date/time are identical
+        cancellable.sort(key=lambda b: (b.request.requested_date, b.request.requested_time, b.id))
 
         matched_booking = None
         raw_message = (parsed.raw_message or "").strip()
 
-        # First, try to parse as a number (e.g., "1", "2", "3")
-        try:
-            selection_num = int(raw_message)
+        # First, try to extract a number from the message (e.g., "1", "1.", "#1", "1 please")
+        # This is more robust than strict int() parsing
+        number_match = re.search(r"\d+", raw_message)
+        if number_match:
+            selection_num = int(number_match.group())
             if 1 <= selection_num <= len(cancellable):
                 matched_booking = cancellable[selection_num - 1]
-        except ValueError:
-            pass
 
         # If not a number, try to match by date/time from Gemini's parsing
         if not matched_booking and parsed.tee_time_request:
