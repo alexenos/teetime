@@ -118,7 +118,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def _run_migrations(conn: Any) -> None:
+async def _run_column_migrations(conn: Any) -> None:
     """
     Run idempotent schema migrations for columns added after initial deployment.
 
@@ -149,7 +149,46 @@ async def _run_migrations(conn: Any) -> None:
                 raise
 
 
+async def _run_enum_migrations() -> None:
+    """
+    Run idempotent enum type migrations for PostgreSQL.
+
+    ALTER TYPE ... ADD VALUE cannot run inside a transaction block in PostgreSQL,
+    so this must be run with autocommit mode using a separate connection.
+    SQLite stores enums as strings, so no migration is needed there.
+    """
+    if not settings.database_url.startswith("postgresql"):
+        return
+
+    from sqlalchemy import create_engine
+
+    sync_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    sync_engine = create_engine(sync_url, isolation_level="AUTOCOMMIT")
+
+    try:
+        with sync_engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT 1 FROM pg_enum "
+                    "WHERE enumlabel = 'AWAITING_CANCELLATION_SELECTION' "
+                    "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'conversationstate')"
+                )
+            )
+            if result.fetchone() is None:
+                conn.execute(
+                    text("ALTER TYPE conversationstate ADD VALUE 'AWAITING_CANCELLATION_SELECTION'")
+                )
+                logger.info("Added AWAITING_CANCELLATION_SELECTION to conversationstate enum")
+            else:
+                logger.debug(
+                    "AWAITING_CANCELLATION_SELECTION already exists in conversationstate enum"
+                )
+    finally:
+        sync_engine.dispose()
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _run_migrations(conn)
+        await _run_column_migrations(conn)
+    await _run_enum_migrations()
