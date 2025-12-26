@@ -744,32 +744,32 @@ class TestBookingServiceIntentHandling:
             assert sample_session.pending_cancellation_id == sample_booking.id
 
     @pytest.mark.asyncio
-    async def test_handle_cancel_intent_confirm_cancellation(
+    async def test_handle_cancellation_confirmation_confirm(
         self,
         booking_service: BookingService,
         sample_session: UserSession,
         sample_booking: TeeTimeBooking,
     ) -> None:
-        """Test confirming a pending cancellation."""
+        """Test confirming a pending cancellation via _handle_cancellation_confirmation."""
         # Set up session with pending cancellation
         sample_session.pending_cancellation_id = sample_booking.id
-        parsed = ParsedIntent(intent="cancel", raw_message="yes")
+        parsed = ParsedIntent(intent="confirm", raw_message="yes")
 
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
             mock_db.get_booking = AsyncMock(return_value=sample_booking)
-            mock_db.update_session = AsyncMock()
 
             async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
             mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
-            response = await booking_service._handle_cancel_intent(sample_session, parsed)
+            response = await booking_service._handle_cancellation_confirmation(
+                sample_session, parsed
+            )
             assert "cancelled" in response.lower()
             assert sample_session.pending_cancellation_id is None
 
     @pytest.mark.asyncio
-    async def test_handle_cancel_intent_decline_cancellation(
+    async def test_handle_cancellation_confirmation_decline(
         self,
         booking_service: BookingService,
         sample_session: UserSession,
@@ -779,13 +779,28 @@ class TestBookingServiceIntentHandling:
         sample_session.pending_cancellation_id = sample_booking.id
         parsed = ParsedIntent(intent="cancel", raw_message="no")
 
+        response = await booking_service._handle_cancellation_confirmation(sample_session, parsed)
+
+        assert "remains active" in response.lower()
+        assert sample_session.pending_cancellation_id is None
+
+    @pytest.mark.asyncio
+    async def test_handle_cancellation_confirmation_booking_not_found(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+    ) -> None:
+        """Test that confirming a deleted booking clears state and informs user."""
+        sample_session.pending_cancellation_id = "deleted-booking-id"
+        parsed = ParsedIntent(intent="confirm", raw_message="yes")
+
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
-            mock_db.update_session = AsyncMock()
+            mock_db.get_booking = AsyncMock(return_value=None)
 
-            response = await booking_service._handle_cancel_intent(sample_session, parsed)
-
-            assert "remains active" in response.lower()
+            response = await booking_service._handle_cancellation_confirmation(
+                sample_session, parsed
+            )
+            assert "couldn't find" in response.lower()
             assert sample_session.pending_cancellation_id is None
 
     @pytest.mark.asyncio

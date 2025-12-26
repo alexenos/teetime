@@ -118,7 +118,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def _run_migrations(conn: Any) -> None:
+async def _run_column_migrations(conn: Any) -> None:
     """
     Run idempotent schema migrations for columns added after initial deployment.
 
@@ -149,7 +149,50 @@ async def _run_migrations(conn: Any) -> None:
                 raise
 
 
+async def _run_enum_migrations() -> None:
+    """
+    Run idempotent enum type migrations for PostgreSQL.
+
+    ALTER TYPE ... ADD VALUE cannot run inside a transaction block in PostgreSQL,
+    so this must be run with autocommit mode using a separate async connection.
+    SQLite stores enums as strings, so no migration is needed there.
+    """
+    if not settings.database_url.startswith("postgresql"):
+        return
+
+    # Create a separate engine with autocommit for enum migration
+    # This is required because ALTER TYPE ADD VALUE cannot run in a transaction
+    autocommit_engine = create_async_engine(
+        settings.database_url,
+        echo=False,
+        isolation_level="AUTOCOMMIT",
+    )
+
+    try:
+        async with autocommit_engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT 1 FROM pg_enum "
+                    "WHERE enumlabel = 'AWAITING_CANCELLATION_SELECTION' "
+                    "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'conversationstate')"
+                )
+            )
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(
+                    text("ALTER TYPE conversationstate ADD VALUE 'AWAITING_CANCELLATION_SELECTION'")
+                )
+                logger.info("Added AWAITING_CANCELLATION_SELECTION to conversationstate enum")
+            else:
+                logger.debug(
+                    "AWAITING_CANCELLATION_SELECTION already exists in conversationstate enum"
+                )
+    finally:
+        await autocommit_engine.dispose()
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await _run_migrations(conn)
+        await _run_column_migrations(conn)
+    await _run_enum_migrations()
