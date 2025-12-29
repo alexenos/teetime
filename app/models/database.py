@@ -154,28 +154,32 @@ async def _run_enum_migrations() -> None:
     Run idempotent enum type migrations for PostgreSQL.
 
     ALTER TYPE ... ADD VALUE cannot run inside a transaction block in PostgreSQL,
-    so this must be run with autocommit mode using a separate connection.
+    so this must be run with autocommit mode using a separate async connection.
     SQLite stores enums as strings, so no migration is needed there.
     """
     if not settings.database_url.startswith("postgresql"):
         return
 
-    from sqlalchemy import create_engine
-
-    sync_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
-    sync_engine = create_engine(sync_url, isolation_level="AUTOCOMMIT")
+    # Create a separate engine with autocommit for enum migration
+    # This is required because ALTER TYPE ADD VALUE cannot run in a transaction
+    autocommit_engine = create_async_engine(
+        settings.database_url,
+        echo=False,
+        isolation_level="AUTOCOMMIT",
+    )
 
     try:
-        with sync_engine.connect() as conn:
-            result = conn.execute(
+        async with autocommit_engine.connect() as conn:
+            result = await conn.execute(
                 text(
                     "SELECT 1 FROM pg_enum "
                     "WHERE enumlabel = 'AWAITING_CANCELLATION_SELECTION' "
                     "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'conversationstate')"
                 )
             )
-            if result.fetchone() is None:
-                conn.execute(
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(
                     text("ALTER TYPE conversationstate ADD VALUE 'AWAITING_CANCELLATION_SELECTION'")
                 )
                 logger.info("Added AWAITING_CANCELLATION_SELECTION to conversationstate enum")
@@ -184,7 +188,7 @@ async def _run_enum_migrations() -> None:
                     "AWAITING_CANCELLATION_SELECTION already exists in conversationstate enum"
                 )
     finally:
-        sync_engine.dispose()
+        await autocommit_engine.dispose()
 
 
 async def init_db() -> None:
