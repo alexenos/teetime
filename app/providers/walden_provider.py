@@ -31,6 +31,7 @@ from app.providers.base import (
     BookingResult,
     ReservationProvider,
 )
+from app.providers.wait_helper import WaitStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,7 @@ class WaldenGolfProvider(ReservationProvider):
         Validates that required credentials are configured. Logs a warning if
         credentials are missing - operations will fail at login time.
         """
+        self.wait_strategy = WaitStrategy()
         if not settings.walden_member_number or not settings.walden_password:
             logger.warning(
                 "Walden Golf credentials not configured. "
@@ -691,7 +693,7 @@ class WaldenGolfProvider(ReservationProvider):
         except Exception as e:
             logger.warning(f"Error during course selection: {e}")
 
-        time_module.sleep(1)
+        self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
 
         if self._verify_course_selection(driver, course_name):
             logger.info(f"Verified: Currently on {course_name} course page")
@@ -761,7 +763,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             dropdown_trigger.click()
             logger.info("Opened course selection dropdown")
-            time_module.sleep(0.5)
+            self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
 
             checkbox_items = driver.find_elements(
                 By.CSS_SELECTOR,
@@ -819,7 +821,7 @@ class WaldenGolfProvider(ReservationProvider):
                 except Exception:
                     driver.find_element(By.TAG_NAME, "body").click()
 
-            time_module.sleep(0.5)
+            self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
 
             if target_found:
                 logger.info(
@@ -1111,7 +1113,7 @@ class WaldenGolfProvider(ReservationProvider):
                             day_el.click()
                             logger.info(f"Selected day {day_str} from calendar")
                             # Wait for page to reload after date selection
-                            time_module.sleep(2)
+                            self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
                             # Wait for tee time slots to appear
                             try:
                                 WebDriverWait(driver, 10).until(
@@ -1198,7 +1200,12 @@ class WaldenGolfProvider(ReservationProvider):
                 f"BOOKING_DEBUG: Starting player count selection for {num_players} players"
             )
             # Wait for the player count button group to appear
-            time_module.sleep(1)
+            self.wait_strategy.wait_for_element(
+                driver,
+                (By.CSS_SELECTOR, ".reservation-players, .ui-selectonebutton"),
+                fixed_duration=1.0,
+                timeout=5.0,
+            )
 
             # The Walden Golf site uses a button group with class "reservation-players"
             # Each button contains a radio input with value 1, 2, 3, or 4
@@ -1250,7 +1257,7 @@ class WaldenGolfProvider(ReservationProvider):
                     logger.info(
                         f"BOOKING_DEBUG: Clicked player count button for {num_players} players"
                     )
-                    time_module.sleep(1)  # Wait for the form to update
+                    self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
 
                     # Verify the selection took effect by checking for player rows
                     if not self._verify_player_rows_appeared(driver, num_players):
@@ -1282,7 +1289,7 @@ class WaldenGolfProvider(ReservationProvider):
                     select = Select(player_select)
                     select.select_by_value(str(num_players))
                     logger.info(f"Selected {num_players} players using selector: {selector}")
-                    time_module.sleep(0.5)
+                    self.wait_strategy.wait_after_action(driver, fixed_duration=0.5)
                     return True
                 except NoSuchElementException:
                     continue
@@ -1317,7 +1324,12 @@ class WaldenGolfProvider(ReservationProvider):
         logger.debug(f"BOOKING_DEBUG: Verifying {expected_players} player rows appeared")
 
         # Wait a bit for the DOM to update after player count selection
-        time_module.sleep(2)
+        self.wait_strategy.wait_for_element(
+            driver,
+            (By.CSS_SELECTOR, "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"),
+            fixed_duration=2.0,
+            timeout=5.0,
+        )
 
         row_selectors = [
             "[id*='playersTable'] tbody tr[data-ri]",
@@ -1389,7 +1401,12 @@ class WaldenGolfProvider(ReservationProvider):
                 f"BOOKING_DEBUG: Starting TBD guest registration for {num_tbd_guests} guests"
             )
             # Wait for the player table to update after selecting player count
-            time_module.sleep(2)
+            self.wait_strategy.wait_for_element(
+                driver,
+                (By.CSS_SELECTOR, "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"),
+                fixed_duration=2.0,
+                timeout=5.0,
+            )
 
             tbd_buttons_added = 0
 
@@ -1529,7 +1546,7 @@ class WaldenGolfProvider(ReservationProvider):
                         driver.execute_script("arguments[0].click();", tbd_button)
                         logger.info(f"Clicked TBD button for player {player_num}")
                         tbd_buttons_added += 1
-                        time_module.sleep(1)  # Wait for the form to update
+                        self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
                     else:
                         # If no TBD button, try to find the player name input and type "TBD"
                         player_input = None
@@ -1555,7 +1572,7 @@ class WaldenGolfProvider(ReservationProvider):
                             player_input.send_keys("TBD Registered Guest")
                             logger.info(f"Entered TBD Registered Guest for player {player_num}")
                             tbd_buttons_added += 1
-                            time_module.sleep(0.5)
+                            self.wait_strategy.wait_after_action(driver, fixed_duration=0.5)
                         else:
                             logger.warning(
                                 f"BOOKING_DEBUG: Could not find TBD button or input for player {player_num}"
@@ -1794,7 +1811,7 @@ class WaldenGolfProvider(ReservationProvider):
                             break
 
                     driver.execute_script("arguments[0].scrollIntoView({block: 'end'});", last_slot)
-                    time_module.sleep(0.3)
+                    self.wait_strategy.simple_wait(fixed_duration=0.3, event_driven_duration=0.1)
 
                     datascroller = driver.find_elements(
                         By.CSS_SELECTOR, ".ui-datascroller-content, .ui-datascroller-list"
@@ -1804,11 +1821,13 @@ class WaldenGolfProvider(ReservationProvider):
                             "arguments[0].scrollTop = arguments[0].scrollHeight;",
                             datascroller[0],
                         )
-                        time_module.sleep(0.3)
+                        self.wait_strategy.simple_wait(
+                            fixed_duration=0.3, event_driven_duration=0.1
+                        )
 
             except Exception as e:
                 logger.debug(f"BOOKING_DEBUG: Scroll attempt {attempt + 1} error: {e}")
-                time_module.sleep(0.2)
+                self.wait_strategy.simple_wait(fixed_duration=0.2, event_driven_duration=0.1)
 
         logger.info(
             f"BOOKING_DEBUG: Finished scrolling. Total slot items loaded: {previous_item_count}"
@@ -2386,7 +2405,7 @@ class WaldenGolfProvider(ReservationProvider):
             driver.execute_script(
                 "arguments[0].scrollIntoView({block: 'center'});", reserve_element
             )
-            time_module.sleep(0.5)  # Wait for scroll to complete
+            self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
 
             wait = WebDriverWait(driver, 10)
             wait.until(expected_conditions.element_to_be_clickable(reserve_element))
@@ -2436,11 +2455,19 @@ class WaldenGolfProvider(ReservationProvider):
             try:
                 # Wait for the booking form to load
                 logger.debug("BOOKING_DEBUG: Looking for Book Now button")
-                time_module.sleep(2)
+                self.wait_strategy.wait_for_element(
+                    driver,
+                    (
+                        By.CSS_SELECTOR,
+                        "a[id*='bookTeeTimeAction'], a:contains('Book Now'), button:contains('Book')",
+                    ),
+                    fixed_duration=2.0,
+                    timeout=10.0,
+                )
 
                 # Scroll down to make sure the Book Now button is visible
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time_module.sleep(1)
+                self.wait_strategy.simple_wait(fixed_duration=1.0, event_driven_duration=0.2)
 
                 # Look for "Book Now" link/button - it's an <a> element on Walden Golf
                 # Try to find by ID first (most reliable), then by text content
@@ -2478,7 +2505,7 @@ class WaldenGolfProvider(ReservationProvider):
                 driver.execute_script(
                     "arguments[0].scrollIntoView({block: 'center'});", confirm_button
                 )
-                time_module.sleep(0.5)
+                self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
 
                 current_url = driver.current_url
                 driver.execute_script("arguments[0].click();", confirm_button)
@@ -2734,7 +2761,7 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                     )
 
-                    time_module.sleep(2)
+                    self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
 
                     result = self._find_and_cancel_reservation_sync(driver, confirmation_number)
                     if result:
@@ -2907,14 +2934,14 @@ class WaldenGolfProvider(ReservationProvider):
             True if cancellation was confirmed successfully, False otherwise
         """
         try:
-            time_module.sleep(1)
+            self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
 
             try:
                 alert = driver.switch_to.alert
                 logger.info(f"Alert detected: {alert.text}")
                 alert.accept()
                 logger.info("Alert accepted")
-                time_module.sleep(1)
+                self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
                 return self._verify_cancellation_success(driver, target_date, target_time)
             except Exception:
                 pass
@@ -2933,7 +2960,7 @@ class WaldenGolfProvider(ReservationProvider):
                     if confirm_btn.is_displayed():
                         logger.info(f"Found confirm button with CSS selector: {selector}")
                         confirm_btn.click()
-                        time_module.sleep(1)
+                        self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
                         return self._verify_cancellation_success(driver, target_date, target_time)
                 except NoSuchElementException:
                     continue
@@ -2953,12 +2980,12 @@ class WaldenGolfProvider(ReservationProvider):
                     if confirm_btn.is_displayed():
                         logger.info(f"Found confirm button with XPath: {xpath}")
                         confirm_btn.click()
-                        time_module.sleep(1)
+                        self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
                         return self._verify_cancellation_success(driver, target_date, target_time)
                 except NoSuchElementException:
                     continue
 
-            time_module.sleep(2)
+            self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
 
             return self._verify_cancellation_success(driver, target_date, target_time)
 
