@@ -653,6 +653,9 @@ class BookingService:
                 if result.confirmation_number:
                     details += f" (Confirmation: {result.confirmation_number})"
 
+                if result.fallback_reason:
+                    details += f"\n\nNote: {result.fallback_reason}"
+
                 await sms_service.send_booking_confirmation(booking.phone_number, details)
                 return True
             else:

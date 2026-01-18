@@ -328,7 +328,16 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"BOOKING_DEBUG: Tee time page loaded. URL: {driver.current_url}")
 
             logger.debug("BOOKING_DEBUG: Step 3/5 - Selecting course and date")
-            self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
+            if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
+                logger.error("BOOKING_DEBUG: Course selection/verification failed")
+                return BookingResult(
+                    success=False,
+                    error_message=(
+                        f"Failed to select or verify {self.NORTHGATE_COURSE_NAME} course. "
+                        f"The booking may have been attempted on the wrong course. "
+                        f"Please verify the course selection manually."
+                    ),
+                )
             self._select_date_sync(driver, target_date)
 
             wait.until(
@@ -371,27 +380,345 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug("BOOKING_DEBUG: === BOOKING ATTEMPT COMPLETE - Closing driver ===")
             driver.quit()
 
-    def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> None:
-        """Select the course from the dropdown."""
+    def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> bool:
+        """
+        Select the course from the multi-select checkbox dropdown.
+
+        The Walden Golf tee time page uses a multi-select dropdown with checkboxes
+        for course selection. By default, both Northgate and Walden on Lake Conroe
+        are selected, showing tee times for both courses in separate columns.
+
+        To prevent accidental bookings at the wrong course, this method:
+        1. Opens the course selection dropdown
+        2. Ensures the target course (Northgate) is checked
+        3. Unchecks other courses (Walden on Lake Conroe) to show only Northgate times
+        4. Closes the dropdown and verifies the selection
+
+        Args:
+            driver: The WebDriver instance
+            course_name: The name of the course to select (e.g., "Northgate")
+
+        Returns:
+            True if the correct course is selected/verified, False otherwise
+        """
+        walden_course_name = "Walden on Lake Conroe"
+
         try:
-            course_select = driver.find_element(By.CSS_SELECTOR, "select[id*='course']")
-            select = Select(course_select)
+            if self._select_course_via_checkbox_dropdown(driver, course_name, walden_course_name):
+                logger.info(f"Successfully configured course selection for {course_name} only")
+            else:
+                if self._select_course_via_standard_dropdown(driver, course_name):
+                    logger.info(f"Selected course via standard dropdown: {course_name}")
+                else:
+                    logger.warning(
+                        f"No course dropdown found - attempting to verify "
+                        f"current course is {course_name}"
+                    )
+        except Exception as e:
+            logger.warning(f"Error during course selection: {e}")
 
-            for option in select.options:
-                if course_name.lower() in option.text.lower():
-                    select.select_by_visible_text(option.text)
-                    logger.info(f"Selected course: {option.text}")
-                    wait = WebDriverWait(driver, 10)
+        time_module.sleep(1)
+
+        if self._verify_course_selection(driver, course_name):
+            logger.info(f"Verified: Currently on {course_name} course page")
+            return True
+        else:
+            logger.error(
+                f"BOOKING_DEBUG: Failed to verify {course_name} course selection. "
+                f"May be on wrong course page."
+            )
+            return False
+
+    def _select_course_via_checkbox_dropdown(
+        self, driver: webdriver.Chrome, target_course: str, course_to_deselect: str
+    ) -> bool:
+        """
+        Handle multi-select checkbox dropdown for course selection.
+
+        The Walden Golf site uses a custom dropdown with checkboxes where multiple
+        courses can be selected simultaneously. This method ensures only the target
+        course is selected by checking it and unchecking others.
+
+        Args:
+            driver: The WebDriver instance
+            target_course: Course to ensure is checked (e.g., "Northgate")
+            course_to_deselect: Course to uncheck (e.g., "Walden on Lake Conroe")
+
+        Returns:
+            True if checkbox dropdown was found and configured, False otherwise
+        """
+        try:
+            dropdown_trigger_selectors = [
+                "[class*='select'][class*='course']",
+                "div[class*='multiselect']",
+                "button[class*='dropdown']",
+                ".course-dropdown",
+                "[aria-label*='course' i]",
+                "[placeholder*='course' i]",
+            ]
+
+            dropdown_trigger = None
+            for selector in dropdown_trigger_selectors:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            dropdown_trigger = elem
+                            break
+                    if dropdown_trigger:
+                        break
+                except NoSuchElementException:
+                    continue
+
+            if not dropdown_trigger:
+                try:
+                    dropdown_trigger = driver.find_element(
+                        By.XPATH,
+                        "//*[contains(text(), 'Select Course') or contains(text(), 'Course')]"
+                        "[contains(@class, 'select') or contains(@class, 'dropdown') or "
+                        "self::button or self::div[contains(@class, 'trigger')]]",
+                    )
+                except NoSuchElementException:
+                    pass
+
+            if not dropdown_trigger:
+                logger.debug("No checkbox dropdown trigger found for course selection")
+                return False
+
+            dropdown_trigger.click()
+            logger.info("Opened course selection dropdown")
+            time_module.sleep(0.5)
+
+            checkbox_items = driver.find_elements(
+                By.CSS_SELECTOR,
+                "input[type='checkbox'], "
+                "li[class*='option'], "
+                "div[class*='option'], "
+                "label[class*='checkbox']",
+            )
+
+            if not checkbox_items:
+                checkbox_items = driver.find_elements(
+                    By.XPATH,
+                    "//li[.//input[@type='checkbox']] | "
+                    "//div[contains(@class, 'option')] | "
+                    "//label[contains(@class, 'check')]",
+                )
+
+            target_found = False
+            deselect_found = False
+
+            for item in checkbox_items:
+                item_text = item.text.lower() if item.text else ""
+                if not item_text:
                     try:
-                        wait.until(expected_conditions.staleness_of(course_select))
-                    except TimeoutException:
-                        pass
-                    return
+                        item_text = item.get_attribute("textContent").lower()
+                    except Exception:
+                        continue
 
-            logger.warning(f"Course '{course_name}' not found in dropdown, using default")
+                if target_course.lower() in item_text:
+                    target_found = True
+                    checkbox = self._find_checkbox_in_element(driver, item, target_course)
+                    if checkbox and not checkbox.is_selected():
+                        self._click_checkbox_or_label(driver, item, checkbox)
+                        logger.info(f"Checked '{target_course}' in course dropdown")
+                    elif checkbox and checkbox.is_selected():
+                        logger.info(f"'{target_course}' already checked")
 
+                elif course_to_deselect.lower() in item_text:
+                    deselect_found = True
+                    checkbox = self._find_checkbox_in_element(driver, item, course_to_deselect)
+                    if checkbox and checkbox.is_selected():
+                        self._click_checkbox_or_label(driver, item, checkbox)
+                        logger.info(f"Unchecked '{course_to_deselect}' in course dropdown")
+                    elif checkbox and not checkbox.is_selected():
+                        logger.info(f"'{course_to_deselect}' already unchecked")
+
+            try:
+                close_button = driver.find_element(
+                    By.CSS_SELECTOR, "[class*='close'], .x, button[aria-label='close']"
+                )
+                close_button.click()
+            except NoSuchElementException:
+                try:
+                    dropdown_trigger.click()
+                except Exception:
+                    driver.find_element(By.TAG_NAME, "body").click()
+
+            time_module.sleep(0.5)
+
+            if target_found:
+                logger.info(
+                    f"Course dropdown configured: {target_course}=checked, "
+                    f"{course_to_deselect}={'unchecked' if deselect_found else 'not found'}"
+                )
+                return True
+
+            logger.warning(f"Target course '{target_course}' not found in dropdown options")
+            return False
+
+        except Exception as e:
+            logger.debug(f"Checkbox dropdown selection failed: {e}")
+            return False
+
+    def _find_checkbox_in_element(
+        self, driver: webdriver.Chrome, container: Any, course_name: str
+    ) -> Any | None:
+        """Find the checkbox input within a container element."""
+        try:
+            return container.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
         except NoSuchElementException:
-            logger.info("No course dropdown found - may already be on correct course page")
+            pass
+
+        try:
+            return container.find_element(By.TAG_NAME, "input")
+        except NoSuchElementException:
+            pass
+
+        try:
+            return driver.find_element(
+                By.XPATH,
+                f"//input[@type='checkbox'][following-sibling::*[contains(text(), '{course_name}')] "
+                f"or preceding-sibling::*[contains(text(), '{course_name}')]]",
+            )
+        except NoSuchElementException:
+            pass
+
+        return None
+
+    def _click_checkbox_or_label(
+        self, driver: webdriver.Chrome, container: Any, checkbox: Any
+    ) -> None:
+        """Click the checkbox or its label to toggle selection."""
+        try:
+            checkbox.click()
+            return
+        except Exception:
+            pass
+
+        try:
+            label = container.find_element(By.TAG_NAME, "label")
+            label.click()
+            return
+        except Exception:
+            pass
+
+        try:
+            container.click()
+            return
+        except Exception:
+            pass
+
+        try:
+            driver.execute_script("arguments[0].click();", checkbox)
+        except Exception as e:
+            logger.warning(f"Failed to click checkbox: {e}")
+
+    def _select_course_via_standard_dropdown(
+        self, driver: webdriver.Chrome, course_name: str
+    ) -> bool:
+        """
+        Fallback: Select course using standard HTML select dropdown.
+
+        Args:
+            driver: The WebDriver instance
+            course_name: The name of the course to select
+
+        Returns:
+            True if course was selected, False otherwise
+        """
+        course_dropdown_selectors = [
+            "select[id*='course']",
+            "select[name*='course']",
+            "select[id*='Course']",
+            "select[name*='Course']",
+            "select.course-select",
+            "#courseSelect",
+        ]
+
+        for selector in course_dropdown_selectors:
+            try:
+                course_select = driver.find_element(By.CSS_SELECTOR, selector)
+                select = Select(course_select)
+
+                for option in select.options:
+                    if course_name.lower() in option.text.lower():
+                        select.select_by_visible_text(option.text)
+                        logger.info(f"Selected course: {option.text} using selector: {selector}")
+                        wait = WebDriverWait(driver, 10)
+                        try:
+                            wait.until(expected_conditions.staleness_of(course_select))
+                        except TimeoutException:
+                            pass
+                        return True
+
+            except NoSuchElementException:
+                continue
+
+        return False
+
+    def _verify_course_selection(self, driver: webdriver.Chrome, course_name: str) -> bool:
+        """
+        Verify that the correct course is currently selected/displayed.
+
+        Checks multiple indicators on the page to confirm we're viewing
+        the correct course's tee times.
+
+        Args:
+            driver: The WebDriver instance
+            course_name: The expected course name (e.g., "Northgate")
+
+        Returns:
+            True if the correct course is verified, False otherwise
+        """
+        try:
+            page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            course_name_lower = course_name.lower()
+
+            if course_name_lower in page_text:
+                logger.debug(f"Found '{course_name}' in page text")
+                return True
+
+            course_indicators = [
+                f"h1:contains('{course_name}')",
+                f"h2:contains('{course_name}')",
+                f".course-name:contains('{course_name}')",
+                f"[class*='course']:contains('{course_name}')",
+            ]
+
+            for indicator in course_indicators:
+                try:
+                    elements = driver.find_elements(
+                        By.XPATH,
+                        f"//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
+                        f"'abcdefghijklmnopqrstuvwxyz'), '{course_name_lower}')]",
+                    )
+                    if elements:
+                        logger.debug(f"Found course indicator element for '{course_name}'")
+                        return True
+                except NoSuchElementException:
+                    continue
+
+            try:
+                selected_options = driver.find_elements(
+                    By.CSS_SELECTOR, "select option:checked, select option[selected]"
+                )
+                for option in selected_options:
+                    if course_name_lower in option.text.lower():
+                        logger.debug(f"Found '{course_name}' in selected dropdown option")
+                        return True
+            except NoSuchElementException:
+                pass
+
+            logger.warning(
+                f"Could not verify course '{course_name}' on page. "
+                f"Page may be on a different course."
+            )
+            return False
+
+        except Exception as e:
+            logger.error(f"Error verifying course selection: {e}")
+            return False
 
     def _select_date_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
         """
@@ -1039,6 +1366,14 @@ class WaldenGolfProvider(ReservationProvider):
 
         logger.info(f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots")
 
+        all_available_times = [t for t, _ in slots_with_capacity]
+        logger.info(
+            f"BOOKING_DEBUG: Available times with {num_players}+ spots: "
+            f"{[t.strftime('%I:%M %p') for t in all_available_times[:10]]}"
+            f"{'...' if len(all_available_times) > 10 else ''}"
+        )
+
+        exact_match = None
         best_slot = None
         best_diff = float("inf")
 
@@ -1046,16 +1381,60 @@ class WaldenGolfProvider(ReservationProvider):
             slot_minutes = slot_time.hour * 60 + slot_time.minute
             diff = abs(slot_minutes - target_minutes)
 
+            if diff == 0:
+                exact_match = (slot_time, slot_element)
+                logger.info(
+                    f"BOOKING_DEBUG: Found exact match for requested time "
+                    f"{target_time.strftime('%I:%M %p')}"
+                )
+
             if diff <= fallback_window_minutes and diff < best_diff:
                 best_diff = diff
                 best_slot = (slot_time, slot_element)
 
-        if best_slot:
-            booked_time, reserve_element = best_slot
+        if exact_match:
+            booked_time, reserve_element = exact_match
             logger.info(
-                f"Attempting to book slot at {booked_time.strftime('%I:%M %p')} for {num_players} players"
+                f"Attempting to book exact requested time at "
+                f"{booked_time.strftime('%I:%M %p')} for {num_players} players"
             )
             return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+
+        if best_slot:
+            booked_time, reserve_element = best_slot
+            time_diff_minutes = int(best_diff)
+            logger.warning(
+                f"BOOKING_DEBUG: Exact requested time {target_time.strftime('%I:%M %p')} "
+                f"not available with {num_players} spots. "
+                f"Using fallback time {booked_time.strftime('%I:%M %p')} "
+                f"({time_diff_minutes} minutes {'earlier' if booked_time < target_time else 'later'})"
+            )
+
+            fallback_reason = None
+            requested_slot = self._find_slot_by_time(search_context, target_time)
+            if requested_slot:
+                bookers = self._extract_bookers_from_slot(requested_slot)
+                if bookers:
+                    booker_names = ", ".join(bookers[:2])
+                    if len(bookers) > 2:
+                        booker_names += f" and {len(bookers) - 2} others"
+                    fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was already booked by {booker_names}"
+                    logger.info(f"BOOKING_DEBUG: Fallback reason: {fallback_reason}")
+                else:
+                    fallback_reason = (
+                        f"Tee time {target_time.strftime('%I:%M %p')} did not have "
+                        f"{num_players} available spots"
+                    )
+            else:
+                fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was not available"
+
+            logger.info(
+                f"Attempting to book fallback slot at {booked_time.strftime('%I:%M %p')} "
+                f"for {num_players} players (requested: {target_time.strftime('%I:%M %p')})"
+            )
+            return self._complete_booking_sync(
+                driver, reserve_element, booked_time, num_players, fallback_reason
+            )
         else:
             all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
             return BookingResult(
@@ -1310,6 +1689,79 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"Error extracting time from slot item: {e}")
 
         return None
+
+    def _find_slot_by_time(self, search_context: Any, target_time: time) -> Any | None:
+        """
+        Find a specific time slot by its time.
+
+        Args:
+            search_context: The WebDriver element to search within
+            target_time: The time to search for
+
+        Returns:
+            The slot item element if found, None otherwise
+        """
+        try:
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+            for slot_item in slot_items:
+                slot_time = self._extract_time_from_slot_item(slot_item)
+                if slot_time and slot_time == target_time:
+                    return slot_item
+        except Exception as e:
+            logger.debug(f"Error finding slot by time: {e}")
+        return None
+
+    def _extract_bookers_from_slot(self, slot_item: Any) -> list[str]:
+        """
+        Extract the names of people who have booked spots in a time slot.
+
+        The Walden Golf tee sheet shows booked spots with the member's name.
+        This method extracts those names to provide context when a requested
+        time is not available.
+
+        Args:
+            slot_item: The <li> element containing the time slot
+
+        Returns:
+            List of booker names found in the slot
+        """
+        bookers: list[str] = []
+        try:
+            reserved_divs = slot_item.find_elements(By.CSS_SELECTOR, "div.Reserved")
+            for div in reserved_divs:
+                div_text = div.text.strip()
+                if div_text and "Available" not in div_text:
+                    lines = [line.strip() for line in div_text.split("\n") if line.strip()]
+                    for line in lines:
+                        if line and "Available" not in line and "Reserve" not in line:
+                            if re.match(r"^[A-Za-z]", line) and "," in line:
+                                bookers.append(line)
+
+            if not bookers:
+                slot_text = slot_item.text
+                # Match names like "O'Donnell, Deborah", "mcghee, mike", "Garrett, Steve"
+                # Handles apostrophes, lowercase names, and multi-part first names
+                name_pattern = r"([A-Za-z][A-Za-z']+,\s*[A-Za-z][A-Za-z' ]*)"
+                matches = re.findall(name_pattern, slot_text)
+                # Filter out non-name matches like "Available" or "Reserve"
+                for match in matches:
+                    if "Available" not in match and "Reserve" not in match:
+                        bookers.append(match)
+
+            if not bookers:
+                spans = slot_item.find_elements(By.TAG_NAME, "span")
+                for span in spans:
+                    span_text = span.text.strip()
+                    if span_text and "Available" not in span_text and "Reserve" not in span_text:
+                        # Match names with apostrophes and lowercase (e.g., "O'Donnell,", "mcghee,")
+                        if re.match(r"^[A-Za-z][A-Za-z']+,", span_text):
+                            bookers.append(span_text)
+
+        except Exception as e:
+            logger.debug(f"Error extracting bookers from slot: {e}")
+
+        unique_bookers = list(dict.fromkeys(bookers))
+        return unique_bookers
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
@@ -1637,6 +2089,7 @@ class WaldenGolfProvider(ReservationProvider):
         reserve_element: Any,
         booked_time: time,
         num_players: int,
+        fallback_reason: str | None = None,
     ) -> BookingResult:
         """
         Complete the booking by clicking Reserve, selecting player count, and confirming.
@@ -1646,6 +2099,7 @@ class WaldenGolfProvider(ReservationProvider):
             reserve_element: The Reserve button/link element to click
             booked_time: The time being booked
             num_players: Number of players (1-4)
+            fallback_reason: Optional reason why a fallback time was used
 
         Returns:
             BookingResult with booking outcome
@@ -1787,6 +2241,7 @@ class WaldenGolfProvider(ReservationProvider):
                     success=True,
                     booked_time=booked_time,
                     confirmation_number=confirmation_number,
+                    fallback_reason=fallback_reason,
                 )
             else:
                 logger.error("BOOKING_DEBUG: Booking verification FAILED")
