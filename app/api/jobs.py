@@ -183,11 +183,23 @@ async def execute_due_bookings(
 
     booking_map = {b.id: b for b in due_bookings}
 
+    booking_open_time = now.replace(
+        hour=settings.booking_open_hour,
+        minute=settings.booking_open_minute,
+        second=0,
+        microsecond=0,
+    ).replace(tzinfo=None)
+
+    logger.info(
+        f"BATCH_JOB: Booking window opens at {booking_open_time.strftime('%H:%M:%S')}, "
+        f"current time is {now.strftime('%H:%M:%S')}"
+    )
+
     try:
         batch_results = await asyncio.wait_for(
             booking_service.execute_bookings_batch(
                 bookings=due_bookings,
-                execute_at=now.replace(tzinfo=None),
+                execute_at=booking_open_time,
             ),
             timeout=BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings),
         )
