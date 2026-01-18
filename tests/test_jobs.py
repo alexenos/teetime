@@ -311,25 +311,28 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_booking = AsyncMock(return_value=True)
+                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", True)])
                 mock_service.get_booking = AsyncMock(return_value=successful_booking)
 
-                response = test_client.post(
-                    "/jobs/execute-due-bookings",
-                    headers={"X-Scheduler-API-Key": "test-api-key"},
-                )
+                with patch("app.api.jobs.sms_service") as mock_sms:
+                    mock_sms.send_booking_confirmation = AsyncMock()
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["total_due"] == 1
-                assert data["succeeded"] == 1
-                assert data["failed"] == 0
-                assert len(data["results"]) == 1
-                assert data["results"][0]["booking_id"] == "test1234"
-                assert data["results"][0]["status"] == "success"
-                assert data["results"][0]["confirmation_number"] == "CONF123"
-                assert data["results"][0]["requested_date"] == "2025-12-20"
-                assert data["results"][0]["requested_time"] == "08:00:00"
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"X-Scheduler-API-Key": "test-api-key"},
+                    )
+
+                    assert response.status_code == 200
+                    data = response.json()
+                    assert data["total_due"] == 1
+                    assert data["succeeded"] == 1
+                    assert data["failed"] == 0
+                    assert len(data["results"]) == 1
+                    assert data["results"][0]["booking_id"] == "test1234"
+                    assert data["results"][0]["status"] == "success"
+                    assert data["results"][0]["confirmation_number"] == "CONF123"
+                    assert data["results"][0]["requested_date"] == "2025-12-20"
+                    assert data["results"][0]["requested_time"] == "08:00:00"
 
     def test_failed_booking_execution(
         self,
@@ -344,23 +347,26 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_booking = AsyncMock(return_value=False)
+                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", False)])
                 mock_service.get_booking = AsyncMock(return_value=failed_booking)
 
-                response = test_client.post(
-                    "/jobs/execute-due-bookings",
-                    headers={"X-Scheduler-API-Key": "test-api-key"},
-                )
+                with patch("app.api.jobs.sms_service") as mock_sms:
+                    mock_sms.send_booking_failure = AsyncMock()
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["total_due"] == 1
-                assert data["succeeded"] == 0
-                assert data["failed"] == 1
-                assert len(data["results"]) == 1
-                assert data["results"][0]["booking_id"] == "test1234"
-                assert data["results"][0]["status"] == "failed"
-                assert data["results"][0]["error"] == "No available slots"
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"X-Scheduler-API-Key": "test-api-key"},
+                    )
+
+                    assert response.status_code == 200
+                    data = response.json()
+                    assert data["total_due"] == 1
+                    assert data["succeeded"] == 0
+                    assert data["failed"] == 1
+                    assert len(data["results"]) == 1
+                    assert data["results"][0]["booking_id"] == "test1234"
+                    assert data["results"][0]["status"] == "failed"
+                    assert data["results"][0]["error"] == "No available slots"
 
     def test_booking_execution_exception(
         self,
@@ -374,7 +380,9 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_booking = AsyncMock(side_effect=Exception("Selenium crashed"))
+                mock_service.execute_bookings_batch = AsyncMock(
+                    side_effect=Exception("Selenium crashed")
+                )
 
                 response = test_client.post(
                     "/jobs/execute-due-bookings",
@@ -449,7 +457,13 @@ class TestJobsExecuteDueBookings:
                 mock_service.get_due_bookings = AsyncMock(
                     return_value=[booking1, booking2, booking3]
                 )
-                mock_service.execute_booking = AsyncMock(side_effect=[True, False, True])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        ("booking1", True),
+                        ("booking2", False),
+                        ("booking3", True),
+                    ]
+                )
                 mock_service.get_booking = AsyncMock(
                     side_effect=[
                         successful_booking1,
@@ -458,22 +472,26 @@ class TestJobsExecuteDueBookings:
                     ]
                 )
 
-                response = test_client.post(
-                    "/jobs/execute-due-bookings",
-                    headers={"X-Scheduler-API-Key": "test-api-key"},
-                )
+                with patch("app.api.jobs.sms_service") as mock_sms:
+                    mock_sms.send_booking_confirmation = AsyncMock()
+                    mock_sms.send_booking_failure = AsyncMock()
 
-                assert response.status_code == 200
-                data = response.json()
-                assert data["total_due"] == 3
-                assert data["succeeded"] == 2
-                assert data["failed"] == 1
-                assert len(data["results"]) == 3
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"X-Scheduler-API-Key": "test-api-key"},
+                    )
 
-                results_by_id = {r["booking_id"]: r for r in data["results"]}
-                assert results_by_id["booking1"]["status"] == "success"
-                assert results_by_id["booking2"]["status"] == "failed"
-                assert results_by_id["booking3"]["status"] == "success"
+                    assert response.status_code == 200
+                    data = response.json()
+                    assert data["total_due"] == 3
+                    assert data["succeeded"] == 2
+                    assert data["failed"] == 1
+                    assert len(data["results"]) == 3
+
+                    results_by_id = {r["booking_id"]: r for r in data["results"]}
+                    assert results_by_id["booking1"]["status"] == "success"
+                    assert results_by_id["booking2"]["status"] == "failed"
+                    assert results_by_id["booking3"]["status"] == "success"
 
 
 class TestJobsTimeout:
@@ -500,7 +518,7 @@ class TestJobsTimeout:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_booking = AsyncMock(return_value=True)
+                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", True)])
 
                 with patch("asyncio.wait_for", mock_wait_for):
                     response = test_client.post(

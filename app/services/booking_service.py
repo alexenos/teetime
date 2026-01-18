@@ -19,7 +19,7 @@ from app.models.schemas import (
     TeeTimeRequest,
     UserSession,
 )
-from app.providers.base import ReservationProvider
+from app.providers.base import BatchBookingRequest, ReservationProvider
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.sms_service import sms_service
@@ -700,6 +700,97 @@ class BookingService:
         """
         naive_current_time = current_time.replace(tzinfo=None)
         return await database_service.get_due_bookings(naive_current_time)
+
+    async def execute_bookings_batch(
+        self,
+        bookings: list[TeeTimeBooking],
+        execute_at: datetime | None = None,
+    ) -> list[tuple[str, bool]]:
+        """
+        Execute multiple bookings in a batch for efficiency.
+
+        This method groups bookings by date and uses the provider's batch booking
+        method to book all times for each date in a single session. This is much
+        faster than booking each time individually because:
+        1. Only one login is required per date
+        2. The driver session is reused for all bookings on the same date
+        3. If execute_at is provided, the system logs in early and waits
+
+        SMS notifications are NOT sent by this method - the caller is responsible
+        for sending notifications after all bookings are complete.
+
+        Args:
+            bookings: List of bookings to execute
+            execute_at: Optional datetime to wait until before starting bookings.
+                       If provided, the provider will log in early and wait until
+                       this time before refreshing the page and booking.
+
+        Returns:
+            List of (booking_id, success) tuples for each booking
+        """
+        if not bookings:
+            return []
+
+        if not self._reservation_provider:
+            results = []
+            for booking in bookings:
+                booking_id = booking.id or ""
+                booking.status = BookingStatus.FAILED
+                booking.error_message = "Reservation provider not configured"
+                await database_service.update_booking(booking)
+                results.append((booking_id, False))
+            return results
+
+        bookings_by_date: dict[date, list[TeeTimeBooking]] = {}
+        for booking in bookings:
+            target_date = booking.request.requested_date
+            if target_date not in bookings_by_date:
+                bookings_by_date[target_date] = []
+            bookings_by_date[target_date].append(booking)
+
+        all_results: list[tuple[str, bool]] = []
+
+        for target_date, date_bookings in bookings_by_date.items():
+            for booking in date_bookings:
+                booking.status = BookingStatus.IN_PROGRESS
+                await database_service.update_booking(booking)
+
+            batch_requests = [
+                BatchBookingRequest(
+                    booking_id=booking.id or "",
+                    target_time=booking.request.requested_time,
+                    num_players=booking.request.num_players,
+                    fallback_window_minutes=booking.request.fallback_window_minutes,
+                )
+                for booking in date_bookings
+            ]
+
+            batch_result = await self._reservation_provider.book_multiple_tee_times(
+                target_date=target_date,
+                requests=batch_requests,
+                execute_at=execute_at,
+            )
+
+            booking_map = {b.id: b for b in date_bookings}
+            for item_result in batch_result.results:
+                booking = booking_map.get(item_result.booking_id)
+                if not booking:
+                    continue
+
+                result = item_result.result
+                if result.success:
+                    booking.status = BookingStatus.SUCCESS
+                    booking.actual_booked_time = result.booked_time
+                    booking.confirmation_number = result.confirmation_number
+                    all_results.append((item_result.booking_id, True))
+                else:
+                    booking.status = BookingStatus.FAILED
+                    booking.error_message = result.error_message
+                    all_results.append((item_result.booking_id, False))
+
+                await database_service.update_booking(booking)
+
+        return all_results
 
 
 booking_service = BookingService()

@@ -24,7 +24,13 @@ from selenium.webdriver.support.ui import Select, WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 from app.config import settings
-from app.providers.base import BookingResult, ReservationProvider
+from app.providers.base import (
+    BatchBookingItemResult,
+    BatchBookingRequest,
+    BatchBookingResult,
+    BookingResult,
+    ReservationProvider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +384,274 @@ class WaldenGolfProvider(ReservationProvider):
             )
         finally:
             logger.debug("BOOKING_DEBUG: === BOOKING ATTEMPT COMPLETE - Closing driver ===")
+            driver.quit()
+
+    async def book_multiple_tee_times(
+        self,
+        target_date: date,
+        requests: list[BatchBookingRequest],
+        execute_at: datetime | None = None,
+    ) -> BatchBookingResult:
+        """
+        Book multiple tee times in a single session for efficiency.
+
+        This method is optimized for booking multiple tee times on the same date:
+        1. Creates a single WebDriver session
+        2. Logs in once
+        3. If execute_at is provided, waits until that time before booking
+        4. Books all requested times in sequence
+        5. Returns results for all bookings
+
+        Args:
+            target_date: The date to book (all requests must be for this date)
+            requests: List of booking requests to execute
+            execute_at: Optional datetime to wait until before starting bookings.
+                       If provided, the method will log in early and wait until
+                       this time before refreshing the page and booking.
+
+        Returns:
+            BatchBookingResult with results for each booking request
+        """
+        return await asyncio.to_thread(
+            self._book_multiple_tee_times_sync,
+            target_date,
+            requests,
+            execute_at,
+        )
+
+    def _book_multiple_tee_times_sync(
+        self,
+        target_date: date,
+        requests: list[BatchBookingRequest],
+        execute_at: datetime | None,
+    ) -> BatchBookingResult:
+        """
+        Synchronous batch booking implementation with single driver lifecycle.
+
+        Creates driver once, logs in once, then books all requested times in sequence.
+        If execute_at is provided, waits until that time before refreshing and booking.
+        """
+        if not requests:
+            return BatchBookingResult()
+
+        logger.info(
+            f"BATCH_BOOKING: === STARTING BATCH BOOKING === "
+            f"date={target_date} ({target_date.strftime('%A')}), "
+            f"num_requests={len(requests)}, "
+            f"execute_at={execute_at.strftime('%H:%M:%S') if execute_at else 'immediate'}"
+        )
+
+        results: list[BatchBookingItemResult] = []
+        total_succeeded = 0
+        total_failed = 0
+
+        driver = self._create_driver()
+        try:
+            logger.info("BATCH_BOOKING: Step 1 - Logging in to Walden Golf")
+            if not self._perform_login(driver):
+                logger.error("BATCH_BOOKING: Login failed")
+                for req in requests:
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=BookingResult(
+                                success=False,
+                                error_message="Failed to log in to Walden Golf",
+                            ),
+                        )
+                    )
+                    total_failed += 1
+                return BatchBookingResult(
+                    results=results,
+                    total_succeeded=total_succeeded,
+                    total_failed=total_failed,
+                )
+            logger.info("BATCH_BOOKING: Login successful")
+
+            logger.info("BATCH_BOOKING: Step 2 - Navigating to tee time booking page")
+            driver.get(self.TEE_TIME_URL)
+
+            wait = WebDriverWait(driver, 15)
+            wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
+            logger.info(f"BATCH_BOOKING: Tee time page loaded. URL: {driver.current_url}")
+
+            logger.info("BATCH_BOOKING: Step 3 - Selecting course")
+            if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
+                logger.error("BATCH_BOOKING: Course selection/verification failed")
+                for req in requests:
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=BookingResult(
+                                success=False,
+                                error_message=(
+                                    f"Failed to select or verify {self.NORTHGATE_COURSE_NAME} course."
+                                ),
+                            ),
+                        )
+                    )
+                    total_failed += 1
+                return BatchBookingResult(
+                    results=results,
+                    total_succeeded=total_succeeded,
+                    total_failed=total_failed,
+                )
+
+            if execute_at:
+                now = datetime.now()
+                if now < execute_at:
+                    wait_seconds = (execute_at - now).total_seconds()
+                    logger.info(
+                        f"BATCH_BOOKING: Step 4 - Waiting {wait_seconds:.1f}s until "
+                        f"{execute_at.strftime('%H:%M:%S')} before booking"
+                    )
+                    time_module.sleep(wait_seconds)
+                    logger.info("BATCH_BOOKING: Wait complete, refreshing page")
+                    driver.refresh()
+                    wait.until(
+                        expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form"))
+                    )
+                    if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
+                        logger.warning("BATCH_BOOKING: Course re-selection after refresh failed")
+
+            logger.info("BATCH_BOOKING: Step 5 - Selecting date")
+            self._select_date_sync(driver, target_date)
+
+            wait.until(
+                expected_conditions.presence_of_element_located(
+                    (
+                        By.CSS_SELECTOR,
+                        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                    )
+                )
+            )
+            logger.info("BATCH_BOOKING: Date selection complete")
+
+            logger.info(f"BATCH_BOOKING: Step 6 - Booking {len(requests)} tee times")
+            for i, req in enumerate(requests, 1):
+                logger.info(
+                    f"BATCH_BOOKING: Booking {i}/{len(requests)} - "
+                    f"time={req.target_time.strftime('%H:%M')}, "
+                    f"players={req.num_players}, booking_id={req.booking_id}"
+                )
+
+                try:
+                    result = self._find_and_book_time_slot_sync(
+                        driver,
+                        req.target_time,
+                        req.num_players,
+                        req.fallback_window_minutes,
+                    )
+
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=result,
+                        )
+                    )
+
+                    if result.success:
+                        total_succeeded += 1
+                        logger.info(
+                            f"BATCH_BOOKING: Booking {i}/{len(requests)} SUCCESS - "
+                            f"booked_time={result.booked_time}, "
+                            f"confirmation={result.confirmation_number}"
+                        )
+                    else:
+                        total_failed += 1
+                        logger.warning(
+                            f"BATCH_BOOKING: Booking {i}/{len(requests)} FAILED - "
+                            f"error={result.error_message}"
+                        )
+
+                    if i < len(requests):
+                        logger.info(
+                            "BATCH_BOOKING: Navigating back to tee time page for next booking"
+                        )
+                        driver.get(self.TEE_TIME_URL)
+                        wait.until(
+                            expected_conditions.presence_of_element_located(
+                                (By.CSS_SELECTOR, "form")
+                            )
+                        )
+                        if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
+                            logger.warning("BATCH_BOOKING: Course re-selection failed")
+                        self._select_date_sync(driver, target_date)
+                        wait.until(
+                            expected_conditions.presence_of_element_located(
+                                (
+                                    By.CSS_SELECTOR,
+                                    ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                                )
+                            )
+                        )
+
+                except Exception as e:
+                    logger.error(f"BATCH_BOOKING: Booking {i}/{len(requests)} ERROR - {e}")
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=BookingResult(
+                                success=False,
+                                error_message=f"Booking error: {str(e)}",
+                            ),
+                        )
+                    )
+                    total_failed += 1
+
+            logger.info(
+                f"BATCH_BOOKING: === BATCH COMPLETE === "
+                f"succeeded={total_succeeded}, failed={total_failed}"
+            )
+
+            return BatchBookingResult(
+                results=results,
+                total_succeeded=total_succeeded,
+                total_failed=total_failed,
+            )
+
+        except TimeoutException as e:
+            logger.error(f"BATCH_BOOKING: Timeout exception: {e}")
+            self._capture_diagnostic_info(driver, "batch_booking_timeout")
+            for req in requests:
+                if not any(r.booking_id == req.booking_id for r in results):
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=BookingResult(
+                                success=False,
+                                error_message=f"Batch booking timeout: {str(e)}",
+                            ),
+                        )
+                    )
+                    total_failed += 1
+            return BatchBookingResult(
+                results=results,
+                total_succeeded=total_succeeded,
+                total_failed=total_failed,
+            )
+        except WebDriverException as e:
+            logger.error(f"BATCH_BOOKING: WebDriver exception: {e}")
+            self._capture_diagnostic_info(driver, "batch_booking_webdriver_error")
+            for req in requests:
+                if not any(r.booking_id == req.booking_id for r in results):
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=BookingResult(
+                                success=False,
+                                error_message=f"Batch booking error: {str(e)}",
+                            ),
+                        )
+                    )
+                    total_failed += 1
+            return BatchBookingResult(
+                results=results,
+                total_succeeded=total_succeeded,
+                total_failed=total_failed,
+            )
+        finally:
+            logger.info("BATCH_BOOKING: === BATCH BOOKING COMPLETE - Closing driver ===")
             driver.quit()
 
     def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> bool:
@@ -2827,6 +3101,31 @@ class MockWaldenProvider(ReservationProvider):
             success=True,
             booked_time=target_time,
             confirmation_number=f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        )
+
+    async def book_multiple_tee_times(
+        self,
+        target_date: date,
+        requests: list[BatchBookingRequest],
+        execute_at: datetime | None = None,
+    ) -> BatchBookingResult:
+        results: list[BatchBookingItemResult] = []
+        total_succeeded = 0
+
+        for req in requests:
+            await asyncio.sleep(0.1)
+            result = BookingResult(
+                success=True,
+                booked_time=req.target_time,
+                confirmation_number=f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}-{req.booking_id[:8]}",
+            )
+            results.append(BatchBookingItemResult(booking_id=req.booking_id, result=result))
+            total_succeeded += 1
+
+        return BatchBookingResult(
+            results=results,
+            total_succeeded=total_succeeded,
+            total_failed=0,
         )
 
     async def get_available_times(self, target_date: date) -> list[time]:
