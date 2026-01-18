@@ -1409,11 +1409,32 @@ class WaldenGolfProvider(ReservationProvider):
                 f"Using fallback time {booked_time.strftime('%I:%M %p')} "
                 f"({time_diff_minutes} minutes {'earlier' if booked_time < target_time else 'later'})"
             )
+
+            fallback_reason = None
+            requested_slot = self._find_slot_by_time(search_context, target_time)
+            if requested_slot:
+                bookers = self._extract_bookers_from_slot(requested_slot)
+                if bookers:
+                    booker_names = ", ".join(bookers[:2])
+                    if len(bookers) > 2:
+                        booker_names += f" and {len(bookers) - 2} others"
+                    fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was already booked by {booker_names}"
+                    logger.info(f"BOOKING_DEBUG: Fallback reason: {fallback_reason}")
+                else:
+                    fallback_reason = (
+                        f"Tee time {target_time.strftime('%I:%M %p')} did not have "
+                        f"{num_players} available spots"
+                    )
+            else:
+                fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was not available"
+
             logger.info(
                 f"Attempting to book fallback slot at {booked_time.strftime('%I:%M %p')} "
                 f"for {num_players} players (requested: {target_time.strftime('%I:%M %p')})"
             )
-            return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+            return self._complete_booking_sync(
+                driver, reserve_element, booked_time, num_players, fallback_reason
+            )
         else:
             all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
             return BookingResult(
@@ -1668,6 +1689,73 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"Error extracting time from slot item: {e}")
 
         return None
+
+    def _find_slot_by_time(self, search_context: Any, target_time: time) -> Any | None:
+        """
+        Find a specific time slot by its time.
+
+        Args:
+            search_context: The WebDriver element to search within
+            target_time: The time to search for
+
+        Returns:
+            The slot item element if found, None otherwise
+        """
+        try:
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+            for slot_item in slot_items:
+                slot_time = self._extract_time_from_slot_item(slot_item)
+                if slot_time and slot_time == target_time:
+                    return slot_item
+        except Exception as e:
+            logger.debug(f"Error finding slot by time: {e}")
+        return None
+
+    def _extract_bookers_from_slot(self, slot_item: Any) -> list[str]:
+        """
+        Extract the names of people who have booked spots in a time slot.
+
+        The Walden Golf tee sheet shows booked spots with the member's name.
+        This method extracts those names to provide context when a requested
+        time is not available.
+
+        Args:
+            slot_item: The <li> element containing the time slot
+
+        Returns:
+            List of booker names found in the slot
+        """
+        bookers: list[str] = []
+        try:
+            reserved_divs = slot_item.find_elements(By.CSS_SELECTOR, "div.Reserved")
+            for div in reserved_divs:
+                div_text = div.text.strip()
+                if div_text and "Available" not in div_text:
+                    lines = [line.strip() for line in div_text.split("\n") if line.strip()]
+                    for line in lines:
+                        if line and "Available" not in line and "Reserve" not in line:
+                            if re.match(r"^[A-Za-z]", line) and "," in line:
+                                bookers.append(line)
+
+            if not bookers:
+                slot_text = slot_item.text
+                name_pattern = r"([A-Z][a-z]+,\s*[A-Z][a-z]+)"
+                matches = re.findall(name_pattern, slot_text)
+                bookers.extend(matches)
+
+            if not bookers:
+                spans = slot_item.find_elements(By.TAG_NAME, "span")
+                for span in spans:
+                    span_text = span.text.strip()
+                    if span_text and "Available" not in span_text and "Reserve" not in span_text:
+                        if re.match(r"^[A-Z][a-z]+,", span_text):
+                            bookers.append(span_text)
+
+        except Exception as e:
+            logger.debug(f"Error extracting bookers from slot: {e}")
+
+        unique_bookers = list(dict.fromkeys(bookers))
+        return unique_bookers
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:
@@ -1995,6 +2083,7 @@ class WaldenGolfProvider(ReservationProvider):
         reserve_element: Any,
         booked_time: time,
         num_players: int,
+        fallback_reason: str | None = None,
     ) -> BookingResult:
         """
         Complete the booking by clicking Reserve, selecting player count, and confirming.
@@ -2004,6 +2093,7 @@ class WaldenGolfProvider(ReservationProvider):
             reserve_element: The Reserve button/link element to click
             booked_time: The time being booked
             num_players: Number of players (1-4)
+            fallback_reason: Optional reason why a fallback time was used
 
         Returns:
             BookingResult with booking outcome
@@ -2145,6 +2235,7 @@ class WaldenGolfProvider(ReservationProvider):
                     success=True,
                     booked_time=booked_time,
                     confirmation_number=confirmation_number,
+                    fallback_reason=fallback_reason,
                 )
             else:
                 logger.error("BOOKING_DEBUG: Booking verification FAILED")

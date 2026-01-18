@@ -10,6 +10,7 @@ class BookingResult:
     confirmation_number: str | None = None
     error_message: str | None = None
     alternatives: str | None = None
+    fallback_reason: str | None = None
 
 
 class ReservationProvider(ABC):
