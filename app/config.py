@@ -1,4 +1,20 @@
+from enum import Enum
+
 from pydantic_settings import BaseSettings
+
+
+class WaitMode(str, Enum):
+    """
+    Wait strategy mode for Selenium operations.
+
+    FIXED: Use fixed sleep durations (current behavior, most reliable)
+    EVENT_DRIVEN: Use WebDriverWait only, no fixed sleeps (fastest, less reliable)
+    HYBRID: Use WebDriverWait + small buffer sleep (balanced approach)
+    """
+
+    FIXED = "fixed"
+    EVENT_DRIVEN = "event_driven"
+    HYBRID = "hybrid"
 
 
 class Settings(BaseSettings):
@@ -29,6 +45,9 @@ class Settings(BaseSettings):
 
     # Logging configuration
     log_level: str = "INFO"  # Set to "DEBUG" to see BOOKING_DEBUG messages in GCP Cloud Logs
+
+    # Wait strategy for Selenium operations (fixed, event_driven, hybrid)
+    wait_mode: WaitMode = WaitMode.FIXED
 
     class Config:
         env_file = ".env"

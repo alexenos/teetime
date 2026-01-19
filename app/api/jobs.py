@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.services.booking_service import booking_service
+from app.services.sms_service import sms_service
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,12 @@ async def execute_due_bookings(
 
     This endpoint is called by Cloud Scheduler at 6:30am CT daily.
     It finds all SCHEDULED bookings where scheduled_execution_time <= now
-    and executes them sequentially with per-booking timeouts.
+    and executes them using batch booking for efficiency.
+
+    Optimizations for speed:
+    1. Uses batch booking to process multiple bookings with a single login session
+    2. Defers SMS notifications until after ALL bookings are complete
+    3. Groups bookings by date to minimize navigation overhead
 
     Security: Accepts OIDC token from Cloud Scheduler (preferred) or legacy API key.
 
@@ -164,61 +170,65 @@ async def execute_due_bookings(
 
     due_bookings = await booking_service.get_due_bookings(now)
 
-    results: list[JobExecutionItem] = []
-    succeeded = 0
-    failed = 0
+    if not due_bookings:
+        return JobExecutionResult(
+            executed_at=now,
+            total_due=0,
+            succeeded=0,
+            failed=0,
+            results=[],
+        )
 
-    for booking in due_bookings:
-        # booking.id should always be set for bookings from the database
-        booking_id = booking.id or ""
-        try:
-            success = await asyncio.wait_for(
-                booking_service.execute_booking(booking_id),
-                timeout=BOOKING_EXECUTION_TIMEOUT_SECONDS,
-            )
-            if success:
-                succeeded += 1
-                updated_booking = await booking_service.get_booking(booking_id)
-                results.append(
-                    JobExecutionItem(
-                        booking_id=booking_id,
-                        status=JobExecutionStatus.SUCCESS,
-                        requested_date=booking.request.requested_date,
-                        requested_time=booking.request.requested_time,
-                        confirmation_number=updated_booking.confirmation_number
-                        if updated_booking
-                        else None,
-                    )
-                )
-            else:
-                failed += 1
-                updated_booking = await booking_service.get_booking(booking_id)
-                results.append(
-                    JobExecutionItem(
-                        booking_id=booking_id,
-                        status=JobExecutionStatus.FAILED,
-                        requested_date=booking.request.requested_date,
-                        requested_time=booking.request.requested_time,
-                        error=updated_booking.error_message if updated_booking else "Unknown error",
-                    )
-                )
-        except TimeoutError:
-            failed += 1
-            logger.error(
-                f"Booking {booking_id} timed out after {BOOKING_EXECUTION_TIMEOUT_SECONDS}s"
-            )
+    logger.info(f"BATCH_JOB: Starting batch execution of {len(due_bookings)} bookings")
+
+    booking_map = {b.id: b for b in due_bookings}
+
+    booking_open_time = now.replace(
+        hour=settings.booking_open_hour,
+        minute=settings.booking_open_minute,
+        second=0,
+        microsecond=0,
+    ).replace(tzinfo=None)
+
+    logger.info(
+        f"BATCH_JOB: Booking window opens at {booking_open_time.strftime('%H:%M:%S')}, "
+        f"current time is {now.strftime('%H:%M:%S')}"
+    )
+
+    try:
+        batch_results = await asyncio.wait_for(
+            booking_service.execute_bookings_batch(
+                bookings=due_bookings,
+                execute_at=booking_open_time,
+            ),
+            timeout=BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings),
+        )
+    except TimeoutError:
+        logger.error("BATCH_JOB: Batch execution timed out")
+        results: list[JobExecutionItem] = []
+        for booking in due_bookings:
+            booking_id = booking.id or ""
             results.append(
                 JobExecutionItem(
                     booking_id=booking_id,
                     status=JobExecutionStatus.TIMEOUT,
                     requested_date=booking.request.requested_date,
                     requested_time=booking.request.requested_time,
-                    error=f"Execution timed out after {BOOKING_EXECUTION_TIMEOUT_SECONDS} seconds",
+                    error="Batch execution timed out",
                 )
             )
-        except Exception as e:
-            failed += 1
-            logger.exception(f"Booking {booking_id} failed with error: {e}")
+        return JobExecutionResult(
+            executed_at=now,
+            total_due=len(due_bookings),
+            succeeded=0,
+            failed=len(due_bookings),
+            results=results,
+        )
+    except Exception as e:
+        logger.exception(f"BATCH_JOB: Batch execution failed with error: {e}")
+        results = []
+        for booking in due_bookings:
+            booking_id = booking.id or ""
             results.append(
                 JobExecutionItem(
                     booking_id=booking_id,
@@ -228,6 +238,70 @@ async def execute_due_bookings(
                     error=str(e),
                 )
             )
+        return JobExecutionResult(
+            executed_at=now,
+            total_due=len(due_bookings),
+            succeeded=0,
+            failed=len(due_bookings),
+            results=results,
+        )
+
+    logger.info("BATCH_JOB: Batch execution complete, sending SMS notifications")
+
+    results = []
+    succeeded = 0
+    failed = 0
+
+    for booking_id, success in batch_results:
+        updated_booking = await booking_service.get_booking(booking_id)
+        original_booking = booking_map.get(booking_id)
+
+        if not original_booking:
+            continue
+
+        if success and updated_booking:
+            succeeded += 1
+            results.append(
+                JobExecutionItem(
+                    booking_id=booking_id,
+                    status=JobExecutionStatus.SUCCESS,
+                    requested_date=original_booking.request.requested_date,
+                    requested_time=original_booking.request.requested_time,
+                    confirmation_number=updated_booking.confirmation_number,
+                )
+            )
+
+            date_str = original_booking.request.requested_date.strftime("%A, %B %d")
+            time_str = (
+                updated_booking.actual_booked_time or original_booking.request.requested_time
+            ).strftime("%I:%M %p")
+            details = f"{date_str} at {time_str} for {original_booking.request.num_players} players"
+            if updated_booking.confirmation_number:
+                details += f" (Confirmation: {updated_booking.confirmation_number})"
+
+            await sms_service.send_booking_confirmation(original_booking.phone_number, details)
+        else:
+            failed += 1
+            error_message = updated_booking.error_message if updated_booking else "Unknown error"
+            results.append(
+                JobExecutionItem(
+                    booking_id=booking_id,
+                    status=JobExecutionStatus.FAILED,
+                    requested_date=original_booking.request.requested_date,
+                    requested_time=original_booking.request.requested_time,
+                    error=error_message,
+                )
+            )
+
+            await sms_service.send_booking_failure(
+                original_booking.phone_number,
+                error_message or "Unknown error",
+            )
+
+    logger.info(
+        f"BATCH_JOB: Complete - succeeded={succeeded}, failed={failed}, "
+        f"total={len(due_bookings)}"
+    )
 
     return JobExecutionResult(
         executed_at=now,
