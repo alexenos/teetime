@@ -234,6 +234,141 @@ class TestGeminiServiceBuildParsedIntent:
         assert result.tee_time_request is not None
         assert result.tee_time_request.num_players == 4
 
+    def test_build_book_intent_multiple_bookings(self, gemini_service: GeminiService) -> None:
+        """Test building a book intent with multiple bookings in the bookings array."""
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)
+        args = {
+            "intent": "book",
+            "bookings": [
+                {"requested_date": "2025-12-20", "requested_time": "08:00", "num_players": 4},
+                {"requested_date": "2025-12-21", "requested_time": "09:00", "num_players": 2},
+            ],
+            "response_message": "I'll book both tee times for you!",
+        }
+
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._build_parsed_intent(args)
+
+        assert result.intent == "book"
+        assert result.tee_time_request is None
+        assert result.tee_time_requests is not None
+        assert len(result.tee_time_requests) == 2
+        assert result.tee_time_requests[0].requested_date == date(2025, 12, 20)
+        assert result.tee_time_requests[0].requested_time == time(8, 0)
+        assert result.tee_time_requests[0].num_players == 4
+        assert result.tee_time_requests[1].requested_date == date(2025, 12, 21)
+        assert result.tee_time_requests[1].requested_time == time(9, 0)
+        assert result.tee_time_requests[1].num_players == 2
+
+    def test_build_book_intent_single_booking_in_array(self, gemini_service: GeminiService) -> None:
+        """Test that a single booking in the bookings array uses tee_time_request field."""
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)
+        args = {
+            "intent": "book",
+            "bookings": [
+                {"requested_date": "2025-12-20", "requested_time": "08:00", "num_players": 4},
+            ],
+            "response_message": "I'll book that for you!",
+        }
+
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._build_parsed_intent(args)
+
+        assert result.intent == "book"
+        assert result.tee_time_request is not None
+        assert result.tee_time_requests is None
+        assert result.tee_time_request.requested_date == date(2025, 12, 20)
+
+    def test_build_book_intent_empty_bookings_array(self, gemini_service: GeminiService) -> None:
+        """Test that an empty bookings array falls back to legacy fields."""
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)
+        args = {
+            "intent": "book",
+            "bookings": [],
+            "requested_date": "2025-12-20",
+            "requested_time": "08:00",
+            "response_message": "I'll book that for you!",
+        }
+
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._build_parsed_intent(args)
+
+        assert result.intent == "book"
+        assert result.tee_time_request is not None
+        assert result.tee_time_requests is None
+
+    def test_build_book_intent_multiple_bookings_with_invalid_entry(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Test that invalid entries in bookings array are skipped."""
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)
+        args = {
+            "intent": "book",
+            "bookings": [
+                {"requested_date": "2025-12-20", "requested_time": "08:00", "num_players": 4},
+                {"requested_date": "invalid", "requested_time": "invalid"},
+                {"requested_date": "2025-12-21", "requested_time": "09:00", "num_players": 2},
+            ],
+            "response_message": "I'll book the valid tee times!",
+        }
+
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._build_parsed_intent(args)
+
+        assert result.intent == "book"
+        assert result.tee_time_requests is not None
+        assert len(result.tee_time_requests) == 2
+
+    def test_build_book_intent_multiple_bookings_default_num_players(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Test that num_players defaults to 4 in bookings array."""
+        fixed_now = datetime(2025, 12, 15, 12, 0, 0)
+        args = {
+            "intent": "book",
+            "bookings": [
+                {"requested_date": "2025-12-20", "requested_time": "08:00"},
+            ],
+            "response_message": "Booking!",
+        }
+
+        with patch("app.services.gemini_service.datetime") as mock_datetime:
+            mock_datetime.now.return_value = fixed_now
+            mock_datetime.strptime = datetime.strptime
+            result = gemini_service._build_parsed_intent(args)
+
+        assert result.tee_time_request is not None
+        assert result.tee_time_request.num_players == 4
+
+    def test_build_book_intent_multiple_bookings_with_relative_dates(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Test building multiple bookings with relative dates like 'saturday'."""
+        args = {
+            "intent": "book",
+            "bookings": [
+                {"requested_date": "saturday", "requested_time": "08:00", "num_players": 4},
+                {"requested_date": "sunday", "requested_time": "09:00", "num_players": 4},
+            ],
+            "response_message": "I'll book both weekend tee times!",
+        }
+
+        result = gemini_service._build_parsed_intent(args)
+
+        assert result.intent == "book"
+        assert result.tee_time_requests is not None
+        assert len(result.tee_time_requests) == 2
+        assert result.tee_time_requests[0].requested_date.strftime("%A") == "Saturday"
+        assert result.tee_time_requests[1].requested_date.strftime("%A") == "Sunday"
+
 
 class TestGeminiServiceMockParse:
     """Tests for the _mock_parse fallback method."""

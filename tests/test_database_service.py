@@ -232,6 +232,105 @@ class TestSessionConversion:
             == sample_session_with_request.pending_request.requested_date
         )
 
+    def test_session_to_record_with_pending_requests(self, sample_request: TeeTimeRequest) -> None:
+        """Test converting a UserSession with multiple pending requests to a SessionRecord."""
+        service = DatabaseService()
+        request2 = TeeTimeRequest(
+            requested_date=date(2025, 12, 21),
+            requested_time=time(9, 0),
+            num_players=2,
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=[sample_request, request2],
+        )
+        record = service._session_to_record(session)
+
+        assert record.phone_number == session.phone_number
+        assert record.state == session.state
+        assert record.pending_request_json is not None
+        assert "2025-12-20" in record.pending_request_json
+        assert "2025-12-21" in record.pending_request_json
+
+    def test_record_to_session_with_pending_requests(self, sample_request: TeeTimeRequest) -> None:
+        """Test converting a SessionRecord with multiple pending requests to a UserSession."""
+        import json
+
+        service = DatabaseService()
+        request2 = TeeTimeRequest(
+            requested_date=date(2025, 12, 21),
+            requested_time=time(9, 0),
+            num_players=2,
+        )
+        pending_json = json.dumps(
+            [
+                sample_request.model_dump(mode="json"),
+                request2.model_dump(mode="json"),
+            ]
+        )
+        record = SessionRecord(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request_json=pending_json,
+            last_interaction=datetime(2025, 12, 6, 10, 0),
+        )
+
+        session = service._record_to_session(record)
+
+        assert session.phone_number == record.phone_number
+        assert session.state == record.state
+        assert session.pending_request is None
+        assert session.pending_requests is not None
+        assert len(session.pending_requests) == 2
+        assert session.pending_requests[0].requested_date == sample_request.requested_date
+        assert session.pending_requests[1].requested_date == date(2025, 12, 21)
+
+    def test_session_roundtrip_with_pending_requests(self, sample_request: TeeTimeRequest) -> None:
+        """Test that session conversion with multiple pending requests is reversible."""
+        service = DatabaseService()
+        request2 = TeeTimeRequest(
+            requested_date=date(2025, 12, 21),
+            requested_time=time(9, 0),
+            num_players=2,
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=[sample_request, request2],
+        )
+        record = service._session_to_record(session)
+        converted_session = service._record_to_session(record)
+
+        assert converted_session.phone_number == session.phone_number
+        assert converted_session.state == session.state
+        assert converted_session.pending_requests is not None
+        assert len(converted_session.pending_requests) == 2
+        assert converted_session.pending_requests[0].requested_date == sample_request.requested_date
+        assert converted_session.pending_requests[1].requested_date == request2.requested_date
+
+    def test_pending_requests_takes_precedence_over_pending_request(
+        self, sample_request: TeeTimeRequest
+    ) -> None:
+        """Test that pending_requests is used when both fields are set."""
+        service = DatabaseService()
+        request2 = TeeTimeRequest(
+            requested_date=date(2025, 12, 21),
+            requested_time=time(9, 0),
+            num_players=2,
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=sample_request,
+            pending_requests=[request2],
+        )
+        record = service._session_to_record(session)
+
+        assert record.pending_request_json is not None
+        assert "2025-12-21" in record.pending_request_json
+        assert "2025-12-20" not in record.pending_request_json
+
 
 class TestBookingCRUD:
     """Tests for booking CRUD operations with real database."""
