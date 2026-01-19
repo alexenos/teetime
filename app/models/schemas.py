@@ -141,6 +141,10 @@ class UserSession(BaseModel):
         state: Current conversation state (see ConversationState).
         pending_request: Partially or fully built TeeTimeRequest being
             constructed through the conversation. None when IDLE.
+            Deprecated: Use pending_requests for new code.
+        pending_requests: List of TeeTimeRequests being constructed through
+            the conversation. Supports multiple bookings in a single message.
+            None when IDLE.
         pending_cancellation_id: ID of a booking awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for them to confirm.
         last_interaction: Timestamp of the user's last message. Used for
@@ -150,6 +154,7 @@ class UserSession(BaseModel):
     phone_number: str
     state: ConversationState = ConversationState.IDLE
     pending_request: TeeTimeRequest | None = None
+    pending_requests: list[TeeTimeRequest] | None = None
     pending_cancellation_id: str | None = None
     last_interaction: datetime = Field(default_factory=datetime.utcnow)
 
@@ -175,6 +180,9 @@ class ParsedIntent(BaseModel):
             flows where we need to check the exact response.
         tee_time_request: Extracted booking details if intent is "book".
             May be partial if user didn't provide all information.
+            Deprecated: Use tee_time_requests for new code.
+        tee_time_requests: List of extracted booking details if intent is "book".
+            Supports multiple bookings in a single message.
         booking_id: ID of the booking to modify/cancel (if applicable).
         clarification_needed: Question to ask the user if more information
             is needed to complete their request.
@@ -184,6 +192,7 @@ class ParsedIntent(BaseModel):
     intent: str = Field(..., description="The user's intent: book, modify, cancel, status, help")
     raw_message: str | None = None
     tee_time_request: TeeTimeRequest | None = None
+    tee_time_requests: list[TeeTimeRequest] | None = None
     booking_id: str | None = None
     clarification_needed: str | None = None
     response_message: str | None = None

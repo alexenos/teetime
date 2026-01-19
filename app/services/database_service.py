@@ -67,8 +67,12 @@ class DatabaseService:
 
     def _session_to_record(self, session: UserSession) -> SessionRecord:
         """Convert a UserSession Pydantic model to a SessionRecord SQLAlchemy model."""
+        import json
+
         pending_json = None
-        if session.pending_request:
+        if session.pending_requests:
+            pending_json = json.dumps([r.model_dump(mode="json") for r in session.pending_requests])
+        elif session.pending_request:
             pending_json = session.pending_request.model_dump_json()
         return SessionRecord(
             phone_number=session.phone_number,
@@ -80,15 +84,26 @@ class DatabaseService:
 
     def _record_to_session(self, record: SessionRecord) -> UserSession:
         """Convert a SessionRecord SQLAlchemy model to a UserSession Pydantic model."""
+        import json
+
         pending_request = None
+        pending_requests = None
         if record.pending_request_json:
-            pending_request = TeeTimeRequest.model_validate_json(
-                record.pending_request_json  # type: ignore[arg-type]
-            )
+            try:
+                data = json.loads(record.pending_request_json)  # type: ignore[arg-type]
+                if isinstance(data, list):
+                    pending_requests = [TeeTimeRequest.model_validate(r) for r in data]
+                else:
+                    pending_request = TeeTimeRequest.model_validate(data)
+            except (json.JSONDecodeError, TypeError):
+                pending_request = TeeTimeRequest.model_validate_json(
+                    record.pending_request_json  # type: ignore[arg-type]
+                )
         return UserSession(
             phone_number=record.phone_number,  # type: ignore[arg-type]
             state=record.state,  # type: ignore[arg-type]
             pending_request=pending_request,
+            pending_requests=pending_requests,
             pending_cancellation_id=record.pending_cancellation_id,  # type: ignore[arg-type]
             last_interaction=record.last_interaction,  # type: ignore[arg-type]
         )
@@ -171,6 +186,8 @@ class DatabaseService:
 
     async def update_session(self, session: UserSession) -> UserSession:
         """Update an existing session record."""
+        import json
+
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(SessionRecord).where(SessionRecord.phone_number == session.phone_number)
@@ -181,7 +198,11 @@ class DatabaseService:
 
             record.state = session.state  # type: ignore[assignment]
             pending_json = None
-            if session.pending_request:
+            if session.pending_requests:
+                pending_json = json.dumps(
+                    [r.model_dump(mode="json") for r in session.pending_requests]
+                )
+            elif session.pending_request:
                 pending_json = session.pending_request.model_dump_json()
             record.pending_request_json = pending_json  # type: ignore[assignment]
             record.pending_cancellation_id = session.pending_cancellation_id  # type: ignore[assignment]

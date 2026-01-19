@@ -302,12 +302,15 @@ class TestGeminiServiceParseMessage:
     """Tests for the parse_message method."""
 
     @pytest.mark.asyncio
-    async def test_parse_message_no_api_key(self, gemini_service: GeminiService) -> None:
+    async def test_parse_message_no_api_key(self) -> None:
         """Test that parse_message uses mock when no API key is configured."""
-        result = await gemini_service.parse_message("Book Saturday 8am")
+        with patch("app.services.gemini_service.settings") as mock_settings:
+            mock_settings.gemini_api_key = ""
+            service = GeminiService()
+            result = await service.parse_message("Book Saturday 8am")
 
-        assert result.intent == "book"
-        assert result.tee_time_request is not None
+            assert result.intent == "book"
+            assert result.tee_time_request is not None
 
     @pytest.mark.asyncio
     async def test_parse_message_with_context(self, gemini_service: GeminiService) -> None:
