@@ -2338,10 +2338,10 @@ class WaldenGolfProvider(ReservationProvider):
         # Check for time range patterns (e.g., "08:26 AM-10:42 AM", "09:00 AM-09:00 AM")
         # These are tournament blocks or maintenance windows, not bookable slots
         # Skip them silently without logging a warning
-        if "-" in time_text and re.search(r"\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M", time_text):
-            logger.debug(
-                f"Skipping time range string (tournament/event block): '{original_text}'"
-            )
+        if "-" in time_text and re.search(
+            r"\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M", time_text
+        ):
+            logger.debug(f"Skipping time range string (tournament/event block): '{original_text}'")
             return None
 
         formats = ["%I:%M %p", "%I:%M%p", "%H:%M"]
