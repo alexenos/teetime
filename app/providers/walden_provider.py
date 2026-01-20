@@ -1097,18 +1097,12 @@ class WaldenGolfProvider(ReservationProvider):
             except NoSuchElementException:
                 continue
 
-        logger.info(
-            "BOOKING_DEBUG: No date input found with standard selectors, trying day tabs..."
-        )
-        if self._select_date_via_tabs_sync(driver, target_date):
-            logger.debug("BOOKING_DEBUG: Date selection via tabs successful")
-            return
-
-        logger.debug("BOOKING_DEBUG: Day tabs not found, trying calendar picker...")
+        # Skip day tab lookup - go directly to calendar picker for faster date selection
+        logger.info("BOOKING_DEBUG: No date input found, using calendar picker...")
         if self._select_date_via_calendar_sync(driver, target_date):
             logger.debug("BOOKING_DEBUG: Date selection via calendar successful")
         else:
-            logger.warning("BOOKING_DEBUG: All date selection methods failed")
+            logger.warning("BOOKING_DEBUG: Calendar date selection failed")
 
     def _select_date_via_calendar_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
         """
