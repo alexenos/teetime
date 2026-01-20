@@ -1685,15 +1685,47 @@ class WaldenGolfProvider(ReservationProvider):
             for section in sections:
                 if self.NORTHGATE_COURSE_NAME.lower() in section.text.lower():
                     northgate_section = section
+                    logger.info(
+                        "BOOKING_DEBUG: Found Northgate course section for slot search"
+                    )
                     break
         except NoSuchElementException:
             pass
 
-        search_context = northgate_section if northgate_section else driver
+        if northgate_section:
+            search_context = northgate_section
+        else:
+            logger.warning(
+                "BOOKING_DEBUG: Could not find dedicated Northgate section. "
+                "Will search entire page and filter slots by course name."
+            )
+            search_context = driver
 
         slots_with_capacity = self._find_empty_slots(
             search_context, min_available_spots=num_players
         )
+
+        # If we couldn't find a dedicated Northgate section, filter slots to ensure
+        # we only select Northgate slots (not Walden on Lake Conroe slots)
+        if not northgate_section and slots_with_capacity:
+            filtered_slots = []
+            walden_course_name = "walden on lake conroe"
+            for slot_time, slot_element in slots_with_capacity:
+                # Check if this slot belongs to Northgate by examining parent elements
+                if self._is_northgate_slot(slot_element, walden_course_name):
+                    filtered_slots.append((slot_time, slot_element))
+                else:
+                    logger.debug(
+                        f"BOOKING_DEBUG: Filtering out slot at {slot_time.strftime('%I:%M %p')} - "
+                        f"appears to be from wrong course"
+                    )
+
+            if len(filtered_slots) < len(slots_with_capacity):
+                logger.info(
+                    f"BOOKING_DEBUG: Filtered {len(slots_with_capacity) - len(filtered_slots)} "
+                    f"non-Northgate slots. {len(filtered_slots)} Northgate slots remain."
+                )
+            slots_with_capacity = filtered_slots
 
         if not slots_with_capacity:
             return BookingResult(
@@ -2068,6 +2100,97 @@ class WaldenGolfProvider(ReservationProvider):
         except Exception as e:
             logger.debug(f"Error finding slot by time: {e}")
         return None
+
+    def _is_northgate_slot(self, slot_element: Any, walden_course_name: str) -> bool:
+        """
+        Check if a slot element belongs to the Northgate course.
+
+        When the page displays both Northgate and Walden on Lake Conroe courses,
+        this method examines the slot's parent elements and nearby text to determine
+        which course the slot belongs to.
+
+        The method uses a conservative approach: if we can't definitively determine
+        the course, we assume it's Northgate to avoid false negatives. However, if
+        we find clear evidence that the slot belongs to Walden on Lake Conroe, we
+        filter it out.
+
+        Args:
+            slot_element: The slot element (button or container) to check
+            walden_course_name: The name of the other course to filter out (lowercase)
+
+        Returns:
+            True if the slot appears to belong to Northgate (or course is uncertain),
+            False if the slot clearly belongs to Walden on Lake Conroe
+        """
+        try:
+            # Strategy 1: Check the slot's parent elements for course indicators
+            # Walk up the DOM tree looking for course-related class names or text
+            current = slot_element
+            for _ in range(10):  # Check up to 10 parent levels
+                try:
+                    parent = current.find_element(By.XPATH, "..")
+                    if parent:
+                        # Check for course-related classes
+                        parent_class = parent.get_attribute("class") or ""
+                        parent_id = parent.get_attribute("id") or ""
+
+                        # If we find a Northgate indicator, it's definitely Northgate
+                        if self.NORTHGATE_COURSE_NAME.lower() in parent_class.lower():
+                            return True
+                        if self.NORTHGATE_COURSE_NAME.lower() in parent_id.lower():
+                            return True
+
+                        # If we find a Walden indicator, it's definitely NOT Northgate
+                        if walden_course_name in parent_class.lower():
+                            return False
+                        if walden_course_name in parent_id.lower():
+                            return False
+
+                        # Check for course name in nearby header/label elements
+                        try:
+                            headers = parent.find_elements(
+                                By.CSS_SELECTOR, "h1, h2, h3, h4, .course-name, .course-header"
+                            )
+                            for header in headers:
+                                header_text = header.text.lower()
+                                if walden_course_name in header_text:
+                                    return False
+                                if self.NORTHGATE_COURSE_NAME.lower() in header_text:
+                                    return True
+                        except Exception:
+                            pass
+
+                        current = parent
+                except Exception:
+                    break
+
+            # Strategy 2: Check the slot element's own text and attributes
+            try:
+                slot_text = slot_element.text.lower() if slot_element.text else ""
+                if walden_course_name in slot_text:
+                    return False
+            except Exception:
+                pass
+
+            # Strategy 3: Check for column-based layout indicators
+            # Some tee sheet layouts use columns for different courses
+            try:
+                # Get the slot's position and check if it's in a known column
+                slot_class = slot_element.get_attribute("class") or ""
+                if "walden" in slot_class.lower() and "northgate" not in slot_class.lower():
+                    return False
+            except Exception:
+                pass
+
+            # If we couldn't determine the course, assume it's Northgate
+            # This is conservative - we'd rather attempt to book and fail
+            # than skip a valid Northgate slot
+            return True
+
+        except Exception as e:
+            logger.debug(f"Error checking if slot is Northgate: {e}")
+            # On error, assume it's Northgate to avoid false negatives
+            return True
 
     def _extract_bookers_from_slot(self, slot_item: Any) -> list[str]:
         """
