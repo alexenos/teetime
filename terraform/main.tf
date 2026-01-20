@@ -311,7 +311,7 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
 resource "google_cloud_scheduler_job" "execute_bookings" {
   name             = "${local.service_name}-execute-bookings"
   description      = "Execute due tee time bookings"
-  schedule         = "* * * * *"
+  schedule         = "28 6 * * *"
   time_zone        = var.timezone
   attempt_deadline = "300s"
 

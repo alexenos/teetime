@@ -432,15 +432,31 @@ class WaldenGolfProvider(ReservationProvider):
 
         Creates driver once, logs in once, then books all requested times in sequence.
         If execute_at is provided, waits until that time before refreshing and booking.
+
+        Requests are sorted by target_time to process earlier times first, which helps
+        avoid conflicts where a fallback slot for an earlier booking takes a slot needed
+        by a later booking.
         """
         if not requests:
             return BatchBookingResult()
 
+        # Sort requests by target_time to process earlier times first
+        # This helps avoid conflicts where fallback slots overlap with later bookings
+        sorted_requests = sorted(requests, key=lambda r: r.target_time)
+
+        # Build list of all requested times and their fallback windows for conflict detection
+        # Each entry is (target_time, fallback_window_minutes, booking_id)
+        pending_booking_times: list[tuple[time, int, str]] = [
+            (req.target_time, req.fallback_window_minutes, req.booking_id)
+            for req in sorted_requests
+        ]
+
         logger.info(
             f"BATCH_BOOKING: === STARTING BATCH BOOKING === "
             f"date={target_date} ({target_date.strftime('%A')}), "
-            f"num_requests={len(requests)}, "
-            f"execute_at={execute_at.strftime('%H:%M:%S') if execute_at else 'immediate'}"
+            f"num_requests={len(sorted_requests)}, "
+            f"execute_at={execute_at.strftime('%H:%M:%S') if execute_at else 'immediate'}, "
+            f"sorted_times={[r.target_time.strftime('%H:%M') for r in sorted_requests]}"
         )
 
         results: list[BatchBookingItemResult] = []
@@ -452,7 +468,7 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info("BATCH_BOOKING: Step 1 - Logging in to Walden Golf")
             if not self._perform_login(driver):
                 logger.error("BATCH_BOOKING: Login failed")
-                for req in requests:
+                for req in sorted_requests:
                     results.append(
                         BatchBookingItemResult(
                             booking_id=req.booking_id,
@@ -480,7 +496,7 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info("BATCH_BOOKING: Step 3 - Selecting course")
             if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
                 logger.error("BATCH_BOOKING: Course selection/verification failed")
-                for req in requests:
+                for req in sorted_requests:
                     results.append(
                         BatchBookingItemResult(
                             booking_id=req.booking_id,
@@ -529,12 +545,32 @@ class WaldenGolfProvider(ReservationProvider):
             )
             logger.info("BATCH_BOOKING: Date selection complete")
 
-            logger.info(f"BATCH_BOOKING: Step 6 - Booking {len(requests)} tee times")
-            for i, req in enumerate(requests, 1):
+            # Track times that have been successfully booked to avoid conflicts
+            # When a booking succeeds, we add its booked_time to this set
+            booked_times: set[time] = set()
+
+            logger.info(f"BATCH_BOOKING: Step 6 - Booking {len(sorted_requests)} tee times")
+            for i, req in enumerate(sorted_requests, 1):
+                # Calculate times to exclude: times already booked + times needed by later bookings
+                # This prevents a fallback slot from taking a time needed by a later booking
+                times_to_exclude = booked_times.copy()
+
+                # Add times that are within the fallback window of later bookings
+                for later_time, later_window, later_id in pending_booking_times:
+                    if later_id == req.booking_id:
+                        continue  # Skip current booking
+                    # Check if this later booking's target time could conflict
+                    later_minutes = later_time.hour * 60 + later_time.minute
+                    current_minutes = req.target_time.hour * 60 + req.target_time.minute
+                    # Only protect times for bookings that haven't been processed yet
+                    if later_minutes > current_minutes:
+                        times_to_exclude.add(later_time)
+
                 logger.info(
-                    f"BATCH_BOOKING: Booking {i}/{len(requests)} - "
+                    f"BATCH_BOOKING: Booking {i}/{len(sorted_requests)} - "
                     f"time={req.target_time.strftime('%H:%M')}, "
-                    f"players={req.num_players}, booking_id={req.booking_id}"
+                    f"players={req.num_players}, booking_id={req.booking_id}, "
+                    f"excluding_times={[t.strftime('%H:%M') for t in sorted(times_to_exclude)]}"
                 )
 
                 try:
@@ -543,6 +579,7 @@ class WaldenGolfProvider(ReservationProvider):
                         req.target_time,
                         req.num_players,
                         req.fallback_window_minutes,
+                        times_to_exclude=times_to_exclude,
                     )
 
                     results.append(
@@ -554,19 +591,22 @@ class WaldenGolfProvider(ReservationProvider):
 
                     if result.success:
                         total_succeeded += 1
+                        # Track the booked time to avoid conflicts with later bookings
+                        if result.booked_time:
+                            booked_times.add(result.booked_time)
                         logger.info(
-                            f"BATCH_BOOKING: Booking {i}/{len(requests)} SUCCESS - "
+                            f"BATCH_BOOKING: Booking {i}/{len(sorted_requests)} SUCCESS - "
                             f"booked_time={result.booked_time}, "
                             f"confirmation={result.confirmation_number}"
                         )
                     else:
                         total_failed += 1
                         logger.warning(
-                            f"BATCH_BOOKING: Booking {i}/{len(requests)} FAILED - "
+                            f"BATCH_BOOKING: Booking {i}/{len(sorted_requests)} FAILED - "
                             f"error={result.error_message}"
                         )
 
-                    if i < len(requests):
+                    if i < len(sorted_requests):
                         logger.info(
                             "BATCH_BOOKING: Navigating back to tee time page for next booking"
                         )
@@ -589,7 +629,7 @@ class WaldenGolfProvider(ReservationProvider):
                         )
 
                 except Exception as e:
-                    logger.error(f"BATCH_BOOKING: Booking {i}/{len(requests)} ERROR - {e}")
+                    logger.error(f"BATCH_BOOKING: Booking {i}/{len(sorted_requests)} ERROR - {e}")
                     results.append(
                         BatchBookingItemResult(
                             booking_id=req.booking_id,
@@ -615,7 +655,7 @@ class WaldenGolfProvider(ReservationProvider):
         except TimeoutException as e:
             logger.error(f"BATCH_BOOKING: Timeout exception: {e}")
             self._capture_diagnostic_info(driver, "batch_booking_timeout")
-            for req in requests:
+            for req in sorted_requests:
                 if not any(r.booking_id == req.booking_id for r in results):
                     results.append(
                         BatchBookingItemResult(
@@ -635,7 +675,7 @@ class WaldenGolfProvider(ReservationProvider):
         except WebDriverException as e:
             logger.error(f"BATCH_BOOKING: WebDriver exception: {e}")
             self._capture_diagnostic_info(driver, "batch_booking_webdriver_error")
-            for req in requests:
+            for req in sorted_requests:
                 if not any(r.booking_id == req.booking_id for r in results):
                     results.append(
                         BatchBookingItemResult(
@@ -1057,18 +1097,12 @@ class WaldenGolfProvider(ReservationProvider):
             except NoSuchElementException:
                 continue
 
-        logger.info(
-            "BOOKING_DEBUG: No date input found with standard selectors, trying day tabs..."
-        )
-        if self._select_date_via_tabs_sync(driver, target_date):
-            logger.debug("BOOKING_DEBUG: Date selection via tabs successful")
-            return
-
-        logger.debug("BOOKING_DEBUG: Day tabs not found, trying calendar picker...")
+        # Skip day tab lookup - go directly to calendar picker for faster date selection
+        logger.info("BOOKING_DEBUG: No date input found, using calendar picker...")
         if self._select_date_via_calendar_sync(driver, target_date):
             logger.debug("BOOKING_DEBUG: Date selection via calendar successful")
         else:
-            logger.warning("BOOKING_DEBUG: All date selection methods failed")
+            logger.warning("BOOKING_DEBUG: Calendar date selection failed")
 
     def _select_date_via_calendar_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
         """
@@ -1172,13 +1206,13 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                     return True
 
-            logger.warning(
+            logger.info(
                 f"BOOKING_DEBUG: Could not find day tab for {day_name}. Available tabs: {[t.text for t in day_tabs[:5]]}"
             )
             return False
 
         except NoSuchElementException:
-            logger.warning("BOOKING_DEBUG: No day tabs found on page")
+            logger.info("BOOKING_DEBUG: No day tabs found on page")
             return False
 
     def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> bool:
@@ -1606,6 +1640,7 @@ class WaldenGolfProvider(ReservationProvider):
         target_time: time,
         num_players: int,
         fallback_window_minutes: int,
+        times_to_exclude: set[time] | None = None,
     ) -> BookingResult:
         """
         Find an available time slot and book it.
@@ -1617,15 +1652,23 @@ class WaldenGolfProvider(ReservationProvider):
         to ensure both completely empty slots (with Reserve button) and partially
         filled slots (with Available spans) are found.
 
+        When times_to_exclude is provided (typically during batch booking), the
+        method will avoid selecting those times as fallback slots to prevent
+        conflicts with other bookings in the batch.
+
         Args:
             driver: The WebDriver instance
             target_time: The preferred tee time
             num_players: Number of players (1-4)
             fallback_window_minutes: Window to search for alternatives
+            times_to_exclude: Optional set of times to avoid when selecting fallback slots.
+                             Used during batch booking to prevent conflicts.
 
         Returns:
             BookingResult with booking outcome
         """
+        if times_to_exclude is None:
+            times_to_exclude = set()
         target_minutes = target_time.hour * 60 + target_time.minute
 
         self._scroll_to_load_all_slots(driver, target_time, fallback_window_minutes)
@@ -1636,15 +1679,45 @@ class WaldenGolfProvider(ReservationProvider):
             for section in sections:
                 if self.NORTHGATE_COURSE_NAME.lower() in section.text.lower():
                     northgate_section = section
+                    logger.info("BOOKING_DEBUG: Found Northgate course section for slot search")
                     break
         except NoSuchElementException:
             pass
 
-        search_context = northgate_section if northgate_section else driver
+        if northgate_section:
+            search_context = northgate_section
+        else:
+            logger.warning(
+                "BOOKING_DEBUG: Could not find dedicated Northgate section. "
+                "Will search entire page and filter slots by course name."
+            )
+            search_context = driver
 
         slots_with_capacity = self._find_empty_slots(
             search_context, min_available_spots=num_players
         )
+
+        # If we couldn't find a dedicated Northgate section, filter slots to ensure
+        # we only select Northgate slots (not Walden on Lake Conroe slots)
+        if not northgate_section and slots_with_capacity:
+            filtered_slots = []
+            walden_course_name = "walden on lake conroe"
+            for slot_time, slot_element in slots_with_capacity:
+                # Check if this slot belongs to Northgate by examining parent elements
+                if self._is_northgate_slot(slot_element, walden_course_name):
+                    filtered_slots.append((slot_time, slot_element))
+                else:
+                    logger.debug(
+                        f"BOOKING_DEBUG: Filtering out slot at {slot_time.strftime('%I:%M %p')} - "
+                        f"appears to be from wrong course"
+                    )
+
+            if len(filtered_slots) < len(slots_with_capacity):
+                logger.info(
+                    f"BOOKING_DEBUG: Filtered {len(slots_with_capacity) - len(filtered_slots)} "
+                    f"non-Northgate slots. {len(filtered_slots)} Northgate slots remain."
+                )
+            slots_with_capacity = filtered_slots
 
         if not slots_with_capacity:
             return BookingResult(
@@ -1668,6 +1741,13 @@ class WaldenGolfProvider(ReservationProvider):
         best_slot = None
         best_diff = float("inf")
 
+        # Log excluded times if any
+        if times_to_exclude:
+            logger.info(
+                f"BOOKING_DEBUG: Excluding times from fallback selection: "
+                f"{[t.strftime('%I:%M %p') for t in sorted(times_to_exclude)]}"
+            )
+
         for slot_time, slot_element in slots_with_capacity:
             slot_minutes = slot_time.hour * 60 + slot_time.minute
             diff = abs(slot_minutes - target_minutes)
@@ -1678,6 +1758,15 @@ class WaldenGolfProvider(ReservationProvider):
                     f"BOOKING_DEBUG: Found exact match for requested time "
                     f"{target_time.strftime('%I:%M %p')}"
                 )
+
+            # When selecting fallback slots, skip times that are excluded
+            # (e.g., times needed by other bookings in a batch)
+            if slot_time in times_to_exclude and diff != 0:
+                logger.debug(
+                    f"BOOKING_DEBUG: Skipping {slot_time.strftime('%I:%M %p')} - "
+                    f"excluded to avoid conflict with another booking"
+                )
+                continue
 
             if diff <= fallback_window_minutes and diff < best_diff:
                 best_diff = diff
@@ -2004,6 +2093,97 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"Error finding slot by time: {e}")
         return None
 
+    def _is_northgate_slot(self, slot_element: Any, walden_course_name: str) -> bool:
+        """
+        Check if a slot element belongs to the Northgate course.
+
+        When the page displays both Northgate and Walden on Lake Conroe courses,
+        this method examines the slot's parent elements and nearby text to determine
+        which course the slot belongs to.
+
+        The method uses a conservative approach: if we can't definitively determine
+        the course, we assume it's Northgate to avoid false negatives. However, if
+        we find clear evidence that the slot belongs to Walden on Lake Conroe, we
+        filter it out.
+
+        Args:
+            slot_element: The slot element (button or container) to check
+            walden_course_name: The name of the other course to filter out (lowercase)
+
+        Returns:
+            True if the slot appears to belong to Northgate (or course is uncertain),
+            False if the slot clearly belongs to Walden on Lake Conroe
+        """
+        try:
+            # Strategy 1: Check the slot's parent elements for course indicators
+            # Walk up the DOM tree looking for course-related class names or text
+            current = slot_element
+            for _ in range(10):  # Check up to 10 parent levels
+                try:
+                    parent = current.find_element(By.XPATH, "..")
+                    if parent:
+                        # Check for course-related classes
+                        parent_class = parent.get_attribute("class") or ""
+                        parent_id = parent.get_attribute("id") or ""
+
+                        # If we find a Northgate indicator, it's definitely Northgate
+                        if self.NORTHGATE_COURSE_NAME.lower() in parent_class.lower():
+                            return True
+                        if self.NORTHGATE_COURSE_NAME.lower() in parent_id.lower():
+                            return True
+
+                        # If we find a Walden indicator, it's definitely NOT Northgate
+                        if walden_course_name in parent_class.lower():
+                            return False
+                        if walden_course_name in parent_id.lower():
+                            return False
+
+                        # Check for course name in nearby header/label elements
+                        try:
+                            headers = parent.find_elements(
+                                By.CSS_SELECTOR, "h1, h2, h3, h4, .course-name, .course-header"
+                            )
+                            for header in headers:
+                                header_text = header.text.lower()
+                                if walden_course_name in header_text:
+                                    return False
+                                if self.NORTHGATE_COURSE_NAME.lower() in header_text:
+                                    return True
+                        except Exception:
+                            pass
+
+                        current = parent
+                except Exception:
+                    break
+
+            # Strategy 2: Check the slot element's own text and attributes
+            try:
+                slot_text = slot_element.text.lower() if slot_element.text else ""
+                if walden_course_name in slot_text:
+                    return False
+            except Exception:
+                pass
+
+            # Strategy 3: Check for column-based layout indicators
+            # Some tee sheet layouts use columns for different courses
+            try:
+                # Get the slot's position and check if it's in a known column
+                slot_class = slot_element.get_attribute("class") or ""
+                if "walden" in slot_class.lower() and "northgate" not in slot_class.lower():
+                    return False
+            except Exception:
+                pass
+
+            # If we couldn't determine the course, assume it's Northgate
+            # This is conservative - we'd rather attempt to book and fail
+            # than skip a valid Northgate slot
+            return True
+
+        except Exception as e:
+            logger.debug(f"Error checking if slot is Northgate: {e}")
+            # On error, assume it's Northgate to avoid false negatives
+            return True
+
     def _extract_bookers_from_slot(self, slot_item: Any) -> list[str]:
         """
         Extract the names of people who have booked spots in a time slot.
@@ -2257,11 +2437,26 @@ class WaldenGolfProvider(ReservationProvider):
         return None
 
     def _parse_time(self, time_text: str) -> time | None:
-        """Parse a time string like '07:30 AM' or '12:42 PM' into a time object."""
+        """
+        Parse a time string like '07:30 AM' or '12:42 PM' into a time object.
+
+        Handles time range strings (e.g., '08:26 AM-10:42 AM') by returning None
+        silently, as these represent tournament blocks or maintenance windows
+        that are not bookable slots.
+        """
         original_text = time_text
         time_text = time_text.strip().upper()
 
         if not time_text:
+            return None
+
+        # Check for time range patterns (e.g., "08:26 AM-10:42 AM", "09:00 AM-09:00 AM")
+        # These are tournament blocks or maintenance windows, not bookable slots
+        # Skip them silently without logging a warning
+        if "-" in time_text and re.search(
+            r"\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M", time_text
+        ):
+            logger.debug(f"Skipping time range string (tournament/event block): '{original_text}'")
             return None
 
         formats = ["%I:%M %p", "%I:%M%p", "%H:%M"]
