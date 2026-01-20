@@ -1685,9 +1685,7 @@ class WaldenGolfProvider(ReservationProvider):
             for section in sections:
                 if self.NORTHGATE_COURSE_NAME.lower() in section.text.lower():
                     northgate_section = section
-                    logger.info(
-                        "BOOKING_DEBUG: Found Northgate course section for slot search"
-                    )
+                    logger.info("BOOKING_DEBUG: Found Northgate course section for slot search")
                     break
         except NoSuchElementException:
             pass
