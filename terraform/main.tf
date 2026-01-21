@@ -311,7 +311,9 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
 resource "google_cloud_scheduler_job" "execute_bookings" {
   name             = "${local.service_name}-execute-bookings"
   description      = "Execute due tee time bookings"
-  schedule         = "28 6 * * *"
+  # Must run at or after booking_open_hour:booking_open_minute (6:30 AM CT)
+  # for the query scheduled_execution_time <= now to find due bookings
+  schedule         = "30 6 * * *"
   time_zone        = var.timezone
   attempt_deadline = "300s"
 
