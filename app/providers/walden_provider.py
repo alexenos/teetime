@@ -8,6 +8,7 @@ from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any, TypeVar
 
+import pytz
 from selenium import webdriver
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -516,9 +517,18 @@ class WaldenGolfProvider(ReservationProvider):
                 )
 
             if execute_at:
-                now = datetime.now()
-                if now < execute_at:
-                    wait_seconds = (execute_at - now).total_seconds()
+                # CRITICAL: execute_at is a naive datetime in CT timezone (from jobs.py)
+                # We must compare it with current time in CT timezone, not UTC
+                # Using datetime.now() would return UTC time on Cloud Run, causing
+                # the wait to be skipped (e.g., 12:28 UTC > 06:30 CT naive)
+                ct_tz = pytz.timezone(settings.timezone)
+                now_ct = datetime.now(ct_tz).replace(tzinfo=None)
+                logger.info(
+                    f"BATCH_BOOKING: Current time (CT): {now_ct.strftime('%H:%M:%S')}, "
+                    f"execute_at: {execute_at.strftime('%H:%M:%S')}"
+                )
+                if now_ct < execute_at:
+                    wait_seconds = (execute_at - now_ct).total_seconds()
                     logger.info(
                         f"BATCH_BOOKING: Step 4 - Waiting {wait_seconds:.1f}s until "
                         f"{execute_at.strftime('%H:%M:%S')} before booking"
@@ -531,6 +541,11 @@ class WaldenGolfProvider(ReservationProvider):
                     )
                     if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
                         logger.warning("BATCH_BOOKING: Course re-selection after refresh failed")
+                else:
+                    logger.warning(
+                        f"BATCH_BOOKING: Current time {now_ct.strftime('%H:%M:%S')} is already past "
+                        f"execute_at {execute_at.strftime('%H:%M:%S')} - proceeding immediately"
+                    )
 
             logger.info("BATCH_BOOKING: Step 5 - Selecting date")
             self._select_date_sync(driver, target_date)
@@ -2101,24 +2116,27 @@ class WaldenGolfProvider(ReservationProvider):
         this method examines the slot's parent elements and nearby text to determine
         which course the slot belongs to.
 
-        The method uses a conservative approach: if we can't definitively determine
-        the course, we assume it's Northgate to avoid false negatives. However, if
-        we find clear evidence that the slot belongs to Walden on Lake Conroe, we
-        filter it out.
+        IMPORTANT: This method now uses a STRICT approach - if we cannot definitively
+        confirm the slot belongs to Northgate, we return False to prevent accidentally
+        booking at the wrong course. This is safer than the previous approach which
+        assumed Northgate when uncertain, which led to Walden bookings.
 
         Args:
             slot_element: The slot element (button or container) to check
             walden_course_name: The name of the other course to filter out (lowercase)
 
         Returns:
-            True if the slot appears to belong to Northgate (or course is uncertain),
-            False if the slot clearly belongs to Walden on Lake Conroe
+            True ONLY if the slot is confirmed to belong to Northgate,
+            False if the slot belongs to Walden OR if course cannot be determined
         """
+        found_northgate_indicator = False
+        found_walden_indicator = False
+
         try:
             # Strategy 1: Check the slot's parent elements for course indicators
             # Walk up the DOM tree looking for course-related class names or text
             current = slot_element
-            for _ in range(10):  # Check up to 10 parent levels
+            for level in range(10):  # Check up to 10 parent levels
                 try:
                     parent = current.find_element(By.XPATH, "..")
                     if parent:
@@ -2126,17 +2144,33 @@ class WaldenGolfProvider(ReservationProvider):
                         parent_class = parent.get_attribute("class") or ""
                         parent_id = parent.get_attribute("id") or ""
 
-                        # If we find a Northgate indicator, it's definitely Northgate
+                        # If we find a Northgate indicator, mark it
                         if self.NORTHGATE_COURSE_NAME.lower() in parent_class.lower():
-                            return True
+                            logger.debug(
+                                f"COURSE_CHECK: Found Northgate in parent class at level {level}: "
+                                f"'{parent_class}'"
+                            )
+                            found_northgate_indicator = True
                         if self.NORTHGATE_COURSE_NAME.lower() in parent_id.lower():
-                            return True
+                            logger.debug(
+                                f"COURSE_CHECK: Found Northgate in parent id at level {level}: "
+                                f"'{parent_id}'"
+                            )
+                            found_northgate_indicator = True
 
-                        # If we find a Walden indicator, it's definitely NOT Northgate
+                        # If we find a Walden indicator, mark it
                         if walden_course_name in parent_class.lower():
-                            return False
+                            logger.debug(
+                                f"COURSE_CHECK: Found Walden in parent class at level {level}: "
+                                f"'{parent_class}'"
+                            )
+                            found_walden_indicator = True
                         if walden_course_name in parent_id.lower():
-                            return False
+                            logger.debug(
+                                f"COURSE_CHECK: Found Walden in parent id at level {level}: "
+                                f"'{parent_id}'"
+                            )
+                            found_walden_indicator = True
 
                         # Check for course name in nearby header/label elements
                         try:
@@ -2146,9 +2180,17 @@ class WaldenGolfProvider(ReservationProvider):
                             for header in headers:
                                 header_text = header.text.lower()
                                 if walden_course_name in header_text:
-                                    return False
+                                    logger.debug(
+                                        f"COURSE_CHECK: Found Walden in header at level {level}: "
+                                        f"'{header.text}'"
+                                    )
+                                    found_walden_indicator = True
                                 if self.NORTHGATE_COURSE_NAME.lower() in header_text:
-                                    return True
+                                    logger.debug(
+                                        f"COURSE_CHECK: Found Northgate in header at level {level}: "
+                                        f"'{header.text}'"
+                                    )
+                                    found_northgate_indicator = True
                         except Exception:
                             pass
 
@@ -2160,7 +2202,13 @@ class WaldenGolfProvider(ReservationProvider):
             try:
                 slot_text = slot_element.text.lower() if slot_element.text else ""
                 if walden_course_name in slot_text:
-                    return False
+                    logger.debug(f"COURSE_CHECK: Found Walden in slot text: '{slot_element.text}'")
+                    found_walden_indicator = True
+                if self.NORTHGATE_COURSE_NAME.lower() in slot_text:
+                    logger.debug(
+                        f"COURSE_CHECK: Found Northgate in slot text: '{slot_element.text}'"
+                    )
+                    found_northgate_indicator = True
             except Exception:
                 pass
 
@@ -2170,19 +2218,43 @@ class WaldenGolfProvider(ReservationProvider):
                 # Get the slot's position and check if it's in a known column
                 slot_class = slot_element.get_attribute("class") or ""
                 if "walden" in slot_class.lower() and "northgate" not in slot_class.lower():
-                    return False
+                    logger.debug(f"COURSE_CHECK: Found Walden in slot class: '{slot_class}'")
+                    found_walden_indicator = True
+                if "northgate" in slot_class.lower():
+                    logger.debug(f"COURSE_CHECK: Found Northgate in slot class: '{slot_class}'")
+                    found_northgate_indicator = True
             except Exception:
                 pass
 
-            # If we couldn't determine the course, assume it's Northgate
-            # This is conservative - we'd rather attempt to book and fail
-            # than skip a valid Northgate slot
-            return True
+            # Decision logic: STRICT approach to prevent wrong-course bookings
+            # If we found a Walden indicator, definitely NOT Northgate
+            if found_walden_indicator:
+                logger.info(
+                    "COURSE_CHECK: Slot rejected - found Walden indicator "
+                    f"(also found Northgate: {found_northgate_indicator})"
+                )
+                return False
+
+            # If we found a Northgate indicator and no Walden indicator, it's Northgate
+            if found_northgate_indicator:
+                logger.debug("COURSE_CHECK: Slot accepted - confirmed Northgate")
+                return True
+
+            # CRITICAL CHANGE: If we couldn't determine the course, return False
+            # This prevents accidentally booking at Walden when course is uncertain
+            # The previous behavior (returning True) led to wrong-course bookings
+            logger.warning(
+                "COURSE_CHECK: Slot rejected - could not confirm course is Northgate. "
+                "This is a safety measure to prevent wrong-course bookings."
+            )
+            return False
 
         except Exception as e:
-            logger.debug(f"Error checking if slot is Northgate: {e}")
-            # On error, assume it's Northgate to avoid false negatives
-            return True
+            logger.warning(
+                f"COURSE_CHECK: Error checking slot course: {e} - rejecting slot for safety"
+            )
+            # On error, return False to prevent wrong-course bookings
+            return False
 
     def _extract_bookers_from_slot(self, slot_item: Any) -> list[str]:
         """
