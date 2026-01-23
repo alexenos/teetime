@@ -311,8 +311,7 @@ async def execute_due_bookings(
             )
 
     logger.info(
-        f"BATCH_JOB: Complete - succeeded={succeeded}, failed={failed}, "
-        f"total={len(due_bookings)}"
+        f"BATCH_JOB: Complete - succeeded={succeeded}, failed={failed}, total={len(due_bookings)}"
     )
 
     return JobExecutionResult(

@@ -68,7 +68,7 @@ class TestTeeTimeRequest:
         assert request.requested_date == date(2025, 12, 20)
         assert request.requested_time == time(8, 0)
         assert request.num_players == 4  # default
-        assert request.fallback_window_minutes == 30  # default
+        assert request.fallback_window_minutes == 32  # default
 
     def test_create_with_all_fields(self) -> None:
         """Test creating a TeeTimeRequest with all fields."""

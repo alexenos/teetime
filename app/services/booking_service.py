@@ -404,8 +404,7 @@ class BookingService:
 
         booked_time = booking.actual_booked_time or booking.request.requested_time
         cancellation_id = (
-            f"{booking.request.requested_date.strftime('%Y-%m-%d')}_"
-            f"{booked_time.strftime('%H:%M')}"
+            f"{booking.request.requested_date.strftime('%Y-%m-%d')}_{booked_time.strftime('%H:%M')}"
         )
 
         try:
