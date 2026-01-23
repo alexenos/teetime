@@ -64,7 +64,7 @@ class BookingRecord(Base):
     requested_date = Column(Date, nullable=False)
     requested_time = Column(Time, nullable=False)
     num_players = Column(Integer, default=4)
-    fallback_window_minutes = Column(Integer, default=30)
+    fallback_window_minutes = Column(Integer, default=32)
     status: Column[Any] = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
     scheduled_execution_time = Column(DateTime, nullable=True)
     actual_booked_time = Column(Time, nullable=True)
@@ -131,15 +131,14 @@ async def _run_column_migrations(conn: Any) -> None:
     if is_postgres:
         await conn.execute(
             text(
-                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS "
-                "pending_cancellation_id VARCHAR(50)"
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_cancellation_id VARCHAR(50)"
             )
         )
         logger.info("Checked/added pending_cancellation_id column to sessions table")
     elif is_sqlite:
         try:
             await conn.execute(
-                text("ALTER TABLE sessions ADD COLUMN " "pending_cancellation_id VARCHAR(50)")
+                text("ALTER TABLE sessions ADD COLUMN pending_cancellation_id VARCHAR(50)")
             )
             logger.info("Added pending_cancellation_id column to sessions table")
         except Exception as e:

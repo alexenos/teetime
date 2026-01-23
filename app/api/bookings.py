@@ -14,7 +14,7 @@ class CreateBookingRequest(BaseModel):
     requested_date: date
     requested_time: time
     num_players: int = 4
-    fallback_window_minutes: int = 30
+    fallback_window_minutes: int = 32
 
 
 class BookingResponse(BaseModel):

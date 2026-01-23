@@ -56,12 +56,12 @@ class TeeTimeRequest(BaseModel):
     requested_time: time = Field(..., description="The preferred tee time")
     num_players: int = Field(default=4, ge=1, le=4, description="Number of players (1-4)")
     fallback_window_minutes: int = Field(
-        default=30,
+        default=32,
         description=(
             "If the exact requested time is unavailable, the system will attempt "
             "to book a time within this many minutes before or after the requested "
-            "time. For example, if set to 30 and the user requests 8:00am, the system "
-            "will try times between 7:30am and 8:30am if 8:00am is taken."
+            "time. Northgate tee times are spaced 8 minutes apart, so fallback times "
+            "must be multiples of 8 minutes from the requested time (e.g., 8, 16, 24, 32)."
         ),
     )
 

@@ -163,8 +163,7 @@ class GeminiService:
             # Always include the current date so Gemini knows what year it is
             today = datetime.now()
             date_context = (
-                f"Today's date is {today.strftime('%A, %B %d, %Y')} "
-                f"({today.strftime('%Y-%m-%d')})."
+                f"Today's date is {today.strftime('%A, %B %d, %Y')} ({today.strftime('%Y-%m-%d')})."
             )
 
             prompt = f"{date_context}\n\n"

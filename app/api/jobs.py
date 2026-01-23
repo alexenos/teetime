@@ -151,14 +151,18 @@ async def execute_due_bookings(
     """
     Execute all bookings that are due for execution.
 
-    This endpoint is called by Cloud Scheduler at 6:30am CT daily.
-    It finds all SCHEDULED bookings where scheduled_execution_time <= now
-    and executes them using batch booking for efficiency.
+    This endpoint is called by Cloud Scheduler at 6:28am CT daily (2 minutes early).
+    It finds all SCHEDULED bookings where scheduled_execution_time <= booking_open_time
+    (6:30am CT) and executes them using batch booking for efficiency.
+
+    The early trigger allows the system to log in and navigate to the booking page
+    before the booking window opens, then wait until exactly 6:30am to book.
 
     Optimizations for speed:
     1. Uses batch booking to process multiple bookings with a single login session
     2. Defers SMS notifications until after ALL bookings are complete
     3. Groups bookings by date to minimize navigation overhead
+    4. Logs in early and waits until booking window opens
 
     Security: Accepts OIDC token from Cloud Scheduler (preferred) or legacy API key.
 
@@ -168,7 +172,19 @@ async def execute_due_bookings(
     tz = pytz.timezone(settings.timezone)
     now = datetime.now(tz)
 
-    due_bookings = await booking_service.get_due_bookings(now)
+    # Calculate the booking window open time (6:30am CT)
+    # We query for bookings due at this time, not "now", because the scheduler
+    # triggers early (6:28am) to allow login before the window opens
+    booking_open_time = now.replace(
+        hour=settings.booking_open_hour,
+        minute=settings.booking_open_minute,
+        second=0,
+        microsecond=0,
+    )
+
+    # Query for bookings due at the booking window open time
+    # This finds bookings scheduled for 6:30am even when called at 6:28am
+    due_bookings = await booking_service.get_due_bookings(booking_open_time)
 
     if not due_bookings:
         return JobExecutionResult(
@@ -183,12 +199,8 @@ async def execute_due_bookings(
 
     booking_map = {b.id: b for b in due_bookings}
 
-    booking_open_time = now.replace(
-        hour=settings.booking_open_hour,
-        minute=settings.booking_open_minute,
-        second=0,
-        microsecond=0,
-    ).replace(tzinfo=None)
+    # Strip timezone for passing to batch booking (expects naive datetime in CT)
+    booking_open_time_naive = booking_open_time.replace(tzinfo=None)
 
     logger.info(
         f"BATCH_JOB: Booking window opens at {booking_open_time.strftime('%H:%M:%S')}, "
@@ -199,7 +211,7 @@ async def execute_due_bookings(
         batch_results = await asyncio.wait_for(
             booking_service.execute_bookings_batch(
                 bookings=due_bookings,
-                execute_at=booking_open_time,
+                execute_at=booking_open_time_naive,
             ),
             timeout=BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings),
         )
@@ -299,8 +311,7 @@ async def execute_due_bookings(
             )
 
     logger.info(
-        f"BATCH_JOB: Complete - succeeded={succeeded}, failed={failed}, "
-        f"total={len(due_bookings)}"
+        f"BATCH_JOB: Complete - succeeded={succeeded}, failed={failed}, total={len(due_bookings)}"
     )
 
     return JobExecutionResult(
