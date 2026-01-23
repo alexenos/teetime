@@ -364,7 +364,11 @@ class WaldenGolfProvider(ReservationProvider):
 
             logger.debug("BOOKING_DEBUG: Step 4/5 - Finding and booking time slot")
             result = self._find_and_book_time_slot_sync(
-                driver, target_time, num_players, fallback_window_minutes, tee_time_interval_minutes=tee_time_interval_minutes
+                driver,
+                target_time,
+                num_players,
+                fallback_window_minutes,
+                tee_time_interval_minutes=tee_time_interval_minutes,
             )
 
             logger.info(
@@ -1792,7 +1796,11 @@ class WaldenGolfProvider(ReservationProvider):
 
             # Tee times are spaced at fixed intervals (e.g., 8 min for Northgate, 10 min for Walden),
             # so only consider fallback times that are multiples of the interval from the requested time
-            if diff <= fallback_window_minutes and diff < best_diff and diff % tee_time_interval_minutes == 0:
+            if (
+                diff <= fallback_window_minutes
+                and diff < best_diff
+                and diff % tee_time_interval_minutes == 0
+            ):
                 best_diff = diff
                 best_slot = (slot_time, slot_element)
 
