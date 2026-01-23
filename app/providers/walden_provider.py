@@ -258,7 +258,8 @@ class WaldenGolfProvider(ReservationProvider):
         target_date: date,
         target_time: time,
         num_players: int,
-        fallback_window_minutes: int = 30,
+        fallback_window_minutes: int = 32,
+        tee_time_interval_minutes: int = 8,
     ) -> BookingResult:
         """
         Book a tee time at Northgate Country Club.
@@ -290,6 +291,7 @@ class WaldenGolfProvider(ReservationProvider):
             target_time,
             num_players,
             fallback_window_minutes,
+            tee_time_interval_minutes,
         )
 
     def _book_tee_time_sync(
@@ -298,6 +300,7 @@ class WaldenGolfProvider(ReservationProvider):
         target_time: time,
         num_players: int,
         fallback_window_minutes: int,
+        tee_time_interval_minutes: int = 8,
     ) -> BookingResult:
         """
         Synchronous booking implementation with full driver lifecycle.
@@ -361,7 +364,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             logger.debug("BOOKING_DEBUG: Step 4/5 - Finding and booking time slot")
             result = self._find_and_book_time_slot_sync(
-                driver, target_time, num_players, fallback_window_minutes
+                driver, target_time, num_players, fallback_window_minutes, tee_time_interval_minutes=tee_time_interval_minutes
             )
 
             logger.info(
@@ -595,6 +598,7 @@ class WaldenGolfProvider(ReservationProvider):
                         req.num_players,
                         req.fallback_window_minutes,
                         times_to_exclude=times_to_exclude,
+                        tee_time_interval_minutes=req.tee_time_interval_minutes,
                     )
 
                     results.append(
@@ -1656,6 +1660,7 @@ class WaldenGolfProvider(ReservationProvider):
         num_players: int,
         fallback_window_minutes: int,
         times_to_exclude: set[time] | None = None,
+        tee_time_interval_minutes: int = 8,
     ) -> BookingResult:
         """
         Find an available time slot and book it.
@@ -1678,6 +1683,8 @@ class WaldenGolfProvider(ReservationProvider):
             fallback_window_minutes: Window to search for alternatives
             times_to_exclude: Optional set of times to avoid when selecting fallback slots.
                              Used during batch booking to prevent conflicts.
+            tee_time_interval_minutes: Spacing between tee times (e.g., 8 for Northgate, 10 for Walden).
+                             Fallback times must be multiples of this interval from the requested time.
 
         Returns:
             BookingResult with booking outcome
@@ -1783,7 +1790,9 @@ class WaldenGolfProvider(ReservationProvider):
                 )
                 continue
 
-            if diff <= fallback_window_minutes and diff < best_diff:
+            # Tee times are spaced at fixed intervals (e.g., 8 min for Northgate, 10 min for Walden),
+            # so only consider fallback times that are multiples of the interval from the requested time
+            if diff <= fallback_window_minutes and diff < best_diff and diff % tee_time_interval_minutes == 0:
                 best_diff = diff
                 best_slot = (slot_time, slot_element)
 
@@ -3387,7 +3396,8 @@ class MockWaldenProvider(ReservationProvider):
         target_date: date,
         target_time: time,
         num_players: int,
-        fallback_window_minutes: int = 30,
+        fallback_window_minutes: int = 32,
+        tee_time_interval_minutes: int = 8,
     ) -> BookingResult:
         await asyncio.sleep(0.5)
 

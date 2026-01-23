@@ -10,7 +10,8 @@ class BatchBookingRequest:
     booking_id: str
     target_time: time
     num_players: int
-    fallback_window_minutes: int = 30
+    fallback_window_minutes: int = 32
+    tee_time_interval_minutes: int = 8
 
 
 @dataclass
@@ -56,7 +57,8 @@ class ReservationProvider(ABC):
         target_date: date,
         target_time: time,
         num_players: int,
-        fallback_window_minutes: int = 30,
+        fallback_window_minutes: int = 32,
+        tee_time_interval_minutes: int = 8,
     ) -> BookingResult:
         """Book a tee time for the specified date and time."""
         pass

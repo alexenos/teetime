@@ -64,7 +64,7 @@ class BookingRecord(Base):
     requested_date = Column(Date, nullable=False)
     requested_time = Column(Time, nullable=False)
     num_players = Column(Integer, default=4)
-    fallback_window_minutes = Column(Integer, default=30)
+    fallback_window_minutes = Column(Integer, default=32)
     status: Column[Any] = Column(Enum(BookingStatus), default=BookingStatus.PENDING)
     scheduled_execution_time = Column(DateTime, nullable=True)
     actual_booked_time = Column(Time, nullable=True)
