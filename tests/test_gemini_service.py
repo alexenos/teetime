@@ -613,7 +613,7 @@ class TestGeminiServiceParseMessage:
 
 class TestGeminiServiceProtobufConversion:
     """Tests for protobuf-to-dict conversion in parse_message.
-    
+
     These tests verify that nested protobuf structures (like the bookings array)
     are properly converted to Python dicts when processing Gemini API responses.
     This is critical because dict(fc.args) only converts the top level, leaving
@@ -625,25 +625,27 @@ class TestGeminiServiceProtobufConversion:
         self, gemini_service: GeminiService
     ) -> None:
         """Test that multiple bookings in a protobuf Struct are correctly parsed.
-        
+
         This is a regression test for the bug where Gemini returns bookings in a
         protobuf ListValue/Struct, and dict(fc.args) doesn't recursively convert
         nested structures. The fix uses MessageToDict for proper conversion.
-        
+
         Simulates a request like: "Book 2/1 at 8:58a and 9:06a"
         """
         from google.protobuf.struct_pb2 import Struct
 
         # Create a protobuf Struct mimicking what Gemini actually returns
         protobuf_args = Struct()
-        protobuf_args.update({
-            "intent": "book",
-            "bookings": [
-                {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
-                {"requested_date": "2026-02-01", "requested_time": "09:06", "num_players": 4},
-            ],
-            "response_message": "I'll book 2 tee times for Sunday, February 1.",
-        })
+        protobuf_args.update(
+            {
+                "intent": "book",
+                "bookings": [
+                    {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
+                    {"requested_date": "2026-02-01", "requested_time": "09:06", "num_players": 4},
+                ],
+                "response_message": "I'll book 2 tee times for Sunday, February 1.",
+            }
+        )
 
         mock_function_call = MagicMock()
         mock_function_call.args = protobuf_args
@@ -678,19 +680,21 @@ class TestGeminiServiceProtobufConversion:
         self, gemini_service: GeminiService
     ) -> None:
         """Test that a single booking in a protobuf Struct is correctly parsed.
-        
+
         Simulates a request like: "Book 02/01/2026 at 08:58"
         """
         from google.protobuf.struct_pb2 import Struct
 
         protobuf_args = Struct()
-        protobuf_args.update({
-            "intent": "book",
-            "bookings": [
-                {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
-            ],
-            "response_message": "I'll book that tee time for you.",
-        })
+        protobuf_args.update(
+            {
+                "intent": "book",
+                "bookings": [
+                    {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
+                ],
+                "response_message": "I'll book that tee time for you.",
+            }
+        )
 
         mock_function_call = MagicMock()
         mock_function_call.args = protobuf_args

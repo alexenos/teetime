@@ -122,7 +122,10 @@ class TwilioSMSProvider(SMSProvider):
 
             logger.debug(
                 "Sending %s: to=%s, from=%s, message=%s",
-                channel, to_formatted, from_number, message
+                channel,
+                to_formatted,
+                from_number,
+                message,
             )
 
             result = self.client.messages.create(

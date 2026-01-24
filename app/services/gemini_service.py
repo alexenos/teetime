@@ -236,7 +236,12 @@ class GeminiService:
                     tee_time_requests = None
 
             # Fallback to legacy fields if bookings array was empty or all entries failed parsing
-            if not tee_time_request and not tee_time_requests and args.get("requested_date") and args.get("requested_time"):
+            if (
+                not tee_time_request
+                and not tee_time_requests
+                and args.get("requested_date")
+                and args.get("requested_time")
+            ):
                 resolved_date = self._resolve_relative_date(args["requested_date"])
                 parsed_time = self._parse_time(args["requested_time"])
 
