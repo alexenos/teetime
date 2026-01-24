@@ -1,3 +1,5 @@
+import logging
+import re
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -6,6 +8,8 @@ from google.protobuf.json_format import MessageToDict
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a helpful assistant for booking golf tee times at Northgate Country Club.
 Your job is to understand the user's intent and extract structured information from their messages.
@@ -142,19 +146,74 @@ class GeminiService:
                 days_ahead += 7
             return today + timedelta(days=days_ahead)
 
+        # Try ISO format first (YYYY-MM-DD)
         try:
             return datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
-            return None
+            pass
+
+        # Try MM/DD/YYYY and MM/DD formats
+        current_year = datetime.now().year
+        for fmt in ("%m/%d/%Y", "%m/%d"):
+            try:
+                parsed = datetime.strptime(date_str, fmt)
+                if fmt == "%m/%d":
+                    # No year provided, use current year
+                    parsed = parsed.replace(year=current_year)
+                return parsed.date()
+            except ValueError:
+                pass
+
+        # Try "Month DD" and "Month DD, YYYY" formats
+        for fmt in ("%B %d", "%B %d, %Y", "%b %d", "%b %d, %Y"):
+            try:
+                parsed = datetime.strptime(date_str, fmt)
+                if "%Y" not in fmt:
+                    parsed = parsed.replace(year=current_year)
+                return parsed.date()
+            except ValueError:
+                pass
+
+        logger.warning(f"Failed to parse date: '{date_str}'")
+        return None
 
     def _parse_time(self, time_str: str) -> time | None:
-        try:
-            return datetime.strptime(time_str, "%H:%M").time()
-        except ValueError:
+        """Parse time string in various formats.
+
+        Supports:
+        - 24-hour: "08:58", "14:30", "8:58"
+        - 24-hour with seconds: "08:58:00"
+        - 12-hour with AM/PM: "8:58 AM", "8:58AM", "8:58a", "2:30 PM", "2:30pm"
+        """
+        if not time_str:
+            return None
+
+        time_str = time_str.strip()
+
+        # Try 24-hour formats first
+        for fmt in ("%H:%M", "%H:%M:%S"):
             try:
-                return datetime.strptime(time_str, "%H:%M:%S").time()
+                return datetime.strptime(time_str, fmt).time()
             except ValueError:
-                return None
+                pass
+
+        # Try 12-hour formats with AM/PM
+        # Normalize: "8:58a" -> "8:58 AM", "8:58AM" -> "8:58 AM", "8:58 am" -> "8:58 AM"
+        normalized = time_str.upper()
+        # Handle "8:58a" or "8:58p" (single letter suffix)
+        normalized = re.sub(r"(\d)A$", r"\1 AM", normalized)
+        normalized = re.sub(r"(\d)P$", r"\1 PM", normalized)
+        # Handle "8:58AM" or "8:58PM" (no space before AM/PM)
+        normalized = re.sub(r"(\d)(AM|PM)$", r"\1 \2", normalized)
+
+        for fmt in ("%I:%M %p", "%I:%M:%S %p"):
+            try:
+                return datetime.strptime(normalized, fmt).time()
+            except ValueError:
+                pass
+
+        logger.warning(f"Failed to parse time: '{time_str}'")
+        return None
 
     async def parse_message(self, message: str, context: str | None = None) -> ParsedIntent:
         if not self.model:
@@ -182,9 +241,10 @@ class GeminiService:
                         # nested structures (like bookings array) to Python dicts.
                         # Fall back to dict() for plain dict objects (e.g., in tests).
                         if hasattr(fc.args, "DESCRIPTOR"):
-                            args = MessageToDict(fc.args)
+                            args = MessageToDict(fc.args, preserving_proto_field_name=True)
                         else:
                             args = dict(fc.args)
+                        logger.info(f"Gemini parsed args: {args}")
                         return self._build_parsed_intent(args, raw_message=message)
 
             return ParsedIntent(
@@ -194,7 +254,7 @@ class GeminiService:
             )
 
         except Exception as e:
-            print(f"Gemini API error: {e}")
+            logger.exception(f"Gemini API error for message '{message}': {e}")
             return self._mock_parse(message)
 
     def _build_parsed_intent(
@@ -209,25 +269,34 @@ class GeminiService:
             if bookings and isinstance(bookings, list) and len(bookings) > 0:
                 tee_time_requests = []
                 for booking in bookings:
-                    resolved_date = self._resolve_relative_date(booking.get("requested_date", ""))
-                    parsed_time = self._parse_time(booking.get("requested_time", ""))
+                    raw_date = booking.get("requested_date", "")
+                    raw_time = booking.get("requested_time", "")
+                    resolved_date = self._resolve_relative_date(raw_date)
+                    parsed_time = self._parse_time(raw_time)
 
-                    if resolved_date and parsed_time:
-                        today = datetime.now().date()
-                        if resolved_date < today:
-                            try:
-                                corrected_date = resolved_date.replace(year=resolved_date.year + 1)
-                                resolved_date = corrected_date
-                            except ValueError:
-                                pass
-
-                        tee_time_requests.append(
-                            TeeTimeRequest(
-                                requested_date=resolved_date,
-                                requested_time=parsed_time,
-                                num_players=booking.get("num_players", 4),
-                            )
+                    if not resolved_date or not parsed_time:
+                        logger.warning(
+                            f"Skipping booking due to parse failure: "
+                            f"date='{raw_date}' -> {resolved_date}, "
+                            f"time='{raw_time}' -> {parsed_time}"
                         )
+                        continue
+
+                    today = datetime.now().date()
+                    if resolved_date < today:
+                        try:
+                            corrected_date = resolved_date.replace(year=resolved_date.year + 1)
+                            resolved_date = corrected_date
+                        except ValueError:
+                            pass
+
+                    tee_time_requests.append(
+                        TeeTimeRequest(
+                            requested_date=resolved_date,
+                            requested_time=parsed_time,
+                            num_players=booking.get("num_players", 4),
+                        )
+                    )
 
                 if len(tee_time_requests) == 1:
                     tee_time_request = tee_time_requests[0]
