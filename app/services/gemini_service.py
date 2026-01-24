@@ -11,6 +11,40 @@ from app.models.schemas import ParsedIntent, TeeTimeRequest
 
 logger = logging.getLogger(__name__)
 
+
+def _convert_proto_to_dict(obj: Any) -> Any:
+    """Recursively convert protobuf/proto-plus objects to plain Python types.
+
+    Handles MapComposite, RepeatedComposite, and other proto-plus wrapper types
+    that MessageToDict doesn't fully convert.
+    """
+    # Handle None
+    if obj is None:
+        return None
+
+    # Handle protobuf Timestamp objects
+    if hasattr(obj, "ToDatetime"):
+        return obj.ToDatetime().isoformat()
+
+    # Handle protobuf Duration objects
+    if hasattr(obj, "ToTimedelta"):
+        td = obj.ToTimedelta()
+        total_seconds = int(td.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    # Handle proto-plus MapComposite (dict-like)
+    if hasattr(obj, "keys") and hasattr(obj, "items"):
+        return {k: _convert_proto_to_dict(v) for k, v in obj.items()}
+
+    # Handle proto-plus RepeatedComposite (list-like)
+    if hasattr(obj, "__iter__") and not isinstance(obj, str | bytes | dict):
+        return [_convert_proto_to_dict(item) for item in obj]
+
+    # Return primitive types as-is
+    return obj
+
 SYSTEM_PROMPT = """You are a helpful assistant for booking golf tee times at Northgate Country Club.
 Your job is to understand the user's intent and extract structured information from their messages.
 
@@ -244,6 +278,9 @@ class GeminiService:
                             args = MessageToDict(fc.args, preserving_proto_field_name=True)
                         else:
                             args = dict(fc.args)
+                        # Recursively convert any remaining proto-plus objects
+                        # (e.g., MapComposite in bookings array) to plain dicts
+                        args = _convert_proto_to_dict(args)
                         logger.info(f"Gemini parsed args: {args}")
                         return self._build_parsed_intent(args, raw_message=message)
 
