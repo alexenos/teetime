@@ -119,12 +119,32 @@ class BookingService:
             )
 
     async def _handle_book_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
+        if parsed.tee_time_requests and len(parsed.tee_time_requests) > 1:
+            session.pending_requests = parsed.tee_time_requests
+            session.pending_request = None
+            session.state = ConversationState.AWAITING_CONFIRMATION
+
+            booking_summaries = []
+            for i, request in enumerate(parsed.tee_time_requests, 1):
+                date_str = request.requested_date.strftime("%A, %B %d")
+                time_str = request.requested_time.strftime("%I:%M %p")
+                booking_summaries.append(
+                    f"{i}. {date_str} at {time_str} for {request.num_players} players"
+                )
+
+            return (
+                f"I'll book {len(parsed.tee_time_requests)} tee times:\n"
+                + "\n".join(booking_summaries)
+                + "\n\nReply 'yes' to confirm all bookings."
+            )
+
         if not parsed.tee_time_request:
             if parsed.clarification_needed:
                 return parsed.clarification_needed
             return "I need more details. What date and time would you like?"
 
         session.pending_request = parsed.tee_time_request
+        session.pending_requests = None
         session.state = ConversationState.AWAITING_CONFIRMATION
 
         request = parsed.tee_time_request
@@ -137,13 +157,18 @@ class BookingService:
         )
 
     async def _handle_confirm_intent(self, session: UserSession) -> str:
-        if session.state != ConversationState.AWAITING_CONFIRMATION or not session.pending_request:
+        if session.state != ConversationState.AWAITING_CONFIRMATION:
+            return "There's nothing to confirm. Would you like to book a tee time?"
+
+        if session.pending_requests and len(session.pending_requests) > 0:
+            return await self._handle_confirm_multiple_bookings(session)
+
+        if not session.pending_request:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
         try:
             booking = await self.create_booking(session.phone_number, session.pending_request)
         except ValueError as e:
-            # 48-hour restriction for multi-player bookings
             session.pending_request = None
             session.state = ConversationState.IDLE
             return str(e)
@@ -190,6 +215,91 @@ class BookingService:
                 f"Booking request received for {date_str} at {time_str} "
                 f"for {request.num_players} players. I'll text you with updates."
             )
+
+    async def _handle_confirm_multiple_bookings(self, session: UserSession) -> str:
+        """Handle confirmation of multiple booking requests."""
+        if not session.pending_requests:
+            return "There's nothing to confirm. Would you like to book a tee time?"
+
+        successful_bookings: list[TeeTimeBooking] = []
+        failed_requests: list[tuple[TeeTimeRequest, str]] = []
+
+        for request in session.pending_requests:
+            try:
+                booking = await self.create_booking(session.phone_number, request)
+                successful_bookings.append(booking)
+            except ValueError as e:
+                failed_requests.append((request, str(e)))
+
+        session.pending_requests = None
+        session.pending_request = None
+        session.state = ConversationState.IDLE
+
+        response_parts = []
+
+        if successful_bookings:
+            scheduled_bookings = [
+                b for b in successful_bookings if b.status == BookingStatus.SCHEDULED
+            ]
+            immediate_bookings = [
+                b for b in successful_bookings if b.status != BookingStatus.SCHEDULED
+            ]
+
+            if scheduled_bookings:
+                booking_summaries = []
+                for booking in scheduled_bookings:
+                    date_str = booking.request.requested_date.strftime("%A, %B %d")
+                    time_str = booking.request.requested_time.strftime("%I:%M %p")
+                    booking_summaries.append(
+                        f"- {date_str} at {time_str} for {booking.request.num_players} players"
+                    )
+
+                if len(scheduled_bookings) == 1:
+                    exec_time = scheduled_bookings[0].scheduled_execution_time
+                    exec_str = exec_time.strftime("%A at %I:%M %p CT") if exec_time else "soon"
+                    response_parts.append(
+                        f"Booking scheduled! The booking window opens {exec_str}:\n"
+                        + "\n".join(booking_summaries)
+                    )
+                else:
+                    response_parts.append(
+                        f"{len(scheduled_bookings)} bookings scheduled! "
+                        "I'll text you with results when the booking windows open:\n"
+                        + "\n".join(booking_summaries)
+                    )
+
+            if immediate_bookings:
+                for booking in immediate_bookings:
+                    date_str = booking.request.requested_date.strftime("%A, %B %d")
+                    time_str = booking.request.requested_time.strftime("%I:%M %p")
+                    if booking.status == BookingStatus.SUCCESS:
+                        booked_time_str = (
+                            booking.actual_booked_time.strftime("%I:%M %p")
+                            if booking.actual_booked_time
+                            else time_str
+                        )
+                        response_parts.append(
+                            f"Booking confirmed! Reserved {date_str} at {booked_time_str} "
+                            f"for {booking.request.num_players} players."
+                        )
+                    elif booking.status == BookingStatus.FAILED:
+                        response_parts.append(
+                            f"Booking for {date_str} at {time_str} failed. "
+                            "I'll text you with more details."
+                        )
+                    elif booking.status == BookingStatus.IN_PROGRESS:
+                        response_parts.append(
+                            f"Booking in progress for {date_str} at {time_str}. "
+                            "I'll text you with the result."
+                        )
+
+        if failed_requests:
+            for request, error in failed_requests:
+                date_str = request.requested_date.strftime("%A, %B %d")
+                time_str = request.requested_time.strftime("%I:%M %p")
+                response_parts.append(f"Could not schedule {date_str} at {time_str}: {error}")
+
+        return "\n\n".join(response_parts) if response_parts else "No bookings were created."
 
     async def _handle_status_intent(self, session: UserSession) -> str:
         user_bookings = await database_service.get_bookings(phone_number=session.phone_number)

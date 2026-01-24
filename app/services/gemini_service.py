@@ -32,7 +32,7 @@ If information is missing, ask for clarification.
 FUNCTION_DECLARATIONS = [
     {
         "name": "parse_tee_time_request",
-        "description": "Parse a user's request to book a golf tee time",
+        "description": "Parse a user's request to book golf tee times. Supports multiple bookings in a single message.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -41,17 +41,39 @@ FUNCTION_DECLARATIONS = [
                     "enum": ["book", "status", "cancel", "modify", "help", "confirm", "unclear"],
                     "description": "The user's intent",
                 },
+                "bookings": {
+                    "type": "array",
+                    "description": "List of tee time bookings requested. Use this when user requests multiple bookings in one message.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "requested_date": {
+                                "type": "string",
+                                "description": "The requested date in YYYY-MM-DD format",
+                            },
+                            "requested_time": {
+                                "type": "string",
+                                "description": "The requested time in HH:MM format (24-hour)",
+                            },
+                            "num_players": {
+                                "type": "integer",
+                                "description": "Number of players (1-4)",
+                            },
+                        },
+                        "required": ["requested_date", "requested_time"],
+                    },
+                },
                 "requested_date": {
                     "type": "string",
-                    "description": "The requested date in YYYY-MM-DD format",
+                    "description": "The requested date in YYYY-MM-DD format (for single booking, deprecated - use bookings array)",
                 },
                 "requested_time": {
                     "type": "string",
-                    "description": "The requested time in HH:MM format (24-hour)",
+                    "description": "The requested time in HH:MM format (24-hour) (for single booking, deprecated - use bookings array)",
                 },
                 "num_players": {
                     "type": "integer",
-                    "description": "Number of players (1-4)",
+                    "description": "Number of players (1-4) (for single booking, deprecated - use bookings array)",
                 },
                 "clarification_needed": {
                     "type": "string",
@@ -173,34 +195,63 @@ class GeminiService:
     ) -> ParsedIntent:
         intent = args.get("intent", "unclear")
         tee_time_request = None
+        tee_time_requests: list[TeeTimeRequest] | None = None
 
-        if intent == "book" and args.get("requested_date") and args.get("requested_time"):
-            resolved_date = self._resolve_relative_date(args["requested_date"])
-            parsed_time = self._parse_time(args["requested_time"])
+        if intent == "book":
+            bookings = args.get("bookings", [])
+            if bookings and isinstance(bookings, list) and len(bookings) > 0:
+                tee_time_requests = []
+                for booking in bookings:
+                    resolved_date = self._resolve_relative_date(booking.get("requested_date", ""))
+                    parsed_time = self._parse_time(booking.get("requested_time", ""))
 
-            if resolved_date and parsed_time:
-                # Safety check: if the date is in the past, Gemini likely returned
-                # the wrong year. Adjust to the next occurrence of that date.
-                today = datetime.now().date()
-                if resolved_date < today:
-                    # The date is in the past - try adding a year
-                    try:
-                        corrected_date = resolved_date.replace(year=resolved_date.year + 1)
-                        resolved_date = corrected_date
-                    except ValueError:
-                        # Handle Feb 29 edge case
-                        pass
+                    if resolved_date and parsed_time:
+                        today = datetime.now().date()
+                        if resolved_date < today:
+                            try:
+                                corrected_date = resolved_date.replace(year=resolved_date.year + 1)
+                                resolved_date = corrected_date
+                            except ValueError:
+                                pass
 
-                tee_time_request = TeeTimeRequest(
-                    requested_date=resolved_date,
-                    requested_time=parsed_time,
-                    num_players=args.get("num_players", 4),
-                )
+                        tee_time_requests.append(
+                            TeeTimeRequest(
+                                requested_date=resolved_date,
+                                requested_time=parsed_time,
+                                num_players=booking.get("num_players", 4),
+                            )
+                        )
+
+                if len(tee_time_requests) == 1:
+                    tee_time_request = tee_time_requests[0]
+                    tee_time_requests = None
+                elif len(tee_time_requests) == 0:
+                    tee_time_requests = None
+
+            elif args.get("requested_date") and args.get("requested_time"):
+                resolved_date = self._resolve_relative_date(args["requested_date"])
+                parsed_time = self._parse_time(args["requested_time"])
+
+                if resolved_date and parsed_time:
+                    today = datetime.now().date()
+                    if resolved_date < today:
+                        try:
+                            corrected_date = resolved_date.replace(year=resolved_date.year + 1)
+                            resolved_date = corrected_date
+                        except ValueError:
+                            pass
+
+                    tee_time_request = TeeTimeRequest(
+                        requested_date=resolved_date,
+                        requested_time=parsed_time,
+                        num_players=args.get("num_players", 4),
+                    )
 
         return ParsedIntent(
             intent=intent,
             raw_message=raw_message,
             tee_time_request=tee_time_request,
+            tee_time_requests=tee_time_requests,
             clarification_needed=args.get("clarification_needed"),
             response_message=args.get("response_message", ""),
         )

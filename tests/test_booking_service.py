@@ -1469,3 +1469,257 @@ class TestBookingService48HourRestriction:
                 assert "48 hours" in response
                 assert session.state == ConversationState.IDLE
                 assert session.pending_request is None
+
+
+class TestMultipleBookings:
+    """Tests for multiple booking functionality."""
+
+    @pytest.mark.asyncio
+    async def test_handle_book_intent_multiple_requests(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Test handling a book intent with multiple tee time requests."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 21),
+                requested_time=time(9, 0),
+                num_players=4,
+            ),
+        ]
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_requests=requests,
+        )
+
+        response = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert "2 tee times" in response
+        assert "Saturday, December 20" in response
+        assert "Sunday, December 21" in response
+        assert "08:00 AM" in response
+        assert "09:00 AM" in response
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert sample_session.pending_requests == requests
+        assert sample_session.pending_request is None
+
+    @pytest.mark.asyncio
+    async def test_handle_confirm_multiple_bookings_success(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test confirming multiple bookings successfully."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 30),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 31),
+                requested_time=time(9, 0),
+                num_players=4,
+            ),
+        ]
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=requests,
+        )
+
+        async def create_booking_side_effect(
+            phone_number: str, request: TeeTimeRequest
+        ) -> TeeTimeBooking:
+            return TeeTimeBooking(
+                id="test123",
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 23, 6, 30),
+            )
+
+        with patch.object(
+            booking_service, "create_booking", new=AsyncMock(side_effect=create_booking_side_effect)
+        ):
+            response = await booking_service._handle_confirm_intent(session)
+
+        assert "scheduled" in response.lower()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_requests is None
+        assert session.pending_request is None
+
+    @pytest.mark.asyncio
+    async def test_handle_confirm_multiple_bookings_partial_failure(
+        self, booking_service: BookingService
+    ) -> None:
+        """Test confirming multiple bookings where one fails."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 24),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 30),
+                requested_time=time(9, 0),
+                num_players=4,
+            ),
+        ]
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=requests,
+        )
+
+        call_count = 0
+
+        async def create_booking_side_effect(
+            phone_number: str, request: TeeTimeRequest
+        ) -> TeeTimeBooking:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("Multi-player bookings within 48 hours")
+            return TeeTimeBooking(
+                id="test123",
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 23, 6, 30),
+            )
+
+        with patch.object(
+            booking_service, "create_booking", new=AsyncMock(side_effect=create_booking_side_effect)
+        ):
+            response = await booking_service._handle_confirm_intent(session)
+
+        assert "Could not schedule" in response
+        assert "48 hours" in response
+        assert "scheduled" in response.lower()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_requests is None
+
+    @pytest.mark.asyncio
+    async def test_single_booking_in_tee_time_requests_uses_single_field(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Test that a single booking in tee_time_requests still uses pending_request."""
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 20),
+            requested_time=time(8, 0),
+            num_players=4,
+        )
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_request=request,
+        )
+
+        response = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert "Saturday, December 20" in response
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert sample_session.pending_request == request
+        assert sample_session.pending_requests is None
+
+    @pytest.mark.asyncio
+    async def test_handle_confirm_all_bookings_fail(self, booking_service: BookingService) -> None:
+        """Test confirming multiple bookings where all fail."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 24),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 25),
+                requested_time=time(9, 0),
+                num_players=4,
+            ),
+        ]
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=requests,
+        )
+
+        async def create_booking_side_effect(
+            phone_number: str, request: TeeTimeRequest
+        ) -> TeeTimeBooking:
+            raise ValueError("Multi-player bookings within 48 hours")
+
+        with patch.object(
+            booking_service, "create_booking", new=AsyncMock(side_effect=create_booking_side_effect)
+        ):
+            response = await booking_service._handle_confirm_intent(session)
+
+        assert "Could not schedule" in response
+        assert session.state == ConversationState.IDLE
+        assert session.pending_requests is None
+
+    @pytest.mark.asyncio
+    async def test_handle_book_intent_three_requests(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Test handling a book intent with three tee time requests."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 21),
+                requested_time=time(9, 0),
+                num_players=4,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 22),
+                requested_time=time(10, 0),
+                num_players=2,
+            ),
+        ]
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_requests=requests,
+        )
+
+        response = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert "3 tee times" in response
+        assert "Saturday, December 20" in response
+        assert "Sunday, December 21" in response
+        assert "Monday, December 22" in response
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert sample_session.pending_requests == requests
+
+    @pytest.mark.asyncio
+    async def test_handle_book_intent_multiple_requests_different_player_counts(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Test handling multiple bookings with different player counts."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+                num_players=2,
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 21),
+                requested_time=time(9, 0),
+                num_players=4,
+            ),
+        ]
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_requests=requests,
+        )
+
+        response = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert "2 tee times" in response
+        assert "2 players" in response
+        assert "4 players" in response
+        assert sample_session.pending_requests == requests
