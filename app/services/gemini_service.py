@@ -2,6 +2,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import google.generativeai as genai
+from google.protobuf.json_format import MessageToDict
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
@@ -177,7 +178,13 @@ class GeminiService:
                 for part in response.candidates[0].content.parts:
                     if hasattr(part, "function_call"):
                         fc = part.function_call
-                        args = dict(fc.args)
+                        # Use MessageToDict for protobuf objects to properly convert
+                        # nested structures (like bookings array) to Python dicts.
+                        # Fall back to dict() for plain dict objects (e.g., in tests).
+                        if hasattr(fc.args, "DESCRIPTOR"):
+                            args = MessageToDict(fc.args)
+                        else:
+                            args = dict(fc.args)
                         return self._build_parsed_intent(args, raw_message=message)
 
             return ParsedIntent(
@@ -228,7 +235,13 @@ class GeminiService:
                 elif len(tee_time_requests) == 0:
                     tee_time_requests = None
 
-            elif args.get("requested_date") and args.get("requested_time"):
+            # Fallback to legacy fields if bookings array was empty or all entries failed parsing
+            if (
+                not tee_time_request
+                and not tee_time_requests
+                and args.get("requested_date")
+                and args.get("requested_time")
+            ):
                 resolved_date = self._resolve_relative_date(args["requested_date"])
                 parsed_time = self._parse_time(args["requested_time"])
 

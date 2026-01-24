@@ -30,6 +30,7 @@ steps:
       - '-var=project_id=$PROJECT_ID'
       - '-var=region=${_REGION}'
       - '-var=container_image=${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
+      - '-var=log_level=DEBUG'
 
 substitutions:
   _REGION: us-central1
