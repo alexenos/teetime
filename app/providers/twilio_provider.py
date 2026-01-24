@@ -1,8 +1,12 @@
+import logging
+
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client
 
 from app.config import settings
 from app.providers.sms_base import SMSProvider, SMSResult
+
+logger = logging.getLogger(__name__)
 
 
 class TwilioSMSProvider(SMSProvider):
@@ -106,24 +110,31 @@ class TwilioSMSProvider(SMSProvider):
         Returns:
             SMSResult with success status and message SID or error message.
         """
+        channel = "WhatsApp" if self.is_whatsapp else "SMS"
+
         if not settings.twilio_account_sid or not settings.twilio_auth_token:
-            channel = "WhatsApp" if self.is_whatsapp else "SMS"
-            print(f"[{channel} Mock] To: {to_number}, Message: {message}")
+            logger.debug("[%s Mock] To: %s, Message: %s", channel, to_number, message)
             return SMSResult(success=True, message_sid="mock_sid")
 
         try:
             from_number = self._format_phone_for_channel(settings.twilio_phone_number)
             to_formatted = self._format_phone_for_channel(to_number)
 
+            logger.debug(
+                "Sending %s: to=%s, from=%s, message=%s",
+                channel, to_formatted, from_number, message
+            )
+
             result = self.client.messages.create(
                 body=message,
                 from_=from_number,
                 to=to_formatted,
             )
+
+            logger.debug("Sent %s successfully: sid=%s", channel, result.sid)
             return SMSResult(success=True, message_sid=result.sid)
         except Exception as e:
-            channel = "WhatsApp" if self.is_whatsapp else "SMS"
-            print(f"Error sending {channel}: {e}")
+            logger.error("Error sending %s to %s: %s", channel, to_number, e)
             return SMSResult(success=False, error_message=str(e))
 
 
@@ -140,5 +151,5 @@ class MockSMSProvider(SMSProvider):
     async def send_sms(self, to_number: str, message: str) -> SMSResult:
         """Record the message and return a mock success result."""
         self.sent_messages.append({"to": to_number, "message": message})
-        print(f"[SMS Mock] To: {to_number}, Message: {message}")
+        logger.debug("[SMS Mock] To: %s, Message: %s", to_number, message)
         return SMSResult(success=True, message_sid=f"mock_sid_{len(self.sent_messages)}")
