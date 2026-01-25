@@ -47,10 +47,25 @@ class SMSProvider(ABC):
         return await self.send_sms(to_number, message)
 
     async def send_booking_failure(
-        self, to_number: str, reason: str, alternatives: str | None = None
+        self,
+        to_number: str,
+        reason: str,
+        alternatives: str | None = None,
+        booking_details: str | None = None,
     ) -> SMSResult:
-        """Send a booking failure notification SMS."""
-        message = f"Unable to book tee time: {reason}"
+        """Send a booking failure notification SMS.
+
+        Args:
+            to_number: The recipient's phone number.
+            reason: The reason for the booking failure.
+            alternatives: Optional alternative time slots available.
+            booking_details: Optional details about the specific booking that failed
+                           (e.g., "Sunday, February 01 at 08:58 AM for 4 players").
+        """
+        if booking_details:
+            message = f"Unable to book tee time for {booking_details}: {reason}"
+        else:
+            message = f"Unable to book tee time: {reason}"
         if alternatives:
             message += f"\n\nAlternatives available: {alternatives}"
         return await self.send_sms(to_number, message)

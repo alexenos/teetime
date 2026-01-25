@@ -305,9 +305,17 @@ async def execute_due_bookings(
                 )
             )
 
+            # Build booking details string for the failure message
+            date_str = original_booking.request.requested_date.strftime("%A, %B %d")
+            time_str = original_booking.request.requested_time.strftime("%I:%M %p")
+            booking_details = (
+                f"{date_str} at {time_str} for {original_booking.request.num_players} players"
+            )
+
             await sms_service.send_booking_failure(
                 original_booking.phone_number,
                 error_message or "Unknown error",
+                booking_details=booking_details,
             )
 
     logger.info(

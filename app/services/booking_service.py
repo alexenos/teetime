@@ -732,8 +732,18 @@ class BookingService:
             booking.status = BookingStatus.FAILED
             booking.error_message = "Reservation provider not configured"
             await database_service.update_booking(booking)
+
+            # Build booking details string for the failure message
+            date_str = booking.request.requested_date.strftime("%A, %B %d")
+            time_str = booking.request.requested_time.strftime("%I:%M %p")
+            booking_details = (
+                f"{date_str} at {time_str} for {booking.request.num_players} players"
+            )
+
             await sms_service.send_booking_failure(
-                booking.phone_number, "System not configured for booking"
+                booking.phone_number,
+                "System not configured for booking",
+                booking_details=booking_details,
             )
             return False
 
@@ -772,10 +782,18 @@ class BookingService:
                 booking.error_message = result.error_message
                 await database_service.update_booking(booking)
 
+                # Build booking details string for the failure message
+                date_str = booking.request.requested_date.strftime("%A, %B %d")
+                time_str = booking.request.requested_time.strftime("%I:%M %p")
+                booking_details = (
+                    f"{date_str} at {time_str} for {booking.request.num_players} players"
+                )
+
                 await sms_service.send_booking_failure(
                     booking.phone_number,
                     result.error_message or "Unknown error",
                     result.alternatives,
+                    booking_details,
                 )
                 return False
 
@@ -783,7 +801,17 @@ class BookingService:
             booking.status = BookingStatus.FAILED
             booking.error_message = str(e)
             await database_service.update_booking(booking)
-            await sms_service.send_booking_failure(booking.phone_number, str(e))
+
+            # Build booking details string for the failure message
+            date_str = booking.request.requested_date.strftime("%A, %B %d")
+            time_str = booking.request.requested_time.strftime("%I:%M %p")
+            booking_details = (
+                f"{date_str} at {time_str} for {booking.request.num_players} players"
+            )
+
+            await sms_service.send_booking_failure(
+                booking.phone_number, str(e), booking_details=booking_details
+            )
             return False
 
     async def get_pending_bookings(self) -> list[TeeTimeBooking]:
