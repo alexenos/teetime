@@ -350,7 +350,15 @@ class WaldenGolfProvider(ReservationProvider):
                         f"Please verify the course selection manually."
                     ),
                 )
-            self._select_date_sync(driver, target_date)
+            if not self._select_date_sync(driver, target_date):
+                logger.error("BOOKING_DEBUG: Date selection failed")
+                return BookingResult(
+                    success=False,
+                    error_message=(
+                        f"Failed to select date {target_date.strftime('%m/%d/%Y')}. "
+                        f"Cannot proceed with booking - would search wrong date."
+                    ),
+                )
 
             wait.until(
                 expected_conditions.presence_of_element_located(
@@ -555,7 +563,27 @@ class WaldenGolfProvider(ReservationProvider):
                     )
 
             logger.info("BATCH_BOOKING: Step 5 - Selecting date")
-            self._select_date_sync(driver, target_date)
+            if not self._select_date_sync(driver, target_date):
+                logger.error("BATCH_BOOKING: Date selection failed")
+                for req in sorted_requests:
+                    results.append(
+                        BatchBookingItemResult(
+                            booking_id=req.booking_id,
+                            result=BookingResult(
+                                success=False,
+                                error_message=(
+                                    f"Failed to select date {target_date.strftime('%m/%d/%Y')}. "
+                                    f"Cannot proceed with booking - would search wrong date."
+                                ),
+                            ),
+                        )
+                    )
+                    total_failed += 1
+                return BatchBookingResult(
+                    results=results,
+                    total_succeeded=total_succeeded,
+                    total_failed=total_failed,
+                )
 
             wait.until(
                 expected_conditions.presence_of_element_located(
@@ -641,7 +669,9 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                         if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
                             logger.warning("BATCH_BOOKING: Course re-selection failed")
-                        self._select_date_sync(driver, target_date)
+                        if not self._select_date_sync(driver, target_date):
+                            logger.error("BATCH_BOOKING: Date re-selection failed for next booking")
+                            # Continue with remaining bookings but they will likely fail
                         wait.until(
                             expected_conditions.presence_of_element_located(
                                 (
@@ -1059,7 +1089,7 @@ class WaldenGolfProvider(ReservationProvider):
             logger.error(f"Error verifying course selection: {e}")
             return False
 
-    def _select_date_sync(self, driver: webdriver.Chrome, target_date: date) -> None:
+    def _select_date_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
         """
         Select the target date using various date selection mechanisms.
 
@@ -1070,11 +1100,14 @@ class WaldenGolfProvider(ReservationProvider):
         4. Calendar navigation
 
         This method tries multiple approaches in order of likelihood.
+
+        Returns:
+            True if date was successfully selected, False otherwise.
         """
         day_name = target_date.strftime("%A")
         date_str = target_date.strftime("%m/%d/%Y")
         date_str_alt = target_date.strftime("%Y-%m-%d")
-        logger.debug(f"BOOKING_DEBUG: Selecting date {target_date} ({day_name})")
+        logger.info(f"BOOKING_DEBUG: Selecting date {target_date} ({day_name})")
 
         date_input_selectors = [
             "input[type='text'][id*='date']",
@@ -1098,7 +1131,7 @@ class WaldenGolfProvider(ReservationProvider):
                     date_input.send_keys(date_str_alt)
                 else:
                     date_input.send_keys(date_str)
-                logger.info(f"Entered date {date_str} using selector: {selector}")
+                logger.info(f"BOOKING_DEBUG: Entered date {date_str} using selector: {selector}")
 
                 wait = WebDriverWait(driver, 5)
                 try:
@@ -1111,11 +1144,11 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                     )
                     search_button.click()
-                    logger.info("Clicked search/submit button after date entry")
+                    logger.info("BOOKING_DEBUG: Clicked search/submit button after date entry")
                 except TimeoutException:
                     pass
 
-                return
+                return True
 
             except NoSuchElementException:
                 continue
@@ -1123,13 +1156,22 @@ class WaldenGolfProvider(ReservationProvider):
         # Skip day tab lookup - go directly to calendar picker for faster date selection
         logger.info("BOOKING_DEBUG: No date input found, using calendar picker...")
         if self._select_date_via_calendar_sync(driver, target_date):
-            logger.debug("BOOKING_DEBUG: Date selection via calendar successful")
+            logger.info("BOOKING_DEBUG: Date selection via calendar successful")
+            return True
         else:
-            logger.warning("BOOKING_DEBUG: Calendar date selection failed")
+            logger.error(
+                f"BOOKING_DEBUG: Calendar date selection failed for {target_date}. "
+                f"Cannot proceed with booking on wrong date."
+            )
+            return False
 
     def _select_date_via_calendar_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
         """
         Select date using a calendar picker widget if available.
+
+        Handles month navigation when the target date is in a different month than
+        the currently displayed month. Uses the month/year dropdowns or navigation
+        arrows to reach the correct month before selecting the day.
 
         Returns:
             True if date was selected successfully, False otherwise.
@@ -1144,7 +1186,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             if calendar_triggers:
                 calendar_triggers[0].click()
-                logger.info("Clicked calendar trigger")
+                logger.info("BOOKING_DEBUG: Clicked calendar trigger")
 
                 wait = WebDriverWait(driver, 5)
                 try:
@@ -1152,23 +1194,48 @@ class WaldenGolfProvider(ReservationProvider):
                         expected_conditions.presence_of_element_located(
                             (
                                 By.CSS_SELECTOR,
-                                ".ui-datepicker, .datepicker, [class*='calendar-popup']",
+                                ".ui-datepicker, .datepicker, [class*='calendar-popup'], "
+                                ".ui-datepicker-calendar, select[class*='month'], select[class*='year']",
                             )
                         )
                     )
+                    logger.info("BOOKING_DEBUG: Calendar popup appeared")
 
+                    # Navigate to the correct month/year if needed
+                    if not self._navigate_calendar_to_month(driver, target_date):
+                        logger.warning(
+                            f"BOOKING_DEBUG: Failed to navigate calendar to {target_date.strftime('%B %Y')}"
+                        )
+                        return False
+
+                    # Now select the day
                     day_str = str(target_date.day)
                     day_elements = driver.find_elements(
                         By.XPATH,
                         f"//td[@data-date='{target_date.day}'] | "
                         f"//a[text()='{day_str}'] | "
-                        f"//td[contains(@class, 'day') and text()='{day_str}']",
+                        f"//td[contains(@class, 'day') and text()='{day_str}'] | "
+                        f"//td[normalize-space(text())='{day_str}']",
+                    )
+
+                    logger.info(
+                        f"BOOKING_DEBUG: Found {len(day_elements)} day elements for day {day_str}"
                     )
 
                     for day_el in day_elements:
                         if day_el.is_displayed() and day_el.is_enabled():
+                            # Avoid clicking on days from adjacent months (often grayed out)
+                            day_class = day_el.get_attribute("class") or ""
+                            if "ui-datepicker-other-month" in day_class or "disabled" in day_class:
+                                logger.debug(
+                                    f"BOOKING_DEBUG: Skipping day element with class: {day_class}"
+                                )
+                                continue
+
                             day_el.click()
-                            logger.info(f"Selected day {day_str} from calendar")
+                            logger.info(
+                                f"BOOKING_DEBUG: Selected day {day_str} from calendar for date {target_date}"
+                            )
                             # Wait for page to reload after date selection
                             self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
                             # Wait for tee time slots to appear
@@ -1177,21 +1244,297 @@ class WaldenGolfProvider(ReservationProvider):
                                     expected_conditions.presence_of_element_located(
                                         (
                                             By.CSS_SELECTOR,
-                                            ".custom-free-slot-span, .teetime-row, [class*='tee-time']",
+                                            ".custom-free-slot-span, .teetime-row, [class*='tee-time'], "
+                                            "li.ui-datascroller-item",
                                         )
                                     )
                                 )
                             except TimeoutException:
-                                logger.debug("Tee time slots not found after calendar selection")
+                                logger.debug(
+                                    "BOOKING_DEBUG: Tee time slots not found after calendar selection"
+                                )
                             return True
 
+                    logger.warning(
+                        f"BOOKING_DEBUG: No clickable day element found for day {day_str}"
+                    )
+
                 except TimeoutException:
-                    logger.debug("Calendar popup did not appear")
+                    logger.warning("BOOKING_DEBUG: Calendar popup did not appear")
 
         except Exception as e:
-            logger.debug(f"Calendar selection failed: {e}")
+            logger.warning(f"BOOKING_DEBUG: Calendar selection failed: {e}")
 
         return False
+
+    def _navigate_calendar_to_month(self, driver: webdriver.Chrome, target_date: date) -> bool:
+        """
+        Navigate the calendar to the correct month and year.
+
+        Tries multiple strategies:
+        1. Use month/year dropdown selects if available
+        2. Use next/prev navigation arrows
+
+        Args:
+            driver: The WebDriver instance
+            target_date: The target date to navigate to
+
+        Returns:
+            True if navigation succeeded or no navigation needed, False otherwise
+        """
+        target_month = target_date.month
+        target_year = target_date.year
+        target_month_name = target_date.strftime("%B")  # e.g., "February"
+        target_month_abbr = target_date.strftime("%b")  # e.g., "Feb"
+
+        logger.info(f"BOOKING_DEBUG: Navigating calendar to {target_month_name} {target_year}")
+
+        # Strategy 1: Try month/year dropdown selects
+        try:
+            # Look for month dropdown - try various selectors
+            month_selects = driver.find_elements(
+                By.CSS_SELECTOR,
+                "select.ui-datepicker-month, select[class*='month'], "
+                "select[data-handler='selectMonth'], select[name*='month']",
+            )
+            year_selects = driver.find_elements(
+                By.CSS_SELECTOR,
+                "select.ui-datepicker-year, select[class*='year'], "
+                "select[data-handler='selectYear'], select[name*='year']",
+            )
+
+            if month_selects and year_selects:
+                logger.info("BOOKING_DEBUG: Found month/year dropdowns, using select strategy")
+
+                # Select year first
+                year_select = Select(year_selects[0])
+                try:
+                    year_select.select_by_value(str(target_year))
+                    logger.info(f"BOOKING_DEBUG: Selected year {target_year} from dropdown")
+                except Exception:
+                    try:
+                        year_select.select_by_visible_text(str(target_year))
+                        logger.info(f"BOOKING_DEBUG: Selected year {target_year} by text")
+                    except Exception as e:
+                        logger.warning(f"BOOKING_DEBUG: Could not select year: {e}")
+
+                self.wait_strategy.simple_wait(fixed_duration=0.3, event_driven_duration=0.1)
+
+                # Select month (0-indexed in some implementations, 1-indexed in others)
+                month_select = Select(month_selects[0])
+                try:
+                    # Try 0-indexed first (JavaScript Date style)
+                    month_select.select_by_value(str(target_month - 1))
+                    logger.info(
+                        f"BOOKING_DEBUG: Selected month {target_month_name} (value={target_month - 1})"
+                    )
+                except Exception:
+                    try:
+                        # Try 1-indexed
+                        month_select.select_by_value(str(target_month))
+                        logger.info(
+                            f"BOOKING_DEBUG: Selected month {target_month_name} (value={target_month})"
+                        )
+                    except Exception:
+                        try:
+                            # Try by visible text
+                            month_select.select_by_visible_text(target_month_name)
+                            logger.info(
+                                f"BOOKING_DEBUG: Selected month {target_month_name} by text"
+                            )
+                        except Exception:
+                            try:
+                                month_select.select_by_visible_text(target_month_abbr)
+                                logger.info(
+                                    f"BOOKING_DEBUG: Selected month {target_month_abbr} by abbr"
+                                )
+                            except Exception as e:
+                                logger.warning(f"BOOKING_DEBUG: Could not select month: {e}")
+
+                self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.2)
+                return True
+
+        except Exception as e:
+            logger.debug(f"BOOKING_DEBUG: Dropdown strategy failed: {e}")
+
+        # Strategy 2: Use navigation arrows to move month by month
+        try:
+            # Determine current month/year displayed
+            current_month, current_year = self._get_calendar_current_month(driver)
+
+            if current_month is None or current_year is None:
+                logger.warning("BOOKING_DEBUG: Could not determine current calendar month")
+                # Assume we need to navigate - try clicking next
+                current_month = datetime.now().month
+                current_year = datetime.now().year
+
+            logger.info(
+                f"BOOKING_DEBUG: Calendar currently showing {current_month}/{current_year}, "
+                f"need {target_month}/{target_year}"
+            )
+
+            # Calculate months to navigate
+            months_diff = (target_year - current_year) * 12 + (target_month - current_month)
+
+            if months_diff == 0:
+                logger.info("BOOKING_DEBUG: Already on correct month")
+                return True
+
+            # Find navigation buttons
+            if months_diff > 0:
+                # Need to go forward
+                nav_selectors = [
+                    "a.ui-datepicker-next",
+                    "button.ui-datepicker-next",
+                    "[data-handler='next']",
+                    ".ui-datepicker-next",
+                    "a[title='Next']",
+                    "button[title='Next']",
+                    "span.ui-icon-circle-triangle-e",
+                    "[class*='next']",
+                    "a[class*='next']",
+                    "button[class*='next']",
+                ]
+                direction = "next"
+            else:
+                # Need to go backward
+                nav_selectors = [
+                    "a.ui-datepicker-prev",
+                    "button.ui-datepicker-prev",
+                    "[data-handler='prev']",
+                    ".ui-datepicker-prev",
+                    "a[title='Prev']",
+                    "button[title='Prev']",
+                    "span.ui-icon-circle-triangle-w",
+                    "[class*='prev']",
+                    "a[class*='prev']",
+                    "button[class*='prev']",
+                ]
+                direction = "prev"
+                months_diff = abs(months_diff)
+
+            nav_button = None
+            for selector in nav_selectors:
+                try:
+                    buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for btn in buttons:
+                        if btn.is_displayed() and btn.is_enabled():
+                            nav_button = btn
+                            logger.info(
+                                f"BOOKING_DEBUG: Found {direction} nav button with selector: {selector}"
+                            )
+                            break
+                    if nav_button:
+                        break
+                except Exception:
+                    continue
+
+            if not nav_button:
+                logger.warning(f"BOOKING_DEBUG: Could not find {direction} navigation button")
+                return False
+
+            # Click navigation button for each month we need to move
+            for i in range(months_diff):
+                try:
+                    # Re-find the button each time as DOM may update
+                    for selector in nav_selectors:
+                        try:
+                            buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                            for btn in buttons:
+                                if btn.is_displayed() and btn.is_enabled():
+                                    nav_button = btn
+                                    break
+                            if nav_button:
+                                break
+                        except Exception:
+                            continue
+
+                    nav_button.click()
+                    logger.debug(
+                        f"BOOKING_DEBUG: Clicked {direction} button ({i + 1}/{months_diff})"
+                    )
+                    self.wait_strategy.simple_wait(fixed_duration=0.3, event_driven_duration=0.1)
+                except Exception as e:
+                    logger.warning(f"BOOKING_DEBUG: Error clicking nav button: {e}")
+                    return False
+
+            logger.info(
+                f"BOOKING_DEBUG: Navigated {months_diff} months {direction} to reach "
+                f"{target_month_name} {target_year}"
+            )
+            return True
+
+        except Exception as e:
+            logger.warning(f"BOOKING_DEBUG: Navigation arrow strategy failed: {e}")
+
+        return False
+
+    def _get_calendar_current_month(
+        self, driver: webdriver.Chrome
+    ) -> tuple[int | None, int | None]:
+        """
+        Determine the currently displayed month and year in the calendar.
+
+        Returns:
+            Tuple of (month, year) as integers, or (None, None) if cannot determine
+        """
+        try:
+            # Try to read from month/year dropdowns
+            month_selects = driver.find_elements(
+                By.CSS_SELECTOR,
+                "select.ui-datepicker-month, select[class*='month']",
+            )
+            year_selects = driver.find_elements(
+                By.CSS_SELECTOR,
+                "select.ui-datepicker-year, select[class*='year']",
+            )
+
+            if month_selects and year_selects:
+                month_select = Select(month_selects[0])
+                year_select = Select(year_selects[0])
+
+                # Get selected values
+                selected_month = month_select.first_selected_option
+                selected_year = year_select.first_selected_option
+
+                month_val = selected_month.get_attribute("value")
+                year_val = selected_year.get_attribute("value")
+
+                if month_val is not None and year_val is not None:
+                    # Month might be 0-indexed
+                    month_int = int(month_val)
+                    if month_int < 12:  # Likely 0-indexed
+                        month_int += 1
+                    return month_int, int(year_val)
+
+            # Try to read from header text (e.g., "January 2026" or "Jan 2026")
+            header_selectors = [
+                ".ui-datepicker-title",
+                ".datepicker-title",
+                "[class*='calendar-header']",
+                "[class*='datepicker-header']",
+            ]
+
+            for selector in header_selectors:
+                try:
+                    headers = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for header in headers:
+                        text = header.text.strip()
+                        if text:
+                            # Try to parse "January 2026" or "Jan 2026"
+                            for fmt in ["%B %Y", "%b %Y"]:
+                                try:
+                                    parsed = datetime.strptime(text, fmt)
+                                    return parsed.month, parsed.year
+                                except ValueError:
+                                    continue
+                except Exception:
+                    continue
+
+        except Exception as e:
+            logger.debug(f"BOOKING_DEBUG: Error getting current calendar month: {e}")
+
+        return None, None
 
     def _select_date_via_tabs_sync(self, driver: webdriver.Chrome, target_date: date) -> bool:
         """
@@ -2973,7 +3316,9 @@ class WaldenGolfProvider(ReservationProvider):
             wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
 
             self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
-            self._select_date_sync(driver, target_date)
+            if not self._select_date_sync(driver, target_date):
+                logger.error(f"Failed to select date {target_date} for availability check")
+                return []
 
             wait.until(
                 expected_conditions.presence_of_element_located(

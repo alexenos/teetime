@@ -1107,6 +1107,103 @@ class TestBookingServiceExecuteBooking:
             assert sample_booking.error_message == "Time slot not available"
 
     @pytest.mark.asyncio
+    async def test_execute_booking_failure_includes_booking_details_in_sms(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Test that booking failure SMS includes specific booking details."""
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(
+                    success=False,
+                    error_message="No time slots available",
+                )
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                await booking_service.execute_booking(sample_booking.id)
+
+                # Verify send_booking_failure was called with booking_details
+                mock_sms.send_booking_failure.assert_called_once()
+                call_kwargs = mock_sms.send_booking_failure.call_args
+                # Check that booking_details was passed (positional arg 3 or kwarg)
+                args, kwargs = call_kwargs
+                booking_details = kwargs.get("booking_details") or (
+                    args[3] if len(args) > 3 else None
+                )
+                assert booking_details is not None
+                # Verify it contains date, time, and players
+                assert "Saturday" in booking_details or "December" in booking_details
+                assert "08:00 AM" in booking_details
+                assert "4 players" in booking_details
+
+    @pytest.mark.asyncio
+    async def test_execute_booking_exception_includes_booking_details_in_sms(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Test that booking exception SMS includes specific booking details."""
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(side_effect=Exception("Network error"))
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                await booking_service.execute_booking(sample_booking.id)
+
+                # Verify send_booking_failure was called with booking_details
+                mock_sms.send_booking_failure.assert_called_once()
+                call_kwargs = mock_sms.send_booking_failure.call_args
+                args, kwargs = call_kwargs
+                booking_details = kwargs.get("booking_details")
+                assert booking_details is not None
+                assert "4 players" in booking_details
+
+    @pytest.mark.asyncio
+    async def test_execute_booking_no_provider_includes_booking_details_in_sms(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Test that no provider failure SMS includes specific booking details."""
+        # Ensure no provider is set
+        booking_service._reservation_provider = None
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                await booking_service.execute_booking(sample_booking.id)
+
+                # Verify send_booking_failure was called with booking_details
+                mock_sms.send_booking_failure.assert_called_once()
+                call_kwargs = mock_sms.send_booking_failure.call_args
+                args, kwargs = call_kwargs
+                booking_details = kwargs.get("booking_details")
+                assert booking_details is not None
+                assert "4 players" in booking_details
+
+    @pytest.mark.asyncio
     async def test_execute_booking_exception(
         self, booking_service: BookingService, sample_booking: TeeTimeBooking
     ) -> None:

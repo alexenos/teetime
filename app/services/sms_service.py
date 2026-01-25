@@ -69,10 +69,24 @@ class SMSService:
         return result.message_sid if result.success else None
 
     async def send_booking_failure(
-        self, to_number: str, reason: str, alternatives: str | None = None
+        self,
+        to_number: str,
+        reason: str,
+        alternatives: str | None = None,
+        booking_details: str | None = None,
     ) -> str | None:
-        """Send a booking failure notification SMS."""
-        result = await self.provider.send_booking_failure(to_number, reason, alternatives)
+        """Send a booking failure notification SMS.
+
+        Args:
+            to_number: The recipient's phone number.
+            reason: The reason for the booking failure.
+            alternatives: Optional alternative time slots available.
+            booking_details: Optional details about the specific booking that failed
+                           (e.g., "Sunday, February 01 at 08:58 AM for 4 players").
+        """
+        result = await self.provider.send_booking_failure(
+            to_number, reason, alternatives, booking_details
+        )
         return result.message_sid if result.success else None
 
     async def send_weekly_prompt(self, to_number: str) -> str | None:

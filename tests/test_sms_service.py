@@ -238,6 +238,24 @@ class TestSMSServiceBookingNotifications:
         assert "8:08 AM, 8:16 AM" in mock_provider.sent_messages[0]["message"]
 
     @pytest.mark.asyncio
+    async def test_send_booking_failure_with_booking_details(
+        self, sms_service: SMSService, mock_provider: MockSMSProvider
+    ) -> None:
+        """Test sending booking failure with specific booking details."""
+        sms_service.set_provider(mock_provider)
+
+        result = await sms_service.send_booking_failure(
+            "+15551234567",
+            "No time slots with 4 available spots found",
+            booking_details="Sunday, February 01 at 08:58 AM for 4 players",
+        )
+
+        assert result is not None
+        message = mock_provider.sent_messages[0]["message"]
+        assert "Sunday, February 01 at 08:58 AM for 4 players" in message
+        assert "No time slots with 4 available spots found" in message
+
+    @pytest.mark.asyncio
     async def test_send_weekly_prompt(
         self, sms_service: SMSService, mock_provider: MockSMSProvider
     ) -> None:

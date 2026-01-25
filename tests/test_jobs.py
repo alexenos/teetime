@@ -399,6 +399,41 @@ class TestJobsExecuteDueBookings:
                 assert data["results"][0]["status"] == "error"
                 assert "Selenium crashed" in data["results"][0]["error"]
 
+    def test_booking_failure_sms_includes_booking_details(
+        self,
+        test_client: TestClient,
+        sample_booking: TeeTimeBooking,
+        failed_booking: TeeTimeBooking,
+    ) -> None:
+        """Test that failure SMS includes specific booking details (date, time, players)."""
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.scheduler_api_key = "test-api-key"
+            mock_settings.timezone = "America/Chicago"
+
+            with patch("app.api.jobs.booking_service") as mock_service:
+                mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
+                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", False)])
+                mock_service.get_booking = AsyncMock(return_value=failed_booking)
+
+                with patch("app.api.jobs.sms_service") as mock_sms:
+                    mock_sms.send_booking_failure = AsyncMock()
+
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"X-Scheduler-API-Key": "test-api-key"},
+                    )
+
+                    assert response.status_code == 200
+
+                    # Verify send_booking_failure was called with booking_details
+                    mock_sms.send_booking_failure.assert_called_once()
+                    call_kwargs = mock_sms.send_booking_failure.call_args
+                    args, kwargs = call_kwargs
+                    booking_details = kwargs.get("booking_details")
+                    assert booking_details is not None
+                    # Verify it contains date, time, and players info
+                    assert "4 players" in booking_details
+
     def test_multiple_bookings_mixed_results(
         self,
         test_client: TestClient,
