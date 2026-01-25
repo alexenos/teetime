@@ -1250,7 +1250,9 @@ class WaldenGolfProvider(ReservationProvider):
                                     )
                                 )
                             except TimeoutException:
-                                logger.debug("BOOKING_DEBUG: Tee time slots not found after calendar selection")
+                                logger.debug(
+                                    "BOOKING_DEBUG: Tee time slots not found after calendar selection"
+                                )
                             return True
 
                     logger.warning(
@@ -1285,9 +1287,7 @@ class WaldenGolfProvider(ReservationProvider):
         target_month_name = target_date.strftime("%B")  # e.g., "February"
         target_month_abbr = target_date.strftime("%b")  # e.g., "Feb"
 
-        logger.info(
-            f"BOOKING_DEBUG: Navigating calendar to {target_month_name} {target_year}"
-        )
+        logger.info(f"BOOKING_DEBUG: Navigating calendar to {target_month_name} {target_year}")
 
         # Strategy 1: Try month/year dropdown selects
         try:
@@ -1469,7 +1469,9 @@ class WaldenGolfProvider(ReservationProvider):
 
         return False
 
-    def _get_calendar_current_month(self, driver: webdriver.Chrome) -> tuple[int | None, int | None]:
+    def _get_calendar_current_month(
+        self, driver: webdriver.Chrome
+    ) -> tuple[int | None, int | None]:
         """
         Determine the currently displayed month and year in the calendar.
 

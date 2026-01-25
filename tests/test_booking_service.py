@@ -1137,7 +1137,9 @@ class TestBookingServiceExecuteBooking:
                 call_kwargs = mock_sms.send_booking_failure.call_args
                 # Check that booking_details was passed (positional arg 3 or kwarg)
                 args, kwargs = call_kwargs
-                booking_details = kwargs.get("booking_details") or (args[3] if len(args) > 3 else None)
+                booking_details = kwargs.get("booking_details") or (
+                    args[3] if len(args) > 3 else None
+                )
                 assert booking_details is not None
                 # Verify it contains date, time, and players
                 assert "Saturday" in booking_details or "December" in booking_details

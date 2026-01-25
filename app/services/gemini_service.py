@@ -45,6 +45,7 @@ def _convert_proto_to_dict(obj: Any) -> Any:
     # Return primitive types as-is
     return obj
 
+
 SYSTEM_PROMPT = """You are a helpful assistant for booking golf tee times at Northgate Country Club.
 Your job is to understand the user's intent and extract structured information from their messages.
 

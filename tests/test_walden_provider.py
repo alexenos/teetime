@@ -441,9 +441,7 @@ class TestWaldenProviderCancellation:
 class TestWaldenProviderCalendarNavigation:
     """Tests for calendar date selection and month navigation logic."""
 
-    def test_get_calendar_current_month_from_dropdowns(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_get_calendar_current_month_from_dropdowns(self, provider: WaldenGolfProvider) -> None:
         """Test reading current month/year from dropdown selects."""
         from unittest.mock import MagicMock, patch
 
@@ -492,9 +490,7 @@ class TestWaldenProviderCalendarNavigation:
             assert month == 1  # January
             assert year == 2026
 
-    def test_get_calendar_current_month_from_header(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_get_calendar_current_month_from_header(self, provider: WaldenGolfProvider) -> None:
         """Test reading current month/year from header text when dropdowns not available."""
         from unittest.mock import MagicMock
 
@@ -541,9 +537,7 @@ class TestWaldenProviderCalendarNavigation:
         assert month is None
         assert year is None
 
-    def test_navigate_calendar_to_month_same_month(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_navigate_calendar_to_month_same_month(self, provider: WaldenGolfProvider) -> None:
         """Test that navigation returns True when already on correct month."""
         from datetime import date
         from unittest.mock import MagicMock, patch
@@ -552,9 +546,7 @@ class TestWaldenProviderCalendarNavigation:
         target_date = date(2026, 1, 25)  # January 2026
 
         # Mock that we're already on January 2026
-        with patch.object(
-            provider, "_get_calendar_current_month", return_value=(1, 2026)
-        ):
+        with patch.object(provider, "_get_calendar_current_month", return_value=(1, 2026)):
             # No dropdowns found, will use arrow navigation
             mock_driver.find_elements.return_value = []
 
@@ -562,9 +554,7 @@ class TestWaldenProviderCalendarNavigation:
 
             assert result is True
 
-    def test_navigate_calendar_to_month_via_dropdowns(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_navigate_calendar_to_month_via_dropdowns(self, provider: WaldenGolfProvider) -> None:
         """Test navigation using month/year dropdown selects."""
         from datetime import date
         from unittest.mock import MagicMock, patch
@@ -607,9 +597,7 @@ class TestWaldenProviderCalendarNavigation:
             # Verify month was selected (0-indexed = 1 for February)
             mock_month_select.select_by_value.assert_called_with("1")
 
-    def test_navigate_calendar_to_month_via_next_arrow(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_navigate_calendar_to_month_via_next_arrow(self, provider: WaldenGolfProvider) -> None:
         """Test navigation using next arrow when dropdowns not available."""
         from datetime import date
         from unittest.mock import MagicMock, patch
@@ -630,18 +618,14 @@ class TestWaldenProviderCalendarNavigation:
         mock_driver.find_elements.side_effect = find_elements_side_effect
 
         # Mock that we're on January 2026, need to go to February
-        with patch.object(
-            provider, "_get_calendar_current_month", return_value=(1, 2026)
-        ):
+        with patch.object(provider, "_get_calendar_current_month", return_value=(1, 2026)):
             result = provider._navigate_calendar_to_month(mock_driver, target_date)
 
             assert result is True
             # Should have clicked next once (Jan -> Feb)
             assert mock_next_button.click.call_count >= 1
 
-    def test_navigate_calendar_to_month_via_prev_arrow(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_navigate_calendar_to_month_via_prev_arrow(self, provider: WaldenGolfProvider) -> None:
         """Test navigation using prev arrow when going backward."""
         from datetime import date
         from unittest.mock import MagicMock, patch
@@ -662,18 +646,14 @@ class TestWaldenProviderCalendarNavigation:
         mock_driver.find_elements.side_effect = find_elements_side_effect
 
         # Mock that we're on January 2026, need to go back to December 2025
-        with patch.object(
-            provider, "_get_calendar_current_month", return_value=(1, 2026)
-        ):
+        with patch.object(provider, "_get_calendar_current_month", return_value=(1, 2026)):
             result = provider._navigate_calendar_to_month(mock_driver, target_date)
 
             assert result is True
             # Should have clicked prev once (Jan 2026 -> Dec 2025)
             assert mock_prev_button.click.call_count >= 1
 
-    def test_navigate_calendar_fails_when_no_nav_button(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_navigate_calendar_fails_when_no_nav_button(self, provider: WaldenGolfProvider) -> None:
         """Test that navigation fails when no navigation button found."""
         from datetime import date
         from unittest.mock import MagicMock, patch
@@ -685,9 +665,7 @@ class TestWaldenProviderCalendarNavigation:
         mock_driver.find_elements.return_value = []
 
         # Mock that we're on January 2026
-        with patch.object(
-            provider, "_get_calendar_current_month", return_value=(1, 2026)
-        ):
+        with patch.object(provider, "_get_calendar_current_month", return_value=(1, 2026)):
             result = provider._navigate_calendar_to_month(mock_driver, target_date)
 
             assert result is False
@@ -708,9 +686,7 @@ class TestWaldenProviderCalendarNavigation:
         mock_driver.find_element.side_effect = NoSuchElementException()
 
         # Mock calendar selection to fail
-        with patch.object(
-            provider, "_select_date_via_calendar_sync", return_value=False
-        ):
+        with patch.object(provider, "_select_date_via_calendar_sync", return_value=False):
             result = provider._select_date_sync(mock_driver, target_date)
 
             assert result is False
@@ -731,19 +707,15 @@ class TestWaldenProviderCalendarNavigation:
         mock_driver.find_element.side_effect = NoSuchElementException()
 
         # Mock calendar selection to succeed
-        with patch.object(
-            provider, "_select_date_via_calendar_sync", return_value=True
-        ):
+        with patch.object(provider, "_select_date_via_calendar_sync", return_value=True):
             result = provider._select_date_sync(mock_driver, target_date)
 
             assert result is True
 
-    def test_select_date_via_calendar_calls_navigate(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_select_date_via_calendar_calls_navigate(self, provider: WaldenGolfProvider) -> None:
         """Test that calendar selection calls month navigation."""
         from datetime import date
-        from unittest.mock import MagicMock, call, patch
+        from unittest.mock import MagicMock, patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 2, 1)
@@ -793,12 +765,8 @@ class TestWaldenProviderDateSelectionFailure:
 
             with patch.object(provider, "_perform_login", return_value=True):
                 with patch.object(provider, "_select_course_sync", return_value=True):
-                    with patch.object(
-                        provider, "_select_date_sync", return_value=False
-                    ):
-                        result = provider._book_tee_time_sync(
-                            target_date, target_time, 4, 32
-                        )
+                    with patch.object(provider, "_select_date_sync", return_value=False):
+                        result = provider._book_tee_time_sync(target_date, target_time, 4, 32)
 
                         assert result.success is False
                         assert "Failed to select date" in result.error_message
@@ -826,13 +794,9 @@ class TestWaldenProviderDateSelectionFailure:
                         with patch.object(
                             provider,
                             "_find_and_book_time_slot_sync",
-                            return_value=BookingResult(
-                                success=True, booked_time=target_time
-                            ),
+                            return_value=BookingResult(success=True, booked_time=target_time),
                         ) as mock_book:
-                            result = provider._book_tee_time_sync(
-                                target_date, target_time, 4, 32
-                            )
+                            result = provider._book_tee_time_sync(target_date, target_time, 4, 32)
 
                             # Verify _find_and_book_time_slot_sync was called
                             mock_book.assert_called_once()

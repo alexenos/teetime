@@ -736,9 +736,7 @@ class BookingService:
             # Build booking details string for the failure message
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             time_str = booking.request.requested_time.strftime("%I:%M %p")
-            booking_details = (
-                f"{date_str} at {time_str} for {booking.request.num_players} players"
-            )
+            booking_details = f"{date_str} at {time_str} for {booking.request.num_players} players"
 
             await sms_service.send_booking_failure(
                 booking.phone_number,
@@ -805,9 +803,7 @@ class BookingService:
             # Build booking details string for the failure message
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             time_str = booking.request.requested_time.strftime("%I:%M %p")
-            booking_details = (
-                f"{date_str} at {time_str} for {booking.request.num_players} players"
-            )
+            booking_details = f"{date_str} at {time_str} for {booking.request.num_players} players"
 
             await sms_service.send_booking_failure(
                 booking.phone_number, str(e), booking_details=booking_details
