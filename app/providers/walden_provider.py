@@ -595,6 +595,25 @@ class WaldenGolfProvider(ReservationProvider):
             )
             logger.info("BATCH_BOOKING: Date selection complete")
 
+            max_needed_minutes = None
+            for req in sorted_requests:
+                req_minutes = req.target_time.hour * 60 + req.target_time.minute
+                req_end_minutes = min(24 * 60 - 1, req_minutes + req.fallback_window_minutes)
+                if max_needed_minutes is None or req_end_minutes > max_needed_minutes:
+                    max_needed_minutes = req_end_minutes
+
+            if max_needed_minutes is not None:
+                logger.info(
+                    "BATCH_BOOKING: Pre-scrolling tee sheet to latest needed time "
+                    f"{time(max_needed_minutes // 60, max_needed_minutes % 60).strftime('%I:%M %p')}"
+                )
+                self._scroll_to_load_all_slots(
+                    driver,
+                    target_time=sorted_requests[-1].target_time,
+                    fallback_window_minutes=sorted_requests[-1].fallback_window_minutes,
+                    max_time_minutes_override=max_needed_minutes,
+                )
+
             # Track times that have been successfully booked to avoid conflicts
             # When a booking succeeds, we add its booked_time to this set
             booked_times: set[time] = set()
@@ -631,6 +650,7 @@ class WaldenGolfProvider(ReservationProvider):
                         req.fallback_window_minutes,
                         times_to_exclude=times_to_exclude,
                         tee_time_interval_minutes=req.tee_time_interval_minutes,
+                        skip_scroll=True,
                     )
 
                     results.append(
@@ -680,6 +700,34 @@ class WaldenGolfProvider(ReservationProvider):
                                 )
                             )
                         )
+
+                        remaining_needed_minutes = None
+                        for remaining_req in sorted_requests[i:]:
+                            remaining_minutes = (
+                                remaining_req.target_time.hour * 60
+                                + remaining_req.target_time.minute
+                            )
+                            remaining_end_minutes = min(
+                                24 * 60 - 1,
+                                remaining_minutes + remaining_req.fallback_window_minutes,
+                            )
+                            if (
+                                remaining_needed_minutes is None
+                                or remaining_end_minutes > remaining_needed_minutes
+                            ):
+                                remaining_needed_minutes = remaining_end_minutes
+
+                        if remaining_needed_minutes is not None:
+                            logger.info(
+                                "BATCH_BOOKING: Pre-scrolling tee sheet for remaining bookings to "
+                                f"{time(remaining_needed_minutes // 60, remaining_needed_minutes % 60).strftime('%I:%M %p')}"
+                            )
+                            self._scroll_to_load_all_slots(
+                                driver,
+                                target_time=sorted_requests[-1].target_time,
+                                fallback_window_minutes=sorted_requests[-1].fallback_window_minutes,
+                                max_time_minutes_override=remaining_needed_minutes,
+                            )
 
                 except Exception as e:
                     logger.error(f"BATCH_BOOKING: Booking {i}/{len(sorted_requests)} ERROR - {e}")
@@ -2008,6 +2056,7 @@ class WaldenGolfProvider(ReservationProvider):
         fallback_window_minutes: int,
         times_to_exclude: set[time] | None = None,
         tee_time_interval_minutes: int = 8,
+        skip_scroll: bool = False,
     ) -> BookingResult:
         """
         Find an available time slot and book it.
@@ -2040,7 +2089,8 @@ class WaldenGolfProvider(ReservationProvider):
             times_to_exclude = set()
         target_minutes = target_time.hour * 60 + target_time.minute
 
-        self._scroll_to_load_all_slots(driver, target_time, fallback_window_minutes)
+        if not skip_scroll:
+            self._scroll_to_load_all_slots(driver, target_time, fallback_window_minutes)
 
         northgate_section = None
         try:
@@ -2066,27 +2116,25 @@ class WaldenGolfProvider(ReservationProvider):
             search_context, min_available_spots=num_players
         )
 
-        # If we couldn't find a dedicated Northgate section, filter slots to ensure
-        # we only select Northgate slots (not Walden on Lake Conroe slots)
-        if not northgate_section and slots_with_capacity:
-            filtered_slots = []
+        if slots_with_capacity:
             walden_course_name = "walden on lake conroe"
+
+            course_filtered_slots: list[tuple[time, Any]] = []
             for slot_time, slot_element in slots_with_capacity:
-                # Check if this slot belongs to Northgate by examining parent elements
                 if self._is_northgate_slot(slot_element, walden_course_name):
-                    filtered_slots.append((slot_time, slot_element))
+                    course_filtered_slots.append((slot_time, slot_element))
                 else:
                     logger.debug(
                         f"BOOKING_DEBUG: Filtering out slot at {slot_time.strftime('%I:%M %p')} - "
                         f"appears to be from wrong course"
                     )
 
-            if len(filtered_slots) < len(slots_with_capacity):
+            if len(course_filtered_slots) < len(slots_with_capacity):
                 logger.info(
-                    f"BOOKING_DEBUG: Filtered {len(slots_with_capacity) - len(filtered_slots)} "
-                    f"non-Northgate slots. {len(filtered_slots)} Northgate slots remain."
+                    f"BOOKING_DEBUG: Filtered {len(slots_with_capacity) - len(course_filtered_slots)} "
+                    f"non-Northgate slots. {len(course_filtered_slots)} Northgate slots remain."
                 )
-            slots_with_capacity = filtered_slots
+            slots_with_capacity = course_filtered_slots
 
         if not slots_with_capacity:
             return BookingResult(
@@ -2097,9 +2145,28 @@ class WaldenGolfProvider(ReservationProvider):
                 ),
             )
 
-        logger.info(f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots")
+        min_time_minutes = max(0, target_minutes - fallback_window_minutes)
+        max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
 
-        all_available_times = [t for t, _ in slots_with_capacity]
+        eligible_slots: list[tuple[time, Any]] = []
+        for slot_time, slot_element in slots_with_capacity:
+            slot_minutes = slot_time.hour * 60 + slot_time.minute
+            diff = abs(slot_minutes - target_minutes)
+            if diff > fallback_window_minutes:
+                continue
+            if diff % tee_time_interval_minutes != 0:
+                continue
+            eligible_slots.append((slot_time, slot_element))
+
+        logger.info(
+            f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots, "
+            f"{len(eligible_slots)} eligible within "
+            f"{time(min_time_minutes // 60, min_time_minutes % 60).strftime('%I:%M %p')}-"
+            f"{time(max_time_minutes // 60, max_time_minutes % 60).strftime('%I:%M %p')} "
+            f"at {tee_time_interval_minutes}-minute intervals"
+        )
+
+        all_available_times = [t for t, _ in eligible_slots]
         logger.info(
             f"BOOKING_DEBUG: Available times with {num_players}+ spots: "
             f"{[t.strftime('%I:%M %p') for t in all_available_times[:10]]}"
@@ -2117,7 +2184,7 @@ class WaldenGolfProvider(ReservationProvider):
                 f"{[t.strftime('%I:%M %p') for t in sorted(times_to_exclude)]}"
             )
 
-        for slot_time, slot_element in slots_with_capacity:
+        for slot_time, slot_element in eligible_slots:
             slot_minutes = slot_time.hour * 60 + slot_time.minute
             diff = abs(slot_minutes - target_minutes)
 
@@ -2137,13 +2204,8 @@ class WaldenGolfProvider(ReservationProvider):
                 )
                 continue
 
-            # Tee times are spaced at fixed intervals (e.g., 8 min for Northgate, 10 min for Walden),
-            # so only consider fallback times that are multiples of the interval from the requested time
-            if (
-                diff <= fallback_window_minutes
-                and diff < best_diff
-                and diff % tee_time_interval_minutes == 0
-            ):
+            # eligible_slots already enforces fallback window and interval alignment
+            if diff < best_diff:
                 best_diff = diff
                 best_slot = (slot_time, slot_element)
 
@@ -2191,7 +2253,7 @@ class WaldenGolfProvider(ReservationProvider):
                 driver, reserve_element, booked_time, num_players, fallback_reason
             )
         else:
-            all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
+            all_times = [t.strftime("%I:%M %p") for t, _ in eligible_slots[:5]]
             return BookingResult(
                 success=False,
                 error_message=(
@@ -2208,6 +2270,7 @@ class WaldenGolfProvider(ReservationProvider):
         driver: webdriver.Chrome,
         target_time: time,
         fallback_window_minutes: int,
+        max_time_minutes_override: int | None = None,
     ) -> None:
         """
         Scroll through the datascroller to load all tee time slots.
@@ -2231,7 +2294,10 @@ class WaldenGolfProvider(ReservationProvider):
         previous_item_count = 0
 
         target_minutes = target_time.hour * 60 + target_time.minute
-        max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+        if max_time_minutes_override is None:
+            max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+        else:
+            max_time_minutes = min(24 * 60 - 1, max_time_minutes_override)
 
         logger.info(
             f"BOOKING_DEBUG: Starting datascroller scroll to load slots up to "
@@ -2257,7 +2323,11 @@ class WaldenGolfProvider(ReservationProvider):
 
                 if slot_items:
                     last_slot = slot_items[-1]
-                    last_time = self._extract_time_from_slot_item(last_slot)
+                    last_time = None
+                    for candidate in reversed(slot_items):
+                        last_time = self._extract_time_from_slot_item(candidate)
+                        if last_time:
+                            break
 
                     if last_time:
                         last_time_minutes = last_time.hour * 60 + last_time.minute

@@ -6,7 +6,9 @@ against the actual Walden Golf website structure.
 """
 
 import os
-from datetime import date, timedelta
+from datetime import date, time, timedelta
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -219,6 +221,221 @@ class TestWaldenProviderConfirmationExtraction:
         """
         result = provider._extract_confirmation_number(mock_driver)
         assert result is None
+
+
+class TestWaldenProviderFindAndBookTimeSlot:
+    def test_filters_by_window_and_interval_and_selects_best_slot(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+
+        slot_el_ok = MagicMock()
+        slot_el_wrong_course = MagicMock()
+
+        monkeypatch.setattr(
+            provider,
+            "_find_empty_slots",
+            MagicMock(
+                return_value=[
+                    (time(8, 50), slot_el_ok),
+                    (time(8, 54), slot_el_ok),
+                    (time(8, 58), slot_el_ok),
+                    (time(9, 2), slot_el_ok),
+                    (time(9, 6), slot_el_ok),
+                    (time(9, 0), slot_el_wrong_course),
+                ]
+            ),
+        )
+
+        monkeypatch.setattr(provider, "_is_northgate_slot", lambda el, _: el is slot_el_ok)
+
+        expected_result = SimpleNamespace(success=True)
+
+        def complete_booking_side_effect(
+            _driver: MagicMock, _reserve_element: MagicMock, booked_time: time, _num_players: int, *_args: object
+        ) -> SimpleNamespace:
+            expected_result.booked_time = booked_time
+            return expected_result
+
+        monkeypatch.setattr(provider, "_complete_booking_sync", complete_booking_side_effect)
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 58),
+            num_players=4,
+            fallback_window_minutes=8,
+            tee_time_interval_minutes=8,
+        )
+
+        assert result.success is True
+        assert getattr(result, "booked_time") == time(8, 58)
+
+    def test_skip_scroll_does_not_scroll(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_driver = MagicMock()
+        scroll_mock = MagicMock()
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", scroll_mock)
+
+        slot_el_ok = MagicMock()
+        monkeypatch.setattr(
+            provider,
+            "_find_empty_slots",
+            MagicMock(return_value=[(time(8, 58), slot_el_ok)]),
+        )
+        monkeypatch.setattr(provider, "_is_northgate_slot", lambda *_: True)
+
+        expected_result = SimpleNamespace(success=True)
+
+        def complete_booking_side_effect(
+            _driver: MagicMock, _reserve_element: MagicMock, booked_time: time, _num_players: int, *_args: object
+        ) -> SimpleNamespace:
+            expected_result.booked_time = booked_time
+            return expected_result
+
+        monkeypatch.setattr(provider, "_complete_booking_sync", complete_booking_side_effect)
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 58),
+            num_players=4,
+            fallback_window_minutes=8,
+            tee_time_interval_minutes=8,
+            skip_scroll=True,
+        )
+
+        assert result.success is True
+        scroll_mock.assert_not_called()
+
+
+class TestWaldenProviderScrollToLoadAllSlots:
+    def test_stops_based_on_last_parsable_time_when_trailing_items_unparsable(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        driver = MagicMock()
+        provider.wait_strategy = SimpleNamespace(simple_wait=lambda **_: None)
+
+        item1 = object()
+        item2 = object()
+        item3 = object()
+        item4 = object()
+        item5 = object()
+
+        driver.find_elements.side_effect = [
+            [item1, item2, item3],
+            [item1, item2, item3, item4, item5],
+        ]
+
+        def extract_time_side_effect(item: object) -> time | None:
+            if item is item3:
+                return time(8, 40)
+            if item is item5:
+                return None
+            if item is item4:
+                return time(9, 10)
+            return None
+
+        monkeypatch.setattr(provider, "_extract_time_from_slot_item", extract_time_side_effect)
+
+        provider._scroll_to_load_all_slots(
+            driver,
+            target_time=time(8, 58),
+            fallback_window_minutes=8,
+        )
+
+        assert driver.find_elements.call_count >= 2
+
+    def test_max_time_minutes_override_limits_scrolling(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        driver = MagicMock()
+        provider.wait_strategy = SimpleNamespace(simple_wait=lambda **_: None)
+
+        item1 = object()
+        item2 = object()
+        item3 = object()
+        driver.find_elements.side_effect = [
+            [item1, item2, item3],
+        ]
+
+        def extract_time_side_effect(item: object) -> time | None:
+            if item is item3:
+                return time(9, 20)
+            return None
+
+        monkeypatch.setattr(provider, "_extract_time_from_slot_item", extract_time_side_effect)
+
+        provider._scroll_to_load_all_slots(
+            driver,
+            target_time=time(8, 58),
+            fallback_window_minutes=120,
+            max_time_minutes_override=(9 * 60 + 10),
+        )
+
+        driver.execute_script.assert_not_called()
+
+
+class TestWaldenProviderBatchPreScroll:
+    def test_batch_prescroll_and_skip_scroll_per_booking(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        walden_module = __import__("app.providers.walden_provider", fromlist=["*"])
+
+        class DummyWait:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def until(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        monkeypatch.setattr(walden_module, "WebDriverWait", DummyWait)
+        monkeypatch.setattr(
+            walden_module,
+            "expected_conditions",
+            SimpleNamespace(presence_of_element_located=lambda *_: None),
+        )
+
+        driver = MagicMock()
+        monkeypatch.setattr(provider, "_create_driver", lambda: driver)
+        monkeypatch.setattr(provider, "_perform_login", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_date_sync", lambda *_: True)
+
+        scroll_mock = MagicMock()
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", scroll_mock)
+
+        booked = []
+
+        def find_and_book_side_effect(
+            _driver: MagicMock,
+            target_time: time,
+            _num_players: int,
+            _fallback_window_minutes: int,
+            **kwargs: object,
+        ) -> object:
+            assert kwargs.get("skip_scroll") is True
+            booked.append(target_time)
+            return SimpleNamespace(success=True, booked_time=target_time, confirmation_number="X")
+
+        monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", find_and_book_side_effect)
+
+        from app.providers.base import BatchBookingRequest
+
+        req1 = BatchBookingRequest(booking_id="a", target_time=time(8, 58), num_players=4)
+        req2 = BatchBookingRequest(booking_id="b", target_time=time(9, 6), num_players=4)
+
+        result = provider._book_multiple_tee_times_sync(
+            target_date=date.today(),
+            requests=[req1, req2],
+            execute_at=None,
+        )
+
+        assert result.total_succeeded == 2
+        assert booked == [time(8, 58), time(9, 6)]
+        assert scroll_mock.call_count >= 1
+        assert any(call.kwargs.get("max_time_minutes_override") is not None for call in scroll_mock.mock_calls)
 
 
 class TestWaldenProviderBookingVerification:
