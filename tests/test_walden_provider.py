@@ -254,7 +254,11 @@ class TestWaldenProviderFindAndBookTimeSlot:
         expected_result = SimpleNamespace(success=True)
 
         def complete_booking_side_effect(
-            _driver: MagicMock, _reserve_element: MagicMock, booked_time: time, _num_players: int, *_args: object
+            _driver: MagicMock,
+            _reserve_element: MagicMock,
+            booked_time: time,
+            _num_players: int,
+            *_args: object,
         ) -> SimpleNamespace:
             expected_result.booked_time = booked_time
             return expected_result
@@ -290,7 +294,11 @@ class TestWaldenProviderFindAndBookTimeSlot:
         expected_result = SimpleNamespace(success=True)
 
         def complete_booking_side_effect(
-            _driver: MagicMock, _reserve_element: MagicMock, booked_time: time, _num_players: int, *_args: object
+            _driver: MagicMock,
+            _reserve_element: MagicMock,
+            booked_time: time,
+            _num_players: int,
+            *_args: object,
         ) -> SimpleNamespace:
             expected_result.booked_time = booked_time
             return expected_result
@@ -435,7 +443,10 @@ class TestWaldenProviderBatchPreScroll:
         assert result.total_succeeded == 2
         assert booked == [time(8, 58), time(9, 6)]
         assert scroll_mock.call_count >= 1
-        assert any(call.kwargs.get("max_time_minutes_override") is not None for call in scroll_mock.mock_calls)
+        assert any(
+            call.kwargs.get("max_time_minutes_override") is not None
+            for call in scroll_mock.mock_calls
+        )
 
 
 class TestWaldenProviderBookingVerification:

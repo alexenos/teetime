@@ -62,9 +62,9 @@ class TestGeminiServiceResolveRelativeDate:
             for day_name, expected_date in days_expected.items():
                 result = gemini_service._resolve_relative_date(day_name)
                 assert result is not None
-                assert (
-                    result == expected_date
-                ), f"Expected {expected_date} for {day_name}, got {result}"
+                assert result == expected_date, (
+                    f"Expected {expected_date} for {day_name}, got {result}"
+                )
                 assert result.strftime("%A").lower() == day_name
 
     def test_resolve_day_of_week_case_insensitive(self, gemini_service: GeminiService) -> None:
