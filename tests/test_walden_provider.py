@@ -389,7 +389,7 @@ class TestWaldenProviderBatchPreScroll:
     def test_batch_prescroll_and_skip_scroll_per_booking(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        walden_module = __import__("app.providers.walden_provider", fromlist=["*"])
+        import app.providers.walden_provider as walden_module
 
         class DummyWait:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
