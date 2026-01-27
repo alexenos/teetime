@@ -2089,12 +2089,26 @@ class WaldenGolfProvider(ReservationProvider):
             slots_with_capacity = filtered_slots
 
         if not slots_with_capacity:
-            return BookingResult(
-                success=False,
-                error_message=(
+            # Check if the requested time slot exists and has a blocking reason
+            requested_slot = self._find_slot_by_time(search_context, target_time)
+            blocking_reason = None
+            if requested_slot:
+                blocking_reason = self._extract_blocking_reason_from_slot(requested_slot)
+
+            if blocking_reason:
+                error_msg = (
+                    f"Tee time {target_time.strftime('%I:%M %p')}: {blocking_reason}. "
+                    f"No alternative slots with {num_players} available spots found."
+                )
+            else:
+                error_msg = (
                     f"No time slots with {num_players} available spots found on this date. "
                     f"All slots are either fully booked or have fewer than {num_players} spots available."
-                ),
+                )
+
+            return BookingResult(
+                success=False,
+                error_message=error_msg,
             )
 
         logger.info(f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots")
@@ -2168,18 +2182,25 @@ class WaldenGolfProvider(ReservationProvider):
             fallback_reason = None
             requested_slot = self._find_slot_by_time(search_context, target_time)
             if requested_slot:
-                bookers = self._extract_bookers_from_slot(requested_slot)
-                if bookers:
-                    booker_names = ", ".join(bookers[:2])
-                    if len(bookers) > 2:
-                        booker_names += f" and {len(bookers) - 2} others"
-                    fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was already booked by {booker_names}"
-                    logger.info(f"BOOKING_DEBUG: Fallback reason: {fallback_reason}")
+                # First check if the slot is blocked by an event/tournament/group
+                blocking_reason = self._extract_blocking_reason_from_slot(requested_slot)
+                if blocking_reason:
+                    fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')}: {blocking_reason}"
+                    logger.info(f"BOOKING_DEBUG: Fallback reason (blocked): {fallback_reason}")
                 else:
-                    fallback_reason = (
-                        f"Tee time {target_time.strftime('%I:%M %p')} did not have "
-                        f"{num_players} available spots"
-                    )
+                    # Check if it's booked by other members
+                    bookers = self._extract_bookers_from_slot(requested_slot)
+                    if bookers:
+                        booker_names = ", ".join(bookers[:2])
+                        if len(bookers) > 2:
+                            booker_names += f" and {len(bookers) - 2} others"
+                        fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was already booked by {booker_names}"
+                        logger.info(f"BOOKING_DEBUG: Fallback reason: {fallback_reason}")
+                    else:
+                        fallback_reason = (
+                            f"Tee time {target_time.strftime('%I:%M %p')} did not have "
+                            f"{num_players} available spots"
+                        )
             else:
                 fallback_reason = f"Tee time {target_time.strftime('%I:%M %p')} was not available"
 
@@ -2191,13 +2212,28 @@ class WaldenGolfProvider(ReservationProvider):
                 driver, reserve_element, booked_time, num_players, fallback_reason
             )
         else:
+            # Check if the requested time slot has a blocking reason
+            requested_slot = self._find_slot_by_time(search_context, target_time)
+            blocking_reason = None
+            if requested_slot:
+                blocking_reason = self._extract_blocking_reason_from_slot(requested_slot)
+
             all_times = [t.strftime("%I:%M %p") for t, _ in slots_with_capacity[:5]]
-            return BookingResult(
-                success=False,
-                error_message=(
+
+            if blocking_reason:
+                error_msg = (
+                    f"Tee time {target_time.strftime('%I:%M %p')}: {blocking_reason}. "
+                    f"No alternative slots within {fallback_window_minutes} minutes."
+                )
+            else:
+                error_msg = (
                     f"No time slots with {num_players} available spots within "
                     f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
-                ),
+                )
+
+            return BookingResult(
+                success=False,
+                error_message=error_msg,
                 alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}"
                 if all_times
                 else None,
@@ -2667,6 +2703,165 @@ class WaldenGolfProvider(ReservationProvider):
 
         unique_bookers = list(dict.fromkeys(bookers))
         return unique_bookers
+
+    def _extract_blocking_reason_from_slot(self, slot_item: Any) -> str | None:
+        """
+        Extract the blocking reason from a time slot that cannot be reserved.
+
+        The Walden Golf tee sheet shows various blocking reasons when slots are
+        unavailable due to events, tournaments, or special groups. These appear
+        as text within the slot item, often in specific div elements or spans.
+
+        Common blocking patterns include:
+        - Event names (e.g., "Member Guest Tournament", "Ladies Day")
+        - Group reservations (e.g., "Men's Group", "Senior League")
+        - Course maintenance or closures
+        - Time range blocks (e.g., "08:26 AM-10:42 AM" for shotgun starts)
+
+        Args:
+            slot_item: The <li> element containing the time slot
+
+        Returns:
+            The blocking reason if found, None otherwise
+        """
+        try:
+            slot_text = slot_item.text.strip() if slot_item.text else ""
+
+            # Check for time range patterns indicating event blocks (e.g., shotgun starts)
+            # These look like "08:26 AM-10:42 AM" and indicate a blocked time range
+            time_range_match = re.search(
+                r"(\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M)", slot_text
+            )
+            if time_range_match:
+                # Look for event name near the time range
+                event_name = self._find_event_name_in_text(slot_text)
+                if event_name:
+                    return f"Blocked for event: {event_name}"
+                return f"Blocked for event ({time_range_match.group(1)})"
+
+            # Look for common event/group indicators in the slot text
+            event_keywords = [
+                "tournament",
+                "event",
+                "shotgun",
+                "outing",
+                "league",
+                "group",
+                "closed",
+                "maintenance",
+                "reserved",
+                "private",
+                "member",
+                "ladies",
+                "men's",
+                "senior",
+                "junior",
+                "clinic",
+                "lesson",
+            ]
+
+            slot_text_lower = slot_text.lower()
+            for keyword in event_keywords:
+                if keyword in slot_text_lower:
+                    # Try to extract the full event/group name
+                    event_name = self._find_event_name_in_text(slot_text)
+                    if event_name:
+                        return f"Blocked for: {event_name}"
+                    return f"Blocked ({keyword})"
+
+            # Check for blocked/unavailable div classes
+            blocked_divs = slot_item.find_elements(
+                By.CSS_SELECTOR,
+                "div.Blocked, div.Event, div.Tournament, div[class*='blocked'], "
+                "div[class*='event'], div[class*='closed'], div[class*='unavailable']",
+            )
+            for div in blocked_divs:
+                div_text = div.text.strip()
+                if div_text:
+                    # Clean up the text - take first meaningful line
+                    lines = [line.strip() for line in div_text.split("\n") if line.strip()]
+                    if lines:
+                        return f"Blocked for: {lines[0]}"
+
+            # Check for spans with event/blocking information
+            spans = slot_item.find_elements(By.TAG_NAME, "span")
+            for span in spans:
+                span_class = span.get_attribute("class") or ""
+                span_text = span.text.strip()
+                if span_text and (
+                    "event" in span_class.lower()
+                    or "block" in span_class.lower()
+                    or "closed" in span_class.lower()
+                ):
+                    return f"Blocked for: {span_text}"
+
+        except Exception as e:
+            logger.debug(f"Error extracting blocking reason from slot: {e}")
+
+        return None
+
+    def _find_event_name_in_text(self, text: str) -> str | None:
+        """
+        Extract an event or group name from slot text.
+
+        Looks for common patterns that indicate event names, such as text
+        following keywords like "Event:", capitalized phrases, etc.
+
+        Args:
+            text: The text content to search
+
+        Returns:
+            The event name if found, None otherwise
+        """
+        if not text:
+            return None
+
+        # Remove time patterns to focus on event name
+        cleaned = re.sub(r"\d{1,2}:\d{2}\s*[AP]M", "", text)
+        cleaned = re.sub(r"\s*-\s*", " ", cleaned)
+        cleaned = cleaned.strip()
+
+        if not cleaned:
+            return None
+
+        # Look for text after common prefixes
+        prefixes = ["Event:", "Tournament:", "Group:", "Reserved for:", "Blocked:"]
+        for prefix in prefixes:
+            if prefix.lower() in cleaned.lower():
+                idx = cleaned.lower().find(prefix.lower())
+                event_part = cleaned[idx + len(prefix) :].strip()
+                # Take first line or up to 50 chars
+                event_part = event_part.split("\n")[0].strip()
+                if len(event_part) > 50:
+                    event_part = event_part[:47] + "..."
+                if event_part:
+                    return event_part
+
+        # Look for capitalized phrases that might be event names
+        # Match sequences of capitalized words (e.g., "Member Guest Tournament")
+        cap_pattern = r"([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)"
+        matches = re.findall(cap_pattern, cleaned)
+        for match in matches:
+            # Filter out common non-event phrases
+            if match.lower() not in ["available", "reserve", "book now"]:
+                if len(match) > 50:
+                    match = match[:47] + "..."
+                return match
+
+        # If we have meaningful text left, use it (truncated)
+        lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
+        for line in lines:
+            # Skip lines that are just times or common UI text
+            if not re.match(r"^\d", line) and line.lower() not in [
+                "available",
+                "reserve",
+                "book now",
+            ]:
+                if len(line) > 50:
+                    line = line[:47] + "..."
+                return line
+
+        return None
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:

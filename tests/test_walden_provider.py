@@ -803,5 +803,120 @@ class TestWaldenProviderDateSelectionFailure:
                             assert result.success is True
 
 
+class TestWaldenProviderBlockingReasonExtraction:
+    """Tests for the _extract_blocking_reason_from_slot and _find_event_name_in_text methods."""
+
+    def test_extract_blocking_reason_with_time_range(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test extracting blocking reason from a time range (shotgun start)."""
+        from unittest.mock import MagicMock
+
+        mock_slot = MagicMock()
+        mock_slot.text = "08:26 AM-10:42 AM Member Guest Tournament"
+        mock_slot.find_elements.return_value = []
+
+        result = provider._extract_blocking_reason_from_slot(mock_slot)
+
+        assert result is not None
+        assert "Blocked for event" in result
+        assert "Member Guest Tournament" in result
+
+    def test_extract_blocking_reason_with_tournament_keyword(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test extracting blocking reason with tournament keyword."""
+        from unittest.mock import MagicMock
+
+        mock_slot = MagicMock()
+        mock_slot.text = "Club Championship Tournament"
+        mock_slot.find_elements.return_value = []
+
+        result = provider._extract_blocking_reason_from_slot(mock_slot)
+
+        assert result is not None
+        assert "Blocked" in result
+
+    def test_extract_blocking_reason_with_league_keyword(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test extracting blocking reason with league keyword."""
+        from unittest.mock import MagicMock
+
+        mock_slot = MagicMock()
+        mock_slot.text = "Senior League Play"
+        mock_slot.find_elements.return_value = []
+
+        result = provider._extract_blocking_reason_from_slot(mock_slot)
+
+        assert result is not None
+        assert "Blocked" in result
+
+    def test_extract_blocking_reason_with_shotgun_keyword(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test extracting blocking reason with shotgun keyword."""
+        from unittest.mock import MagicMock
+
+        mock_slot = MagicMock()
+        mock_slot.text = "Shotgun Start - Corporate Outing"
+        mock_slot.find_elements.return_value = []
+
+        result = provider._extract_blocking_reason_from_slot(mock_slot)
+
+        assert result is not None
+        assert "Blocked" in result
+
+    def test_extract_blocking_reason_no_blocking(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that no blocking reason is returned for normal slots."""
+        from unittest.mock import MagicMock
+
+        mock_slot = MagicMock()
+        mock_slot.text = "07:30 AM Available Reserve"
+        mock_slot.find_elements.return_value = []
+
+        result = provider._extract_blocking_reason_from_slot(mock_slot)
+
+        assert result is None
+
+    def test_find_event_name_with_prefix(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test finding event name after a prefix like 'Event:'."""
+        result = provider._find_event_name_in_text("Event: Member Guest Tournament")
+
+        assert result is not None
+        assert "Member Guest Tournament" in result
+
+    def test_find_event_name_capitalized_phrase(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test finding event name from capitalized phrase."""
+        result = provider._find_event_name_in_text("Ladies Day Luncheon")
+
+        assert result is not None
+        assert "Ladies Day Luncheon" in result
+
+    def test_find_event_name_empty_string(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that empty string returns None."""
+        result = provider._find_event_name_in_text("")
+
+        assert result is None
+
+    def test_find_event_name_truncates_long_names(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that very long event names are truncated."""
+        long_name = "A" * 100
+        result = provider._find_event_name_in_text(f"Event: {long_name}")
+
+        assert result is not None
+        assert len(result) <= 53  # 50 chars + "..."
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
