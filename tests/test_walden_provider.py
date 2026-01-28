@@ -329,7 +329,9 @@ class TestWaldenProviderScrollToLoadAllSlots:
         ]
 
         def consume_slot_items() -> list[object]:
-            return slot_items_by_call.pop(0) if slot_items_by_call else slot_items_by_call[-1]
+            if len(slot_items_by_call) > 1:
+                return slot_items_by_call.pop(0)
+            return slot_items_by_call[0] if slot_items_by_call else []
 
         def find_elements_side_effect(by: object, selector: str) -> list[object]:
             if selector == "li.ui-datascroller-item":
