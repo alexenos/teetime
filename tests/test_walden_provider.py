@@ -331,10 +331,22 @@ class TestWaldenProviderScrollToLoadAllSlots:
         item4 = object()
         item5 = object()
 
-        driver.find_elements.side_effect = [
+        slot_items_by_call = [
             [item1, item2, item3],
             [item1, item2, item3, item4, item5],
         ]
+
+        def consume_slot_items() -> list[object]:
+            return slot_items_by_call.pop(0) if slot_items_by_call else slot_items_by_call[-1]
+
+        def find_elements_side_effect(by: object, selector: str) -> list[object]:
+            if selector == "li.ui-datascroller-item":
+                return consume_slot_items()
+            if selector in (".ui-datascroller-content, .ui-datascroller-list",):
+                return []
+            return []
+
+        driver.find_elements.side_effect = find_elements_side_effect
 
         def extract_time_side_effect(item: object) -> time | None:
             if item is item3:
@@ -354,6 +366,7 @@ class TestWaldenProviderScrollToLoadAllSlots:
         )
 
         assert driver.find_elements.call_count >= 2
+        assert driver.execute_script.call_count <= 1
 
     def test_max_time_minutes_override_limits_scrolling(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
