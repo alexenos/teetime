@@ -8,7 +8,7 @@ against the actual Walden Golf website structure.
 import os
 from datetime import date, time, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -371,9 +371,15 @@ class TestWaldenProviderScrollToLoadAllSlots:
         item1 = object()
         item2 = object()
         item3 = object()
-        driver.find_elements.side_effect = [
-            [item1, item2, item3],
-        ]
+
+        def find_elements_side_effect(by: object, selector: str) -> list[object]:
+            if selector == "li.ui-datascroller-item":
+                return [item1, item2, item3]
+            if selector in (".ui-datascroller-content, .ui-datascroller-list",):
+                return []
+            return []
+
+        driver.find_elements.side_effect = find_elements_side_effect
 
         def extract_time_side_effect(item: object) -> time | None:
             if item is item3:
@@ -650,8 +656,6 @@ class TestWaldenProviderCalendarNavigation:
 
     def test_get_calendar_current_month_from_dropdowns(self, provider: WaldenGolfProvider) -> None:
         """Test reading current month/year from dropdown selects."""
-        from unittest.mock import patch
-
         mock_driver = MagicMock()
 
         # Mock month dropdown with 0-indexed value (January = 0)
@@ -743,7 +747,6 @@ class TestWaldenProviderCalendarNavigation:
     def test_navigate_calendar_to_month_same_month(self, provider: WaldenGolfProvider) -> None:
         """Test that navigation returns True when already on correct month."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 1, 25)  # January 2026
@@ -760,7 +763,6 @@ class TestWaldenProviderCalendarNavigation:
     def test_navigate_calendar_to_month_via_dropdowns(self, provider: WaldenGolfProvider) -> None:
         """Test navigation using month/year dropdown selects."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 2, 1)  # February 2026
@@ -803,7 +805,6 @@ class TestWaldenProviderCalendarNavigation:
     def test_navigate_calendar_to_month_via_next_arrow(self, provider: WaldenGolfProvider) -> None:
         """Test navigation using next arrow when dropdowns not available."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 2, 1)  # February 2026
@@ -831,7 +832,6 @@ class TestWaldenProviderCalendarNavigation:
     def test_navigate_calendar_to_month_via_prev_arrow(self, provider: WaldenGolfProvider) -> None:
         """Test navigation using prev arrow when going backward."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2025, 12, 15)  # December 2025
@@ -859,7 +859,6 @@ class TestWaldenProviderCalendarNavigation:
     def test_navigate_calendar_fails_when_no_nav_button(self, provider: WaldenGolfProvider) -> None:
         """Test that navigation fails when no navigation button found."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 3, 1)  # March 2026
@@ -878,7 +877,6 @@ class TestWaldenProviderCalendarNavigation:
     ) -> None:
         """Test that _select_date_sync returns False when calendar selection fails."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 2, 1)
@@ -899,7 +897,6 @@ class TestWaldenProviderCalendarNavigation:
     ) -> None:
         """Test that _select_date_sync returns True when calendar selection succeeds."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 2, 1)
@@ -918,7 +915,6 @@ class TestWaldenProviderCalendarNavigation:
     def test_select_date_via_calendar_calls_navigate(self, provider: WaldenGolfProvider) -> None:
         """Test that calendar selection calls month navigation."""
         from datetime import date
-        from unittest.mock import patch
 
         mock_driver = MagicMock()
         target_date = date(2026, 2, 1)
@@ -957,7 +953,6 @@ class TestWaldenProviderDateSelectionFailure:
     ) -> None:
         """Test that booking fails with clear error when date selection fails."""
         from datetime import date, time
-        from unittest.mock import patch
 
         target_date = date(2026, 2, 1)
         target_time = time(8, 58)
@@ -980,7 +975,6 @@ class TestWaldenProviderDateSelectionFailure:
     ) -> None:
         """Test that booking proceeds when date selection succeeds."""
         from datetime import date, time
-        from unittest.mock import patch
 
         from app.providers.base import BookingResult
 
