@@ -2116,26 +2116,6 @@ class WaldenGolfProvider(ReservationProvider):
             search_context, min_available_spots=num_players
         )
 
-        if slots_with_capacity:
-            walden_course_name = "walden on lake conroe"
-
-            course_filtered_slots: list[tuple[time, Any]] = []
-            for slot_time, slot_element in slots_with_capacity:
-                if self._is_northgate_slot(slot_element, walden_course_name):
-                    course_filtered_slots.append((slot_time, slot_element))
-                else:
-                    logger.debug(
-                        f"BOOKING_DEBUG: Filtering out slot at {slot_time.strftime('%I:%M %p')} - "
-                        f"appears to be from wrong course"
-                    )
-
-            if len(course_filtered_slots) < len(slots_with_capacity):
-                logger.info(
-                    f"BOOKING_DEBUG: Filtered {len(slots_with_capacity) - len(course_filtered_slots)} "
-                    f"non-Northgate slots. {len(course_filtered_slots)} Northgate slots remain."
-                )
-            slots_with_capacity = course_filtered_slots
-
         if not slots_with_capacity:
             return BookingResult(
                 success=False,
@@ -2157,6 +2137,23 @@ class WaldenGolfProvider(ReservationProvider):
             if diff % tee_time_interval_minutes != 0:
                 continue
             eligible_slots.append((slot_time, slot_element))
+
+        if eligible_slots and not northgate_section:
+            walden_course_name = "walden on lake conroe"
+            course_filtered_slots: list[tuple[time, Any]] = []
+            filtered_out_count = 0
+            for slot_time, slot_element in eligible_slots:
+                if self._is_northgate_slot(slot_element, walden_course_name):
+                    course_filtered_slots.append((slot_time, slot_element))
+                else:
+                    filtered_out_count += 1
+
+            if filtered_out_count:
+                logger.info(
+                    f"BOOKING_DEBUG: Filtered {filtered_out_count} non-Northgate slots. "
+                    f"{len(course_filtered_slots)} Northgate slots remain."
+                )
+            eligible_slots = course_filtered_slots
 
         logger.info(
             f"Found {len(slots_with_capacity)} slots with {num_players}+ available spots, "
@@ -2324,7 +2321,8 @@ class WaldenGolfProvider(ReservationProvider):
                 if slot_items:
                     last_slot = slot_items[-1]
                     last_time = None
-                    for candidate in reversed(slot_items):
+                    max_candidates = 10
+                    for candidate in reversed(slot_items[-max_candidates:]):
                         last_time = self._extract_time_from_slot_item(candidate)
                         if last_time:
                             break
