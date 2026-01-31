@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.api.jobs import JobExecutionItem, JobExecutionResult, JobExecutionStatus
 from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
+from app.providers.base import BookingResult
 
 
 @pytest.fixture
@@ -311,7 +312,18 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", True)])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        (
+                            "test1234",
+                            BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF123",
+                            ),
+                        )
+                    ]
+                )
                 mock_service.get_booking = AsyncMock(return_value=successful_booking)
 
                 with patch("app.api.jobs.sms_service") as mock_sms:
@@ -347,7 +359,14 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", False)])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        (
+                            "test1234",
+                            BookingResult(success=False, error_message="No available slots"),
+                        )
+                    ]
+                )
                 mock_service.get_booking = AsyncMock(return_value=failed_booking)
 
                 with patch("app.api.jobs.sms_service") as mock_sms:
@@ -412,7 +431,14 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", False)])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        (
+                            "test1234",
+                            BookingResult(success=False, error_message="No available slots"),
+                        )
+                    ]
+                )
                 mock_service.get_booking = AsyncMock(return_value=failed_booking)
 
                 with patch("app.api.jobs.sms_service") as mock_sms:
@@ -494,9 +520,26 @@ class TestJobsExecuteDueBookings:
                 )
                 mock_service.execute_bookings_batch = AsyncMock(
                     return_value=[
-                        ("booking1", True),
-                        ("booking2", False),
-                        ("booking3", True),
+                        (
+                            "booking1",
+                            BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF001",
+                            ),
+                        ),
+                        (
+                            "booking2",
+                            BookingResult(success=False, error_message="Slot taken"),
+                        ),
+                        (
+                            "booking3",
+                            BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF003",
+                            ),
+                        ),
                     ]
                 )
                 mock_service.get_booking = AsyncMock(
@@ -553,7 +596,18 @@ class TestJobsTimeout:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
-                mock_service.execute_bookings_batch = AsyncMock(return_value=[("test1234", True)])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        (
+                            "test1234",
+                            BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF123",
+                            ),
+                        )
+                    ]
+                )
 
                 with patch("asyncio.wait_for", mock_wait_for):
                     response = test_client.post(

@@ -19,7 +19,7 @@ from app.models.schemas import (
     TeeTimeRequest,
     UserSession,
 )
-from app.providers.base import BatchBookingRequest, ReservationProvider
+from app.providers.base import BatchBookingRequest, BookingResult, ReservationProvider
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.sms_service import sms_service
@@ -838,7 +838,7 @@ class BookingService:
         self,
         bookings: list[TeeTimeBooking],
         execute_at: datetime | None = None,
-    ) -> list[tuple[str, bool]]:
+    ) -> list[tuple[str, BookingResult]]:
         """
         Execute multiple bookings in a batch for efficiency.
 
@@ -859,7 +859,7 @@ class BookingService:
                        this time before refreshing the page and booking.
 
         Returns:
-            List of (booking_id, success) tuples for each booking
+            List of (booking_id, BookingResult) tuples for each booking
         """
         if not bookings:
             return []
@@ -871,7 +871,15 @@ class BookingService:
                 booking.status = BookingStatus.FAILED
                 booking.error_message = "Reservation provider not configured"
                 await database_service.update_booking(booking)
-                results.append((booking_id, False))
+                results.append(
+                    (
+                        booking_id,
+                        BookingResult(
+                            success=False,
+                            error_message="Reservation provider not configured",
+                        ),
+                    )
+                )
             return results
 
         bookings_by_date: dict[date, list[TeeTimeBooking]] = {}
@@ -881,7 +889,7 @@ class BookingService:
                 bookings_by_date[target_date] = []
             bookings_by_date[target_date].append(booking)
 
-        all_results: list[tuple[str, bool]] = []
+        all_results: list[tuple[str, BookingResult]] = []
 
         for target_date, date_bookings in bookings_by_date.items():
             for booking in date_bookings:
@@ -915,11 +923,11 @@ class BookingService:
                     booking.status = BookingStatus.SUCCESS
                     booking.actual_booked_time = result.booked_time
                     booking.confirmation_number = result.confirmation_number
-                    all_results.append((item_result.booking_id, True))
+                    all_results.append((item_result.booking_id, result))
                 else:
                     booking.status = BookingStatus.FAILED
                     booking.error_message = result.error_message
-                    all_results.append((item_result.booking_id, False))
+                    all_results.append((item_result.booking_id, result))
 
                 await database_service.update_booking(booking)
 

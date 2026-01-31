@@ -19,6 +19,7 @@ class BookingResult:
     """Result of a single booking attempt."""
 
     success: bool
+    course_name: str | None = None
     booked_time: time | None = None
     confirmation_number: str | None = None
     error_message: str | None = None

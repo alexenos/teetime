@@ -264,14 +264,14 @@ async def execute_due_bookings(
     succeeded = 0
     failed = 0
 
-    for booking_id, success in batch_results:
+    for booking_id, result in batch_results:
         updated_booking = await booking_service.get_booking(booking_id)
         original_booking = booking_map.get(booking_id)
 
         if not original_booking:
             continue
 
-        if success and updated_booking:
+        if result.success and updated_booking:
             succeeded += 1
             results.append(
                 JobExecutionItem(
@@ -287,14 +287,27 @@ async def execute_due_bookings(
             time_str = (
                 updated_booking.actual_booked_time or original_booking.request.requested_time
             ).strftime("%I:%M %p")
+
             details = f"{date_str} at {time_str} for {original_booking.request.num_players} players"
+            if result.course_name:
+                details = f"{result.course_name} - {details}"
             if updated_booking.confirmation_number:
                 details += f" (Confirmation: {updated_booking.confirmation_number})"
+
+            if result.fallback_reason:
+                details += (
+                    f"\n\nOriginal tee time {original_booking.request.requested_time.strftime('%I:%M %p')}. "
+                    f"{result.fallback_reason}"
+                )
 
             await sms_service.send_booking_confirmation(original_booking.phone_number, details)
         else:
             failed += 1
-            error_message = updated_booking.error_message if updated_booking else "Unknown error"
+            error_message = (
+                updated_booking.error_message
+                if updated_booking
+                else (result.error_message or "Unknown error")
+            )
             results.append(
                 JobExecutionItem(
                     booking_id=booking_id,
