@@ -1721,6 +1721,57 @@ class WaldenGolfProvider(ReservationProvider):
                         f"BOOKING_DEBUG: Could not find radio input for {num_players} players"
                     )
 
+                # Alternative strategy: some PrimeFaces/JSF variants render the select-one-button
+                # without a visible/usable radio input. In that case, click the button by label.
+                try:
+                    candidate_buttons = button_group.find_elements(
+                        By.CSS_SELECTOR, ".ui-button, button, a, span"
+                    )
+                    for candidate in candidate_buttons:
+                        try:
+                            candidate_text = (candidate.text or "").strip()
+                            if candidate_text != str(num_players):
+                                continue
+
+                            candidate_classes = candidate.get_attribute("class") or ""
+                            logger.info(
+                                f"BOOKING_DEBUG: Player {num_players} button classes: {candidate_classes}"
+                            )
+                            if "ui-state-disabled" in candidate_classes:
+                                logger.error(
+                                    f"BOOKING_DEBUG: Player count {num_players} button is disabled"
+                                )
+                                return False
+
+                            driver.execute_script("arguments[0].click();", candidate)
+                            logger.info(
+                                f"BOOKING_DEBUG: Clicked player count button for {num_players} players"
+                            )
+                            self.wait_strategy.wait_after_action(driver, fixed_duration=1.0)
+
+                            if not self._verify_player_rows_appeared(driver, num_players):
+                                logger.error(
+                                    f"BOOKING_DEBUG: Player rows did not appear after selecting {num_players} players"
+                                )
+                                return False
+
+                            logger.debug(
+                                f"BOOKING_DEBUG: Successfully selected {num_players} players"
+                            )
+                            return True
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+                try:
+                    group_html = button_group.get_attribute("outerHTML")
+                    if group_html and len(group_html) > 2000:
+                        group_html = group_html[:2000] + "... [truncated]"
+                    logger.debug(f"BOOKING_DEBUG: Player button group HTML: {group_html}")
+                except Exception:
+                    pass
+
             # Fallback: try dropdown selectors
             player_selectors = [
                 "select[id*='player']",
@@ -2138,12 +2189,29 @@ class WaldenGolfProvider(ReservationProvider):
                 continue
             eligible_slots.append((slot_time, slot_element))
 
-        if eligible_slots and not northgate_section:
+        if eligible_slots:
             walden_course_name = "walden on lake conroe"
             course_filtered_slots: list[tuple[time, Any]] = []
             filtered_out_count = 0
+
+            # Even when we find a "Northgate" section, the DOM may still contain
+            # Walden slots. For safety, always reject slots that look like Walden.
+            # If the Northgate section is present, we use a non-strict filter that
+            # only rejects slots with explicit Walden indicators.
+            strict_course_check = northgate_section is None
+
             for slot_time, slot_element in eligible_slots:
-                if self._is_northgate_slot(slot_element, walden_course_name):
+                is_northgate = False
+                try:
+                    is_northgate = self._is_northgate_slot(
+                        slot_element,
+                        walden_course_name,
+                        strict=strict_course_check,
+                    )
+                except TypeError:
+                    is_northgate = self._is_northgate_slot(slot_element, walden_course_name)
+
+                if is_northgate:
                     course_filtered_slots.append((slot_time, slot_element))
                 else:
                     filtered_out_count += 1
@@ -2212,7 +2280,9 @@ class WaldenGolfProvider(ReservationProvider):
                 f"Attempting to book exact requested time at "
                 f"{booked_time.strftime('%I:%M %p')} for {num_players} players"
             )
-            return self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+            result = self._complete_booking_sync(driver, reserve_element, booked_time, num_players)
+            result.course_name = self.NORTHGATE_COURSE_NAME
+            return result
 
         if best_slot:
             booked_time, reserve_element = best_slot
@@ -2246,13 +2316,16 @@ class WaldenGolfProvider(ReservationProvider):
                 f"Attempting to book fallback slot at {booked_time.strftime('%I:%M %p')} "
                 f"for {num_players} players (requested: {target_time.strftime('%I:%M %p')})"
             )
-            return self._complete_booking_sync(
+            result = self._complete_booking_sync(
                 driver, reserve_element, booked_time, num_players, fallback_reason
             )
+            result.course_name = self.NORTHGATE_COURSE_NAME
+            return result
         else:
             all_times = [t.strftime("%I:%M %p") for t, _ in eligible_slots[:5]]
             return BookingResult(
                 success=False,
+                course_name=self.NORTHGATE_COURSE_NAME,
                 error_message=(
                     f"No time slots with {num_players} available spots within "
                     f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
@@ -2536,7 +2609,9 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"Error finding slot by time: {e}")
         return None
 
-    def _is_northgate_slot(self, slot_element: Any, walden_course_name: str) -> bool:
+    def _is_northgate_slot(
+        self, slot_element: Any, walden_course_name: str, strict: bool = True
+    ) -> bool:
         """
         Check if a slot element belongs to the Northgate course.
 
@@ -2554,8 +2629,13 @@ class WaldenGolfProvider(ReservationProvider):
             walden_course_name: The name of the other course to filter out (lowercase)
 
         Returns:
-            True ONLY if the slot is confirmed to belong to Northgate,
-            False if the slot belongs to Walden OR if course cannot be determined
+            If strict=True:
+                True ONLY if the slot is confirmed to belong to Northgate,
+                False if the slot belongs to Walden OR if course cannot be determined.
+            If strict=False:
+                True unless the slot is identified as Walden. Used when we have
+                already scoped search to a Northgate section but still want a
+                safety net against accidental Walden selection.
         """
         found_northgate_indicator = False
         found_walden_indicator = False
@@ -2666,6 +2746,12 @@ class WaldenGolfProvider(ReservationProvider):
             # If we found a Northgate indicator and no Walden indicator, it's Northgate
             if found_northgate_indicator:
                 logger.debug("COURSE_CHECK: Slot accepted - confirmed Northgate")
+                return True
+
+            if not strict:
+                logger.debug(
+                    "COURSE_CHECK: Slot accepted - no Walden indicator found (non-strict mode)"
+                )
                 return True
 
             # CRITICAL CHANGE: If we couldn't determine the course, return False
