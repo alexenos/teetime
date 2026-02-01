@@ -3132,34 +3132,47 @@ class WaldenGolfProvider(ReservationProvider):
         """
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            bucket_name = os.getenv(
-                "DEBUG_ARTIFACTS_BUCKET", "gen-lang-client-0822973627-teetime-debug-artifacts"
-            )
+            bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
 
-            screenshot_bytes = driver.get_screenshot_as_png()
-            html_bytes = driver.page_source.encode("utf-8", errors="replace")
+            if bucket_name:
+                screenshot_bytes = driver.get_screenshot_as_png()
+                html_bytes = driver.page_source.encode("utf-8", errors="replace")
 
-            try:
-                screenshot_object = f"walden/{context}/{timestamp}/screenshot.png"
-                html_object = f"walden/{context}/{timestamp}/page.html"
+                try:
+                    screenshot_object = f"walden/{context}/{timestamp}/screenshot.png"
+                    html_object = f"walden/{context}/{timestamp}/page.html"
 
-                screenshot_uri = self._upload_bytes_to_gcs(
-                    bucket_name=bucket_name,
-                    object_name=screenshot_object,
-                    content_type="image/png",
-                    data=screenshot_bytes,
-                )
-                logger.info(f"Saved debug screenshot to {screenshot_uri}")
+                    screenshot_uri = self._upload_bytes_to_gcs(
+                        bucket_name=bucket_name,
+                        object_name=screenshot_object,
+                        content_type="image/png",
+                        data=screenshot_bytes,
+                    )
+                    logger.info(f"Saved debug screenshot to {screenshot_uri}")
 
-                html_uri = self._upload_bytes_to_gcs(
-                    bucket_name=bucket_name,
-                    object_name=html_object,
-                    content_type="text/html; charset=utf-8",
-                    data=html_bytes,
-                )
-                logger.info(f"Saved debug HTML to {html_uri}")
+                    html_uri = self._upload_bytes_to_gcs(
+                        bucket_name=bucket_name,
+                        object_name=html_object,
+                        content_type="text/html; charset=utf-8",
+                        data=html_bytes,
+                    )
+                    logger.info(f"Saved debug HTML to {html_uri}")
 
-            except Exception as upload_error:
+                except Exception as upload_error:
+                    screenshot_path = f"/tmp/walden_debug_{context}_{timestamp}.png"
+                    html_path = f"/tmp/walden_debug_{context}_{timestamp}.html"
+
+                    driver.save_screenshot(screenshot_path)
+                    logger.info(f"Saved debug screenshot to {screenshot_path}")
+
+                    with open(html_path, "w", encoding="utf-8") as f:
+                        f.write(driver.page_source)
+                    logger.info(f"Saved debug HTML to {html_path}")
+
+                    logger.warning(
+                        f"Failed to upload diagnostic artifacts to GCS bucket '{bucket_name}': {upload_error}"
+                    )
+            else:
                 screenshot_path = f"/tmp/walden_debug_{context}_{timestamp}.png"
                 html_path = f"/tmp/walden_debug_{context}_{timestamp}.html"
 
@@ -3169,10 +3182,7 @@ class WaldenGolfProvider(ReservationProvider):
                 with open(html_path, "w", encoding="utf-8") as f:
                     f.write(driver.page_source)
                 logger.info(f"Saved debug HTML to {html_path}")
-
-                logger.warning(
-                    f"Failed to upload diagnostic artifacts to GCS bucket '{bucket_name}': {upload_error}"
-                )
+                logger.info("DEBUG_ARTIFACTS_BUCKET not set; remote artifact upload disabled")
 
         except Exception as e:
             logger.warning(f"Failed to capture diagnostic info: {e}")

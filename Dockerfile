@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
+    tzdata \
     chromium \
     chromium-driver \
     # Dependencies for headless Chrome
