@@ -1040,6 +1040,18 @@ class WaldenGolfProvider(ReservationProvider):
             for sel in selectors:
                 try:
                     for el in driver.find_elements(By.CSS_SELECTOR, sel)[:10]:
+                        try:
+                            if (el.get_attribute("aria-hidden") or "").lower() == "true":
+                                continue
+                        except Exception:
+                            pass
+
+                        try:
+                            if not el.is_displayed():
+                                continue
+                        except Exception:
+                            pass
+
                         text = (getattr(el, "text", "") or "").strip()
                         if text:
                             messages.append(text)
