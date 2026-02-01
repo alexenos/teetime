@@ -97,7 +97,7 @@ class TwilioSMSProvider(SMSProvider):
             return True
         if not signature:
             return False
-        return self.validator.validate(url, params, signature)
+        return bool(self.validator.validate(url, params, signature))
 
     async def send_sms(self, to_number: str, message: str) -> SMSResult:
         """
@@ -145,7 +145,7 @@ class MockSMSProvider(SMSProvider):
     """Mock SMS provider for testing and development."""
 
     def __init__(self) -> None:
-        self.sent_messages: list[dict] = []
+        self.sent_messages: list[dict[str, str]] = []
 
     def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
         """Always return True for mock provider."""
