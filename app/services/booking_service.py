@@ -7,8 +7,7 @@ processing booking requests, and executing reservations at the scheduled time.
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
-
-import pytz
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.models.schemas import (
@@ -559,12 +558,12 @@ class BookingService:
         """
         # Check 48-hour restriction for multi-player bookings
         if request.num_players > 1:
-            tz = pytz.timezone(settings.timezone)
+            tz = ZoneInfo(settings.timezone)
             now_ct = datetime.now(tz)
 
             # Combine requested date and time into a timezone-aware datetime
             tee_time_naive = datetime.combine(request.requested_date, request.requested_time)
-            tee_time_ct = tz.localize(tee_time_naive)
+            tee_time_ct = tee_time_naive.replace(tzinfo=tz)
 
             hours_until_tee_time = (tee_time_ct - now_ct).total_seconds() / 3600
 
@@ -594,16 +593,18 @@ class BookingService:
         # execution_time is naive (CT wall-clock), so we localize it.
         # This approach is safe even if _calculate_execution_time() is later
         # changed to return an aware datetime.
-        tz = pytz.timezone(settings.timezone)
+        tz = ZoneInfo(settings.timezone)
         now_ct = datetime.now(tz)
         if execution_time.tzinfo is None:
-            exec_ct = tz.localize(execution_time)
+            exec_ct = execution_time.replace(tzinfo=tz)
         else:
             exec_ct = execution_time.astimezone(tz)
 
         if exec_ct <= now_ct:
-            await self.execute_booking(created_booking.id)
-            return await database_service.get_booking(created_booking.id) or created_booking
+            booking_id_opt: str | None = created_booking.id
+            if booking_id_opt is not None:
+                await self.execute_booking(booking_id_opt)
+                return await database_service.get_booking(booking_id_opt) or created_booking
 
         return created_booking
 
@@ -676,20 +677,18 @@ class BookingService:
         The timezone is used for DST-correct calculation but stripped
         before returning to match the database schema (timestamp without timezone).
         """
-        tz = pytz.timezone(settings.timezone)
+        tz = ZoneInfo(settings.timezone)
 
         booking_open_date = target_date - timedelta(days=settings.days_in_advance)
 
-        execution_time = tz.localize(
-            datetime.combine(
-                booking_open_date,
-                datetime.min.time().replace(
-                    hour=settings.booking_open_hour,
-                    minute=settings.booking_open_minute,
-                    second=0,
-                ),
-            )
-        )
+        execution_time = datetime.combine(
+            booking_open_date,
+            datetime.min.time().replace(
+                hour=settings.booking_open_hour,
+                minute=settings.booking_open_minute,
+                second=0,
+            ),
+        ).replace(tzinfo=tz)
 
         # Return naive datetime (strip timezone) for database storage
         # The value represents CT wall-clock time
@@ -912,24 +911,24 @@ class BookingService:
                 execute_at=execute_at,
             )
 
-            booking_map = {b.id: b for b in date_bookings}
+            booking_map = {b.id: b for b in date_bookings if b.id is not None}
             for item_result in batch_result.results:
-                booking = booking_map.get(item_result.booking_id)
-                if not booking:
+                booking_opt = booking_map.get(item_result.booking_id)
+                if not booking_opt:
                     continue
 
                 result = item_result.result
                 if result.success:
-                    booking.status = BookingStatus.SUCCESS
-                    booking.actual_booked_time = result.booked_time
-                    booking.confirmation_number = result.confirmation_number
+                    booking_opt.status = BookingStatus.SUCCESS
+                    booking_opt.actual_booked_time = result.booked_time
+                    booking_opt.confirmation_number = result.confirmation_number
                     all_results.append((item_result.booking_id, result))
                 else:
-                    booking.status = BookingStatus.FAILED
-                    booking.error_message = result.error_message
+                    booking_opt.status = BookingStatus.FAILED
+                    booking_opt.error_message = result.error_message
                     all_results.append((item_result.booking_id, result))
 
-                await database_service.update_booking(booking)
+                await database_service.update_booking(booking_opt)
 
         return all_results
 

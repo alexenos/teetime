@@ -104,3 +104,9 @@ variable "log_level" {
   type        = string
   default     = "INFO"
 }
+
+variable "debug_artifacts_bucket" {
+  description = "GCS bucket name for debug artifacts (screenshots + HTML)"
+  type        = string
+  default     = "gen-lang-client-0822973627-teetime-debug-artifacts"
+}

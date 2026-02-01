@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.api import bookings, health, jobs, webhooks
 from app.config import settings
 from app.models.database import init_db
+from app.providers.base import ReservationProvider
 from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
 from app.services.booking_service import booking_service
 
@@ -55,7 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if settings.walden_member_number and settings.walden_password:
         logger.info("Walden Golf credentials configured - using real WaldenGolfProvider")
-        provider = WaldenGolfProvider()
+        provider: ReservationProvider = WaldenGolfProvider()
     else:
         logger.warning(
             "Walden Golf credentials not configured - using MockWaldenProvider. "

@@ -31,6 +31,7 @@ locals {
     "cloudscheduler.googleapis.com",
     "artifactregistry.googleapis.com",
     "iam.googleapis.com",
+    "storage.googleapis.com",
   ]
   secrets = [
     "TWILIO_ACCOUNT_SID",
@@ -148,6 +149,11 @@ resource "google_cloud_run_v2_service" "teetime" {
         value = var.log_level
       }
 
+      env {
+        name  = "DEBUG_ARTIFACTS_BUCKET"
+        value = var.debug_artifacts_bucket
+      }
+
       dynamic "env" {
         for_each = toset(local.secrets)
         content {
@@ -193,6 +199,24 @@ resource "google_cloud_run_v2_service" "teetime" {
     google_project_service.apis,
     google_secret_manager_secret_iam_member.cloud_run_secret_access,
   ]
+}
+
+# Debug artifacts bucket for Selenium screenshots/HTML (Cloud Run /tmp is ephemeral)
+resource "google_storage_bucket" "debug_artifacts" {
+  name                        = var.debug_artifacts_bucket
+  location                    = var.region
+  uniform_bucket_level_access = true
+
+  # Prevent accidental deletion of debug evidence unless explicitly changed.
+  force_destroy = false
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_storage_bucket_iam_member" "cloud_run_debug_artifacts_writer" {
+  bucket = google_storage_bucket.debug_artifacts.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.cloud_run.email}"
 }
 
 resource "google_cloud_run_v2_service_iam_member" "public_access" {
@@ -261,6 +285,13 @@ resource "google_project_iam_member" "cloud_build_scheduler_admin" {
 resource "google_project_iam_member" "cloud_build_service_usage" {
   project = var.project_id
   role    = "roles/serviceusage.serviceUsageAdmin"
+  member  = "serviceAccount:${google_service_account.cloud_build.email}"
+}
+
+# Cloud Build SA needs to be able to create/update the debug artifacts bucket via Terraform
+resource "google_project_iam_member" "cloud_build_storage_admin" {
+  project = var.project_id
+  role    = "roles/storage.admin"
   member  = "serviceAccount:${google_service_account.cloud_build.email}"
 }
 

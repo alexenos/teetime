@@ -10,8 +10,8 @@ import asyncio
 import logging
 from datetime import date, datetime, time
 from enum import Enum
+from zoneinfo import ZoneInfo
 
-import pytz
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.transport import requests as google_requests
@@ -169,7 +169,7 @@ async def execute_due_bookings(
     Idempotency: Bookings are transitioned to IN_PROGRESS before execution,
     so retries will not re-execute already-started bookings.
     """
-    tz = pytz.timezone(settings.timezone)
+    tz = ZoneInfo(settings.timezone)
     now = datetime.now(tz)
 
     # Calculate the booking window open time (6:30am CT)
@@ -197,7 +197,7 @@ async def execute_due_bookings(
 
     logger.info(f"BATCH_JOB: Starting batch execution of {len(due_bookings)} bookings")
 
-    booking_map = {b.id: b for b in due_bookings}
+    booking_map = {b.id: b for b in due_bookings if b.id is not None}
 
     # Strip timezone for passing to batch booking (expects naive datetime in CT)
     booking_open_time_naive = booking_open_time.replace(tzinfo=None)

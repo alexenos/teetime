@@ -89,8 +89,9 @@ class TestWaldenProviderCredentials:
 
 
 @pytest.mark.skipif(
-    not os.getenv("WALDEN_MEMBER_NUMBER") or not os.getenv("WALDEN_PASSWORD"),
-    reason="Walden Golf credentials not configured",
+    (not os.getenv("WALDEN_MEMBER_NUMBER") or not os.getenv("WALDEN_PASSWORD"))
+    or os.getenv("RUN_WALDEN_INTEGRATION") != "1",
+    reason="Walden Golf integration tests are opt-in (set RUN_WALDEN_INTEGRATION=1 and credentials)",
 )
 class TestWaldenProviderIntegration:
     """
@@ -494,6 +495,22 @@ class TestWaldenProviderBookingVerification:
         )
         result = provider._verify_booking_success(mock_driver)
         assert result is False
+
+    def test_verify_success_ignores_hidden_error_in_html(self, provider: WaldenGolfProvider) -> None:
+        """Test that 'error' in raw HTML does not override visible success text."""
+        mock_driver = MagicMock()
+
+        mock_body = MagicMock()
+        mock_body.text = "Your tee time was successfully booked!"
+        mock_driver.find_element.return_value = mock_body
+
+        # Simulate 'error' only in script/hidden markup in the HTML source
+        mock_driver.page_source = (
+            "<html><body><div>Success</div></body><script>var error = true;</script></html>"
+        )
+
+        result = provider._verify_booking_success(mock_driver)
+        assert result is True
 
     def test_verify_failure_with_unavailable(self, provider: WaldenGolfProvider) -> None:
         """Test that 'unavailable' indicator returns False."""

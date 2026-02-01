@@ -7,8 +7,11 @@ import time as time_module
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any, TypeVar
+from zoneinfo import ZoneInfo
 
-import pytz
+import google.auth
+import httpx
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from selenium import webdriver
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -536,7 +539,7 @@ class WaldenGolfProvider(ReservationProvider):
                 # We must compare it with current time in CT timezone, not UTC
                 # Using datetime.now() would return UTC time on Cloud Run, causing
                 # the wait to be skipped (e.g., 12:28 UTC > 06:30 CT naive)
-                ct_tz = pytz.timezone(settings.timezone)
+                ct_tz = ZoneInfo(settings.timezone)
                 now_ct = datetime.now(ct_tz).replace(tzinfo=None)
                 logger.info(
                     f"BATCH_BOOKING: Current time (CT): {now_ct.strftime('%H:%M:%S')}, "
@@ -929,7 +932,7 @@ class WaldenGolfProvider(ReservationProvider):
                 item_text = item.text.lower() if item.text else ""
                 if not item_text:
                     try:
-                        item_text = item.get_attribute("textContent").lower()
+                        item_text = (item.get_attribute("textContent") or "").lower()
                     except Exception:
                         continue
 
@@ -1000,6 +1003,65 @@ class WaldenGolfProvider(ReservationProvider):
             )
         except NoSuchElementException:
             pass
+
+        return None
+
+    def _get_visible_page_text(self, driver: webdriver.Chrome) -> str:
+        """Get visible text from the page (prefer <body>.text over raw HTML source)."""
+        try:
+            body = driver.find_element(By.TAG_NAME, "body")
+            body_text = getattr(body, "text", "")
+            if isinstance(body_text, str) and body_text.strip():
+                return body_text
+        except Exception:
+            pass
+
+        page_source = getattr(driver, "page_source", "")
+        return page_source if isinstance(page_source, str) else ""
+
+    def _extract_booking_error_message(self, driver: webdriver.Chrome) -> str | None:
+        """Extract user-visible booking error text from common alert/message containers."""
+        selectors = [
+            ".ui-messages-error",
+            ".ui-message-error",
+            ".ui-growl-message-error",
+            ".error",
+            ".errors",
+            "[class*='error']",
+            ".alert",
+            ".alert-danger",
+            "[role='alert']",
+            "[aria-live='assertive']",
+            "[aria-live='polite']",
+        ]
+
+        try:
+            messages: list[str] = []
+            for sel in selectors:
+                try:
+                    for el in driver.find_elements(By.CSS_SELECTOR, sel)[:10]:
+                        text = (getattr(el, "text", "") or "").strip()
+                        if text:
+                            messages.append(text)
+                except Exception:
+                    continue
+
+            if messages:
+                unique: list[str] = []
+                for msg in messages:
+                    if msg not in unique:
+                        unique.append(msg)
+                joined = " | ".join(unique)
+                return joined[:500]
+        except Exception:
+            pass
+
+        # Fallback: provide a short snippet of visible text if it contains likely failure words.
+        visible_text = self._get_visible_page_text(driver)
+        visible_lower = visible_text.lower()
+        if any(word in visible_lower for word in ("error", "unable", "failed", "unavailable")):
+            snippet = " ".join(visible_text.split())
+            return snippet[:500]
 
         return None
 
@@ -2154,6 +2216,7 @@ class WaldenGolfProvider(ReservationProvider):
         except NoSuchElementException:
             pass
 
+        search_context: Any
         if northgate_section:
             search_context = northgate_section
         else:
@@ -3069,18 +3132,78 @@ class WaldenGolfProvider(ReservationProvider):
         """
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            screenshot_path = f"/tmp/walden_debug_{context}_{timestamp}.png"
-            html_path = f"/tmp/walden_debug_{context}_{timestamp}.html"
+            bucket_name = os.getenv(
+                "DEBUG_ARTIFACTS_BUCKET", "gen-lang-client-0822973627-teetime-debug-artifacts"
+            )
 
-            driver.save_screenshot(screenshot_path)
-            logger.info(f"Saved debug screenshot to {screenshot_path}")
+            screenshot_bytes = driver.get_screenshot_as_png()
+            html_bytes = driver.page_source.encode("utf-8", errors="replace")
 
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write(driver.page_source)
-            logger.info(f"Saved debug HTML to {html_path}")
+            try:
+                screenshot_object = f"walden/{context}/{timestamp}/screenshot.png"
+                html_object = f"walden/{context}/{timestamp}/page.html"
+
+                screenshot_uri = self._upload_bytes_to_gcs(
+                    bucket_name=bucket_name,
+                    object_name=screenshot_object,
+                    content_type="image/png",
+                    data=screenshot_bytes,
+                )
+                logger.info(f"Saved debug screenshot to {screenshot_uri}")
+
+                html_uri = self._upload_bytes_to_gcs(
+                    bucket_name=bucket_name,
+                    object_name=html_object,
+                    content_type="text/html; charset=utf-8",
+                    data=html_bytes,
+                )
+                logger.info(f"Saved debug HTML to {html_uri}")
+
+            except Exception as upload_error:
+                screenshot_path = f"/tmp/walden_debug_{context}_{timestamp}.png"
+                html_path = f"/tmp/walden_debug_{context}_{timestamp}.html"
+
+                driver.save_screenshot(screenshot_path)
+                logger.info(f"Saved debug screenshot to {screenshot_path}")
+
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(driver.page_source)
+                logger.info(f"Saved debug HTML to {html_path}")
+
+                logger.warning(
+                    f"Failed to upload diagnostic artifacts to GCS bucket '{bucket_name}': {upload_error}"
+                )
 
         except Exception as e:
             logger.warning(f"Failed to capture diagnostic info: {e}")
+
+    def _upload_bytes_to_gcs(
+        self, *, bucket_name: str, object_name: str, content_type: str, data: bytes
+    ) -> str:
+        """Upload bytes to GCS using ADC and the JSON upload API.
+
+        Returns the gs:// URI for the uploaded object.
+        """
+        credentials, _ = google.auth.default(  # type: ignore[no-untyped-call]
+            scopes=["https://www.googleapis.com/auth/devstorage.read_write"]
+        )
+        credentials.refresh(GoogleAuthRequest())  # type: ignore[no-untyped-call]
+        token = credentials.token
+        if not token:
+            raise RuntimeError("Failed to obtain access token for GCS upload")
+
+        url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket_name}/o"
+        params = {"uploadType": "media", "name": object_name}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": content_type,
+        }
+
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, params=params, headers=headers, content=data)
+            resp.raise_for_status()
+
+        return f"gs://{bucket_name}/{object_name}"
 
     def _log_row_element_state(self, driver: webdriver.Chrome, row: Any, player_num: int) -> None:
         """
@@ -3301,14 +3424,19 @@ class WaldenGolfProvider(ReservationProvider):
                     logger.info(
                         "BOOKING_DEBUG: URL did not change, checking for success indicators"
                     )
-                    wait.until(
-                        expected_conditions.presence_of_element_located(
-                            (
-                                By.XPATH,
-                                "//*[contains(text(), 'success') or contains(text(), 'confirm') or contains(text(), 'thank')]",
+                    try:
+                        wait.until(
+                            expected_conditions.presence_of_element_located(
+                                (
+                                    By.XPATH,
+                                    "//*[contains(text(), 'success') or contains(text(), 'confirm') or contains(text(), 'thank')]",
+                                )
                             )
                         )
-                    )
+                    except TimeoutException:
+                        logger.debug(
+                            "BOOKING_DEBUG: No success indicators found after clicking Book Now"
+                        )
 
             except TimeoutException:
                 logger.debug("BOOKING_DEBUG: No confirmation dialog found - booking may be direct")
@@ -3328,9 +3456,15 @@ class WaldenGolfProvider(ReservationProvider):
             else:
                 logger.error("BOOKING_DEBUG: Booking verification FAILED")
                 self._capture_diagnostic_info(driver, "booking_verification_failed")
+                error_details = self._extract_booking_error_message(driver)
+                if error_details:
+                    logger.error(f"BOOKING_DEBUG: Extracted booking error text: {error_details}")
                 return BookingResult(
                     success=False,
-                    error_message="Booking may not have completed successfully",
+                    error_message=(
+                        f"Booking may not have completed successfully"
+                        f"{': ' + error_details if error_details else ''}"
+                    ),
                     booked_time=booked_time,
                 )
 
@@ -3352,22 +3486,23 @@ class WaldenGolfProvider(ReservationProvider):
     def _extract_confirmation_number(self, driver: webdriver.Chrome) -> str | None:
         """Try to extract a confirmation number from the page after booking."""
         try:
-            page_source = driver.page_source
-            page_text_lower = page_source.lower()
+            page_text = self._get_visible_page_text(driver)
+            page_text_lower = page_text.lower()
 
             if (
                 "confirmation" in page_text_lower
                 or "booked" in page_text_lower
                 or "reserved" in page_text_lower
             ):
+                # Require at least one digit to avoid matching DOM ids/classes (e.g. "DialogDIV")
                 patterns = [
-                    r"confirmation[:\s#]*([A-Z0-9-]+)",
-                    r"booking[:\s#]*([A-Z0-9-]+)",
-                    r"reference[:\s#]*([A-Z0-9-]+)",
+                    r"confirmation[:\s#]*([A-Z0-9-]*\d[A-Z0-9-]*)",
+                    r"booking[:\s#]*([A-Z0-9-]*\d[A-Z0-9-]*)",
+                    r"reference[:\s#]*([A-Z0-9-]*\d[A-Z0-9-]*)",
                 ]
 
                 for pattern in patterns:
-                    match = re.search(pattern, page_source, re.IGNORECASE)
+                    match = re.search(pattern, page_text, re.IGNORECASE)
                     if match:
                         return match.group(1)
 
@@ -3387,7 +3522,7 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info(
                 f"BOOKING_DEBUG: Verifying booking success. Current URL: {driver.current_url}"
             )
-            page_text = driver.page_source.lower()
+            page_text = self._get_visible_page_text(driver).lower()
 
             success_indicators = [
                 "successfully",
