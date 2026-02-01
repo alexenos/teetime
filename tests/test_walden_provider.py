@@ -496,7 +496,9 @@ class TestWaldenProviderBookingVerification:
         result = provider._verify_booking_success(mock_driver)
         assert result is False
 
-    def test_verify_success_ignores_hidden_error_in_html(self, provider: WaldenGolfProvider) -> None:
+    def test_verify_success_ignores_hidden_error_in_html(
+        self, provider: WaldenGolfProvider
+    ) -> None:
         """Test that 'error' in raw HTML does not override visible success text."""
         mock_driver = MagicMock()
 
