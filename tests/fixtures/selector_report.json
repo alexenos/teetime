@@ -1,0 +1,255 @@
+{
+  "working": [
+    {
+      "category": "login",
+      "name": "member_input",
+      "selector": "input[name='_com_liferay_login_web_portlet_LoginPortlet_login']",
+      "count": 1
+    },
+    {
+      "category": "login",
+      "name": "password_input",
+      "selector": "input[name='_com_liferay_login_web_portlet_LoginPortlet_password']",
+      "count": 1
+    },
+    {
+      "category": "login",
+      "name": "submit_button",
+      "selector": "button[type='submit']",
+      "count": 1
+    },
+    {
+      "category": "course_dropdown",
+      "name": "dropdown_trigger_1",
+      "selector": "[class*='select'][class*='course']",
+      "count": 1
+    },
+    {
+      "category": "date_picker",
+      "name": "datepicker_1",
+      "selector": "[class*='datepicker']",
+      "count": 2
+    },
+    {
+      "category": "date_picker",
+      "name": "calendar",
+      "selector": "[class*='calendar']",
+      "count": 38
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "datascroller_list",
+      "selector": "ul.ui-datascroller-list",
+      "count": 2
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "slot_item",
+      "selector": "li.ui-datascroller-item",
+      "count": 145
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "empty_slot",
+      "selector": "div.Empty",
+      "count": 21
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "reserved_slot",
+      "selector": "div.Reserved",
+      "count": 71
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "available_span",
+      "selector": "span.custom-free-slot-span",
+      "count": 87
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "slot_time",
+      "selector": "span[class*='time']",
+      "count": 298
+    },
+    {
+      "category": "booking_controls",
+      "name": "reserve_button",
+      "selector": "a[id*='reserve_button']",
+      "count": 21
+    },
+    {
+      "category": "primefaces_components",
+      "name": "pf_datascroller",
+      "selector": ".ui-datascroller",
+      "count": 2
+    },
+    {
+      "category": "primefaces_components",
+      "name": "pf_datascroller_content",
+      "selector": ".ui-datascroller-content",
+      "count": 2
+    },
+    {
+      "category": "primefaces_components",
+      "name": "pf_datascroller_loader",
+      "selector": ".ui-datascroller-loader",
+      "count": 2
+    },
+    {
+      "category": "primefaces_components",
+      "name": "pf_dialog",
+      "selector": ".ui-dialog",
+      "count": 2
+    },
+    {
+      "category": "primefaces_components",
+      "name": "pf_growl",
+      "selector": ".ui-growl",
+      "count": 2
+    }
+  ],
+  "broken": [
+    {
+      "category": "course_dropdown",
+      "name": "dropdown_trigger_2",
+      "selector": "div[class*='multiselect']"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "dropdown_trigger_3",
+      "selector": "button[class*='dropdown']"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "dropdown_trigger_4",
+      "selector": ".course-dropdown"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "dropdown_trigger_5",
+      "selector": "[aria-label*='course']"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "dropdown_trigger_6",
+      "selector": "[placeholder*='course']"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "multiselect",
+      "selector": "div.p-multiselect"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "multiselect_label",
+      "selector": "span.p-multiselect-label"
+    },
+    {
+      "category": "course_dropdown",
+      "name": "multiselect_trigger",
+      "selector": "div.p-multiselect-trigger"
+    },
+    {
+      "category": "course_options",
+      "name": "checkbox_item",
+      "selector": "li.p-multiselect-item"
+    },
+    {
+      "category": "course_options",
+      "name": "checkbox_label",
+      "selector": "span.p-checkbox-label"
+    },
+    {
+      "category": "course_options",
+      "name": "checkbox",
+      "selector": "div.p-checkbox"
+    },
+    {
+      "category": "course_options",
+      "name": "northgate_option",
+      "selector": "[aria-label*='Northgate']"
+    },
+    {
+      "category": "date_picker",
+      "name": "datepicker_2",
+      "selector": "span.p-datepicker-trigger"
+    },
+    {
+      "category": "date_picker",
+      "name": "datepicker_3",
+      "selector": "input.p-inputtext"
+    },
+    {
+      "category": "date_picker",
+      "name": "calendar_header",
+      "selector": ".p-datepicker-header"
+    },
+    {
+      "category": "date_picker",
+      "name": "calendar_next",
+      "selector": "button.p-datepicker-next"
+    },
+    {
+      "category": "date_picker",
+      "name": "calendar_prev",
+      "selector": "button.p-datepicker-prev"
+    },
+    {
+      "category": "date_picker",
+      "name": "calendar_day",
+      "selector": "td span:not(.p-disabled)"
+    },
+    {
+      "category": "tee_time_slots",
+      "name": "slot_info",
+      "selector": "div[class*='slot-info']"
+    },
+    {
+      "category": "booking_controls",
+      "name": "reserve_link",
+      "selector": "a[href*='reserve']"
+    },
+    {
+      "category": "booking_controls",
+      "name": "player_count_select",
+      "selector": "select[id*='player']"
+    },
+    {
+      "category": "booking_controls",
+      "name": "confirm_button",
+      "selector": "button[id*='confirm']"
+    },
+    {
+      "category": "booking_controls",
+      "name": "submit_booking",
+      "selector": "button[type='submit']"
+    },
+    {
+      "category": "course_filtering",
+      "name": "course_header",
+      "selector": "[class*='course-header']"
+    },
+    {
+      "category": "course_filtering",
+      "name": "course_name",
+      "selector": "[class*='course-name']"
+    },
+    {
+      "category": "course_filtering",
+      "name": "northgate_indicator",
+      "selector": "[class*='northgate']"
+    },
+    {
+      "category": "course_filtering",
+      "name": "course_section",
+      "selector": "div[data-course]"
+    },
+    {
+      "category": "primefaces_components",
+      "name": "pf_panel",
+      "selector": ".ui-panel"
+    }
+  ],
+  "errors": []
+}
