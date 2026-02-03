@@ -13,6 +13,7 @@ Usage:
 """
 
 import json
+import os
 import sys
 import time
 from datetime import date, timedelta
@@ -21,14 +22,58 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from selenium import webdriver
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
 
 from app.config import settings
-from app.providers.walden_provider import WaldenGolfProvider
 
 FIXTURES_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
+
+# Wait time constants (in seconds)
+PAGE_LOAD_WAIT = 2
+POST_LOGIN_WAIT = 3
+DYNAMIC_CONTENT_WAIT = 3
+TEE_TIME_PAGE_WAIT = 5
+
+# Walden Golf URLs
+BASE_URL = "https://www.waldengolf.com"
+LOGIN_URL = f"{BASE_URL}/web/pages/login"
+TEE_TIME_URL = f"{BASE_URL}/group/pages/book-a-tee-time"
+
+
+def create_driver() -> webdriver.Chrome:
+    """Create a headless Chrome WebDriver instance for snapshot capture."""
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+    if chromedriver_path and os.path.exists(chromedriver_path):
+        service = Service(chromedriver_path)
+    else:
+        service = Service(ChromeDriverManager().install())
+
+    driver = webdriver.Chrome(service=service, options=options)
+
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+    )
+
+    return driver
 
 
 def save_snapshot(driver, name: str, metadata: dict | None = None) -> Path:
@@ -61,14 +106,13 @@ def capture_snapshots():
         print("Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD in .env")
         sys.exit(1)
 
-    provider = WaldenGolfProvider()
-    driver = provider._create_driver()
+    driver = create_driver()
 
     try:
         # 1. Capture login page
         print("\n[1/6] Capturing login page...")
-        driver.get(provider.LOGIN_URL)
-        time.sleep(2)
+        driver.get(LOGIN_URL)
+        time.sleep(PAGE_LOAD_WAIT)
         save_snapshot(driver, "walden_login_page", {"state": "login_form"})
 
         # 2. Perform login
@@ -94,10 +138,10 @@ def capture_snapshots():
 
         try:
             wait.until(expected_conditions.url_changes(current_url))
-        except Exception:
-            pass
+        except TimeoutException:
+            pass  # URL may not change if login fails, continue to check
 
-        time.sleep(3)
+        time.sleep(POST_LOGIN_WAIT)
 
         if "login" in driver.current_url.lower() and "home" not in driver.current_url.lower():
             print(f"ERROR: Login failed. URL: {driver.current_url}")
@@ -109,8 +153,8 @@ def capture_snapshots():
 
         # 3. Navigate to tee time page
         print("\n[3/6] Navigating to tee time booking page...")
-        driver.get(provider.TEE_TIME_URL)
-        time.sleep(5)  # Wait for page to load fully
+        driver.get(TEE_TIME_URL)
+        time.sleep(TEE_TIME_PAGE_WAIT)
         save_snapshot(driver, "walden_tee_time_initial", {"state": "tee_time_page_initial"})
 
         # 4. Wait for datascroller to load
@@ -121,14 +165,15 @@ def capture_snapshots():
                     (By.CSS_SELECTOR, "ul.ui-datascroller-list")
                 )
             )
-            time.sleep(3)  # Additional wait for dynamic content
-        except Exception as e:
+            time.sleep(DYNAMIC_CONTENT_WAIT)
+        except TimeoutException as e:
             print(f"  Warning: Datascroller not found: {e}")
 
-        save_snapshot(driver, "walden_tee_time_loaded", {
-            "state": "tee_time_page_loaded",
-            "note": "After waiting for datascroller"
-        })
+        save_snapshot(
+            driver,
+            "walden_tee_time_loaded",
+            {"state": "tee_time_page_loaded", "note": "After waiting for datascroller"},
+        )
 
         # 5. Try to select Northgate course
         print("\n[5/6] Attempting to select Northgate course...")
@@ -151,16 +196,17 @@ def capture_snapshots():
                 if elements:
                     print(f"  Found {len(elements)} elements matching: {selector}")
                     course_selected = True
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - intentionally catching all selector errors
+                continue
 
         if not course_selected:
             print("  No course dropdown found with standard selectors")
 
-        save_snapshot(driver, "walden_tee_time_with_course", {
-            "state": "course_selection",
-            "course_dropdown_found": course_selected
-        })
+        save_snapshot(
+            driver,
+            "walden_tee_time_with_course",
+            {"state": "course_selection", "course_dropdown_found": course_selected},
+        )
 
         # 6. Try to navigate to a future date (7 days out)
         print("\n[6/6] Attempting to navigate to future date...")
@@ -182,13 +228,12 @@ def capture_snapshots():
                 elements = driver.find_elements(By.CSS_SELECTOR, selector)
                 if elements:
                     print(f"  Found {len(elements)} elements matching: {selector}")
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - intentionally catching all selector errors
+                continue
 
-        save_snapshot(driver, "walden_tee_time_final", {
-            "state": "final",
-            "target_date": str(target_date)
-        })
+        save_snapshot(
+            driver, "walden_tee_time_final", {"state": "final", "target_date": str(target_date)}
+        )
 
         # Summary
         print("\n" + "=" * 60)

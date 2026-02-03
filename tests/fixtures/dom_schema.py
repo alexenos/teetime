@@ -14,10 +14,9 @@ Key findings from HTML analysis:
 6. Reserve button has id containing "reserve_button"
 """
 
-from dataclasses import dataclass
+import re
 
 
-@dataclass(frozen=True)
 class WaldenDOMSchema:
     """
     Centralized DOM selectors for Walden Golf website.
@@ -39,7 +38,7 @@ class WaldenDOMSchema:
 
     # Course checkboxes (hidden, inside the dropdown)
     COURSE_CHECKBOX_NORTHGATE = "input[id*='j_idt101:0']"  # value="2"
-    COURSE_CHECKBOX_WALDEN = "input[id*='j_idt101:1']"     # value="1"
+    COURSE_CHECKBOX_WALDEN = "input[id*='j_idt101:1']"  # value="1"
     COURSE_CHECKBOX_FAST_FIVE = "input[id*='j_idt101:2']"  # value="3"
 
     # ========== DATE PICKER ==========
@@ -55,8 +54,8 @@ class WaldenDOMSchema:
     HORIZONTAL_DATE_LINK = "a.ui-link"
     HORIZONTAL_DATE_SELECTED = "a.selected-date"
     HORIZONTAL_PREV_WEEK = "span[id*='j_idt120']"  # Double left arrow
-    HORIZONTAL_PREV_DAY = "span[id*='j_idt122']"   # Single left arrow
-    HORIZONTAL_NEXT_DAY = "span[id*='j_idt130']"   # Single right arrow
+    HORIZONTAL_PREV_DAY = "span[id*='j_idt122']"  # Single left arrow
+    HORIZONTAL_NEXT_DAY = "span[id*='j_idt130']"  # Single right arrow
     HORIZONTAL_NEXT_WEEK = "span[id*='j_idt132']"  # Double right arrow
 
     # ========== HOLES SELECTOR ==========
@@ -94,10 +93,10 @@ class WaldenDOMSchema:
     SLOT_DIV = "div[id*='slotTeeDIV']"
 
     # Slot status classes (on the slotTeeDIV div)
-    SLOT_STATUS_EMPTY = "Empty"           # Available for booking
-    SLOT_STATUS_RESERVED = "Reserved"     # Already booked
-    SLOT_STATUS_WEATHER = "Weather delay" # Weather delay
-    SLOT_STATUS_BLOCK = "Block"           # Blocked
+    SLOT_STATUS_EMPTY = "Empty"  # Available for booking
+    SLOT_STATUS_RESERVED = "Reserved"  # Already booked
+    SLOT_STATUS_WEATHER = "Weather delay"  # Weather delay
+    SLOT_STATUS_BLOCK = "Block"  # Blocked
     SLOT_STATUS_DISABLED = "ui-state-disabled"  # Disabled
 
     # Slot time
@@ -135,14 +134,13 @@ SELECTOR_VALIDATION = {
     "LOGIN_MEMBER_INPUT": ("walden_login_page", 1),
     "LOGIN_PASSWORD_INPUT": ("walden_login_page", 1),
     "LOGIN_SUBMIT_BUTTON": ("walden_login_page", 1),
-
     # Tee time page selectors
     "COURSE_DROPDOWN": ("walden_tee_time_loaded", 1),
     "DATASCROLLER_LIST": ("walden_tee_time_loaded", 1),
     "DATASCROLLER_ITEM": ("walden_tee_time_loaded", 50),  # Should have many slots
-    "RESERVE_BUTTON": ("walden_tee_time_loaded", 1),      # At least one available slot
+    "RESERVE_BUTTON": ("walden_tee_time_loaded", 1),  # At least one available slot
     "SLOT_TIME_LABEL": ("walden_tee_time_loaded", 50),
-    "COURSE_HEADING": ("walden_tee_time_loaded", 2),      # Northgate + Walden
+    "COURSE_HEADING": ("walden_tee_time_loaded", 2),  # Northgate + Walden
 }
 
 
@@ -157,8 +155,7 @@ def get_course_index_from_element_id(element_id: str) -> str | None:
         "_teeTimePortlet_WAR_northstarportlet_:teeTimeForm:teeTimeCourses:1:teeTimeSlots:12:..."
         Returns "1" (Walden)
     """
-    import re
-    match = re.search(r'teeTimeCourses:(\d+)', element_id)
+    match = re.search(r"teeTimeCourses:(\d+)", element_id)
     if match:
         return match.group(1)
     return None

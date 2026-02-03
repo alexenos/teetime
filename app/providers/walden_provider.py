@@ -119,6 +119,11 @@ class WaldenGolfProvider(ReservationProvider):
     TEE_TIME_INTERVAL_MINUTES = 8
     MAX_PLAYERS = 4  # Maximum players per tee time slot
 
+    # Course index constants for element ID parsing
+    # The Walden Golf website uses teeTimeCourses:0 for Northgate and teeTimeCourses:1 for Walden
+    NORTHGATE_COURSE_INDEX = "0"
+    WALDEN_COURSE_INDEX = "1"
+
     def __init__(self) -> None:
         """
         Initialize the WaldenGolfProvider.
@@ -2683,11 +2688,6 @@ class WaldenGolfProvider(ReservationProvider):
         except Exception as e:
             logger.debug(f"Error finding slot by time: {e}")
         return None
-
-    # Course index constants for element ID parsing
-    # The Walden Golf website uses teeTimeCourses:0 for Northgate and teeTimeCourses:1 for Walden
-    NORTHGATE_COURSE_INDEX = "0"
-    WALDEN_COURSE_INDEX = "1"
 
     def _get_course_index_from_element_id(self, element_id: str) -> str | None:
         """

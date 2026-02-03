@@ -5,9 +5,10 @@ These tests validate that our DOM selectors work correctly against
 real HTML from the Walden Golf website, without needing live access.
 """
 
-import pytest
+import re
 from pathlib import Path
 
+import pytest
 from bs4 import BeautifulSoup
 
 from tests.fixtures.dom_schema import (
@@ -104,7 +105,6 @@ class TestTeeTimeSlotSelectors:
         assert len(elements) >= 50
 
         # Check time format (e.g., "07:30 AM", "04:34 PM")
-        import re
         time_pattern = re.compile(r"\d{2}:\d{2}\s*(AM|PM)")
         for el in elements[:10]:  # Check first 10
             time_text = el.get_text(strip=True)
@@ -283,7 +283,9 @@ class TestCourseIdentificationFromFixtures:
                 assert is_northgate_slot(btn_id), f"Northgate button not identified: {btn_id}"
                 northgate_count += 1
             elif "teeTimeCourses:1" in btn_id:
-                assert not is_northgate_slot(btn_id), f"Walden button wrongly identified as Northgate: {btn_id}"
+                assert not is_northgate_slot(btn_id), (
+                    f"Walden button wrongly identified as Northgate: {btn_id}"
+                )
                 walden_count += 1
 
         print(f"\nReserve buttons - Northgate: {northgate_count}, Walden: {walden_count}")
@@ -304,16 +306,22 @@ class TestCourseIdentificationFromFixtures:
 
             if course_index == "0":
                 assert is_northgate_slot(div_id), f"Northgate slot not identified: {div_id}"
-                assert not is_walden_slot(div_id), f"Northgate slot wrongly identified as Walden: {div_id}"
+                assert not is_walden_slot(div_id), (
+                    f"Northgate slot wrongly identified as Walden: {div_id}"
+                )
                 northgate_count += 1
             elif course_index == "1":
-                assert not is_northgate_slot(div_id), f"Walden slot wrongly identified as Northgate: {div_id}"
+                assert not is_northgate_slot(div_id), (
+                    f"Walden slot wrongly identified as Northgate: {div_id}"
+                )
                 assert is_walden_slot(div_id), f"Walden slot not identified: {div_id}"
                 walden_count += 1
             else:
                 unknown_count += 1
 
-        print(f"\nSlot DIVs - Northgate: {northgate_count}, Walden: {walden_count}, Unknown: {unknown_count}")
+        print(
+            f"\nSlot DIVs - Northgate: {northgate_count}, Walden: {walden_count}, Unknown: {unknown_count}"
+        )
         assert northgate_count >= 20, "Expected at least 20 Northgate slots"
         assert walden_count >= 20, "Expected at least 20 Walden slots"
         assert unknown_count == 0, f"Found {unknown_count} slots with unknown course"
@@ -346,8 +354,7 @@ class TestCourseIdentificationFromFixtures:
         assert len(all_elements_with_course_id) >= 100, "Expected many elements with course IDs"
 
         # Verify pattern consistency
-        import re
-        pattern = re.compile(r'teeTimeCourses:(\d+)')
+        pattern = re.compile(r"teeTimeCourses:(\d+)")
 
         course_indices = set()
         for el in all_elements_with_course_id:
@@ -368,7 +375,7 @@ class TestCourseIdentificationFromFixtures:
         # These are the element types that _find_empty_slots returns
         clickable_selectors = [
             "a[id*='reserve_button']",  # Reserve buttons
-            "a.slot-link",               # Slot links
+            "a.slot-link",  # Slot links
         ]
 
         for selector in clickable_selectors:

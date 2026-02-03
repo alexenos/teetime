@@ -12,13 +12,14 @@ Usage:
 """
 
 import json
-import re
-import sys
 from pathlib import Path
 
 from bs4 import BeautifulSoup
 
-# Selectors extracted from walden_provider.py organized by purpose
+# Selectors to validate against captured HTML fixtures.
+# This includes both working selectors (from WaldenDOMSchema) and potentially
+# broken selectors (e.g., PrimeVue p-* selectors) to detect regressions and
+# identify which fallback strategies are needed.
 SELECTORS = {
     "login": {
         "member_input": "input[name='_com_liferay_login_web_portlet_LoginPortlet_login']",
@@ -199,12 +200,15 @@ def validate_selectors():
     # Save report
     report_path = Path(__file__).parent.parent / "tests" / "fixtures" / "selector_report.json"
     report = {
-        "working": [{"category": c, "name": n, "selector": s, "count": cnt}
-                   for c, n, s, cnt in results["working"]],
-        "broken": [{"category": c, "name": n, "selector": s}
-                  for c, n, s in results["broken"]],
-        "errors": [{"category": c, "name": n, "selector": s, "error": e}
-                  for c, n, s, e in results["errors"]],
+        "working": [
+            {"category": c, "name": n, "selector": s, "count": cnt}
+            for c, n, s, cnt in results["working"]
+        ],
+        "broken": [{"category": c, "name": n, "selector": s} for c, n, s in results["broken"]],
+        "errors": [
+            {"category": c, "name": n, "selector": s, "error": e}
+            for c, n, s, e in results["errors"]
+        ],
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"\nReport saved to: {report_path}")
