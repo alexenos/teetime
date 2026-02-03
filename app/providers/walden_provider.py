@@ -2248,12 +2248,25 @@ class WaldenGolfProvider(ReservationProvider):
         )
 
         if not slots_with_capacity:
+            # Extract event blocks that may be causing the lack of availability
+            event_blocks = self._extract_event_blocks(
+                search_context, target_time, fallback_window_minutes
+            )
+
+            error_message = (
+                f"No time slots with {num_players} available spots found on this date. "
+                f"All slots are either fully booked or have fewer than {num_players} spots available."
+            )
+
+            event_message = self._format_event_block_message(event_blocks)
+            if event_message:
+                error_message = (
+                    f"No time slots with {num_players} available spots found. {event_message}"
+                )
+
             return BookingResult(
                 success=False,
-                error_message=(
-                    f"No time slots with {num_players} available spots found on this date. "
-                    f"All slots are either fully booked or have fewer than {num_players} spots available."
-                ),
+                error_message=error_message,
             )
 
         min_time_minutes = max(0, target_minutes - fallback_window_minutes)
@@ -2403,13 +2416,25 @@ class WaldenGolfProvider(ReservationProvider):
             return result
         else:
             all_times = [t.strftime("%I:%M %p") for t, _ in eligible_slots[:5]]
+
+            # Extract event blocks that may be blocking the requested time window
+            event_blocks = self._extract_event_blocks(
+                search_context, target_time, fallback_window_minutes
+            )
+
+            error_message = (
+                f"No time slots with {num_players} available spots within "
+                f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
+            )
+
+            event_message = self._format_event_block_message(event_blocks)
+            if event_message:
+                error_message += f". {event_message}"
+
             return BookingResult(
                 success=False,
                 course_name=self.NORTHGATE_COURSE_NAME,
-                error_message=(
-                    f"No time slots with {num_players} available spots within "
-                    f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
-                ),
+                error_message=error_message,
                 alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}"
                 if all_times
                 else None,
@@ -2840,6 +2865,144 @@ class WaldenGolfProvider(ReservationProvider):
 
         unique_bookers = list(dict.fromkeys(bookers))
         return unique_bookers
+
+    def _format_event_block_message(self, event_blocks: list[str]) -> str | None:
+        """
+        Format event block names into a human-readable message suffix.
+
+        Args:
+            event_blocks: List of event names that are blocking tee times
+
+        Returns:
+            Formatted message string, or None if no events
+        """
+        if not event_blocks:
+            return None
+
+        if len(event_blocks) == 1:
+            return f"Time blocked by event: {event_blocks[0]}"
+        else:
+            event_list = ", ".join(event_blocks[:3])
+            if len(event_blocks) > 3:
+                event_list += f" and {len(event_blocks) - 3} more"
+            return f"Times blocked by events: {event_list}"
+
+    def _extract_event_blocks(
+        self,
+        search_context: Any,
+        target_time: time,
+        fallback_window_minutes: int,
+    ) -> list[str]:
+        """
+        Extract event/tournament block names that may be blocking tee times.
+
+        The Walden Golf tee sheet displays events and tournaments as blocked time ranges
+        with format like "08:26 AM-10:42 AM" followed by an event name such as
+        "Northgate SGA 3 Man ABC - 3318".
+
+        This method scans slot items for these blocked time ranges and extracts
+        the event names to provide more informative error messages.
+
+        Args:
+            search_context: The WebDriver element to search within
+            target_time: The target tee time being searched for
+            fallback_window_minutes: The fallback window in minutes
+
+        Returns:
+            List of event names that overlap with the requested time window
+        """
+        event_names: list[str] = []
+        target_minutes = target_time.hour * 60 + target_time.minute
+        min_time_minutes = max(0, target_minutes - fallback_window_minutes)
+        max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+
+        # Pattern to match time ranges like "08:26 AM-10:42 AM" or "9:00 AM - 11:00 AM"
+        time_range_pattern = re.compile(
+            r"(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*-\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])"
+        )
+
+        try:
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+
+            for slot_item in slot_items:
+                try:
+                    slot_text = slot_item.text.strip()
+                    if not slot_text:
+                        continue
+
+                    # Check if this is an event block (contains a time range)
+                    time_range_match = time_range_pattern.search(slot_text)
+                    if not time_range_match:
+                        continue
+
+                    # Parse the start and end times
+                    start_time_str = time_range_match.group(1).upper()
+                    end_time_str = time_range_match.group(2).upper()
+
+                    start_time = None
+                    end_time = None
+                    for fmt in ["%I:%M %p", "%I:%M%p"]:
+                        try:
+                            start_time = datetime.strptime(start_time_str.strip(), fmt).time()
+                            end_time = datetime.strptime(end_time_str.strip(), fmt).time()
+                            break
+                        except ValueError:
+                            continue
+
+                    if not start_time or not end_time:
+                        continue
+
+                    # Check if this event block overlaps with our target window
+                    start_minutes = start_time.hour * 60 + start_time.minute
+                    end_minutes = end_time.hour * 60 + end_time.minute
+
+                    # Handle events spanning midnight (e.g., 11:00 PM - 1:00 AM)
+                    # If end time is before start time, the event spans midnight
+                    if end_minutes < start_minutes:
+                        # Event spans midnight - it overlaps if:
+                        # 1. Target window overlaps with the evening portion (start to midnight)
+                        # 2. Target window overlaps with the morning portion (midnight to end)
+                        overlaps = (
+                            start_minutes <= max_time_minutes  # Evening portion overlaps
+                            or end_minutes >= min_time_minutes  # Morning portion overlaps
+                        )
+                    else:
+                        # Normal event (doesn't span midnight)
+                        # Event overlaps if: event_start <= window_end AND event_end >= window_start
+                        overlaps = (
+                            start_minutes <= max_time_minutes and end_minutes >= min_time_minutes
+                        )
+
+                    if overlaps:
+                        # Extract the event name - it's the text after the time range
+                        # Remove the time range from the text to get the event name
+                        event_name = slot_text[time_range_match.end() :].strip()
+
+                        # Clean up the event name
+                        # Remove leading/trailing whitespace, newlines
+                        event_name = " ".join(event_name.split())
+
+                        if event_name and event_name not in event_names:
+                            logger.debug(
+                                f"Found blocking event: '{event_name}' "
+                                f"({start_time_str}-{end_time_str})"
+                            )
+                            event_names.append(event_name)
+
+                except Exception as e:
+                    logger.debug(f"Error processing slot item for event: {e}")
+                    continue
+
+        except Exception as e:
+            logger.debug(f"Error extracting event blocks: {e}")
+
+        if event_names:
+            logger.info(
+                f"Found {len(event_names)} event(s) blocking times in requested window: "
+                f"{event_names}"
+            )
+
+        return event_names
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:

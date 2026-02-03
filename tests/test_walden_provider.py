@@ -1019,5 +1019,282 @@ class TestWaldenProviderDateSelectionFailure:
                             assert result.success is True
 
 
+class TestWaldenProviderExtractEventBlocks:
+    """Tests for the _extract_event_blocks method."""
+
+    def test_extracts_single_event_in_time_window(self, provider: WaldenGolfProvider) -> None:
+        """Test extracting a single event that blocks time slots."""
+        mock_search_context = MagicMock()
+
+        # Create a mock slot item with event block
+        mock_slot_item = MagicMock()
+        mock_slot_item.text.strip.return_value = "08:26 AM-10:42 AM Northgate SGA 3 Man ABC - 3318"
+
+        mock_search_context.find_elements.return_value = [mock_slot_item]
+
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(9, 0),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 1
+        assert "Northgate SGA 3 Man ABC - 3318" in result[0]
+
+    def test_extracts_multiple_events_in_time_window(self, provider: WaldenGolfProvider) -> None:
+        """Test extracting multiple events that block time slots."""
+        mock_search_context = MagicMock()
+
+        mock_slot_item1 = MagicMock()
+        mock_slot_item1.text.strip.return_value = "08:00 AM-09:30 AM Morning Tournament"
+
+        mock_slot_item2 = MagicMock()
+        mock_slot_item2.text.strip.return_value = "09:00 AM-10:00 AM Member Outing"
+
+        mock_search_context.find_elements.return_value = [mock_slot_item1, mock_slot_item2]
+
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(9, 0),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 2
+        assert "Morning Tournament" in result[0]
+        assert "Member Outing" in result[1]
+
+    def test_ignores_events_outside_time_window(self, provider: WaldenGolfProvider) -> None:
+        """Test that events outside the target time window are ignored."""
+        mock_search_context = MagicMock()
+
+        mock_slot_item = MagicMock()
+        # Event from 2pm-4pm should not affect 9am booking with 32min window
+        mock_slot_item.text.strip.return_value = "02:00 PM-04:00 PM Afternoon Event"
+
+        mock_search_context.find_elements.return_value = [mock_slot_item]
+
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(9, 0),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 0
+
+    def test_ignores_regular_slots_without_time_range(self, provider: WaldenGolfProvider) -> None:
+        """Test that regular time slots (not events) are ignored."""
+        mock_search_context = MagicMock()
+
+        mock_slot_item = MagicMock()
+        # Regular slot shows single time, not a range
+        mock_slot_item.text.strip.return_value = "08:58 AM Reserve"
+
+        mock_search_context.find_elements.return_value = [mock_slot_item]
+
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(9, 0),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 0
+
+    def test_handles_empty_search_context(self, provider: WaldenGolfProvider) -> None:
+        """Test handling empty search context gracefully."""
+        mock_search_context = MagicMock()
+        mock_search_context.find_elements.return_value = []
+
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(9, 0),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 0
+
+    def test_handles_midnight_spanning_event_morning_target(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that events spanning midnight are detected for morning bookings."""
+        mock_search_context = MagicMock()
+
+        mock_slot_item = MagicMock()
+        # Event from 11pm to 1am spans midnight
+        mock_slot_item.text.strip.return_value = "11:00 PM-01:00 AM Late Night Event"
+
+        mock_search_context.find_elements.return_value = [mock_slot_item]
+
+        # Target time is 12:30 AM - should overlap with event
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(0, 30),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 1
+        assert "Late Night Event" in result[0]
+
+    def test_handles_midnight_spanning_event_evening_target(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Test that events spanning midnight are detected for evening bookings."""
+        mock_search_context = MagicMock()
+
+        mock_slot_item = MagicMock()
+        # Event from 11pm to 1am spans midnight
+        mock_slot_item.text.strip.return_value = "11:00 PM-01:00 AM Late Night Event"
+
+        mock_search_context.find_elements.return_value = [mock_slot_item]
+
+        # Target time is 11:30 PM - should overlap with event
+        result = provider._extract_event_blocks(
+            mock_search_context,
+            target_time=time(23, 30),
+            fallback_window_minutes=32,
+        )
+
+        assert len(result) == 1
+        assert "Late Night Event" in result[0]
+
+
+class TestWaldenProviderFormatEventBlockMessage:
+    """Tests for the _format_event_block_message helper method."""
+
+    def test_returns_none_for_empty_list(self, provider: WaldenGolfProvider) -> None:
+        """Test that None is returned for empty event list."""
+        result = provider._format_event_block_message([])
+        assert result is None
+
+    def test_formats_single_event(self, provider: WaldenGolfProvider) -> None:
+        """Test formatting a single event."""
+        result = provider._format_event_block_message(["Morning Tournament"])
+        assert result == "Time blocked by event: Morning Tournament"
+
+    def test_formats_two_events(self, provider: WaldenGolfProvider) -> None:
+        """Test formatting two events."""
+        result = provider._format_event_block_message(["Event A", "Event B"])
+        assert result == "Times blocked by events: Event A, Event B"
+
+    def test_formats_three_events(self, provider: WaldenGolfProvider) -> None:
+        """Test formatting three events."""
+        result = provider._format_event_block_message(["Event A", "Event B", "Event C"])
+        assert result == "Times blocked by events: Event A, Event B, Event C"
+
+    def test_truncates_more_than_three_events(self, provider: WaldenGolfProvider) -> None:
+        """Test that more than 3 events are truncated."""
+        result = provider._format_event_block_message(
+            ["Event A", "Event B", "Event C", "Event D", "Event E"]
+        )
+        assert result == "Times blocked by events: Event A, Event B, Event C and 2 more"
+
+
+class TestWaldenProviderEnhancedErrorMessages:
+    """Tests for enhanced error messages with event information."""
+
+    def test_error_message_includes_single_event(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that failure message includes single event name."""
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_empty_slots", MagicMock(return_value=[]))
+        monkeypatch.setattr(
+            provider,
+            "_extract_event_blocks",
+            MagicMock(return_value=["Northgate SGA Tournament"]),
+        )
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(9, 0),
+            num_players=4,
+            fallback_window_minutes=32,
+        )
+
+        assert result.success is False
+        assert "Northgate SGA Tournament" in result.error_message
+        assert "Time blocked by event:" in result.error_message
+
+    def test_error_message_includes_multiple_events(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that failure message includes multiple event names."""
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_empty_slots", MagicMock(return_value=[]))
+        monkeypatch.setattr(
+            provider,
+            "_extract_event_blocks",
+            MagicMock(return_value=["Event A", "Event B"]),
+        )
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(9, 0),
+            num_players=4,
+            fallback_window_minutes=32,
+        )
+
+        assert result.success is False
+        assert "Event A" in result.error_message
+        assert "Event B" in result.error_message
+        assert "Times blocked by events:" in result.error_message
+
+    def test_error_message_without_events_has_generic_message(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that failure message is generic when no events found."""
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_empty_slots", MagicMock(return_value=[]))
+        monkeypatch.setattr(provider, "_extract_event_blocks", MagicMock(return_value=[]))
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(9, 0),
+            num_players=4,
+            fallback_window_minutes=32,
+        )
+
+        assert result.success is False
+        assert "No time slots with 4 available spots found" in result.error_message
+        assert "blocked by event" not in result.error_message
+
+    def test_fallback_failure_includes_event_info(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that fallback failure message includes event names."""
+        mock_driver = MagicMock()
+        slot_el = MagicMock()
+
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        # Return slots, but none in the fallback window (outside 8 min of 9:00)
+        monkeypatch.setattr(
+            provider,
+            "_find_empty_slots",
+            MagicMock(return_value=[(time(10, 0), slot_el)]),  # 1 hour away
+        )
+        monkeypatch.setattr(provider, "_is_northgate_slot", lambda *_: True)
+        monkeypatch.setattr(
+            provider,
+            "_extract_event_blocks",
+            MagicMock(return_value=["Member Event"]),
+        )
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(9, 0),
+            num_players=4,
+            fallback_window_minutes=8,
+            tee_time_interval_minutes=8,
+        )
+
+        assert result.success is False
+        assert "Member Event" in result.error_message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
