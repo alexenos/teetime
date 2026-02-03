@@ -193,6 +193,6 @@ class TestMockWaldenProviderConfirmationNumbers:
             await asyncio.sleep(1.0)
 
         # Verify all confirmation numbers are distinct
-        assert len(set(confirmation_numbers)) == 3, (
-            f"Expected 3 distinct confirmation numbers, got: {confirmation_numbers}"
-        )
+        assert (
+            len(set(confirmation_numbers)) == 3
+        ), f"Expected 3 distinct confirmation numbers, got: {confirmation_numbers}"
