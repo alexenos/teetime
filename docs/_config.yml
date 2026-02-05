@@ -1,0 +1,9 @@
+title: TeeTime Bot
+description: Golf tee time reservation assistant via SMS
+theme: minima
+baseurl: "/teetime"
+url: "https://alexenos.github.io"
+
+# Exclude internal docs from the site
+exclude:
+  - cloud-scheduler-setup.md
