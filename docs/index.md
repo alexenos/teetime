@@ -5,7 +5,7 @@ title: TeeTime Bot
 
 # TeeTime Bot
 
-A personal golf assistant that helps you book tee times via SMS.
+A personal golf assistant that helps you book tee times at the Northgate Country Club via SMS.
 
 ## How It Works
 
@@ -28,4 +28,4 @@ A personal golf assistant that helps you book tee times via SMS.
 
 ---
 
-*TeeTime Bot is a personal golf assistant application for authorized users.*
+*TeeTime Bot is a personal golf assistant application for authorized users only.*

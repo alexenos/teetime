@@ -6,7 +6,7 @@ permalink: /privacy/
 
 # Privacy Policy
 
-**Last Updated: February 4, 2026**
+**Last Updated: February 5, 2026**
 
 This Privacy Policy describes how TeeTime Bot ("we," "us," or "our") collects, uses, and protects your information when you use our SMS-based golf tee time reservation service.
 
@@ -64,4 +64,4 @@ We may update this Privacy Policy from time to time. We will notify you of any m
 
 ---
 
-*TeeTime Bot is a personal golf assistant application for authorized users.*
+*TeeTime Bot is a personal golf assistant application for authorized users only.*
