@@ -16,6 +16,7 @@ from typing import Any
 
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -48,7 +49,7 @@ class WaitStrategy:
 
     def wait_for_element(
         self,
-        driver: WebDriver,
+        driver: WebDriver | WebElement,
         locator: tuple[str, str],
         fixed_duration: float,
         timeout: float = 10.0,
@@ -58,7 +59,9 @@ class WaitStrategy:
         Wait for an element based on the configured wait mode.
 
         Args:
-            driver: The WebDriver instance
+            driver: The WebDriver or WebElement instance to search within.
+                    WebDriverWait accepts WebElement at runtime (Selenium #13087)
+                    for scoped searches (e.g., within a modal).
             locator: Tuple of (By.*, selector) for the element
             fixed_duration: Duration to sleep in FIXED mode
             timeout: Maximum wait time for WebDriverWait in EVENT_DRIVEN/HYBRID modes

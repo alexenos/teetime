@@ -216,8 +216,10 @@ class BookingModalSelectors:
     """
 
     # Modal/dialog container (wait for any of these after clicking Reserve)
+    # Narrowed to PrimeFaces-specific selectors to avoid false positives
     modal_container: str = (
-        ".modal, .dialog, [class*='popup'], form[class*='booking'], [class*='confirm']"
+        ".ui-dialog, .ui-overlay-panel, [class*='booking-dialog'], "
+        "form[class*='booking'], [class*='confirm']"
     )
 
 
@@ -325,10 +327,8 @@ class BookingCompletionSelectors:
 
     # Book Now button by ID (preferred, most specific)
     book_now_by_id: str = "a[id*='bookTeeTimeAction']"
-    # Book Now button wait selector (includes text-based fallback)
-    book_now_wait: str = (
-        "a[id*='bookTeeTimeAction'], a:contains('Book Now'), button:contains('Book')"
-    )
+    # Book Now button wait selector (ID-based only; text matching uses XPath fallbacks)
+    book_now_wait: str = "a[id*='bookTeeTimeAction']"
     # Book Now button XPath fallbacks
     book_now_xpaths: tuple[str, ...] = (
         "//a[contains(., 'Book Now')]",

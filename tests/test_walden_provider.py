@@ -1129,7 +1129,7 @@ class TestPlayerCountModalScoping:
 
         # Make the WebDriverWait return values for each .until() call:
         # 1. element_to_be_clickable (reserve button check)
-        # 2. presence_of_element_located (modal detection)
+        # 2. visibility_of_element_located (modal detection)
         # 3+ any remaining calls (Book Now wait, url_changes, success indicators, etc.)
         with patch("app.providers.walden_provider.WebDriverWait") as mock_wait_cls:
             mock_wait_instance = MagicMock()

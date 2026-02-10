@@ -23,6 +23,7 @@ from selenium.common.exceptions import (
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
@@ -3440,10 +3441,10 @@ class WaldenGolfProvider(ReservationProvider):
             # on the underlying tee sheet page (e.g., the time period filter's
             # .ui-selectonebutton matching instead of the player count buttons).
             # See Issue #105.
-            booking_context = driver  # default: full page
+            booking_context: webdriver.Chrome | WebElement = driver  # default: full page
             try:
                 modal_element = wait.until(
-                    expected_conditions.presence_of_element_located(
+                    expected_conditions.visibility_of_element_located(
                         (By.CSS_SELECTOR, DOM.BOOKING_MODAL.modal_container)
                     )
                 )
