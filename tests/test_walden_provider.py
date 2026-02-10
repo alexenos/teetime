@@ -1019,5 +1019,165 @@ class TestWaldenProviderDateSelectionFailure:
                             assert result.success is True
 
 
+class TestWaldenDOMSchema:
+    """Tests for the centralized DOM schema module."""
+
+    def test_schema_imports(self) -> None:
+        """Test that the DOM schema can be imported and has expected structure."""
+        from app.providers.walden_dom_schema import DOM
+
+        assert isinstance(DOM.PLAYER_COUNT.button_group, tuple)
+        assert len(DOM.PLAYER_COUNT.button_group) == 3
+        assert DOM.LOGIN.submit_button == 'button[type="submit"]'
+        assert ".ui-selectonebutton" in DOM.PLAYER_COUNT.button_group
+
+    def test_schema_is_frozen(self) -> None:
+        """Test that schema instances are immutable (frozen dataclasses)."""
+        import dataclasses
+
+        from app.providers.walden_dom_schema import DOM
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            DOM.PLAYER_COUNT.disabled_class = "something-else"
+
+    def test_player_count_selectors_documented(self) -> None:
+        """Test that PlayerCountSelectors docstring warns about modal scoping."""
+        from app.providers.walden_dom_schema import PlayerCountSelectors
+
+        assert "modal" in PlayerCountSelectors.__doc__.lower()
+        assert "Issue #105" in PlayerCountSelectors.__doc__
+
+    def test_fallback_chains_are_tuples(self) -> None:
+        """Test that fallback chains use tuples (immutable, ordered)."""
+        from app.providers.walden_dom_schema import DOM
+
+        assert isinstance(DOM.PLAYER_COUNT.dropdown_fallbacks, tuple)
+        assert isinstance(DOM.DATE_SELECTION.nav_next, tuple)
+        assert isinstance(DOM.DATE_SELECTION.nav_prev, tuple)
+        assert isinstance(DOM.ERROR_MESSAGES.containers, tuple)
+        assert isinstance(DOM.CANCELLATION.confirm_css, tuple)
+        assert isinstance(DOM.CANCELLATION.confirm_xpaths, tuple)
+        assert isinstance(DOM.SLOT_DISCOVERY.reserve_buttons, tuple)
+
+
+class TestPlayerCountModalScoping:
+    """Tests for Issue #105 fix: player count selection scoped to booking modal."""
+
+    def test_select_player_count_uses_search_context(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """When search_context is provided, find_element is called on it, not driver."""
+        mock_driver = MagicMock()
+        mock_modal = MagicMock()
+
+        # Set up the mock modal to return a button group with a valid radio input
+        mock_button_group = MagicMock()
+        mock_radio = MagicMock()
+        mock_button_div = MagicMock()
+        mock_button_div.get_attribute.return_value = "ui-button"
+
+        # Make the modal find the button group with the first selector
+        mock_modal.find_element.return_value = mock_button_group
+        mock_button_group.find_element.side_effect = [
+            mock_radio,  # radio input
+            mock_button_div,  # parent div (XPATH call)
+        ]
+
+        # Mock wait_strategy to be a no-op
+        provider.wait_strategy = MagicMock()
+
+        # Mock _verify_player_rows_appeared to return True
+        with patch.object(provider, "_verify_player_rows_appeared", return_value=True):
+            result = provider._select_player_count_sync(
+                mock_driver, 4, search_context=mock_modal
+            )
+
+        assert result is True
+        # The critical assertion: find_element was called on the MODAL, not the driver
+        mock_modal.find_element.assert_called()
+        # execute_script should still use driver (not modal)
+        mock_driver.execute_script.assert_called()
+
+    def test_select_player_count_defaults_to_driver(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """When no search_context is provided, defaults to using driver."""
+        mock_driver = MagicMock()
+
+        # Set up the mock driver to return a button group with a valid radio input
+        mock_button_group = MagicMock()
+        mock_radio = MagicMock()
+        mock_button_div = MagicMock()
+        mock_button_div.get_attribute.return_value = "ui-button"
+
+        mock_driver.find_element.return_value = mock_button_group
+        mock_button_group.find_element.side_effect = [
+            mock_radio,  # radio input
+            mock_button_div,  # parent div
+        ]
+
+        provider.wait_strategy = MagicMock()
+
+        with patch.object(provider, "_verify_player_rows_appeared", return_value=True):
+            result = provider._select_player_count_sync(mock_driver, 4)
+
+        assert result is True
+        # find_element called on the driver (default search_context)
+        mock_driver.find_element.assert_called()
+
+    def test_complete_booking_passes_modal_as_context(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """_complete_booking_sync captures modal element and passes it to player count selection."""
+        mock_driver = MagicMock()
+        mock_reserve_element = MagicMock()
+        mock_modal = MagicMock()
+        mock_confirm_button = MagicMock()
+        mock_confirm_button.text = "Book Now"
+
+        # Make the WebDriverWait return values for each .until() call:
+        # 1. element_to_be_clickable (reserve button check)
+        # 2. presence_of_element_located (modal detection)
+        # 3+ any remaining calls (Book Now wait, url_changes, success indicators, etc.)
+        with patch(
+            "app.providers.walden_provider.WebDriverWait"
+        ) as mock_wait_cls:
+            mock_wait_instance = MagicMock()
+            mock_wait_cls.return_value = mock_wait_instance
+            # Use a default return for .until() but make the second call return the modal
+            call_count = [0]
+
+            def until_side_effect(*args, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return mock_reserve_element  # clickable check
+                elif call_count[0] == 2:
+                    return mock_modal  # modal detection
+                else:
+                    return mock_confirm_button  # all subsequent calls
+
+            mock_wait_instance.until.side_effect = until_side_effect
+
+            # Mock _select_player_count_sync to capture args and short-circuit
+            with patch.object(
+                provider, "_select_player_count_sync", return_value=False
+            ) as mock_select:
+                provider.wait_strategy = MagicMock()
+                # Also mock _capture_diagnostic_info to avoid side effects
+                with patch.object(provider, "_capture_diagnostic_info"):
+                    result = provider._complete_booking_sync(
+                        mock_driver, mock_reserve_element, time(8, 26), 4
+                    )
+
+                # Player count selection was called (it returns False, so booking fails)
+                assert result.success is False
+                assert "Failed to select 4 players" in result.error_message
+
+                # The critical assertion: search_context was passed as the modal element
+                mock_select.assert_called_once()
+                call_kwargs = mock_select.call_args
+                assert call_kwargs.kwargs.get("search_context") is mock_modal
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

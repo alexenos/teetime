@@ -35,6 +35,7 @@ from app.providers.base import (
     BookingResult,
     ReservationProvider,
 )
+from app.providers.walden_dom_schema import DOM
 from app.providers.wait_helper import WaitStrategy
 
 logger = logging.getLogger(__name__)
@@ -218,12 +219,12 @@ class WaldenGolfProvider(ReservationProvider):
             wait = WebDriverWait(driver, 15)
             member_input = wait.until(
                 expected_conditions.presence_of_element_located(
-                    (By.NAME, "_com_liferay_login_web_portlet_LoginPortlet_login")
+                    (By.NAME, DOM.LOGIN.member_input_name)
                 )
             )
 
             password_input = driver.find_element(
-                By.NAME, "_com_liferay_login_web_portlet_LoginPortlet_password"
+                By.NAME, DOM.LOGIN.password_input_name
             )
 
             logger.info("Entering credentials...")
@@ -233,7 +234,7 @@ class WaldenGolfProvider(ReservationProvider):
             password_input.clear()
             password_input.send_keys(settings.walden_password)
 
-            submit_button = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+            submit_button = driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button)
             current_url = driver.current_url
             submit_button.click()
 
@@ -367,7 +368,7 @@ class WaldenGolfProvider(ReservationProvider):
                 expected_conditions.presence_of_element_located(
                     (
                         By.CSS_SELECTOR,
-                        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                        DOM.SLOT_DISCOVERY.page_loaded,
                     )
                 )
             )
@@ -592,7 +593,7 @@ class WaldenGolfProvider(ReservationProvider):
                 expected_conditions.presence_of_element_located(
                     (
                         By.CSS_SELECTOR,
-                        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                        DOM.SLOT_DISCOVERY.page_loaded,
                     )
                 )
             )
@@ -699,7 +700,7 @@ class WaldenGolfProvider(ReservationProvider):
                             expected_conditions.presence_of_element_located(
                                 (
                                     By.CSS_SELECTOR,
-                                    ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                                    DOM.SLOT_DISCOVERY.page_loaded,
                                 )
                             )
                         )
@@ -1021,19 +1022,7 @@ class WaldenGolfProvider(ReservationProvider):
 
     def _extract_booking_error_message(self, driver: webdriver.Chrome) -> str | None:
         """Extract user-visible booking error text from common alert/message containers."""
-        selectors = [
-            ".ui-messages-error",
-            ".ui-message-error",
-            ".ui-growl-message-error",
-            ".error",
-            ".errors",
-            "[class*='error']",
-            ".alert",
-            ".alert-danger",
-            "[role='alert']",
-            "[aria-live='assertive']",
-            "[aria-live='polite']",
-        ]
+        selectors = DOM.ERROR_MESSAGES.containers
 
         try:
             messages: list[str] = []
@@ -1366,8 +1355,7 @@ class WaldenGolfProvider(ReservationProvider):
                                     expected_conditions.presence_of_element_located(
                                         (
                                             By.CSS_SELECTOR,
-                                            ".custom-free-slot-span, .teetime-row, [class*='tee-time'], "
-                                            "li.ui-datascroller-item",
+                                            DOM.DATE_SELECTION.tee_time_presence,
                                         )
                                     )
                                 )
@@ -1703,28 +1691,44 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info("BOOKING_DEBUG: No day tabs found on page")
             return False
 
-    def _select_player_count_sync(self, driver: webdriver.Chrome, num_players: int) -> bool:
+    def _select_player_count_sync(
+        self,
+        driver: webdriver.Chrome,
+        num_players: int,
+        search_context: Any = None,
+    ) -> bool:
         """
         Select the number of players in the booking dialog.
 
         The player count selector on Walden Golf is a button group (ui-selectonebutton)
         with buttons for 1, 2, 3, 4 players. This method clicks the appropriate button.
 
+        IMPORTANT: search_context should be the booking modal element when available,
+        NOT the full page driver. The generic .ui-selectonebutton class is shared by
+        the time period filter on the main page (values 0-3) and the player count
+        button group in the modal (values 1-4). Searching the full page matches the
+        wrong element. See Issue #105.
+
         Args:
-            driver: The WebDriver instance
+            driver: The WebDriver instance (needed for execute_script calls)
             num_players: Number of players (1-4)
+            search_context: Element to search within (modal element or driver).
+                           Defaults to driver if not provided.
 
         Returns:
             True if player count was successfully selected, False otherwise
         """
+        if search_context is None:
+            search_context = driver
+
         try:
             logger.debug(
                 f"BOOKING_DEBUG: Starting player count selection for {num_players} players"
             )
-            # Wait for the player count button group to appear
+            # Wait for the player count button group to appear within the search context
             self.wait_strategy.wait_for_element(
-                driver,
-                (By.CSS_SELECTOR, ".reservation-players, .ui-selectonebutton"),
+                search_context,
+                (By.CSS_SELECTOR, ", ".join(DOM.PLAYER_COUNT.button_group)),
                 fixed_duration=1.0,
                 timeout=5.0,
             )
@@ -1733,17 +1737,11 @@ class WaldenGolfProvider(ReservationProvider):
             # Each button contains a radio input with value 1, 2, 3, or 4
             # The button div has class "ui-button" and we need to click the one with the correct value
 
-            # First try to find the button group
-            button_group_selectors = [
-                ".reservation-players",
-                ".ui-selectonebutton",
-                "[class*='players-sel']",
-            ]
-
+            # First try to find the button group (scoped to search_context)
             button_group = None
-            for selector in button_group_selectors:
+            for selector in DOM.PLAYER_COUNT.button_group:
                 try:
-                    button_group = driver.find_element(By.CSS_SELECTOR, selector)
+                    button_group = search_context.find_element(By.CSS_SELECTOR, selector)
                     logger.info(
                         f"BOOKING_DEBUG: Found player button group with selector: {selector}"
                     )
@@ -1758,23 +1756,26 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     # Find the radio input with the correct value
                     radio_input = button_group.find_element(
-                        By.CSS_SELECTOR, f"input[type='radio'][value='{num_players}']"
+                        By.CSS_SELECTOR,
+                        DOM.PLAYER_COUNT.radio_input_template.format(value=num_players),
                     )
                     # Get the parent div (the clickable button)
-                    button_div = radio_input.find_element(By.XPATH, "./..")
+                    button_div = radio_input.find_element(
+                        By.XPATH, DOM.PLAYER_COUNT.button_parent_xpath
+                    )
 
                     # Check if the button is disabled
                     button_classes = button_div.get_attribute("class") or ""
                     logger.info(
                         f"BOOKING_DEBUG: Player {num_players} button classes: {button_classes}"
                     )
-                    if "ui-state-disabled" in button_classes:
+                    if DOM.PLAYER_COUNT.disabled_class in button_classes:
                         logger.error(
                             f"BOOKING_DEBUG: Player count {num_players} button is disabled"
                         )
                         return False
 
-                    # Click the button
+                    # Click the button (execute_script requires the driver, not search_context)
                     driver.execute_script("arguments[0].click();", button_div)
                     logger.info(
                         f"BOOKING_DEBUG: Clicked player count button for {num_players} players"
@@ -1799,7 +1800,7 @@ class WaldenGolfProvider(ReservationProvider):
                 # without a visible/usable radio input. In that case, click the button by label.
                 try:
                     candidate_buttons = button_group.find_elements(
-                        By.CSS_SELECTOR, ".ui-button, button, a, span"
+                        By.CSS_SELECTOR, DOM.PLAYER_COUNT.candidate_buttons
                     )
                     for candidate in candidate_buttons:
                         try:
@@ -1811,7 +1812,7 @@ class WaldenGolfProvider(ReservationProvider):
                             logger.info(
                                 f"BOOKING_DEBUG: Player {num_players} button classes: {candidate_classes}"
                             )
-                            if "ui-state-disabled" in candidate_classes:
+                            if DOM.PLAYER_COUNT.disabled_class in candidate_classes:
                                 logger.error(
                                     f"BOOKING_DEBUG: Player count {num_players} button is disabled"
                                 )
@@ -1846,19 +1847,10 @@ class WaldenGolfProvider(ReservationProvider):
                 except Exception:
                     pass
 
-            # Fallback: try dropdown selectors
-            player_selectors = [
-                "select[id*='player']",
-                "select[id*='golfer']",
-                "select[name*='player']",
-                "select[name*='golfer']",
-                "select[id*='numPlayers']",
-                "select[id*='numberOfPlayers']",
-            ]
-
-            for selector in player_selectors:
+            # Fallback: try dropdown selectors (scoped to search_context)
+            for selector in DOM.PLAYER_COUNT.dropdown_fallbacks:
                 try:
-                    player_select = driver.find_element(By.CSS_SELECTOR, selector)
+                    player_select = search_context.find_element(By.CSS_SELECTOR, selector)
                     select = Select(player_select)
                     select.select_by_value(str(num_players))
                     logger.info(f"Selected {num_players} players using selector: {selector}")
@@ -1899,20 +1891,12 @@ class WaldenGolfProvider(ReservationProvider):
         # Wait a bit for the DOM to update after player count selection
         self.wait_strategy.wait_for_element(
             driver,
-            (By.CSS_SELECTOR, "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"),
+            (By.CSS_SELECTOR, DOM.PLAYER_COUNT.player_rows_wait),
             fixed_duration=2.0,
             timeout=5.0,
         )
 
-        row_selectors = [
-            "[id*='playersTable'] tbody tr[data-ri]",
-            "[id*='player'] tbody tr[data-ri]",
-            "table[id*='player'] tbody tr",
-            ".player-row",
-            "[class*='player-row']",
-        ]
-
-        for selector in row_selectors:
+        for selector in DOM.PLAYER_COUNT.player_rows:
             try:
                 player_rows = driver.find_elements(By.CSS_SELECTOR, selector)
                 if len(player_rows) >= expected_players:
@@ -1949,7 +1933,10 @@ class WaldenGolfProvider(ReservationProvider):
         return False
 
     def _add_tbd_registered_guests_sync(
-        self, driver: webdriver.Chrome, num_tbd_guests: int
+        self,
+        driver: webdriver.Chrome,
+        num_tbd_guests: int,
+        search_context: Any = None,
     ) -> bool:
         """
         Add TBD Registered Guests for additional player slots.
@@ -1963,20 +1950,25 @@ class WaldenGolfProvider(ReservationProvider):
         stale element reference errors.
 
         Args:
-            driver: The WebDriver instance
+            driver: The WebDriver instance (needed for execute_script calls)
             num_tbd_guests: Number of TBD guests to add (1-3)
+            search_context: Element to search within (modal element or driver).
+                           Defaults to driver if not provided.
 
         Returns:
             True if TBD guests were successfully added, False otherwise
         """
+        if search_context is None:
+            search_context = driver
+
         try:
             logger.info(
                 f"BOOKING_DEBUG: Starting TBD guest registration for {num_tbd_guests} guests"
             )
             # Wait for the player table to update after selecting player count
             self.wait_strategy.wait_for_element(
-                driver,
-                (By.CSS_SELECTOR, "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"),
+                search_context,
+                (By.CSS_SELECTOR, DOM.TBD_GUESTS.player_rows_wait),
                 fixed_duration=2.0,
                 timeout=5.0,
             )
@@ -1994,17 +1986,8 @@ class WaldenGolfProvider(ReservationProvider):
                 # Re-find player rows each iteration to avoid stale references
                 # Try multiple selectors for player rows as the DOM structure may vary
                 player_rows = []
-                row_selectors = [
-                    "[id*='playersTable'] tbody tr[data-ri]",
-                    "[id*='player'] tbody tr[data-ri]",
-                    "table[id*='player'] tbody tr",
-                    ".player-row",
-                    "[class*='player-row']",
-                    "form table tbody tr",
-                ]
-
-                for row_selector in row_selectors:
-                    player_rows = driver.find_elements(By.CSS_SELECTOR, row_selector)
+                for row_selector in DOM.TBD_GUESTS.player_rows:
+                    player_rows = search_context.find_elements(By.CSS_SELECTOR, row_selector)
                     if len(player_rows) > 1:  # Need at least 2 rows (primary + guests)
                         logger.info(
                             f"BOOKING_DEBUG: Found {len(player_rows)} player rows using: {row_selector}"
@@ -2219,7 +2202,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         northgate_section = None
         try:
-            sections = driver.find_elements(By.CSS_SELECTOR, ".course-section, [class*='course']")
+            sections = driver.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.course_section)
             for section in sections:
                 if self.NORTHGATE_COURSE_NAME.lower() in section.text.lower():
                     northgate_section = section
@@ -2451,7 +2434,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         for attempt in range(max_scroll_attempts):
             try:
-                slot_items = driver.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+                slot_items = driver.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items)
                 current_item_count = len(slot_items)
 
                 if current_item_count == previous_item_count:
@@ -2494,7 +2477,7 @@ class WaldenGolfProvider(ReservationProvider):
                     self.wait_strategy.simple_wait(fixed_duration=0.3, event_driven_duration=0.1)
 
                     datascroller = driver.find_elements(
-                        By.CSS_SELECTOR, ".ui-datascroller-content, .ui-datascroller-list"
+                        By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.datascroller_content
                     )
                     if datascroller:
                         driver.execute_script(
@@ -2546,7 +2529,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         try:
             # Find all time slot list items
-            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items)
 
             logger.info(f"Found {len(slot_items)} time slot items")
 
@@ -2554,7 +2537,7 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     # First check for completely empty slots (class="Empty" with reserve_button)
                     # These have all MAX_PLAYERS spots available
-                    empty_divs = slot_item.find_elements(By.CSS_SELECTOR, "div.Empty")
+                    empty_divs = slot_item.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.empty_slot)
 
                     if empty_divs:
                         # This is a completely empty slot - all MAX_PLAYERS spots available
@@ -2563,17 +2546,16 @@ class WaldenGolfProvider(ReservationProvider):
                             if slot_time:
                                 # Find the reserve button or the Available link
                                 reserve_btn = None
-                                try:
-                                    reserve_btn = slot_item.find_element(
-                                        By.CSS_SELECTOR, "a[id*='reserve_button']"
-                                    )
-                                except NoSuchElementException:
+                                for btn_sel in DOM.SLOT_DISCOVERY.reserve_buttons:
                                     try:
                                         reserve_btn = slot_item.find_element(
-                                            By.CSS_SELECTOR, "a.slot-link"
+                                            By.CSS_SELECTOR, btn_sel
                                         )
+                                        break
                                     except NoSuchElementException:
-                                        reserve_btn = slot_item
+                                        continue
+                                if reserve_btn is None:
+                                    reserve_btn = slot_item
 
                                 empty_slots.append((slot_time, reserve_btn))
                                 completely_empty_count += 1
@@ -2584,7 +2566,7 @@ class WaldenGolfProvider(ReservationProvider):
 
                     # Check for partially filled slots (class="Reserved" with Available spans)
                     available_spans = slot_item.find_elements(
-                        By.CSS_SELECTOR, "span.custom-free-slot-span"
+                        By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.available_span
                     )
                     num_available = len(available_spans)
 
@@ -2675,7 +2657,7 @@ class WaldenGolfProvider(ReservationProvider):
             The slot item element if found, None otherwise
         """
         try:
-            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items)
             for slot_item in slot_items:
                 slot_time = self._extract_time_from_slot_item(slot_item)
                 if slot_time and slot_time == target_time:
@@ -2758,7 +2740,7 @@ class WaldenGolfProvider(ReservationProvider):
                         # Check for course name in nearby header/label elements
                         try:
                             headers = parent.find_elements(
-                                By.CSS_SELECTOR, "h1, h2, h3, h4, .course-name, .course-header"
+                                By.CSS_SELECTOR, DOM.COURSE_FILTERING.course_name_headers
                             )
                             for header in headers:
                                 header_text = header.text.lower()
@@ -2861,7 +2843,7 @@ class WaldenGolfProvider(ReservationProvider):
         """
         bookers: list[str] = []
         try:
-            reserved_divs = slot_item.find_elements(By.CSS_SELECTOR, "div.Reserved")
+            reserved_divs = slot_item.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.reserved_slot)
             for div in reserved_divs:
                 div_text = div.text.strip()
                 if div_text and "Available" not in div_text:
@@ -2914,7 +2896,7 @@ class WaldenGolfProvider(ReservationProvider):
         available_slots: list[tuple[time, Any]] = []
 
         available_spans = search_context.find_elements(
-            By.CSS_SELECTOR, "span.custom-free-slot-span"
+            By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.available_span
         )
 
         if available_spans:
@@ -2934,7 +2916,7 @@ class WaldenGolfProvider(ReservationProvider):
                         try:
                             # Look for the Available link inside the span
                             clickable_element = span.find_element(
-                                By.CSS_SELECTOR, "a.custom-free-slot-link"
+                                By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.available_link
                             )
                         except NoSuchElementException:
                             try:
@@ -3340,21 +3322,31 @@ class WaldenGolfProvider(ReservationProvider):
             driver.execute_script("arguments[0].click();", reserve_element)
             logger.debug("BOOKING_DEBUG: Clicked Reserve button")
 
+            # Attempt to detect the booking modal/dialog. If found, scope all
+            # subsequent element searches to the modal to avoid matching elements
+            # on the underlying tee sheet page (e.g., the time period filter's
+            # .ui-selectonebutton matching instead of the player count buttons).
+            # See Issue #105.
+            booking_context = driver  # default: full page
             try:
-                wait.until(
+                modal_element = wait.until(
                     expected_conditions.presence_of_element_located(
-                        (
-                            By.CSS_SELECTOR,
-                            ".modal, .dialog, [class*='popup'], form[class*='booking'], [class*='confirm']",
-                        )
+                        (By.CSS_SELECTOR, DOM.BOOKING_MODAL.modal_container)
                     )
                 )
-                logger.debug("BOOKING_DEBUG: Booking dialog/modal appeared")
+                booking_context = modal_element
+                logger.debug(
+                    "BOOKING_DEBUG: Booking dialog/modal appeared, scoping searches to modal"
+                )
             except TimeoutException:
-                logger.debug("BOOKING_DEBUG: No modal detected, continuing with page")
+                logger.debug(
+                    "BOOKING_DEBUG: No modal detected, using full page as search context"
+                )
 
             logger.debug(f"BOOKING_DEBUG: Selecting player count: {num_players}")
-            if not self._select_player_count_sync(driver, num_players):
+            if not self._select_player_count_sync(
+                driver, num_players, search_context=booking_context
+            ):
                 logger.error(f"BOOKING_DEBUG: Failed to select {num_players} players")
                 self._capture_diagnostic_info(driver, "player_count_selection_failed")
                 return BookingResult(
@@ -3368,7 +3360,9 @@ class WaldenGolfProvider(ReservationProvider):
             if num_players > 1:
                 num_tbd_guests = num_players - 1
                 logger.debug(f"BOOKING_DEBUG: Adding {num_tbd_guests} TBD Registered Guests")
-                if not self._add_tbd_registered_guests_sync(driver, num_tbd_guests):
+                if not self._add_tbd_registered_guests_sync(
+                    driver, num_tbd_guests, search_context=booking_context
+                ):
                     logger.error(f"BOOKING_DEBUG: Failed to add {num_tbd_guests} TBD guests")
                     self._capture_diagnostic_info(driver, "tbd_guest_registration_failed")
                     return BookingResult(
@@ -3385,7 +3379,7 @@ class WaldenGolfProvider(ReservationProvider):
                     driver,
                     (
                         By.CSS_SELECTOR,
-                        "a[id*='bookTeeTimeAction'], a:contains('Book Now'), button:contains('Book')",
+                        DOM.BOOKING_COMPLETION.book_now_wait,
                     ),
                     fixed_duration=2.0,
                     timeout=10.0,
@@ -3399,9 +3393,9 @@ class WaldenGolfProvider(ReservationProvider):
                 # Try to find by ID first (most reliable), then by text content
                 confirm_button = None
                 try:
-                    # First try to find by ID (most specific)
-                    confirm_button = driver.find_element(
-                        By.CSS_SELECTOR, "a[id*='bookTeeTimeAction']"
+                    # First try to find by ID (most specific), scoped to booking context
+                    confirm_button = booking_context.find_element(
+                        By.CSS_SELECTOR, DOM.BOOKING_COMPLETION.book_now_by_id
                     )
                     logger.debug("BOOKING_DEBUG: Found Book Now button by ID")
                 except NoSuchElementException:
@@ -3411,12 +3405,7 @@ class WaldenGolfProvider(ReservationProvider):
                         expected_conditions.element_to_be_clickable(
                             (
                                 By.XPATH,
-                                "//a[contains(., 'Book Now')] | "
-                                "//a[contains(., 'Book')] | "
-                                "//button[contains(., 'Confirm')] | "
-                                "//button[contains(., 'Submit')] | "
-                                "//button[contains(., 'Book')] | "
-                                "//input[@type='submit']",
+                                " | ".join(DOM.BOOKING_COMPLETION.book_now_xpaths),
                             )
                         )
                     )
@@ -3635,7 +3624,7 @@ class WaldenGolfProvider(ReservationProvider):
                 expected_conditions.presence_of_element_located(
                     (
                         By.CSS_SELECTOR,
-                        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form",
+                        DOM.SLOT_DISCOVERY.page_loaded,
                     )
                 )
             )
@@ -3697,7 +3686,7 @@ class WaldenGolfProvider(ReservationProvider):
                     wait = WebDriverWait(driver, 15)
                     wait.until(
                         expected_conditions.presence_of_element_located(
-                            (By.CSS_SELECTOR, "form, .reservations, [class*='reservation']")
+                            (By.CSS_SELECTOR, DOM.CANCELLATION.dashboard_presence)
                         )
                     )
 
@@ -3769,7 +3758,7 @@ class WaldenGolfProvider(ReservationProvider):
             reservations_form = None
             try:
                 reservations_form = driver.find_element(
-                    By.CSS_SELECTOR, "form[name*='memberReservations']"
+                    By.CSS_SELECTOR, DOM.CANCELLATION.reservations_form
                 )
                 logger.info("Found reservations form, scoping search to it")
             except NoSuchElementException:
@@ -3819,10 +3808,7 @@ class WaldenGolfProvider(ReservationProvider):
                         try:
                             cancel_link = row.find_element(
                                 By.CSS_SELECTOR,
-                                "a[aria-label='Cancel Reservation'], "
-                                "a[title='Cancel Reservation'], "
-                                "a[class*='cancel'], "
-                                "button[class*='cancel']",
+                                DOM.CANCELLATION.cancel_link,
                             )
                         except NoSuchElementException:
                             cancel_links = row.find_elements(By.TAG_NAME, "a")
@@ -3886,15 +3872,7 @@ class WaldenGolfProvider(ReservationProvider):
             except Exception:
                 pass
 
-            css_selectors = [
-                "button[class*='confirm']",
-                "button[class*='yes']",
-                "input[type='submit'][value*='Yes']",
-                "input[type='submit'][value*='Confirm']",
-                ".modal button[class*='primary']",
-            ]
-
-            for selector in css_selectors:
+            for selector in DOM.CANCELLATION.confirm_css:
                 try:
                     confirm_btn = driver.find_element(By.CSS_SELECTOR, selector)
                     if confirm_btn.is_displayed():
@@ -3905,16 +3883,7 @@ class WaldenGolfProvider(ReservationProvider):
                 except NoSuchElementException:
                     continue
 
-            xpath_selectors = [
-                "//button[contains(text(), 'Yes')]",
-                "//button[contains(text(), 'Confirm')]",
-                "//button[contains(text(), 'OK')]",
-                "//a[contains(text(), 'Yes')]",
-                "//a[contains(text(), 'Confirm')]",
-                "//*[contains(@class, 'ui-dialog')]//button[contains(text(), 'Yes')]",
-            ]
-
-            for xpath in xpath_selectors:
+            for xpath in DOM.CANCELLATION.confirm_xpaths:
                 try:
                     confirm_btn = driver.find_element(By.XPATH, xpath)
                     if confirm_btn.is_displayed():
@@ -3959,7 +3928,7 @@ class WaldenGolfProvider(ReservationProvider):
         reservations_text = ""
         try:
             reservations_form = driver.find_element(
-                By.CSS_SELECTOR, "form[name*='memberReservations']"
+                By.CSS_SELECTOR, DOM.CANCELLATION.reservations_form
             )
             reservations_text = reservations_form.text.lower()
             logger.info("Scoped verification to reservations form")
@@ -4004,7 +3973,7 @@ class WaldenGolfProvider(ReservationProvider):
         if target_date and target_time:
             try:
                 reservations_form = driver.find_element(
-                    By.CSS_SELECTOR, "form[name*='memberReservations']"
+                    By.CSS_SELECTOR, DOM.CANCELLATION.reservations_form
                 )
                 rows = reservations_form.find_elements(By.CSS_SELECTOR, "table tbody tr")
 
