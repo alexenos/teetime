@@ -283,9 +283,9 @@ class TestCourseIdentificationFromFixtures:
                 assert is_northgate_slot(btn_id), f"Northgate button not identified: {btn_id}"
                 northgate_count += 1
             elif "teeTimeCourses:1" in btn_id:
-                assert not is_northgate_slot(btn_id), (
-                    f"Walden button wrongly identified as Northgate: {btn_id}"
-                )
+                assert not is_northgate_slot(
+                    btn_id
+                ), f"Walden button wrongly identified as Northgate: {btn_id}"
                 walden_count += 1
 
         print(f"\nReserve buttons - Northgate: {northgate_count}, Walden: {walden_count}")
@@ -306,14 +306,14 @@ class TestCourseIdentificationFromFixtures:
 
             if course_index == "0":
                 assert is_northgate_slot(div_id), f"Northgate slot not identified: {div_id}"
-                assert not is_walden_slot(div_id), (
-                    f"Northgate slot wrongly identified as Walden: {div_id}"
-                )
+                assert not is_walden_slot(
+                    div_id
+                ), f"Northgate slot wrongly identified as Walden: {div_id}"
                 northgate_count += 1
             elif course_index == "1":
-                assert not is_northgate_slot(div_id), (
-                    f"Walden slot wrongly identified as Northgate: {div_id}"
-                )
+                assert not is_northgate_slot(
+                    div_id
+                ), f"Walden slot wrongly identified as Northgate: {div_id}"
                 assert is_walden_slot(div_id), f"Walden slot not identified: {div_id}"
                 walden_count += 1
             else:
