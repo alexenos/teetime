@@ -35,8 +35,8 @@ from app.providers.base import (
     BookingResult,
     ReservationProvider,
 )
-from app.providers.walden_dom_schema import DOM
 from app.providers.wait_helper import WaitStrategy
+from app.providers.walden_dom_schema import DOM
 
 logger = logging.getLogger(__name__)
 
@@ -228,9 +228,7 @@ class WaldenGolfProvider(ReservationProvider):
                 )
             )
 
-            password_input = driver.find_element(
-                By.NAME, DOM.LOGIN.password_input_name
-            )
+            password_input = driver.find_element(By.NAME, DOM.LOGIN.password_input_name)
 
             logger.info("Entering credentials...")
             member_input.clear()
@@ -2559,7 +2557,9 @@ class WaldenGolfProvider(ReservationProvider):
 
         try:
             # Find all time slot list items
-            slot_items = search_context.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items)
+            slot_items = search_context.find_elements(
+                By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items
+            )
 
             logger.info(f"Found {len(slot_items)} time slot items")
 
@@ -2567,7 +2567,9 @@ class WaldenGolfProvider(ReservationProvider):
                 try:
                     # First check for completely empty slots (class="Empty" with reserve_button)
                     # These have all MAX_PLAYERS spots available
-                    empty_divs = slot_item.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.empty_slot)
+                    empty_divs = slot_item.find_elements(
+                        By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.empty_slot
+                    )
 
                     if empty_divs:
                         # This is a completely empty slot - all MAX_PLAYERS spots available
@@ -2687,7 +2689,9 @@ class WaldenGolfProvider(ReservationProvider):
             The slot item element if found, None otherwise
         """
         try:
-            slot_items = search_context.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items)
+            slot_items = search_context.find_elements(
+                By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items
+            )
             for slot_item in slot_items:
                 slot_time = self._extract_time_from_slot_item(slot_item)
                 if slot_time and slot_time == target_time:
@@ -2812,7 +2816,9 @@ class WaldenGolfProvider(ReservationProvider):
         """
         bookers: list[str] = []
         try:
-            reserved_divs = slot_item.find_elements(By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.reserved_slot)
+            reserved_divs = slot_item.find_elements(
+                By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.reserved_slot
+            )
             for div in reserved_divs:
                 div_text = div.text.strip()
                 if div_text and "Available" not in div_text:
@@ -3446,9 +3452,7 @@ class WaldenGolfProvider(ReservationProvider):
                     "BOOKING_DEBUG: Booking dialog/modal appeared, scoping searches to modal"
                 )
             except TimeoutException:
-                logger.debug(
-                    "BOOKING_DEBUG: No modal detected, using full page as search context"
-                )
+                logger.debug("BOOKING_DEBUG: No modal detected, using full page as search context")
 
             logger.debug(f"BOOKING_DEBUG: Selecting player count: {num_players}")
             if not self._select_player_count_sync(

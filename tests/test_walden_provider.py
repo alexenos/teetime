@@ -1063,9 +1063,7 @@ class TestWaldenDOMSchema:
 class TestPlayerCountModalScoping:
     """Tests for Issue #105 fix: player count selection scoped to booking modal."""
 
-    def test_select_player_count_uses_search_context(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_select_player_count_uses_search_context(self, provider: WaldenGolfProvider) -> None:
         """When search_context is provided, find_element is called on it, not driver."""
         mock_driver = MagicMock()
         mock_modal = MagicMock()
@@ -1088,9 +1086,7 @@ class TestPlayerCountModalScoping:
 
         # Mock _verify_player_rows_appeared to return True
         with patch.object(provider, "_verify_player_rows_appeared", return_value=True):
-            result = provider._select_player_count_sync(
-                mock_driver, 4, search_context=mock_modal
-            )
+            result = provider._select_player_count_sync(mock_driver, 4, search_context=mock_modal)
 
         assert result is True
         # The critical assertion: find_element was called on the MODAL, not the driver
@@ -1098,9 +1094,7 @@ class TestPlayerCountModalScoping:
         # execute_script should still use driver (not modal)
         mock_driver.execute_script.assert_called()
 
-    def test_select_player_count_defaults_to_driver(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_select_player_count_defaults_to_driver(self, provider: WaldenGolfProvider) -> None:
         """When no search_context is provided, defaults to using driver."""
         mock_driver = MagicMock()
 
@@ -1125,9 +1119,7 @@ class TestPlayerCountModalScoping:
         # find_element called on the driver (default search_context)
         mock_driver.find_element.assert_called()
 
-    def test_complete_booking_passes_modal_as_context(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_complete_booking_passes_modal_as_context(self, provider: WaldenGolfProvider) -> None:
         """_complete_booking_sync captures modal element and passes it to player count selection."""
         mock_driver = MagicMock()
         mock_reserve_element = MagicMock()
@@ -1139,9 +1131,7 @@ class TestPlayerCountModalScoping:
         # 1. element_to_be_clickable (reserve button check)
         # 2. presence_of_element_located (modal detection)
         # 3+ any remaining calls (Book Now wait, url_changes, success indicators, etc.)
-        with patch(
-            "app.providers.walden_provider.WebDriverWait"
-        ) as mock_wait_cls:
+        with patch("app.providers.walden_provider.WebDriverWait") as mock_wait_cls:
             mock_wait_instance = MagicMock()
             mock_wait_cls.return_value = mock_wait_instance
             # Use a default return for .until() but make the second call return the modal
@@ -1177,7 +1167,6 @@ class TestPlayerCountModalScoping:
                 mock_select.assert_called_once()
                 call_kwargs = mock_select.call_args
                 assert call_kwargs.kwargs.get("search_context") is mock_modal
-
 
 
 class TestWaldenProviderExtractEventBlocks:

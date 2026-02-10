@@ -91,9 +91,7 @@ class DateSelectionSelectors:
         "[data-date] input",
     )
     # Search/submit button after date entry
-    search_submit: str = (
-        "button[type='submit'], input[type='submit'], button.search, .btn-search"
-    )
+    search_submit: str = "button[type='submit'], input[type='submit'], button.search, .btn-search"
     # Calendar trigger buttons
     calendar_triggers: str = (
         ".calendar-trigger, .datepicker-trigger, [class*='calendar'], "
@@ -162,13 +160,11 @@ class DateSelectionSelectors:
     )
     # Tee time presence indicator (confirms date selection loaded slots)
     tee_time_presence: str = (
-        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], "
-        "li.ui-datascroller-item"
+        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], li.ui-datascroller-item"
     )
     # Day tab selectors (alternative date selection method)
     day_tabs: str = (
-        ".day-tab, [class*='day-tab'], a[href*='day'], [data-day], "
-        ".teetime-day-tab, .nav-tabs a"
+        ".day-tab, [class*='day-tab'], a[href*='day'], [data-day], .teetime-day-tab, .nav-tabs a"
     )
 
 
@@ -194,9 +190,7 @@ class SlotDiscoverySelectors:
     # Reserved slot div (partially booked)
     reserved_slot: str = "div.Reserved"
     # Page loaded indicator (generic - used after navigation)
-    page_loaded: str = (
-        ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form"
-    )
+    page_loaded: str = ".custom-free-slot-span, .teetime-row, [class*='tee-time'], form"
     # Course section container
     course_section: str = ".course-section, [class*='course']"
     # Reserve buttons XPath (table-based layout fallback)
@@ -263,9 +257,7 @@ class PlayerCountSelectors:
         "select[id*='numberOfPlayers']",
     )
     # Player row verification (wait for these after selecting count)
-    player_rows_wait: str = (
-        "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"
-    )
+    player_rows_wait: str = "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"
     # Player row selectors (tried in order for verification)
     player_rows: tuple[str, ...] = (
         "[id*='playersTable'] tbody tr[data-ri]",
@@ -290,9 +282,7 @@ class TBDGuestSelectors:
         "form table tbody tr",
     )
     # Player rows wait selector
-    player_rows_wait: str = (
-        "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"
-    )
+    player_rows_wait: str = "[id*='playersTable'] tbody tr, table[id*='player'] tbody tr"
     # TBD button CSS selectors (tried per row, in order)
     tbd_button_css: tuple[str, ...] = (
         "a[id*='tbd']",
