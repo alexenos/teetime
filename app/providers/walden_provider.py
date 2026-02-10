@@ -120,6 +120,11 @@ class WaldenGolfProvider(ReservationProvider):
     TEE_TIME_INTERVAL_MINUTES = 8
     MAX_PLAYERS = 4  # Maximum players per tee time slot
 
+    # Course index constants for element ID parsing
+    # The Walden Golf website uses teeTimeCourses:0 for Northgate and teeTimeCourses:1 for Walden
+    NORTHGATE_COURSE_INDEX = "0"
+    WALDEN_COURSE_INDEX = "1"
+
     def __init__(self) -> None:
         """
         Initialize the WaldenGolfProvider.
@@ -2226,12 +2231,25 @@ class WaldenGolfProvider(ReservationProvider):
         )
 
         if not slots_with_capacity:
+            # Extract event blocks that may be causing the lack of availability
+            event_blocks = self._extract_event_blocks(
+                search_context, target_time, fallback_window_minutes
+            )
+
+            error_message = (
+                f"No time slots with {num_players} available spots found on this date. "
+                f"All slots are either fully booked or have fewer than {num_players} spots available."
+            )
+
+            event_message = self._format_event_block_message(event_blocks)
+            if event_message:
+                error_message = (
+                    f"No time slots with {num_players} available spots found. {event_message}"
+                )
+
             return BookingResult(
                 success=False,
-                error_message=(
-                    f"No time slots with {num_players} available spots found on this date. "
-                    f"All slots are either fully booked or have fewer than {num_players} spots available."
-                ),
+                error_message=error_message,
             )
 
         min_time_minutes = max(0, target_minutes - fallback_window_minutes)
@@ -2381,13 +2399,25 @@ class WaldenGolfProvider(ReservationProvider):
             return result
         else:
             all_times = [t.strftime("%I:%M %p") for t, _ in eligible_slots[:5]]
+
+            # Extract event blocks that may be blocking the requested time window
+            event_blocks = self._extract_event_blocks(
+                search_context, target_time, fallback_window_minutes
+            )
+
+            error_message = (
+                f"No time slots with {num_players} available spots within "
+                f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
+            )
+
+            event_message = self._format_event_block_message(event_blocks)
+            if event_message:
+                error_message += f". {event_message}"
+
             return BookingResult(
                 success=False,
                 course_name=self.NORTHGATE_COURSE_NAME,
-                error_message=(
-                    f"No time slots with {num_players} available spots within "
-                    f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
-                ),
+                error_message=error_message,
                 alternatives=f"Slots with {num_players}+ spots: {', '.join(all_times)}"
                 if all_times
                 else None,
@@ -2666,165 +2696,104 @@ class WaldenGolfProvider(ReservationProvider):
             logger.debug(f"Error finding slot by time: {e}")
         return None
 
+    def _get_course_index_from_element_id(self, element_id: str) -> str | None:
+        """
+        Extract the course index from an element ID.
+
+        The Walden Golf website uses a consistent naming pattern in element IDs:
+        - teeTimeCourses:0 = Northgate
+        - teeTimeCourses:1 = Walden on Lake Conroe
+
+        Args:
+            element_id: The element's ID attribute
+
+        Returns:
+            The course index ("0" or "1") if found, None otherwise.
+        """
+        match = re.search(r"teeTimeCourses:(\d+)", element_id)
+        if match:
+            return match.group(1)
+        return None
+
     def _is_northgate_slot(
         self, slot_element: Any, walden_course_name: str, strict: bool = True
     ) -> bool:
         """
         Check if a slot element belongs to the Northgate course.
 
-        When the page displays both Northgate and Walden on Lake Conroe courses,
-        this method examines the slot's parent elements and nearby text to determine
-        which course the slot belongs to.
+        This method uses element ID patterns to reliably determine which course
+        a slot belongs to. The Walden Golf website uses consistent IDs:
+        - teeTimeCourses:0 = Northgate
+        - teeTimeCourses:1 = Walden on Lake Conroe
 
-        IMPORTANT: This method now uses a STRICT approach - if we cannot definitively
-        confirm the slot belongs to Northgate, we return False to prevent accidentally
-        booking at the wrong course. This is safer than the previous approach which
-        assumed Northgate when uncertain, which led to Walden bookings.
+        This approach is more reliable than the previous DOM-walking strategy
+        because the course index is embedded directly in element IDs.
 
         Args:
-            slot_element: The slot element (button or container) to check
-            walden_course_name: The name of the other course to filter out (lowercase)
+            slot_element: The slot element (button, link, span, or container) to check
+            walden_course_name: The name of the other course (unused, kept for API compatibility)
+            strict: If True, return False when course cannot be determined.
+                   If False, return True when course cannot be determined.
 
         Returns:
-            If strict=True:
-                True ONLY if the slot is confirmed to belong to Northgate,
-                False if the slot belongs to Walden OR if course cannot be determined.
-            If strict=False:
-                True unless the slot is identified as Walden. Used when we have
-                already scoped search to a Northgate section but still want a
-                safety net against accidental Walden selection.
+            True if the slot belongs to Northgate, False otherwise.
         """
-        found_northgate_indicator = False
-        found_walden_indicator = False
-
         try:
-            # Strategy 1: Check the slot's parent elements for course indicators
-            # Walk up the DOM tree looking for course-related class names or text
+            # Strategy 1: Check the element's own ID for course index
+            element_id = slot_element.get_attribute("id") or ""
+            course_index = self._get_course_index_from_element_id(element_id)
+
+            if course_index is not None:
+                is_northgate = course_index == self.NORTHGATE_COURSE_INDEX
+                logger.debug(
+                    f"COURSE_CHECK: Element ID '{element_id[:80]}...' -> "
+                    f"course index {course_index} -> "
+                    f"{'Northgate' if is_northgate else 'Walden'}"
+                )
+                return is_northgate
+
+            # Strategy 2: Walk up the DOM tree to find a parent with course info
+            # This handles elements like <span> that may not have their own ID
             current = slot_element
             for level in range(10):  # Check up to 10 parent levels
                 try:
                     parent = current.find_element(By.XPATH, "..")
                     if parent:
-                        # Check for course-related classes
-                        parent_class = parent.get_attribute("class") or ""
                         parent_id = parent.get_attribute("id") or ""
+                        course_index = self._get_course_index_from_element_id(parent_id)
 
-                        # If we find a Northgate indicator, mark it
-                        if self.NORTHGATE_COURSE_NAME.lower() in parent_class.lower():
+                        if course_index is not None:
+                            is_northgate = course_index == self.NORTHGATE_COURSE_INDEX
                             logger.debug(
-                                f"COURSE_CHECK: Found Northgate in parent class at level {level}: "
-                                f"'{parent_class}'"
+                                f"COURSE_CHECK: Parent ID at level {level} "
+                                f"'{parent_id[:80]}...' -> course index {course_index} -> "
+                                f"{'Northgate' if is_northgate else 'Walden'}"
                             )
-                            found_northgate_indicator = True
-                        if self.NORTHGATE_COURSE_NAME.lower() in parent_id.lower():
-                            logger.debug(
-                                f"COURSE_CHECK: Found Northgate in parent id at level {level}: "
-                                f"'{parent_id}'"
-                            )
-                            found_northgate_indicator = True
-
-                        # If we find a Walden indicator, mark it
-                        if walden_course_name in parent_class.lower():
-                            logger.debug(
-                                f"COURSE_CHECK: Found Walden in parent class at level {level}: "
-                                f"'{parent_class}'"
-                            )
-                            found_walden_indicator = True
-                        if walden_course_name in parent_id.lower():
-                            logger.debug(
-                                f"COURSE_CHECK: Found Walden in parent id at level {level}: "
-                                f"'{parent_id}'"
-                            )
-                            found_walden_indicator = True
-
-                        # Check for course name in nearby header/label elements
-                        try:
-                            headers = parent.find_elements(
-                                By.CSS_SELECTOR, DOM.COURSE_FILTERING.course_name_headers
-                            )
-                            for header in headers:
-                                header_text = header.text.lower()
-                                if walden_course_name in header_text:
-                                    logger.debug(
-                                        f"COURSE_CHECK: Found Walden in header at level {level}: "
-                                        f"'{header.text}'"
-                                    )
-                                    found_walden_indicator = True
-                                if self.NORTHGATE_COURSE_NAME.lower() in header_text:
-                                    logger.debug(
-                                        f"COURSE_CHECK: Found Northgate in header at level {level}: "
-                                        f"'{header.text}'"
-                                    )
-                                    found_northgate_indicator = True
-                        except Exception:
-                            pass
+                            return is_northgate
 
                         current = parent
                 except Exception:
                     break
 
-            # Strategy 2: Check the slot element's own text and attributes
-            try:
-                slot_text = slot_element.text.lower() if slot_element.text else ""
-                if walden_course_name in slot_text:
-                    logger.debug(f"COURSE_CHECK: Found Walden in slot text: '{slot_element.text}'")
-                    found_walden_indicator = True
-                if self.NORTHGATE_COURSE_NAME.lower() in slot_text:
-                    logger.debug(
-                        f"COURSE_CHECK: Found Northgate in slot text: '{slot_element.text}'"
-                    )
-                    found_northgate_indicator = True
-            except Exception:
-                pass
-
-            # Strategy 3: Check for column-based layout indicators
-            # Some tee sheet layouts use columns for different courses
-            try:
-                # Get the slot's position and check if it's in a known column
-                slot_class = slot_element.get_attribute("class") or ""
-                if "walden" in slot_class.lower() and "northgate" not in slot_class.lower():
-                    logger.debug(f"COURSE_CHECK: Found Walden in slot class: '{slot_class}'")
-                    found_walden_indicator = True
-                if "northgate" in slot_class.lower():
-                    logger.debug(f"COURSE_CHECK: Found Northgate in slot class: '{slot_class}'")
-                    found_northgate_indicator = True
-            except Exception:
-                pass
-
-            # Decision logic: STRICT approach to prevent wrong-course bookings
-            # If we found a Walden indicator, definitely NOT Northgate
-            if found_walden_indicator:
-                logger.info(
-                    "COURSE_CHECK: Slot rejected - found Walden indicator "
-                    f"(also found Northgate: {found_northgate_indicator})"
+            # Strategy 3: Could not determine course from element IDs
+            # This should be rare if the page structure is consistent
+            if strict:
+                logger.warning(
+                    "COURSE_CHECK: Could not determine course from element IDs. "
+                    "Rejecting slot for safety (strict mode)."
                 )
                 return False
-
-            # If we found a Northgate indicator and no Walden indicator, it's Northgate
-            if found_northgate_indicator:
-                logger.debug("COURSE_CHECK: Slot accepted - confirmed Northgate")
-                return True
-
-            if not strict:
+            else:
                 logger.debug(
-                    "COURSE_CHECK: Slot accepted - no Walden indicator found (non-strict mode)"
+                    "COURSE_CHECK: Could not determine course from element IDs. "
+                    "Accepting slot (non-strict mode)."
                 )
                 return True
-
-            # CRITICAL CHANGE: If we couldn't determine the course, return False
-            # This prevents accidentally booking at Walden when course is uncertain
-            # The previous behavior (returning True) led to wrong-course bookings
-            logger.warning(
-                "COURSE_CHECK: Slot rejected - could not confirm course is Northgate. "
-                "This is a safety measure to prevent wrong-course bookings."
-            )
-            return False
 
         except Exception as e:
             logger.warning(
                 f"COURSE_CHECK: Error checking slot course: {e} - rejecting slot for safety"
             )
-            # On error, return False to prevent wrong-course bookings
             return False
 
     def _extract_bookers_from_slot(self, slot_item: Any) -> list[str]:
@@ -2878,6 +2847,144 @@ class WaldenGolfProvider(ReservationProvider):
 
         unique_bookers = list(dict.fromkeys(bookers))
         return unique_bookers
+
+    def _format_event_block_message(self, event_blocks: list[str]) -> str | None:
+        """
+        Format event block names into a human-readable message suffix.
+
+        Args:
+            event_blocks: List of event names that are blocking tee times
+
+        Returns:
+            Formatted message string, or None if no events
+        """
+        if not event_blocks:
+            return None
+
+        if len(event_blocks) == 1:
+            return f"Time blocked by event: {event_blocks[0]}"
+        else:
+            event_list = ", ".join(event_blocks[:3])
+            if len(event_blocks) > 3:
+                event_list += f" and {len(event_blocks) - 3} more"
+            return f"Times blocked by events: {event_list}"
+
+    def _extract_event_blocks(
+        self,
+        search_context: Any,
+        target_time: time,
+        fallback_window_minutes: int,
+    ) -> list[str]:
+        """
+        Extract event/tournament block names that may be blocking tee times.
+
+        The Walden Golf tee sheet displays events and tournaments as blocked time ranges
+        with format like "08:26 AM-10:42 AM" followed by an event name such as
+        "Northgate SGA 3 Man ABC - 3318".
+
+        This method scans slot items for these blocked time ranges and extracts
+        the event names to provide more informative error messages.
+
+        Args:
+            search_context: The WebDriver element to search within
+            target_time: The target tee time being searched for
+            fallback_window_minutes: The fallback window in minutes
+
+        Returns:
+            List of event names that overlap with the requested time window
+        """
+        event_names: list[str] = []
+        target_minutes = target_time.hour * 60 + target_time.minute
+        min_time_minutes = max(0, target_minutes - fallback_window_minutes)
+        max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+
+        # Pattern to match time ranges like "08:26 AM-10:42 AM" or "9:00 AM - 11:00 AM"
+        time_range_pattern = re.compile(
+            r"(\d{1,2}:\d{2}\s*[AaPp][Mm])\s*-\s*(\d{1,2}:\d{2}\s*[AaPp][Mm])"
+        )
+
+        try:
+            slot_items = search_context.find_elements(By.CSS_SELECTOR, "li.ui-datascroller-item")
+
+            for slot_item in slot_items:
+                try:
+                    slot_text = slot_item.text.strip()
+                    if not slot_text:
+                        continue
+
+                    # Check if this is an event block (contains a time range)
+                    time_range_match = time_range_pattern.search(slot_text)
+                    if not time_range_match:
+                        continue
+
+                    # Parse the start and end times
+                    start_time_str = time_range_match.group(1).upper()
+                    end_time_str = time_range_match.group(2).upper()
+
+                    start_time = None
+                    end_time = None
+                    for fmt in ["%I:%M %p", "%I:%M%p"]:
+                        try:
+                            start_time = datetime.strptime(start_time_str.strip(), fmt).time()
+                            end_time = datetime.strptime(end_time_str.strip(), fmt).time()
+                            break
+                        except ValueError:
+                            continue
+
+                    if not start_time or not end_time:
+                        continue
+
+                    # Check if this event block overlaps with our target window
+                    start_minutes = start_time.hour * 60 + start_time.minute
+                    end_minutes = end_time.hour * 60 + end_time.minute
+
+                    # Handle events spanning midnight (e.g., 11:00 PM - 1:00 AM)
+                    # If end time is before start time, the event spans midnight
+                    if end_minutes < start_minutes:
+                        # Event spans midnight - it overlaps if:
+                        # 1. Target window overlaps with the evening portion (start to midnight)
+                        # 2. Target window overlaps with the morning portion (midnight to end)
+                        overlaps = (
+                            start_minutes <= max_time_minutes  # Evening portion overlaps
+                            or end_minutes >= min_time_minutes  # Morning portion overlaps
+                        )
+                    else:
+                        # Normal event (doesn't span midnight)
+                        # Event overlaps if: event_start <= window_end AND event_end >= window_start
+                        overlaps = (
+                            start_minutes <= max_time_minutes and end_minutes >= min_time_minutes
+                        )
+
+                    if overlaps:
+                        # Extract the event name - it's the text after the time range
+                        # Remove the time range from the text to get the event name
+                        event_name = slot_text[time_range_match.end() :].strip()
+
+                        # Clean up the event name
+                        # Remove leading/trailing whitespace, newlines
+                        event_name = " ".join(event_name.split())
+
+                        if event_name and event_name not in event_names:
+                            logger.debug(
+                                f"Found blocking event: '{event_name}' "
+                                f"({start_time_str}-{end_time_str})"
+                            )
+                            event_names.append(event_name)
+
+                except Exception as e:
+                    logger.debug(f"Error processing slot item for event: {e}")
+                    continue
+
+        except Exception as e:
+            logger.debug(f"Error extracting event blocks: {e}")
+
+        if event_names:
+            logger.info(
+                f"Found {len(event_names)} event(s) blocking times in requested window: "
+                f"{event_names}"
+            )
+
+        return event_names
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:

@@ -700,18 +700,32 @@ class TestGeminiServiceProtobufConversion:
 
         Simulates a request like: "Book 2/1 at 8:58a and 9:06a"
         """
+        # Create a protobuf Struct mimicking what Gemini actually returns
+        # Use a future date to avoid the past-date correction logic
+        from datetime import timedelta
+
         from google.protobuf.struct_pb2 import Struct
 
-        # Create a protobuf Struct mimicking what Gemini actually returns
+        future_date = date.today() + timedelta(days=7)
+        future_date_str = future_date.strftime("%Y-%m-%d")
+
         protobuf_args = Struct()
         protobuf_args.update(
             {
                 "intent": "book",
                 "bookings": [
-                    {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
-                    {"requested_date": "2026-02-01", "requested_time": "09:06", "num_players": 4},
+                    {
+                        "requested_date": future_date_str,
+                        "requested_time": "08:58",
+                        "num_players": 4,
+                    },
+                    {
+                        "requested_date": future_date_str,
+                        "requested_time": "09:06",
+                        "num_players": 4,
+                    },
                 ],
-                "response_message": "I'll book 2 tee times for Sunday, February 1.",
+                "response_message": f"I'll book 2 tee times for {future_date.strftime('%B %d')}.",
             }
         )
 
@@ -733,14 +747,14 @@ class TestGeminiServiceProtobufConversion:
         with patch.object(gemini_service, "_model", MagicMock()):
             gemini_service._model.generate_content = MagicMock(return_value=mock_response)
 
-            result = await gemini_service.parse_message("Book 2/1 at 8:58a and 9:06a")
+            result = await gemini_service.parse_message("Book tee time at 8:58a and 9:06a")
 
             assert result.intent == "book"
             assert result.tee_time_requests is not None
             assert len(result.tee_time_requests) == 2
-            assert result.tee_time_requests[0].requested_date == date(2026, 2, 1)
+            assert result.tee_time_requests[0].requested_date == future_date
             assert result.tee_time_requests[0].requested_time == time(8, 58)
-            assert result.tee_time_requests[1].requested_date == date(2026, 2, 1)
+            assert result.tee_time_requests[1].requested_date == future_date
             assert result.tee_time_requests[1].requested_time == time(9, 6)
 
     @pytest.mark.asyncio
@@ -749,16 +763,26 @@ class TestGeminiServiceProtobufConversion:
     ) -> None:
         """Test that a single booking in a protobuf Struct is correctly parsed.
 
-        Simulates a request like: "Book 02/01/2026 at 08:58"
+        Simulates a request like: "Book next week at 08:58"
         """
+        from datetime import timedelta
+
         from google.protobuf.struct_pb2 import Struct
+
+        # Use a future date to avoid the past-date correction logic
+        future_date = date.today() + timedelta(days=7)
+        future_date_str = future_date.strftime("%Y-%m-%d")
 
         protobuf_args = Struct()
         protobuf_args.update(
             {
                 "intent": "book",
                 "bookings": [
-                    {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
+                    {
+                        "requested_date": future_date_str,
+                        "requested_time": "08:58",
+                        "num_players": 4,
+                    },
                 ],
                 "response_message": "I'll book that tee time for you.",
             }
@@ -782,13 +806,13 @@ class TestGeminiServiceProtobufConversion:
         with patch.object(gemini_service, "_model", MagicMock()):
             gemini_service._model.generate_content = MagicMock(return_value=mock_response)
 
-            result = await gemini_service.parse_message("Book 02/01/2026 at 08:58")
+            result = await gemini_service.parse_message("Book next week at 08:58")
 
             assert result.intent == "book"
             # Single booking should use tee_time_request, not tee_time_requests
             assert result.tee_time_request is not None
             assert result.tee_time_requests is None
-            assert result.tee_time_request.requested_date == date(2026, 2, 1)
+            assert result.tee_time_request.requested_date == future_date
             assert result.tee_time_request.requested_time == time(8, 58)
 
 
@@ -814,8 +838,14 @@ class TestMessageToDictFieldNamePreservation:
         Without preserving_proto_field_name=True, the code looks for keys that
         don't exist, causing booking parsing to fail silently.
         """
+        from datetime import timedelta
+
         from google.protobuf.json_format import MessageToDict
         from google.protobuf.struct_pb2 import Struct
+
+        # Use a future date to avoid the past-date correction logic
+        future_date = date.today() + timedelta(days=7)
+        future_date_str = future_date.strftime("%Y-%m-%d")
 
         # Create protobuf Struct with snake_case keys (as Gemini returns)
         protobuf_args = Struct()
@@ -823,7 +853,11 @@ class TestMessageToDictFieldNamePreservation:
             {
                 "intent": "book",
                 "bookings": [
-                    {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
+                    {
+                        "requested_date": future_date_str,
+                        "requested_time": "08:58",
+                        "num_players": 4,
+                    },
                 ],
                 "response_message": "Test message",
             }
@@ -855,19 +889,32 @@ class TestMessageToDictFieldNamePreservation:
         This verifies the full flow: Gemini response -> MessageToDict -> _build_parsed_intent
         correctly parses bookings when field names are preserved.
         """
+        from datetime import timedelta
         from unittest.mock import MagicMock
 
         from google.protobuf.struct_pb2 import Struct
+
+        # Use a future date to avoid the past-date correction logic
+        future_date = date.today() + timedelta(days=7)
+        future_date_str = future_date.strftime("%Y-%m-%d")
 
         protobuf_args = Struct()
         protobuf_args.update(
             {
                 "intent": "book",
                 "bookings": [
-                    {"requested_date": "2026-02-01", "requested_time": "08:58", "num_players": 4},
-                    {"requested_date": "2026-02-01", "requested_time": "09:06", "num_players": 4},
+                    {
+                        "requested_date": future_date_str,
+                        "requested_time": "08:58",
+                        "num_players": 4,
+                    },
+                    {
+                        "requested_date": future_date_str,
+                        "requested_time": "09:06",
+                        "num_players": 4,
+                    },
                 ],
-                "response_message": "I'll book 2 tee times for February 1.",
+                "response_message": f"I'll book 2 tee times for {future_date.strftime('%B %d')}.",
             }
         )
 
@@ -889,7 +936,7 @@ class TestMessageToDictFieldNamePreservation:
         with patch.object(gemini_service, "_model", MagicMock()):
             gemini_service._model.generate_content = MagicMock(return_value=mock_response)
 
-            result = await gemini_service.parse_message("Book 2/1 at 8:58a and 9:06a")
+            result = await gemini_service.parse_message("Book tee time at 8:58a and 9:06a")
 
             # This would fail without preserving_proto_field_name=True
             assert result.intent == "book"
@@ -898,7 +945,7 @@ class TestMessageToDictFieldNamePreservation:
                 "if this fails, MessageToDict may be converting to camelCase"
             )
             assert len(result.tee_time_requests) == 2
-            assert result.tee_time_requests[0].requested_date == date(2026, 2, 1)
+            assert result.tee_time_requests[0].requested_date == future_date
             assert result.tee_time_requests[0].requested_time == time(8, 58)
             assert result.tee_time_requests[1].requested_time == time(9, 6)
 
