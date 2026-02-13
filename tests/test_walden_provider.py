@@ -1452,8 +1452,9 @@ class TestPrecisionWait:
     ) -> None:
         """Test that precision wait uses sleep for the coarse portion."""
         from datetime import datetime as real_datetime
-        from unittest.mock import patch as mock_patch, MagicMock
+        from unittest.mock import patch as mock_patch
         from zoneinfo import ZoneInfo
+
         import app.providers.walden_provider as walden_module
 
         sleep_calls: list[float] = []
@@ -1608,9 +1609,9 @@ class TestBatchBookingPreparation:
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test that date selection and scrolling happen before execute_at wait."""
-        import app.providers.walden_provider as walden_module
         from datetime import datetime
-        from zoneinfo import ZoneInfo
+
+        import app.providers.walden_provider as walden_module
 
         class DummyWait:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -1676,8 +1677,9 @@ class TestBatchBookingPreparation:
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test that batch booking uses fast JS path when execute_at is provided."""
-        import app.providers.walden_provider as walden_module
         from datetime import datetime
+
+        import app.providers.walden_provider as walden_module
 
         class DummyWait:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -1735,8 +1737,9 @@ class TestBatchBookingPreparation:
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Test that batch booking does NOT call driver.refresh() when execute_at is set."""
-        import app.providers.walden_provider as walden_module
         from datetime import datetime
+
+        import app.providers.walden_provider as walden_module
 
         class DummyWait:
             def __init__(self, *_args: object, **_kwargs: object) -> None:
