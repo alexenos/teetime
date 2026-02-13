@@ -601,9 +601,7 @@ class WaldenGolfProvider(ReservationProvider):
             # booking window opens, so at 6:30 AM we just click.
             use_fast_booking = execute_at is not None
             if use_fast_booking:
-                logger.info(
-                    "BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript"
-                )
+                logger.info("BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript")
 
             # Step 7 - Wait until execute_at with millisecond precision
             if execute_at:
@@ -2260,7 +2258,11 @@ class WaldenGolfProvider(ReservationProvider):
                 )
 
             result = self._complete_booking_sync(
-                driver, None, booked_time, num_players, fallback_reason,
+                driver,
+                None,
+                booked_time,
+                num_players,
+                fallback_reason,
                 already_clicked=True,
             )
             result.course_name = self.NORTHGATE_COURSE_NAME

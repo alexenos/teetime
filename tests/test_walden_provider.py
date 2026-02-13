@@ -1312,9 +1312,7 @@ class TestFindTargetSlotJS:
             "isExact": True,
         }
 
-        result = provider._find_target_slot_js(
-            mock_driver, time(8, 42), 4, 32, 8
-        )
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
         assert result is not None
         assert result["isExact"] is True
@@ -1335,9 +1333,7 @@ class TestFindTargetSlotJS:
             "isExact": False,
         }
 
-        result = provider._find_target_slot_js(
-            mock_driver, time(8, 42), 4, 32, 8
-        )
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
         assert result is not None
         assert result["isExact"] is False
@@ -1348,9 +1344,7 @@ class TestFindTargetSlotJS:
         mock_driver = MagicMock()
         mock_driver.execute_script.return_value = None
 
-        result = provider._find_target_slot_js(
-            mock_driver, time(8, 42), 4, 32, 8
-        )
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
         assert result is None
 
@@ -1360,7 +1354,11 @@ class TestFindTargetSlotJS:
         mock_driver.execute_script.return_value = None
 
         provider._find_target_slot_js(
-            mock_driver, time(8, 42), 4, 32, 8,
+            mock_driver,
+            time(8, 42),
+            4,
+            32,
+            8,
             times_to_exclude={time(8, 50), time(9, 6)},
         )
 
@@ -1377,9 +1375,7 @@ class TestFindTargetSlotJS:
         mock_driver = MagicMock()
         mock_driver.execute_script.return_value = None
 
-        provider._find_target_slot_js(
-            mock_driver, time(8, 42), 4, 32, 8
-        )
+        provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
         call_args = mock_driver.execute_script.call_args
         # The northgate index is the 7th positional argument (index 6 after js_code)
@@ -1428,9 +1424,7 @@ class TestClickSlotByIndexJS:
 class TestPrecisionWait:
     """Tests for the precision busy-wait method."""
 
-    def test_returns_immediately_if_past_execute_at(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_returns_immediately_if_past_execute_at(self, provider: WaldenGolfProvider) -> None:
         """Test that precision wait returns immediately if already past target time."""
         from datetime import datetime
         from unittest.mock import patch as mock_patch
@@ -1501,32 +1495,34 @@ class TestFindAndBookFastJS:
         monkeypatch.setattr(
             provider,
             "_find_target_slot_js",
-            MagicMock(return_value={
-                "timeStr": "8:42",
-                "hours": 8,
-                "minutes": 42,
-                "index": 5,
-                "diff": 0,
-                "available": 4,
-                "isExact": True,
-            }),
+            MagicMock(
+                return_value={
+                    "timeStr": "8:42",
+                    "hours": 8,
+                    "minutes": 42,
+                    "index": 5,
+                    "diff": 0,
+                    "available": 4,
+                    "isExact": True,
+                }
+            ),
         )
 
         # Mock JS click
-        monkeypatch.setattr(
-            provider, "_click_slot_by_index_js", MagicMock(return_value=True)
-        )
+        monkeypatch.setattr(provider, "_click_slot_by_index_js", MagicMock(return_value=True))
 
         # Mock complete booking
         monkeypatch.setattr(
             provider,
             "_complete_booking_sync",
-            MagicMock(return_value=SimpleNamespace(
-                success=True,
-                booked_time=time(8, 42),
-                confirmation_number="ABC123",
-                course_name=None,
-            )),
+            MagicMock(
+                return_value=SimpleNamespace(
+                    success=True,
+                    booked_time=time(8, 42),
+                    confirmation_number="ABC123",
+                    course_name=None,
+                )
+            ),
         )
 
         result = provider._find_and_book_time_slot_sync(
@@ -1549,9 +1545,7 @@ class TestFindAndBookFastJS:
         """Test that fast JS path returns failure when no slot found."""
         mock_driver = MagicMock()
 
-        monkeypatch.setattr(
-            provider, "_find_target_slot_js", MagicMock(return_value=None)
-        )
+        monkeypatch.setattr(provider, "_find_target_slot_js", MagicMock(return_value=None))
 
         result = provider._find_and_book_time_slot_sync(
             mock_driver,
@@ -1574,20 +1568,20 @@ class TestFindAndBookFastJS:
         monkeypatch.setattr(
             provider,
             "_find_target_slot_js",
-            MagicMock(return_value={
-                "timeStr": "8:42",
-                "hours": 8,
-                "minutes": 42,
-                "index": 5,
-                "diff": 0,
-                "available": 4,
-                "isExact": True,
-            }),
+            MagicMock(
+                return_value={
+                    "timeStr": "8:42",
+                    "hours": 8,
+                    "minutes": 42,
+                    "index": 5,
+                    "diff": 0,
+                    "available": 4,
+                    "isExact": True,
+                }
+            ),
         )
 
-        monkeypatch.setattr(
-            provider, "_click_slot_by_index_js", MagicMock(return_value=False)
-        )
+        monkeypatch.setattr(provider, "_click_slot_by_index_js", MagicMock(return_value=False))
 
         result = provider._find_and_book_time_slot_sync(
             mock_driver,
@@ -1646,9 +1640,7 @@ class TestBatchBookingPreparation:
 
         def mock_find_and_book(*_args: object, **_kwargs: object) -> object:
             call_order.append("find_and_book")
-            return SimpleNamespace(
-                success=True, booked_time=time(8, 42), confirmation_number="X"
-            )
+            return SimpleNamespace(success=True, booked_time=time(8, 42), confirmation_number="X")
 
         monkeypatch.setattr(provider, "_select_date_sync", mock_select_date)
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", mock_scroll)
@@ -1657,9 +1649,7 @@ class TestBatchBookingPreparation:
 
         from app.providers.base import BatchBookingRequest
 
-        req = BatchBookingRequest(
-            booking_id="a", target_time=time(8, 42), num_players=4
-        )
+        req = BatchBookingRequest(booking_id="a", target_time=time(8, 42), num_players=4)
 
         result = provider._book_multiple_tee_times_sync(
             target_date=date.today() + timedelta(days=7),
@@ -1713,17 +1703,13 @@ class TestBatchBookingPreparation:
             **kwargs: object,
         ) -> object:
             fast_js_values.append(kwargs.get("use_fast_js", False))
-            return SimpleNamespace(
-                success=True, booked_time=target_time, confirmation_number="X"
-            )
+            return SimpleNamespace(success=True, booked_time=target_time, confirmation_number="X")
 
         monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
 
         from app.providers.base import BatchBookingRequest
 
-        req = BatchBookingRequest(
-            booking_id="a", target_time=time(8, 42), num_players=4
-        )
+        req = BatchBookingRequest(booking_id="a", target_time=time(8, 42), num_players=4)
 
         provider._book_multiple_tee_times_sync(
             target_date=date.today() + timedelta(days=7),
@@ -1772,9 +1758,7 @@ class TestBatchBookingPreparation:
 
         from app.providers.base import BatchBookingRequest
 
-        req = BatchBookingRequest(
-            booking_id="a", target_time=time(8, 42), num_players=4
-        )
+        req = BatchBookingRequest(booking_id="a", target_time=time(8, 42), num_players=4)
 
         provider._book_multiple_tee_times_sync(
             target_date=date.today() + timedelta(days=7),
