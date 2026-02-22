@@ -597,11 +597,53 @@ class WaldenGolfProvider(ReservationProvider):
                 )
 
             # Step 6 - Pre-locate target slots using JavaScript
-            # This identifies the exact DOM index of each target slot BEFORE the
-            # booking window opens, so at 6:30 AM we just click.
+            # When execute_at is set, we scan the DOM NOW (before the booking
+            # window opens) so that at 6:30 AM we only need to click, not search.
+            # Each slot is cached by booking_id; at click time the prelocated slot
+            # is reused unless a dynamic times_to_exclude conflict invalidates it,
+            # in which case a fresh DOM scan occurs as a fallback.
             use_fast_booking = execute_at is not None
+            prelocated_slots: dict[str, dict[str, Any]] = {}
             if use_fast_booking:
-                logger.info("BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript")
+                logger.info(
+                    "BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript "
+                    f"for {len(sorted_requests)} request(s)"
+                )
+                for req in sorted_requests:
+                    # Build a preliminary times_to_exclude using only the known
+                    # target times of other requests (booked_times is empty here).
+                    prelim_exclude: set[time] = set()
+                    req_minutes = req.target_time.hour * 60 + req.target_time.minute
+                    for later_time, _later_window, later_id in pending_booking_times:
+                        if later_id == req.booking_id:
+                            continue
+                        later_minutes = later_time.hour * 60 + later_time.minute
+                        if later_minutes > req_minutes:
+                            prelim_exclude.add(later_time)
+
+                    slot = self._find_target_slot_js(
+                        driver,
+                        req.target_time,
+                        req.num_players,
+                        req.fallback_window_minutes,
+                        req.tee_time_interval_minutes,
+                        prelim_exclude,
+                    )
+                    if slot is not None:
+                        prelocated_slots[req.booking_id] = slot
+                        slot_time = time(slot["hours"], slot["minutes"])
+                        logger.info(
+                            f"BATCH_BOOKING: Pre-located slot for booking_id={req.booking_id}: "
+                            f"{slot_time.strftime('%I:%M %p')} (index={slot['index']}, "
+                            f"exact={slot['isExact']})"
+                        )
+                    else:
+                        logger.warning(
+                            f"BATCH_BOOKING: No slot found during pre-location for "
+                            f"booking_id={req.booking_id} "
+                            f"(target={req.target_time.strftime('%I:%M %p')}); "
+                            f"will re-scan at click time"
+                        )
 
             # Step 7 - Wait until execute_at with millisecond precision
             if execute_at:
@@ -616,7 +658,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             logger.info(
                 f"BATCH_BOOKING: Step 8 - Booking {len(sorted_requests)} tee times"
-                f"{' (fast JS mode)' if use_fast_booking else ''}"
+                f"{f' (fast JS mode, {len(prelocated_slots)} pre-located)' if use_fast_booking else ''}"
             )
             for i, req in enumerate(sorted_requests, 1):
                 # Calculate times to exclude: times already booked + times needed by later bookings
@@ -651,6 +693,7 @@ class WaldenGolfProvider(ReservationProvider):
                         tee_time_interval_minutes=req.tee_time_interval_minutes,
                         skip_scroll=True,
                         use_fast_js=use_fast_booking,
+                        prelocated_slot=prelocated_slots.get(req.booking_id),
                     )
 
                     results.append(
@@ -2180,6 +2223,7 @@ class WaldenGolfProvider(ReservationProvider):
         tee_time_interval_minutes: int = 8,
         skip_scroll: bool = False,
         use_fast_js: bool = False,
+        prelocated_slot: dict[str, Any] | None = None,
     ) -> BookingResult:
         """
         Find an available time slot and book it.
@@ -2198,6 +2242,11 @@ class WaldenGolfProvider(ReservationProvider):
         When use_fast_js is True, uses a single JavaScript execution to find and
         click the target slot, reducing slot finding from ~17s to ~100ms.
 
+        When prelocated_slot is provided (a dict returned by _find_target_slot_js),
+        the fast-JS path will reuse it instead of re-scanning the DOM, unless
+        the slot's time is in times_to_exclude, in which case it falls back to
+        a fresh _find_target_slot_js call.
+
         Args:
             driver: The WebDriver instance
             target_time: The preferred tee time
@@ -2208,6 +2257,9 @@ class WaldenGolfProvider(ReservationProvider):
             tee_time_interval_minutes: Spacing between tee times (e.g., 8 for Northgate, 10 for Walden).
                              Fallback times must be multiples of this interval from the requested time.
             use_fast_js: If True, use JavaScript-based slot finding and clicking for speed.
+            prelocated_slot: Optional pre-computed slot dict from _find_target_slot_js.
+                            Used to skip DOM re-scanning when the slot was located before
+                            the booking window opened.
 
         Returns:
             BookingResult with booking outcome
@@ -2221,14 +2273,31 @@ class WaldenGolfProvider(ReservationProvider):
 
         # === FAST PATH: JavaScript-based slot finding and clicking ===
         if use_fast_js:
-            slot_info = self._find_target_slot_js(
-                driver,
-                target_time,
-                num_players,
-                fallback_window_minutes,
-                tee_time_interval_minutes,
-                times_to_exclude,
-            )
+            # Use prelocated slot if available and its time is not excluded
+            slot_info = None
+            if prelocated_slot is not None:
+                prelocated_time = time(prelocated_slot["hours"], prelocated_slot["minutes"])
+                if prelocated_time not in times_to_exclude:
+                    slot_info = prelocated_slot
+                    logger.info(
+                        f"FAST_JS: Using prelocated slot at {prelocated_time.strftime('%I:%M %p')} "
+                        f"(index={prelocated_slot['index']})"
+                    )
+                else:
+                    logger.info(
+                        f"FAST_JS: Prelocated slot at {prelocated_time.strftime('%I:%M %p')} "
+                        f"is now excluded, re-scanning DOM"
+                    )
+
+            if slot_info is None:
+                slot_info = self._find_target_slot_js(
+                    driver,
+                    target_time,
+                    num_players,
+                    fallback_window_minutes,
+                    tee_time_interval_minutes,
+                    times_to_exclude,
+                )
 
             if slot_info is None:
                 return BookingResult(
