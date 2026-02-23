@@ -65,8 +65,11 @@ def with_retry(
     """
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        """Wrap a function with retry logic."""
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> T:
+            """Execute the wrapped function with exponential-backoff retries."""
             last_exception: Exception | None = None
             for attempt in range(max_attempts):
                 try:
@@ -2624,8 +2627,8 @@ class WaldenGolfProvider(ReservationProvider):
             // Check course via element ID pattern: teeTimeCourses:X
             // Northgate uses index "0", Walden uses index "1"
             var courseMatch = itemHtml.match(/teeTimeCourses:(\\d+)/);
-            if (courseMatch && courseMatch[1] !== northgateIndex) {
-                continue; // Skip non-Northgate slots
+            if (!courseMatch || courseMatch[1] !== northgateIndex) {
+                continue; // Skip slots without a course index or non-Northgate slots
             }
 
             // Extract time from label or text content
@@ -2776,9 +2779,13 @@ class WaldenGolfProvider(ReservationProvider):
         for the final 200ms to hit the target time as precisely as possible.
 
         Args:
-            execute_at: Naive datetime in CT timezone to wait until
+            execute_at: Datetime in CT timezone to wait until. May be naive
+                (assumed CT) or timezone-aware (converted to naive CT).
         """
         ct_tz = ZoneInfo(settings.timezone)
+        # Normalize: convert aware datetimes to naive CT so comparisons are consistent
+        if execute_at.tzinfo is not None:
+            execute_at = execute_at.astimezone(ct_tz).replace(tzinfo=None)
         now_ct = datetime.now(ct_tz).replace(tzinfo=None)
         if now_ct >= execute_at:
             logger.warning(
@@ -2798,8 +2805,9 @@ class WaldenGolfProvider(ReservationProvider):
             time_module.sleep(wait_seconds - 0.2)
 
         # Precision busy-wait for the final ~200ms
+        # Sub-millisecond sleep reduces CPU pressure with negligible precision loss
         while datetime.now(ct_tz).replace(tzinfo=None) < execute_at:
-            pass  # spin
+            time_module.sleep(0.0001)
 
         logger.info("BATCH_BOOKING: Precision wait complete - GO!")
 
@@ -4527,6 +4535,7 @@ class MockWaldenProvider(ReservationProvider):
     """Mock provider for testing without hitting the real booking system."""
 
     def __init__(self) -> None:
+        """Initialize mock provider with no-op setup."""
         pass
 
     async def login(self) -> bool:

@@ -220,6 +220,7 @@ class TestWaldenProviderFindAndBookTimeSlot:
     def test_filters_by_window_and_interval_and_selects_best_slot(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that slot selection respects the fallback window, interval alignment, and picks the nearest available slot."""
         mock_driver = MagicMock()
 
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
@@ -272,6 +273,7 @@ class TestWaldenProviderFindAndBookTimeSlot:
     def test_skip_scroll_does_not_scroll(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that passing skip_scroll=True skips the scroll step entirely."""
         mock_driver = MagicMock()
         scroll_mock = MagicMock()
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", scroll_mock)
@@ -315,6 +317,7 @@ class TestWaldenProviderScrollToLoadAllSlots:
     def test_stops_based_on_last_parsable_time_when_trailing_items_unparsable(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that scrolling stops based on the last parsable time when trailing DOM items have no parsable time."""
         driver = MagicMock()
         provider.wait_strategy = SimpleNamespace(simple_wait=lambda **_: None)
 
@@ -366,6 +369,7 @@ class TestWaldenProviderScrollToLoadAllSlots:
     def test_max_time_minutes_override_limits_scrolling(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that max_time_minutes_override caps scrolling at the specified time regardless of target_time."""
         driver = MagicMock()
         provider.wait_strategy = SimpleNamespace(simple_wait=lambda **_: None)
 
@@ -403,6 +407,7 @@ class TestWaldenProviderBatchPreScroll:
     def test_batch_prescroll_and_skip_scroll_per_booking(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that batch booking pre-scrolls once then skips per-booking scroll calls."""
         import app.providers.walden_provider as walden_module
 
         class DummyWait:
@@ -1644,6 +1649,7 @@ class TestBatchBookingPreparation:
 
         monkeypatch.setattr(provider, "_select_date_sync", mock_select_date)
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", mock_scroll)
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
         monkeypatch.setattr(provider, "_precision_wait_until", mock_precision_wait)
         monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
 
@@ -1691,6 +1697,7 @@ class TestBatchBookingPreparation:
         monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
         monkeypatch.setattr(provider, "_select_date_sync", lambda *_: True)
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
         monkeypatch.setattr(provider, "_precision_wait_until", MagicMock())
 
         fast_js_values: list[bool] = []
@@ -1747,6 +1754,7 @@ class TestBatchBookingPreparation:
         monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
         monkeypatch.setattr(provider, "_select_date_sync", lambda *_: True)
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
         monkeypatch.setattr(provider, "_precision_wait_until", MagicMock())
         monkeypatch.setattr(
             provider,
