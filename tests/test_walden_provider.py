@@ -1482,9 +1482,11 @@ class TestPrecisionWait:
             execute_at = real_datetime(2026, 2, 12, 6, 30, 0)
             provider._precision_wait_until(execute_at)
 
-        # Should have called sleep for coarse wait (wait - 0.2s)
-        assert len(sleep_calls) == 1
-        assert sleep_calls[0] > 0
+        # Should have called sleep once for coarse wait and micro-sleeps for busy-wait
+        assert len(sleep_calls) >= 1
+        assert sleep_calls[0] > 0  # coarse sleep is wait_seconds - 0.2
+        # Any subsequent sleep calls are the busy-wait 0.1ms micro-sleeps
+        assert all(s == 0.0001 for s in sleep_calls[1:])
 
 
 class TestFindAndBookFastJS:
