@@ -67,8 +67,11 @@ def with_retry(
     """
 
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        """Wrap a function with retry logic."""
+
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> T:
+            """Execute the wrapped function with exponential-backoff retries."""
             last_exception: Exception | None = None
             for attempt in range(max_attempts):
                 try:
@@ -539,38 +542,11 @@ class WaldenGolfProvider(ReservationProvider):
                     total_failed=total_failed,
                 )
 
-            if execute_at:
-                # CRITICAL: execute_at is a naive datetime in CT timezone (from jobs.py)
-                # We must compare it with current time in CT timezone, not UTC
-                # Using datetime.now() would return UTC time on Cloud Run, causing
-                # the wait to be skipped (e.g., 12:28 UTC > 06:30 CT naive)
-                ct_tz = ZoneInfo(settings.timezone)
-                now_ct = datetime.now(ct_tz).replace(tzinfo=None)
-                logger.info(
-                    f"BATCH_BOOKING: Current time (CT): {now_ct.strftime('%H:%M:%S')}, "
-                    f"execute_at: {execute_at.strftime('%H:%M:%S')}"
-                )
-                if now_ct < execute_at:
-                    wait_seconds = (execute_at - now_ct).total_seconds()
-                    logger.info(
-                        f"BATCH_BOOKING: Step 4 - Waiting {wait_seconds:.1f}s until "
-                        f"{execute_at.strftime('%H:%M:%S')} before booking"
-                    )
-                    time_module.sleep(wait_seconds)
-                    logger.info("BATCH_BOOKING: Wait complete, refreshing page")
-                    driver.refresh()
-                    wait.until(
-                        expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form"))
-                    )
-                    if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
-                        logger.warning("BATCH_BOOKING: Course re-selection after refresh failed")
-                else:
-                    logger.warning(
-                        f"BATCH_BOOKING: Current time {now_ct.strftime('%H:%M:%S')} is already past "
-                        f"execute_at {execute_at.strftime('%H:%M:%S')} - proceeding immediately"
-                    )
-
-            logger.info("BATCH_BOOKING: Step 5 - Selecting date")
+            # Step 4 - Select date BEFORE waiting for booking window
+            # Slot availability is already visible on the page before 6:30 AM.
+            # We do all preparation (date selection, scrolling, slot pre-location)
+            # before the wait so that at 6:30 AM the ONLY work is clicking Reserve.
+            logger.info("BATCH_BOOKING: Step 4 - Selecting date")
             if not self._select_date_sync(driver, target_date):
                 logger.error("BATCH_BOOKING: Date selection failed")
                 for req in sorted_requests:
@@ -603,6 +579,7 @@ class WaldenGolfProvider(ReservationProvider):
             )
             logger.info("BATCH_BOOKING: Date selection complete")
 
+            # Step 5 - Pre-scroll tee sheet to load all needed slot items
             max_needed_minutes = None
             for req in sorted_requests:
                 req_minutes = req.target_time.hour * 60 + req.target_time.minute
@@ -612,7 +589,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             if max_needed_minutes is not None:
                 logger.info(
-                    "BATCH_BOOKING: Pre-scrolling tee sheet to latest needed time "
+                    "BATCH_BOOKING: Step 5 - Pre-scrolling tee sheet to latest needed time "
                     f"{time(max_needed_minutes // 60, max_needed_minutes % 60).strftime('%I:%M %p')}"
                 )
                 self._scroll_to_load_all_slots(
@@ -622,11 +599,70 @@ class WaldenGolfProvider(ReservationProvider):
                     max_time_minutes_override=max_needed_minutes,
                 )
 
+            # Step 6 - Pre-locate target slots using JavaScript
+            # When execute_at is set, we scan the DOM NOW (before the booking
+            # window opens) so that at 6:30 AM we only need to click, not search.
+            # Each slot is cached by booking_id; at click time the prelocated slot
+            # is reused unless a dynamic times_to_exclude conflict invalidates it,
+            # in which case a fresh DOM scan occurs as a fallback.
+            use_fast_booking = execute_at is not None
+            prelocated_slots: dict[str, dict[str, Any]] = {}
+            if use_fast_booking:
+                logger.info(
+                    "BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript "
+                    f"for {len(sorted_requests)} request(s)"
+                )
+                for req in sorted_requests:
+                    # Build a preliminary times_to_exclude using only the known
+                    # target times of other requests (booked_times is empty here).
+                    prelim_exclude: set[time] = set()
+                    req_minutes = req.target_time.hour * 60 + req.target_time.minute
+                    for later_time, _later_window, later_id in pending_booking_times:
+                        if later_id == req.booking_id:
+                            continue
+                        later_minutes = later_time.hour * 60 + later_time.minute
+                        if later_minutes > req_minutes:
+                            prelim_exclude.add(later_time)
+
+                    slot = self._find_target_slot_js(
+                        driver,
+                        req.target_time,
+                        req.num_players,
+                        req.fallback_window_minutes,
+                        req.tee_time_interval_minutes,
+                        prelim_exclude,
+                    )
+                    if slot is not None:
+                        prelocated_slots[req.booking_id] = slot
+                        slot_time = time(slot["hours"], slot["minutes"])
+                        logger.info(
+                            f"BATCH_BOOKING: Pre-located slot for booking_id={req.booking_id}: "
+                            f"{slot_time.strftime('%I:%M %p')} (index={slot['index']}, "
+                            f"exact={slot['isExact']})"
+                        )
+                    else:
+                        logger.warning(
+                            f"BATCH_BOOKING: No slot found during pre-location for "
+                            f"booking_id={req.booking_id} "
+                            f"(target={req.target_time.strftime('%I:%M %p')}); "
+                            f"will re-scan at click time"
+                        )
+
+            # Step 7 - Wait until execute_at with millisecond precision
+            if execute_at:
+                # No page refresh at 6:30 AM. Slot availability is already on the page.
+                # The server simply starts accepting bookings at 6:30 AM.
+                logger.info("BATCH_BOOKING: Step 7 - Precision wait until booking window opens")
+                self._precision_wait_until(execute_at)
+
             # Track times that have been successfully booked to avoid conflicts
             # When a booking succeeds, we add its booked_time to this set
             booked_times: set[time] = set()
 
-            logger.info(f"BATCH_BOOKING: Step 6 - Booking {len(sorted_requests)} tee times")
+            logger.info(
+                f"BATCH_BOOKING: Step 8 - Booking {len(sorted_requests)} tee times"
+                f"{f' (fast JS mode, {len(prelocated_slots)} pre-located)' if use_fast_booking else ''}"
+            )
             for i, req in enumerate(sorted_requests, 1):
                 # Calculate times to exclude: times already booked + times needed by later bookings
                 # This prevents a fallback slot from taking a time needed by a later booking
@@ -659,6 +695,8 @@ class WaldenGolfProvider(ReservationProvider):
                         times_to_exclude=times_to_exclude,
                         tee_time_interval_minutes=req.tee_time_interval_minutes,
                         skip_scroll=True,
+                        use_fast_js=use_fast_booking,
+                        prelocated_slot=prelocated_slots.get(req.booking_id),
                     )
 
                     results.append(
@@ -2169,6 +2207,8 @@ class WaldenGolfProvider(ReservationProvider):
         times_to_exclude: set[time] | None = None,
         tee_time_interval_minutes: int = 8,
         skip_scroll: bool = False,
+        use_fast_js: bool = False,
+        prelocated_slot: dict[str, Any] | None = None,
     ) -> BookingResult:
         """
         Find an available time slot and book it.
@@ -2184,6 +2224,14 @@ class WaldenGolfProvider(ReservationProvider):
         method will avoid selecting those times as fallback slots to prevent
         conflicts with other bookings in the batch.
 
+        When use_fast_js is True, uses a single JavaScript execution to find and
+        click the target slot, reducing slot finding from ~17s to ~100ms.
+
+        When prelocated_slot is provided (a dict returned by _find_target_slot_js),
+        the fast-JS path will reuse it instead of re-scanning the DOM, unless
+        the slot's time is in times_to_exclude, in which case it falls back to
+        a fresh _find_target_slot_js call.
+
         Args:
             driver: The WebDriver instance
             target_time: The preferred tee time
@@ -2193,6 +2241,10 @@ class WaldenGolfProvider(ReservationProvider):
                              Used during batch booking to prevent conflicts.
             tee_time_interval_minutes: Spacing between tee times (e.g., 8 for Northgate, 10 for Walden).
                              Fallback times must be multiples of this interval from the requested time.
+            use_fast_js: If True, use JavaScript-based slot finding and clicking for speed.
+            prelocated_slot: Optional pre-computed slot dict from _find_target_slot_js.
+                            Used to skip DOM re-scanning when the slot was located before
+                            the booking window opened.
 
         Returns:
             BookingResult with booking outcome
@@ -2203,6 +2255,74 @@ class WaldenGolfProvider(ReservationProvider):
 
         if not skip_scroll:
             self._scroll_to_load_all_slots(driver, target_time, fallback_window_minutes)
+
+        # === FAST PATH: JavaScript-based slot finding and clicking ===
+        if use_fast_js:
+            # Use prelocated slot if available and its time is not excluded
+            slot_info = None
+            if prelocated_slot is not None:
+                prelocated_time = time(prelocated_slot["hours"], prelocated_slot["minutes"])
+                if prelocated_time not in times_to_exclude:
+                    slot_info = prelocated_slot
+                    logger.info(
+                        f"FAST_JS: Using prelocated slot at {prelocated_time.strftime('%I:%M %p')} "
+                        f"(index={prelocated_slot['index']})"
+                    )
+                else:
+                    logger.info(
+                        f"FAST_JS: Prelocated slot at {prelocated_time.strftime('%I:%M %p')} "
+                        f"is now excluded, re-scanning DOM"
+                    )
+
+            if slot_info is None:
+                slot_info = self._find_target_slot_js(
+                    driver,
+                    target_time,
+                    num_players,
+                    fallback_window_minutes,
+                    tee_time_interval_minutes,
+                    times_to_exclude,
+                )
+
+            if slot_info is None:
+                return BookingResult(
+                    success=False,
+                    course_name=self.NORTHGATE_COURSE_NAME,
+                    error_message=(
+                        f"No time slots with {num_players} available spots within "
+                        f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
+                    ),
+                )
+
+            booked_time = time(slot_info["hours"], slot_info["minutes"])
+            is_exact = slot_info["isExact"]
+
+            if not self._click_slot_by_index_js(driver, slot_info["index"]):
+                return BookingResult(
+                    success=False,
+                    error_message="Failed to click Reserve button via JavaScript",
+                    booked_time=booked_time,
+                )
+
+            fallback_reason = None
+            if not is_exact:
+                fallback_reason = (
+                    f"Exact time {target_time.strftime('%I:%M %p')} not available, "
+                    f"using {booked_time.strftime('%I:%M %p')}"
+                )
+
+            result = self._complete_booking_sync(
+                driver,
+                None,
+                booked_time,
+                num_players,
+                fallback_reason,
+                already_clicked=True,
+            )
+            result.course_name = self.NORTHGATE_COURSE_NAME
+            return result
+
+        # === EXISTING SLOW PATH (Python-based Selenium iteration) ===
 
         northgate_section = None
         try:
@@ -2421,6 +2541,257 @@ class WaldenGolfProvider(ReservationProvider):
                 if all_times
                 else None,
             )
+
+    def _find_target_slot_js(
+        self,
+        driver: webdriver.Chrome,
+        target_time: time,
+        num_players: int,
+        fallback_window_minutes: int,
+        tee_time_interval_minutes: int = 8,
+        times_to_exclude: set[time] | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Find the best available slot using a single JavaScript execution.
+
+        This replaces the Python-based _find_empty_slots + _is_northgate_slot pipeline
+        with a single browser-side DOM traversal, reducing slot finding from ~17s to ~100ms.
+
+        The JavaScript iterates all slot items in the browser, checking:
+        - Course membership via element ID patterns (teeTimeCourses:0 for Northgate)
+        - Time extraction from labels
+        - Availability via div.Empty (full slot) or span.custom-free-slot-span count
+        - Fallback window, interval alignment, and time exclusions
+
+        Args:
+            driver: The WebDriver instance
+            target_time: The preferred tee time
+            num_players: Number of players (1-4)
+            fallback_window_minutes: Window to search for alternatives
+            tee_time_interval_minutes: Spacing between tee times (default 8 for Northgate)
+            times_to_exclude: Times to skip when selecting fallback slots
+
+        Returns:
+            Dict with slot info {index, hours, minutes, timeStr, diff, available, isExact}
+            or None if no suitable slot found
+        """
+        if times_to_exclude is None:
+            times_to_exclude = set()
+
+        exclude_list = [{"h": t.hour, "m": t.minute} for t in times_to_exclude]
+
+        js_code = """
+        var targetHour = arguments[0];
+        var targetMinute = arguments[1];
+        var minPlayers = arguments[2];
+        var fallbackMinutes = arguments[3];
+        var intervalMinutes = arguments[4];
+        var excludeTimes = arguments[5];
+        var northgateIndex = arguments[6];
+        var maxPlayers = arguments[7];
+
+        var targetMinutes = targetHour * 60 + targetMinute;
+        var items = document.querySelectorAll('li.ui-datascroller-item');
+        var bestSlot = null;
+        var exactMatch = null;
+        var bestDiff = Infinity;
+
+        // Build exclude set for O(1) lookup
+        var excludeSet = {};
+        for (var e = 0; e < excludeTimes.length; e++) {
+            excludeSet[excludeTimes[e].h * 60 + excludeTimes[e].m] = true;
+        }
+
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            var itemHtml = item.innerHTML;
+
+            // Check course via element ID pattern: teeTimeCourses:X
+            // Northgate uses index "0", Walden uses index "1"
+            var courseMatch = itemHtml.match(/teeTimeCourses:(\\d+)/);
+            if (!courseMatch || courseMatch[1] !== northgateIndex) {
+                continue; // Skip slots without a course index or non-Northgate slots
+            }
+
+            // Extract time from label or text content
+            var label = item.querySelector('label');
+            var timeText = label ? label.textContent.trim() : '';
+            if (!timeText) {
+                var allText = item.textContent;
+                var timeMatch = allText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/);
+                if (timeMatch) {
+                    timeText = timeMatch[0];
+                }
+            }
+            if (!timeText) continue;
+
+            // Parse time
+            var tmatch = timeText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/i);
+            if (!tmatch) continue;
+            var h = parseInt(tmatch[1]);
+            var m = parseInt(tmatch[2]);
+            var ampm = tmatch[3].toUpperCase();
+            if (ampm === 'PM' && h !== 12) h += 12;
+            if (ampm === 'AM' && h === 12) h = 0;
+
+            var slotMinutes = h * 60 + m;
+            var diff = Math.abs(slotMinutes - targetMinutes);
+
+            // Check fallback window
+            if (diff > fallbackMinutes) continue;
+
+            // Check interval alignment
+            if (diff % intervalMinutes !== 0) continue;
+
+            // Check availability
+            var emptyDivs = item.querySelectorAll('div.Empty');
+            var availableSpans = item.querySelectorAll('span.custom-free-slot-span');
+            var isAvailable = false;
+            var availableCount = 0;
+
+            if (emptyDivs.length > 0) {
+                availableCount = maxPlayers;
+                isAvailable = (minPlayers <= maxPlayers);
+            } else if (availableSpans.length >= minPlayers) {
+                availableCount = availableSpans.length;
+                isAvailable = true;
+            }
+
+            if (!isAvailable) continue;
+
+            var slotInfo = {
+                timeStr: h + ':' + (m < 10 ? '0' : '') + m,
+                hours: h,
+                minutes: m,
+                index: i,
+                diff: diff,
+                available: availableCount,
+                isExact: (diff === 0)
+            };
+
+            if (diff === 0) {
+                exactMatch = slotInfo;
+            }
+
+            // For fallback slots, skip excluded times
+            if (diff !== 0 && excludeSet[slotMinutes]) continue;
+
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestSlot = slotInfo;
+            }
+        }
+
+        return exactMatch || bestSlot;
+        """
+
+        result = driver.execute_script(
+            js_code,
+            target_time.hour,
+            target_time.minute,
+            num_players,
+            fallback_window_minutes,
+            tee_time_interval_minutes,
+            exclude_list,
+            self.NORTHGATE_COURSE_INDEX,
+            self.MAX_PLAYERS,
+        )
+
+        if result:
+            logger.info(
+                f"BOOKING_DEBUG: JS slot finder found slot at "
+                f"{result['hours']:02d}:{result['minutes']:02d} "
+                f"(index={result['index']}, exact={result['isExact']}, "
+                f"available={result['available']})"
+            )
+        else:
+            logger.warning(
+                f"BOOKING_DEBUG: JS slot finder found no suitable Northgate slot "
+                f"within {fallback_window_minutes} min of {target_time.strftime('%I:%M %p')} "
+                f"for {num_players} players"
+            )
+
+        return result
+
+    def _click_slot_by_index_js(self, driver: webdriver.Chrome, slot_index: int) -> bool:
+        """
+        Click the Reserve button for the slot at the given DOM index.
+
+        Uses a single JavaScript execution to find and click the appropriate
+        clickable element (Reserve button, Available span, or slot link) within
+        the slot item at the specified index.
+
+        Args:
+            driver: The WebDriver instance
+            slot_index: Index of the slot in the li.ui-datascroller-item NodeList
+
+        Returns:
+            True if the click was performed, False if the element was not found
+        """
+        js_click = """
+        var items = document.querySelectorAll('li.ui-datascroller-item');
+        var item = items[arguments[0]];
+        if (!item) return false;
+
+        // Find the clickable element in priority order
+        var btn = item.querySelector("a[id*='reserve_button']");
+        if (!btn) {
+            var spans = item.querySelectorAll('span.custom-free-slot-span');
+            btn = spans.length > 0 ? spans[0] : null;
+        }
+        if (!btn) btn = item.querySelector("a.slot-link");
+        if (!btn) return false;
+
+        btn.scrollIntoView({block: 'center'});
+        btn.click();
+        return true;
+        """
+        result = driver.execute_script(js_click, slot_index)
+        if result:
+            logger.info(f"BOOKING_DEBUG: JS clicked Reserve at slot index {slot_index}")
+        else:
+            logger.warning(f"BOOKING_DEBUG: JS failed to click Reserve at slot index {slot_index}")
+        return bool(result)
+
+    def _precision_wait_until(self, execute_at: datetime) -> None:
+        """
+        Wait until the exact execute_at time with millisecond precision.
+
+        Uses coarse sleep for most of the wait, then a tight busy-wait loop
+        for the final 200ms to hit the target time as precisely as possible.
+
+        Args:
+            execute_at: Datetime in CT timezone to wait until. May be naive
+                (assumed CT) or timezone-aware (converted to naive CT).
+        """
+        ct_tz = ZoneInfo(settings.timezone)
+        # Normalize: convert aware datetimes to naive CT so comparisons are consistent
+        if execute_at.tzinfo is not None:
+            execute_at = execute_at.astimezone(ct_tz).replace(tzinfo=None)
+        now_ct = datetime.now(ct_tz).replace(tzinfo=None)
+        if now_ct >= execute_at:
+            logger.warning(
+                f"BATCH_BOOKING: Already past execute_at "
+                f"{execute_at.strftime('%H:%M:%S')} - proceeding immediately"
+            )
+            return
+
+        wait_seconds = (execute_at - now_ct).total_seconds()
+        logger.info(
+            f"BATCH_BOOKING: Precision wait {wait_seconds:.1f}s until "
+            f"{execute_at.strftime('%H:%M:%S.%f')}"
+        )
+
+        # Coarse sleep until 200ms before target
+        if wait_seconds > 0.2:
+            time_module.sleep(wait_seconds - 0.2)
+
+        # Precision busy-wait for the final ~200ms
+        # Sub-millisecond sleep reduces CPU pressure with negligible precision loss
+        while datetime.now(ct_tz).replace(tzinfo=None) < execute_at:
+            time_module.sleep(0.0001)
+
+        logger.info("BATCH_BOOKING: Precision wait complete - GO!")
 
     def _scroll_to_load_all_slots(
         self,
@@ -3405,36 +3776,43 @@ class WaldenGolfProvider(ReservationProvider):
         booked_time: time,
         num_players: int,
         fallback_reason: str | None = None,
+        already_clicked: bool = False,
     ) -> BookingResult:
         """
         Complete the booking by clicking Reserve, selecting player count, and confirming.
 
         Args:
             driver: The WebDriver instance
-            reserve_element: The Reserve button/link element to click
+            reserve_element: The Reserve button/link element to click (ignored if already_clicked)
             booked_time: The time being booked
             num_players: Number of players (1-4)
             fallback_reason: Optional reason why a fallback time was used
+            already_clicked: If True, the Reserve button was already clicked via JS.
+                           Skip the scroll+click and go straight to player count selection.
 
         Returns:
             BookingResult with booking outcome
         """
         try:
             logger.info(
-                f"BOOKING_DEBUG: Starting booking completion for time={booked_time}, players={num_players}"
+                f"BOOKING_DEBUG: Starting booking completion for time={booked_time}, "
+                f"players={num_players}, already_clicked={already_clicked}"
             )
-            # Scroll element into view with offset to account for sticky header
-            driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", reserve_element
-            )
-            self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
 
             wait = WebDriverWait(driver, 10)
-            wait.until(expected_conditions.element_to_be_clickable(reserve_element))
 
-            # Use JavaScript click to bypass any overlay issues
-            driver.execute_script("arguments[0].click();", reserve_element)
-            logger.debug("BOOKING_DEBUG: Clicked Reserve button")
+            if not already_clicked:
+                # Scroll element into view with offset to account for sticky header
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block: 'center'});", reserve_element
+                )
+                self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
+
+                wait.until(expected_conditions.element_to_be_clickable(reserve_element))
+
+                # Use JavaScript click to bypass any overlay issues
+                driver.execute_script("arguments[0].click();", reserve_element)
+                logger.debug("BOOKING_DEBUG: Clicked Reserve button")
 
             # Attempt to detect the booking modal/dialog. If found, scope all
             # subsequent element searches to the modal to avoid matching elements
@@ -4131,6 +4509,7 @@ class MockWaldenProvider(ReservationProvider):
     """Mock provider for testing without hitting the real booking system."""
 
     def __init__(self) -> None:
+        """Initialize mock provider with no-op setup."""
         pass
 
     async def login(self) -> bool:

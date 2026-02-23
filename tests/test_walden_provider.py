@@ -220,6 +220,7 @@ class TestWaldenProviderFindAndBookTimeSlot:
     def test_filters_by_window_and_interval_and_selects_best_slot(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that slot selection respects the fallback window, interval alignment, and picks the nearest available slot."""
         mock_driver = MagicMock()
 
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
@@ -272,6 +273,7 @@ class TestWaldenProviderFindAndBookTimeSlot:
     def test_skip_scroll_does_not_scroll(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that passing skip_scroll=True skips the scroll step entirely."""
         mock_driver = MagicMock()
         scroll_mock = MagicMock()
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", scroll_mock)
@@ -315,6 +317,7 @@ class TestWaldenProviderScrollToLoadAllSlots:
     def test_stops_based_on_last_parsable_time_when_trailing_items_unparsable(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that scrolling stops based on the last parsable time when trailing DOM items have no parsable time."""
         driver = MagicMock()
         provider.wait_strategy = SimpleNamespace(simple_wait=lambda **_: None)
 
@@ -366,6 +369,7 @@ class TestWaldenProviderScrollToLoadAllSlots:
     def test_max_time_minutes_override_limits_scrolling(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that max_time_minutes_override caps scrolling at the specified time regardless of target_time."""
         driver = MagicMock()
         provider.wait_strategy = SimpleNamespace(simple_wait=lambda **_: None)
 
@@ -403,6 +407,7 @@ class TestWaldenProviderBatchPreScroll:
     def test_batch_prescroll_and_skip_scroll_per_booking(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Test that batch booking pre-scrolls once then skips per-booking scroll calls."""
         import app.providers.walden_provider as walden_module
 
         class DummyWait:
@@ -1444,6 +1449,485 @@ class TestWaldenProviderEnhancedErrorMessages:
 
         assert result.success is False
         assert "Member Event" in result.error_message
+
+
+class TestFindTargetSlotJS:
+    """Tests for the JavaScript-based slot finding method."""
+
+    def test_find_exact_match(self, provider: WaldenGolfProvider) -> None:
+        """Test that JS finder returns exact match info."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = {
+            "timeStr": "8:42",
+            "hours": 8,
+            "minutes": 42,
+            "index": 5,
+            "diff": 0,
+            "available": 4,
+            "isExact": True,
+        }
+
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        assert result is not None
+        assert result["isExact"] is True
+        assert result["hours"] == 8
+        assert result["minutes"] == 42
+        assert result["index"] == 5
+
+    def test_find_fallback_when_exact_unavailable(self, provider: WaldenGolfProvider) -> None:
+        """Test that JS finder returns fallback slot."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = {
+            "timeStr": "8:50",
+            "hours": 8,
+            "minutes": 50,
+            "index": 7,
+            "diff": 8,
+            "available": 4,
+            "isExact": False,
+        }
+
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        assert result is not None
+        assert result["isExact"] is False
+        assert result["diff"] == 8
+
+    def test_returns_none_when_no_slots(self, provider: WaldenGolfProvider) -> None:
+        """Test that JS finder returns None when no slots available."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = None
+
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        assert result is None
+
+    def test_passes_exclude_times_correctly(self, provider: WaldenGolfProvider) -> None:
+        """Test that exclude times are passed as the correct argument."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = None
+
+        provider._find_target_slot_js(
+            mock_driver,
+            time(8, 42),
+            4,
+            32,
+            8,
+            times_to_exclude={time(8, 50), time(9, 6)},
+        )
+
+        call_args = mock_driver.execute_script.call_args
+        # The exclude list is the 6th positional argument (index 5 after js_code)
+        exclude_arg = call_args[0][6]
+        assert len(exclude_arg) == 2
+        exclude_minutes = {e["h"] * 60 + e["m"] for e in exclude_arg}
+        assert 8 * 60 + 50 in exclude_minutes
+        assert 9 * 60 + 6 in exclude_minutes
+
+    def test_passes_northgate_course_index(self, provider: WaldenGolfProvider) -> None:
+        """Test that the Northgate course index constant is passed to JS."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = None
+
+        provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        call_args = mock_driver.execute_script.call_args
+        # The northgate index is the 7th positional argument (index 6 after js_code)
+        northgate_index = call_args[0][7]
+        assert northgate_index == "0"
+
+
+class TestClickSlotByIndexJS:
+    """Tests for the JavaScript-based Reserve click method."""
+
+    def test_returns_true_on_success(self, provider: WaldenGolfProvider) -> None:
+        """Test that click returns True when successful."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = True
+
+        result = provider._click_slot_by_index_js(mock_driver, 5)
+        assert result is True
+
+    def test_returns_false_on_failure(self, provider: WaldenGolfProvider) -> None:
+        """Test that click returns False when element not found."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = False
+
+        result = provider._click_slot_by_index_js(mock_driver, 999)
+        assert result is False
+
+    def test_returns_false_on_none(self, provider: WaldenGolfProvider) -> None:
+        """Test that click returns False when JS returns None."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = None
+
+        result = provider._click_slot_by_index_js(mock_driver, 0)
+        assert result is False
+
+    def test_passes_correct_index(self, provider: WaldenGolfProvider) -> None:
+        """Test that the slot index is passed correctly to JS."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = True
+
+        provider._click_slot_by_index_js(mock_driver, 42)
+
+        call_args = mock_driver.execute_script.call_args
+        assert call_args[0][1] == 42
+
+
+class TestPrecisionWait:
+    """Tests for the precision busy-wait method."""
+
+    def test_returns_immediately_if_past_execute_at(self, provider: WaldenGolfProvider) -> None:
+        """Test that precision wait returns immediately if already past target time."""
+        from datetime import datetime
+        from unittest.mock import patch as mock_patch
+        from zoneinfo import ZoneInfo
+
+        # execute_at is 1 hour ago
+        past_time = datetime(2026, 2, 12, 5, 30, 0)
+
+        with mock_patch("app.providers.walden_provider.datetime") as mock_datetime:
+            mock_datetime.now.return_value = datetime(
+                2026, 2, 12, 6, 30, 0, tzinfo=ZoneInfo("America/Chicago")
+            )
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+            # Should not raise or hang
+            provider._precision_wait_until(past_time)
+
+    def test_calls_sleep_for_coarse_wait(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that precision wait uses sleep for the coarse portion."""
+        from datetime import datetime as real_datetime
+        from unittest.mock import patch as mock_patch
+        from zoneinfo import ZoneInfo
+
+        import app.providers.walden_provider as walden_module
+
+        sleep_calls: list[float] = []
+
+        def mock_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        monkeypatch.setattr(walden_module.time_module, "sleep", mock_sleep)
+
+        call_count = 0
+
+        def mock_now(tz=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                # First calls: before execute_at (to trigger the wait)
+                return real_datetime(2026, 2, 12, 6, 29, 58, tzinfo=ZoneInfo("America/Chicago"))
+            # After sleep, return time past execute_at to exit busy-wait
+            return real_datetime(2026, 2, 12, 6, 30, 0, 1000, tzinfo=ZoneInfo("America/Chicago"))
+
+        with mock_patch("app.providers.walden_provider.datetime") as mock_dt:
+            mock_dt.now = mock_now
+            # Route strftime and other calls through real datetime
+            mock_dt.side_effect = lambda *args, **kwargs: real_datetime(*args, **kwargs)
+
+            execute_at = real_datetime(2026, 2, 12, 6, 30, 0)
+            provider._precision_wait_until(execute_at)
+
+        # Should have called sleep once for coarse wait and micro-sleeps for busy-wait
+        assert len(sleep_calls) >= 1
+        assert sleep_calls[0] > 0  # coarse sleep is wait_seconds - 0.2
+        # Any subsequent sleep calls are the busy-wait 0.1ms micro-sleeps
+        assert all(s == 0.0001 for s in sleep_calls[1:])
+
+
+class TestFindAndBookFastJS:
+    """Tests for the fast JS path in _find_and_book_time_slot_sync."""
+
+    def test_fast_js_finds_and_books_exact_match(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that fast JS path finds slot, clicks it, and completes booking."""
+        mock_driver = MagicMock()
+
+        # Mock JS slot finder
+        monkeypatch.setattr(
+            provider,
+            "_find_target_slot_js",
+            MagicMock(
+                return_value={
+                    "timeStr": "8:42",
+                    "hours": 8,
+                    "minutes": 42,
+                    "index": 5,
+                    "diff": 0,
+                    "available": 4,
+                    "isExact": True,
+                }
+            ),
+        )
+
+        # Mock JS click
+        monkeypatch.setattr(provider, "_click_slot_by_index_js", MagicMock(return_value=True))
+
+        # Mock complete booking
+        monkeypatch.setattr(
+            provider,
+            "_complete_booking_sync",
+            MagicMock(
+                return_value=SimpleNamespace(
+                    success=True,
+                    booked_time=time(8, 42),
+                    confirmation_number="ABC123",
+                    course_name=None,
+                )
+            ),
+        )
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+        )
+
+        assert result.success is True
+        # Verify _complete_booking_sync was called with already_clicked=True
+        call_kwargs = provider._complete_booking_sync.call_args[1]
+        assert call_kwargs["already_clicked"] is True
+
+    def test_fast_js_returns_failure_when_no_slot(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that fast JS path returns failure when no slot found."""
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(provider, "_find_target_slot_js", MagicMock(return_value=None))
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+        )
+
+        assert result.success is False
+        assert "No time slots" in result.error_message
+
+    def test_fast_js_returns_failure_when_click_fails(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that fast JS path returns failure when click fails."""
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(
+            provider,
+            "_find_target_slot_js",
+            MagicMock(
+                return_value={
+                    "timeStr": "8:42",
+                    "hours": 8,
+                    "minutes": 42,
+                    "index": 5,
+                    "diff": 0,
+                    "available": 4,
+                    "isExact": True,
+                }
+            ),
+        )
+
+        monkeypatch.setattr(provider, "_click_slot_by_index_js", MagicMock(return_value=False))
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+        )
+
+        assert result.success is False
+        assert "Failed to click Reserve" in result.error_message
+
+
+class TestBatchBookingPreparation:
+    """Tests for the restructured batch booking flow with pre-6:30 preparation."""
+
+    def test_batch_booking_does_prep_before_wait(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that date selection and scrolling happen before execute_at wait."""
+        from datetime import datetime
+
+        import app.providers.walden_provider as walden_module
+
+        class DummyWait:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def until(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        monkeypatch.setattr(walden_module, "WebDriverWait", DummyWait)
+        monkeypatch.setattr(
+            walden_module,
+            "expected_conditions",
+            SimpleNamespace(presence_of_element_located=lambda *_: None),
+        )
+
+        driver = MagicMock()
+        monkeypatch.setattr(provider, "_create_driver", lambda: driver)
+        monkeypatch.setattr(provider, "_perform_login", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
+
+        call_order: list[str] = []
+
+        def mock_select_date(*_args: object) -> bool:
+            call_order.append("select_date")
+            return True
+
+        def mock_scroll(*_args: object, **_kwargs: object) -> None:
+            call_order.append("scroll")
+
+        def mock_precision_wait(execute_at: object) -> None:
+            call_order.append("precision_wait")
+
+        def mock_find_and_book(*_args: object, **_kwargs: object) -> object:
+            call_order.append("find_and_book")
+            return SimpleNamespace(success=True, booked_time=time(8, 42), confirmation_number="X")
+
+        monkeypatch.setattr(provider, "_select_date_sync", mock_select_date)
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", mock_scroll)
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
+        monkeypatch.setattr(provider, "_precision_wait_until", mock_precision_wait)
+        monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
+
+        from app.providers.base import BatchBookingRequest
+
+        req = BatchBookingRequest(booking_id="a", target_time=time(8, 42), num_players=4)
+
+        result = provider._book_multiple_tee_times_sync(
+            target_date=date.today() + timedelta(days=7),
+            requests=[req],
+            execute_at=datetime(2026, 2, 19, 6, 30, 0),
+        )
+
+        assert result.total_succeeded == 1
+        # Verify order: date selection and scroll happen BEFORE precision wait
+        assert call_order.index("select_date") < call_order.index("precision_wait")
+        assert call_order.index("scroll") < call_order.index("precision_wait")
+        assert call_order.index("precision_wait") < call_order.index("find_and_book")
+
+    def test_batch_booking_uses_fast_js_when_execute_at_set(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that batch booking uses fast JS path when execute_at is provided."""
+        from datetime import datetime
+
+        import app.providers.walden_provider as walden_module
+
+        class DummyWait:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def until(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        monkeypatch.setattr(walden_module, "WebDriverWait", DummyWait)
+        monkeypatch.setattr(
+            walden_module,
+            "expected_conditions",
+            SimpleNamespace(presence_of_element_located=lambda *_: None),
+        )
+
+        driver = MagicMock()
+        monkeypatch.setattr(provider, "_create_driver", lambda: driver)
+        monkeypatch.setattr(provider, "_perform_login", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_date_sync", lambda *_: True)
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
+        monkeypatch.setattr(provider, "_precision_wait_until", MagicMock())
+
+        fast_js_values: list[bool] = []
+
+        def mock_find_and_book(
+            _driver: object,
+            target_time: time,
+            _num_players: int,
+            _fallback_window: int,
+            **kwargs: object,
+        ) -> object:
+            fast_js_values.append(kwargs.get("use_fast_js", False))
+            return SimpleNamespace(success=True, booked_time=target_time, confirmation_number="X")
+
+        monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
+
+        from app.providers.base import BatchBookingRequest
+
+        req = BatchBookingRequest(booking_id="a", target_time=time(8, 42), num_players=4)
+
+        provider._book_multiple_tee_times_sync(
+            target_date=date.today() + timedelta(days=7),
+            requests=[req],
+            execute_at=datetime(2026, 2, 19, 6, 30, 0),
+        )
+
+        assert fast_js_values == [True]
+
+    def test_batch_booking_no_page_refresh_at_execute_at(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that batch booking does NOT call driver.refresh() when execute_at is set."""
+        from datetime import datetime
+
+        import app.providers.walden_provider as walden_module
+
+        class DummyWait:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def until(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        monkeypatch.setattr(walden_module, "WebDriverWait", DummyWait)
+        monkeypatch.setattr(
+            walden_module,
+            "expected_conditions",
+            SimpleNamespace(presence_of_element_located=lambda *_: None),
+        )
+
+        driver = MagicMock()
+        monkeypatch.setattr(provider, "_create_driver", lambda: driver)
+        monkeypatch.setattr(provider, "_perform_login", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_date_sync", lambda *_: True)
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
+        monkeypatch.setattr(provider, "_precision_wait_until", MagicMock())
+        monkeypatch.setattr(
+            provider,
+            "_find_and_book_time_slot_sync",
+            lambda *_a, **_kw: SimpleNamespace(
+                success=True, booked_time=time(8, 42), confirmation_number="X"
+            ),
+        )
+
+        from app.providers.base import BatchBookingRequest
+
+        req = BatchBookingRequest(booking_id="a", target_time=time(8, 42), num_players=4)
+
+        provider._book_multiple_tee_times_sync(
+            target_date=date.today() + timedelta(days=7),
+            requests=[req],
+            execute_at=datetime(2026, 2, 19, 6, 30, 0),
+        )
+
+        # driver.refresh() should NOT have been called
+        driver.refresh.assert_not_called()
 
 
 if __name__ == "__main__":
