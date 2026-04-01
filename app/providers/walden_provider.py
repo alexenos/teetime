@@ -2685,7 +2685,7 @@ class WaldenGolfProvider(ReservationProvider):
         return exactMatch || bestSlot;
         """
 
-        result = driver.execute_script(
+        result: dict[str, Any] | None = driver.execute_script(
             js_code,
             target_time.hour,
             target_time.minute,
