@@ -87,9 +87,7 @@ class CTDateTime:
             ValueError: If ``dt`` is already timezone-aware.
         """
         if dt.tzinfo is not None:
-            raise ValueError(
-                f"from_naive_ct expects a naive datetime, got tzinfo={dt.tzinfo!r}"
-            )
+            raise ValueError(f"from_naive_ct expects a naive datetime, got tzinfo={dt.tzinfo!r}")
         return dt.replace(tzinfo=cls.CT_TZ)
 
     @classmethod
