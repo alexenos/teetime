@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.providers.walden_provider import WaldenGolfProvider
+from app.utils.timezone import CTDateTime
 
 
 @pytest.fixture
@@ -1624,10 +1625,8 @@ class TestPrecisionWait:
             # After sleep, return time past execute_at to exit busy-wait
             return real_datetime(2026, 2, 12, 6, 30, 0, 1000, tzinfo=ZoneInfo("America/Chicago"))
 
-        with mock_patch("app.providers.walden_provider.datetime") as mock_dt:
-            mock_dt.now = mock_now
-            # Route strftime and other calls through real datetime
-            mock_dt.side_effect = lambda *args, **kwargs: real_datetime(*args, **kwargs)
+        with mock_patch.object(CTDateTime, "now") as mock_ct_now:
+            mock_ct_now.side_effect = mock_now
 
             execute_at = real_datetime(2026, 2, 12, 6, 30, 0)
             provider._precision_wait_until(execute_at)

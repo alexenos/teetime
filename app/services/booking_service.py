@@ -7,7 +7,6 @@ processing booking requests, and executing reservations at the scheduled time.
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.models.schemas import (
@@ -22,6 +21,7 @@ from app.providers.base import BatchBookingRequest, BookingResult, ReservationPr
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.sms_service import sms_service
+from app.utils.timezone import CTDateTime
 
 
 class BookingService:
@@ -558,12 +558,11 @@ class BookingService:
         """
         # Check 48-hour restriction for multi-player bookings
         if request.num_players > 1:
-            tz = ZoneInfo(settings.timezone)
-            now_ct = datetime.now(tz)
+            now_ct = CTDateTime.now()
 
-            # Combine requested date and time into a timezone-aware datetime
+            # Combine requested date and time into a timezone-aware CT datetime
             tee_time_naive = datetime.combine(request.requested_date, request.requested_time)
-            tee_time_ct = tee_time_naive.replace(tzinfo=tz)
+            tee_time_ct = CTDateTime.from_naive_ct(tee_time_naive)
 
             hours_until_tee_time = (tee_time_ct - now_ct).total_seconds() / 3600
 
@@ -591,14 +590,9 @@ class BookingService:
 
         # Compare in timezone-aware space for robustness.
         # execution_time is naive (CT wall-clock), so we localize it.
-        # This approach is safe even if _calculate_execution_time() is later
-        # changed to return an aware datetime.
-        tz = ZoneInfo(settings.timezone)
-        now_ct = datetime.now(tz)
-        if execution_time.tzinfo is None:
-            exec_ct = execution_time.replace(tzinfo=tz)
-        else:
-            exec_ct = execution_time.astimezone(tz)
+        # normalize_to_ct handles both naive and aware inputs safely.
+        now_ct = CTDateTime.now()
+        exec_ct = CTDateTime.normalize_to_ct(execution_time)
 
         if exec_ct <= now_ct:
             booking_id_opt: str | None = created_booking.id
@@ -677,8 +671,6 @@ class BookingService:
         The timezone is used for DST-correct calculation but stripped
         before returning to match the database schema (timestamp without timezone).
         """
-        tz = ZoneInfo(settings.timezone)
-
         booking_open_date = target_date - timedelta(days=settings.days_in_advance)
 
         execution_time = datetime.combine(
@@ -688,11 +680,11 @@ class BookingService:
                 minute=settings.booking_open_minute,
                 second=0,
             ),
-        ).replace(tzinfo=tz)
+        ).replace(tzinfo=CTDateTime.CT_TZ)
 
         # Return naive datetime (strip timezone) for database storage
         # The value represents CT wall-clock time
-        return execution_time.replace(tzinfo=None)
+        return CTDateTime.to_naive_ct(execution_time)
 
     def _get_help_message(self) -> str:
         """Return a help message explaining how to use the booking service."""
