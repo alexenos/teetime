@@ -1412,30 +1412,45 @@ class TestBookingService48HourRestriction:
     async def test_single_player_booking_allowed_within_48_hours(
         self, booking_service: BookingService
     ) -> None:
-        """Test that single-player bookings are allowed within 48 hours of tee time."""
+        """Test that single-player bookings are allowed within 48 hours of tee time.
+
+        This verifies the single-player carve-out: multi-player bookings within
+        48 hours of tee time are rejected, but single-player bookings are always
+        allowed regardless of timing.
+
+        We use a date where execution time is in the future (so booking is scheduled,
+        not executed immediately) but verify the 48-hour check doesn't apply to
+        single-player requests by using the same timing that would fail for
+        multi-player.
+        """
         import pytz
 
         tz = pytz.timezone("America/Chicago")
-        # Current time: Dec 16, 2025 at 10:00 AM CT
-        # Execution time for Dec 23 booking is Dec 16 at 6:30 AM CT (in the past)
-        # But we mock "now" to be Dec 16 at 6:00 AM CT so execution is in the future
-        mock_now_value = tz.localize(datetime(2025, 12, 16, 6, 0))
+        # Current time: Dec 16, 2025 at 6:00 AM CT (before execution time)
+        # Tee time: Dec 17, 2025 at 8:00 AM CT (26 hours away - within 48 hours)
+        # Execution time: Dec 10, 2025 at 6:30 AM CT (past, but we test the check)
+        #
+        # The 48-hour check happens before execution time calculation, so we need
+        # mock_now to be close enough to tee_time to trigger the 48-hour path.
+        # But execution time is based on requested_date - 7 days, not now.
+        #
+        # For Dec 17 tee time: execution = Dec 10 at 6:30 AM
+        # If now = Dec 16 at 6:00 AM, execution is in the past → immediate exec
+        # So let's use Dec 23 tee time with now = Dec 22 at 10 AM:
+        # - Tee time Dec 23 8:00 AM is 22 hours away (within 48h)
+        # - Execution Dec 16 6:30 AM is in past → immediate exec
+        # - But single player should bypass the 48h check entirely
+        #
+        # Actually, the simplest test: same timing as multi_player_rejected test
+        # but with num_players=1 - should NOT raise.
+        mock_now_value = tz.localize(datetime(2025, 12, 23, 10, 0))
 
-        # Request for Dec 17, 2025 at 8:00 AM CT (26 hours away - within 48 hours)
-        # Execution time is Dec 10 at 6:30 AM CT (in the past relative to Dec 16)
-        # So this will trigger immediate execution - let's use a different approach
-        # Use a date where execution time is in the future
-        # Request for Dec 23, 2025 at 8:00 AM CT
-        # Execution time is Dec 16 at 6:30 AM CT
-        # If now is Dec 16 at 6:00 AM CT, execution is 30 min in the future (scheduled)
-        # Tee time is Dec 23 at 8:00 AM CT, which is ~7 days away (not within 48 hours)
-        # Let's adjust: we want tee time within 48 hours but execution in future
-        # That's impossible since execution is 7 days before tee time
-        # So let's just test that single player doesn't raise, using a far future date
+        # Request for Dec 24, 2025 at 8:00 AM CT - 22 hours away (within 48 hours)
+        # This is the SAME timing that raises ValueError for multi-player
         request = TeeTimeRequest(
-            requested_date=date(2025, 12, 23),
+            requested_date=date(2025, 12, 24),
             requested_time=time(8, 0),
-            num_players=1,
+            num_players=1,  # Single player - should bypass 48-hour restriction
             fallback_window_minutes=30,
         )
 
@@ -1445,11 +1460,15 @@ class TestBookingService48HourRestriction:
                 return booking
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+            mock_db.get_booking = AsyncMock(return_value=None)  # For execute path
+            mock_db.update_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
                 mock_ct_now.return_value = mock_now_value
 
-                # Should not raise - single player is always allowed
+                # Should not raise ValueError - single player bypasses 48-hour restriction
+                # even though tee time is only 22 hours away (same timing that fails
+                # for multi-player in test_multi_player_booking_rejected_within_48_hours)
                 booking = await booking_service.create_booking("+15551234567", request)
                 assert booking.request.num_players == 1
 

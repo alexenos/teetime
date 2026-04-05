@@ -1589,11 +1589,10 @@ class TestPrecisionWait:
         # execute_at is 1 hour ago
         past_time = datetime(2026, 2, 12, 5, 30, 0)
 
-        with mock_patch("app.providers.walden_provider.datetime") as mock_datetime:
-            mock_datetime.now.return_value = datetime(
+        with mock_patch.object(CTDateTime, "now") as mock_ct_now:
+            mock_ct_now.return_value = datetime(
                 2026, 2, 12, 6, 30, 0, tzinfo=ZoneInfo("America/Chicago")
             )
-            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
             # Should not raise or hang
             provider._precision_wait_until(past_time)
 
