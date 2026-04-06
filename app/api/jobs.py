@@ -10,7 +10,6 @@ import asyncio
 import logging
 from datetime import date, datetime, time
 from enum import Enum
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from google.auth import exceptions as google_auth_exceptions
@@ -21,6 +20,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.services.booking_service import booking_service
 from app.services.sms_service import sms_service
+from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +169,7 @@ async def execute_due_bookings(
     Idempotency: Bookings are transitioned to IN_PROGRESS before execution,
     so retries will not re-execute already-started bookings.
     """
-    tz = ZoneInfo(settings.timezone)
-    now = datetime.now(tz)
+    now = CTDateTime.now()
 
     # Calculate the booking window open time (6:30am CT)
     # We query for bookings due at this time, not "now", because the scheduler
@@ -200,7 +199,7 @@ async def execute_due_bookings(
     booking_map = {b.id: b for b in due_bookings if b.id is not None}
 
     # Strip timezone for passing to batch booking (expects naive datetime in CT)
-    booking_open_time_naive = booking_open_time.replace(tzinfo=None)
+    booking_open_time_naive = CTDateTime.to_naive_ct(booking_open_time)
 
     logger.info(
         f"BATCH_JOB: Booking window opens at {booking_open_time.strftime('%H:%M:%S')}, "

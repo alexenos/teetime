@@ -7,7 +7,6 @@ import time as time_module
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from typing import Any, TypeVar
-from zoneinfo import ZoneInfo
 
 import google.auth
 import httpx
@@ -38,6 +37,7 @@ from app.providers.base import (
 )
 from app.providers.wait_helper import WaitStrategy
 from app.providers.walden_dom_schema import DOM
+from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
 
@@ -2764,11 +2764,9 @@ class WaldenGolfProvider(ReservationProvider):
             execute_at: Datetime in CT timezone to wait until. May be naive
                 (assumed CT) or timezone-aware (converted to naive CT).
         """
-        ct_tz = ZoneInfo(settings.timezone)
         # Normalize: convert aware datetimes to naive CT so comparisons are consistent
-        if execute_at.tzinfo is not None:
-            execute_at = execute_at.astimezone(ct_tz).replace(tzinfo=None)
-        now_ct = datetime.now(ct_tz).replace(tzinfo=None)
+        execute_at = CTDateTime.to_naive_ct(execute_at)
+        now_ct = CTDateTime.to_naive_ct(CTDateTime.now())
         if now_ct >= execute_at:
             logger.warning(
                 f"BATCH_BOOKING: Already past execute_at "
@@ -2788,7 +2786,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         # Precision busy-wait for the final ~200ms
         # Sub-millisecond sleep reduces CPU pressure with negligible precision loss
-        while datetime.now(ct_tz).replace(tzinfo=None) < execute_at:
+        while CTDateTime.to_naive_ct(CTDateTime.now()) < execute_at:
             time_module.sleep(0.0001)
 
         logger.info("BATCH_BOOKING: Precision wait complete - GO!")

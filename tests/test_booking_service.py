@@ -20,6 +20,7 @@ from app.models.schemas import (
 )
 from app.providers.base import BookingResult
 from app.services.booking_service import BookingService
+from app.utils.timezone import CTDateTime
 
 
 @pytest.fixture
@@ -117,12 +118,10 @@ class TestBookingServiceBookings:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            with patch("app.services.booking_service.datetime") as mock_datetime:
+            with patch.object(CTDateTime, "now") as mock_ct_now:
                 tz = pytz.timezone("America/Chicago")
-                mock_now = datetime(2025, 12, 22, 10, 0)
-                mock_datetime.now.return_value = tz.localize(mock_now)
-                mock_datetime.combine = datetime.combine
-                mock_datetime.min = datetime.min
+                mock_now_value = datetime(2025, 12, 22, 10, 0)
+                mock_ct_now.return_value = tz.localize(mock_now_value)
 
                 booking = await booking_service.create_booking("+15551234567", future_request)
 
@@ -385,14 +384,12 @@ class TestBookingServiceImmediateExecution:
             with patch("app.services.booking_service.sms_service") as mock_sms:
                 mock_sms.send_booking_confirmation = AsyncMock()
 
-                with patch("app.services.booking_service.datetime") as mock_datetime:
+                with patch.object(CTDateTime, "now") as mock_ct_now:
                     tz = pytz.timezone("America/Chicago")
                     # Now is Dec 22 at 10:00 AM CT, execution time (6:30 AM) is in the past
                     # Tee time is Dec 29 at 8:00 AM CT, which is ~7 days away (over 48 hours)
-                    mock_now = datetime(2025, 12, 22, 10, 0)
-                    mock_datetime.now.return_value = tz.localize(mock_now)
-                    mock_datetime.combine = datetime.combine
-                    mock_datetime.min = datetime.min
+                    mock_now_value = datetime(2025, 12, 22, 10, 0)
+                    mock_ct_now.return_value = tz.localize(mock_now_value)
 
                     result = await booking_service.create_booking("+15551234567", past_request)
 
@@ -424,12 +421,10 @@ class TestBookingServiceImmediateExecution:
             mock_provider.book_tee_time = AsyncMock()
             booking_service.set_reservation_provider(mock_provider)
 
-            with patch("app.services.booking_service.datetime") as mock_datetime:
+            with patch.object(CTDateTime, "now") as mock_ct_now:
                 tz = pytz.timezone("America/Chicago")
-                mock_now = datetime(2025, 12, 20, 10, 0)
-                mock_datetime.now.return_value = tz.localize(mock_now)
-                mock_datetime.combine = datetime.combine
-                mock_datetime.min = datetime.min
+                mock_now_value = datetime(2025, 12, 20, 10, 0)
+                mock_ct_now.return_value = tz.localize(mock_now_value)
 
                 result = await booking_service.create_booking("+15551234567", future_request)
 
@@ -490,12 +485,10 @@ class TestBookingServiceImmediateExecution:
             with patch("app.services.booking_service.sms_service") as mock_sms:
                 mock_sms.send_booking_confirmation = AsyncMock()
 
-                with patch("app.services.booking_service.datetime") as mock_datetime:
+                with patch.object(CTDateTime, "now") as mock_ct_now:
                     tz = pytz.timezone("America/Chicago")
-                    mock_now = datetime(2025, 12, 22, 6, 30)
-                    mock_datetime.now.return_value = tz.localize(mock_now)
-                    mock_datetime.combine = datetime.combine
-                    mock_datetime.min = datetime.min
+                    mock_now_value = datetime(2025, 12, 22, 6, 30)
+                    mock_ct_now.return_value = tz.localize(mock_now_value)
 
                     result = await booking_service.create_booking("+15551234567", request)
 
@@ -668,12 +661,10 @@ class TestBookingServiceIntentHandling:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            with patch("app.services.booking_service.datetime") as mock_datetime:
+            with patch.object(CTDateTime, "now") as mock_ct_now:
                 tz = pytz.timezone("America/Chicago")
-                mock_now = datetime(2025, 12, 22, 10, 0)
-                mock_datetime.now.return_value = tz.localize(mock_now)
-                mock_datetime.combine = datetime.combine
-                mock_datetime.min = datetime.min
+                mock_now_value = datetime(2025, 12, 22, 10, 0)
+                mock_ct_now.return_value = tz.localize(mock_now_value)
 
                 response = await booking_service._handle_confirm_intent(session)
 
@@ -1398,7 +1389,7 @@ class TestBookingService48HourRestriction:
 
         tz = pytz.timezone("America/Chicago")
         # Current time: Dec 23, 2025 at 10:00 AM CT
-        mock_now = tz.localize(datetime(2025, 12, 23, 10, 0))
+        mock_now_value = tz.localize(datetime(2025, 12, 23, 10, 0))
 
         # Request for Dec 24, 2025 at 8:00 AM CT (22 hours away - within 48 hours)
         request = TeeTimeRequest(
@@ -1408,9 +1399,8 @@ class TestBookingService48HourRestriction:
             fallback_window_minutes=30,
         )
 
-        with patch("app.services.booking_service.datetime") as mock_datetime:
-            mock_datetime.now.return_value = mock_now
-            mock_datetime.combine = datetime.combine
+        with patch.object(CTDateTime, "now") as mock_ct_now:
+            mock_ct_now.return_value = mock_now_value
 
             with pytest.raises(ValueError) as exc_info:
                 await booking_service.create_booking("+15551234567", request)
@@ -1422,30 +1412,45 @@ class TestBookingService48HourRestriction:
     async def test_single_player_booking_allowed_within_48_hours(
         self, booking_service: BookingService
     ) -> None:
-        """Test that single-player bookings are allowed within 48 hours of tee time."""
+        """Test that single-player bookings are allowed within 48 hours of tee time.
+
+        This verifies the single-player carve-out: multi-player bookings within
+        48 hours of tee time are rejected, but single-player bookings are always
+        allowed regardless of timing.
+
+        We use a date where execution time is in the future (so booking is scheduled,
+        not executed immediately) but verify the 48-hour check doesn't apply to
+        single-player requests by using the same timing that would fail for
+        multi-player.
+        """
         import pytz
 
         tz = pytz.timezone("America/Chicago")
-        # Current time: Dec 16, 2025 at 10:00 AM CT
-        # Execution time for Dec 23 booking is Dec 16 at 6:30 AM CT (in the past)
-        # But we mock "now" to be Dec 16 at 6:00 AM CT so execution is in the future
-        mock_now = tz.localize(datetime(2025, 12, 16, 6, 0))
+        # Current time: Dec 16, 2025 at 6:00 AM CT (before execution time)
+        # Tee time: Dec 17, 2025 at 8:00 AM CT (26 hours away - within 48 hours)
+        # Execution time: Dec 10, 2025 at 6:30 AM CT (past, but we test the check)
+        #
+        # The 48-hour check happens before execution time calculation, so we need
+        # mock_now to be close enough to tee_time to trigger the 48-hour path.
+        # But execution time is based on requested_date - 7 days, not now.
+        #
+        # For Dec 17 tee time: execution = Dec 10 at 6:30 AM
+        # If now = Dec 16 at 6:00 AM, execution is in the past → immediate exec
+        # So let's use Dec 23 tee time with now = Dec 22 at 10 AM:
+        # - Tee time Dec 23 8:00 AM is 22 hours away (within 48h)
+        # - Execution Dec 16 6:30 AM is in past → immediate exec
+        # - But single player should bypass the 48h check entirely
+        #
+        # Actually, the simplest test: same timing as multi_player_rejected test
+        # but with num_players=1 - should NOT raise.
+        mock_now_value = tz.localize(datetime(2025, 12, 23, 10, 0))
 
-        # Request for Dec 17, 2025 at 8:00 AM CT (26 hours away - within 48 hours)
-        # Execution time is Dec 10 at 6:30 AM CT (in the past relative to Dec 16)
-        # So this will trigger immediate execution - let's use a different approach
-        # Use a date where execution time is in the future
-        # Request for Dec 23, 2025 at 8:00 AM CT
-        # Execution time is Dec 16 at 6:30 AM CT
-        # If now is Dec 16 at 6:00 AM CT, execution is 30 min in the future (scheduled)
-        # Tee time is Dec 23 at 8:00 AM CT, which is ~7 days away (not within 48 hours)
-        # Let's adjust: we want tee time within 48 hours but execution in future
-        # That's impossible since execution is 7 days before tee time
-        # So let's just test that single player doesn't raise, using a far future date
+        # Request for Dec 24, 2025 at 8:00 AM CT - 22 hours away (within 48 hours)
+        # This is the SAME timing that raises ValueError for multi-player
         request = TeeTimeRequest(
-            requested_date=date(2025, 12, 23),
+            requested_date=date(2025, 12, 24),
             requested_time=time(8, 0),
-            num_players=1,
+            num_players=1,  # Single player - should bypass 48-hour restriction
             fallback_window_minutes=30,
         )
 
@@ -1455,13 +1460,15 @@ class TestBookingService48HourRestriction:
                 return booking
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+            mock_db.get_booking = AsyncMock(return_value=None)  # For execute path
+            mock_db.update_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            with patch("app.services.booking_service.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_now
-                mock_datetime.combine = datetime.combine
-                mock_datetime.min = datetime.min
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = mock_now_value
 
-                # Should not raise - single player is always allowed
+                # Should not raise ValueError - single player bypasses 48-hour restriction
+                # even though tee time is only 22 hours away (same timing that fails
+                # for multi-player in test_multi_player_booking_rejected_within_48_hours)
                 booking = await booking_service.create_booking("+15551234567", request)
                 assert booking.request.num_players == 1
 
@@ -1475,7 +1482,7 @@ class TestBookingService48HourRestriction:
         tz = pytz.timezone("America/Chicago")
         # Current time: Dec 16, 2025 at 6:00 AM CT
         # This is before the execution time of Dec 16 at 6:30 AM CT
-        mock_now = tz.localize(datetime(2025, 12, 16, 6, 0))
+        mock_now_value = tz.localize(datetime(2025, 12, 16, 6, 0))
 
         # Request for Dec 23, 2025 at 8:00 AM CT (7+ days away, well over 48 hours)
         # Execution time is Dec 16 at 6:30 AM CT (30 min in future, so scheduled)
@@ -1493,10 +1500,8 @@ class TestBookingService48HourRestriction:
 
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
-            with patch("app.services.booking_service.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_now
-                mock_datetime.combine = datetime.combine
-                mock_datetime.min = datetime.min
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = mock_now_value
 
                 # Should not raise - more than 48 hours away
                 booking = await booking_service.create_booking("+15551234567", request)
@@ -1510,7 +1515,7 @@ class TestBookingService48HourRestriction:
         import pytz
 
         tz = pytz.timezone("America/Chicago")
-        mock_now = tz.localize(datetime(2025, 12, 23, 10, 0))
+        mock_now_value = tz.localize(datetime(2025, 12, 23, 10, 0))
 
         # Request for Dec 24, 2025 at 8:00 AM CT (within 48 hours)
         request = TeeTimeRequest(
@@ -1520,9 +1525,8 @@ class TestBookingService48HourRestriction:
             fallback_window_minutes=30,
         )
 
-        with patch("app.services.booking_service.datetime") as mock_datetime:
-            mock_datetime.now.return_value = mock_now
-            mock_datetime.combine = datetime.combine
+        with patch.object(CTDateTime, "now") as mock_ct_now:
+            mock_ct_now.return_value = mock_now_value
 
             with pytest.raises(ValueError) as exc_info:
                 await booking_service.create_booking("+15551234567", request)
@@ -1538,7 +1542,7 @@ class TestBookingService48HourRestriction:
         import pytz
 
         tz = pytz.timezone("America/Chicago")
-        mock_now = tz.localize(datetime(2025, 12, 23, 10, 0))
+        mock_now_value = tz.localize(datetime(2025, 12, 23, 10, 0))
 
         # Session with pending request within 48 hours
         request = TeeTimeRequest(
@@ -1556,9 +1560,8 @@ class TestBookingService48HourRestriction:
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.update_session = AsyncMock(return_value=session)
 
-            with patch("app.services.booking_service.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_now
-                mock_datetime.combine = datetime.combine
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = mock_now_value
 
                 response = await booking_service._handle_confirm_intent(session)
 
