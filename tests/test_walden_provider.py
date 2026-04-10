@@ -1162,9 +1162,7 @@ class TestPlayerCountModalScoping:
                 # Also mock _capture_diagnostic_info to avoid side effects
                 # Mock _check_slot_blocked_popup to return False (no blocked popup)
                 with patch.object(provider, "_capture_diagnostic_info"):
-                    with patch.object(
-                        provider, "_check_slot_blocked_popup", return_value=False
-                    ):
+                    with patch.object(provider, "_check_slot_blocked_popup", return_value=False):
                         result = provider._complete_booking_sync(
                             mock_driver, mock_reserve_element, time(8, 26), 4
                         )
@@ -1701,7 +1699,9 @@ class TestFindAndBookFastJS:
         assert result.confirmation_number == "ABC123"
         # Verify _execute_fast_booking_chain_js was called with correct args
         provider._execute_fast_booking_chain_js.assert_called_once_with(
-            mock_driver, 5, 4  # driver, slot_index, num_players
+            mock_driver,
+            5,
+            4,  # driver, slot_index, num_players
         )
 
     def test_fast_js_returns_failure_when_no_slot(
