@@ -2297,13 +2297,6 @@ class WaldenGolfProvider(ReservationProvider):
             booked_time = time(slot_info["hours"], slot_info["minutes"])
             is_exact = slot_info["isExact"]
 
-            if not self._click_slot_by_index_js(driver, slot_info["index"]):
-                return BookingResult(
-                    success=False,
-                    error_message="Failed to click Reserve button via JavaScript",
-                    booked_time=booked_time,
-                )
-
             fallback_reason = None
             if not is_exact:
                 fallback_reason = (
@@ -2311,16 +2304,60 @@ class WaldenGolfProvider(ReservationProvider):
                     f"using {booked_time.strftime('%I:%M %p')}"
                 )
 
-            result = self._complete_booking_sync(
+            # === ULTRA-FAST PATH: Execute entire booking flow in rapid JS sequence ===
+            # This replaces: _click_slot_by_index_js + _complete_booking_sync
+            # with a single JS execution that does Reserve → player count → TBD → Book Now
+            # in under 2 seconds instead of 7-15 seconds.
+            chain_result = self._execute_fast_booking_chain_js(
                 driver,
-                None,
-                booked_time,
+                slot_info["index"],
                 num_players,
-                fallback_reason,
-                already_clicked=True,
             )
-            result.course_name = self.NORTHGATE_COURSE_NAME
-            return result
+
+            if chain_result.get("blocked"):
+                # Slot was grabbed by another user at the same moment
+                self._capture_diagnostic_info(driver, "slot_blocked_by_other_user")
+                return BookingResult(
+                    success=False,
+                    error_message="Slot blocked by another user",
+                    booked_time=booked_time,
+                    course_name=self.NORTHGATE_COURSE_NAME,
+                )
+
+            if not chain_result.get("success"):
+                phase = chain_result.get("phase", "unknown")
+                error = chain_result.get("error", "Unknown error in fast booking chain")
+                self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+                return BookingResult(
+                    success=False,
+                    error_message=f"Fast booking failed at {phase}: {error}",
+                    booked_time=booked_time,
+                    course_name=self.NORTHGATE_COURSE_NAME,
+                )
+
+            # Fast chain succeeded - verify and extract confirmation
+            confirmation_number = self._extract_confirmation_number(driver)
+            if self._verify_booking_success(driver):
+                return BookingResult(
+                    success=True,
+                    booked_time=booked_time,
+                    confirmation_number=confirmation_number,
+                    fallback_reason=fallback_reason,
+                    course_name=self.NORTHGATE_COURSE_NAME,
+                )
+            else:
+                # Fast chain reported success but verification failed
+                self._capture_diagnostic_info(driver, "fast_chain_verify_failed")
+                error_details = self._extract_booking_error_message(driver)
+                return BookingResult(
+                    success=False,
+                    error_message=(
+                        f"Fast booking chain completed but verification failed"
+                        f"{': ' + error_details if error_details else ''}"
+                    ),
+                    booked_time=booked_time,
+                    course_name=self.NORTHGATE_COURSE_NAME,
+                )
 
         # === EXISTING SLOW PATH (Python-based Selenium iteration) ===
 
@@ -2752,6 +2789,321 @@ class WaldenGolfProvider(ReservationProvider):
         else:
             logger.warning(f"BOOKING_DEBUG: JS failed to click Reserve at slot index {slot_index}")
         return bool(result)
+
+    def _execute_fast_booking_chain_js(
+        self,
+        driver: webdriver.Chrome,
+        slot_index: int,
+        num_players: int,
+    ) -> dict[str, Any]:
+        """
+        Execute the entire booking flow in a single rapid JS sequence.
+
+        This is the speed-critical path for winning the 6:30 AM race. Instead of:
+            1. Click Reserve → wait for modal (up to 10s)
+            2. Find player selector → click it → wait
+            3. Find TBD buttons → click each → wait
+            4. Find Book Now → click it
+
+        We execute a tight JS loop that:
+            1. Clicks Reserve
+            2. Polls for modal/player selector (sub-100ms intervals)
+            3. Clicks player count immediately when found
+            4. Polls for and clicks TBD buttons
+            5. Polls for and clicks Book Now
+
+        The entire sequence should complete in under 2 seconds if the slot
+        is available, vs 7-15 seconds with the Python-based flow.
+
+        Args:
+            driver: The WebDriver instance
+            slot_index: Index of the slot in the li.ui-datascroller-item NodeList
+            num_players: Number of players (1-4)
+
+        Returns:
+            Dict with result info:
+            - success: bool
+            - error: str (if failed)
+            - blocked: bool (if slot was grabbed by another user)
+            - phase: str (which phase completed/failed)
+        """
+        js_fast_chain = """
+        var slotIndex = arguments[0];
+        var numPlayers = arguments[1];
+        var maxWaitMs = arguments[2];
+        var pollIntervalMs = arguments[3];
+
+        var result = {
+            success: false,
+            error: null,
+            blocked: false,
+            phase: 'init',
+            timing: {}
+        };
+        var startTime = Date.now();
+
+        // Helper: poll for element with timeout
+        function pollFor(selectorOrFn, timeoutMs, desc) {
+            var deadline = Date.now() + timeoutMs;
+            while (Date.now() < deadline) {
+                var el = typeof selectorOrFn === 'function'
+                    ? selectorOrFn()
+                    : document.querySelector(selectorOrFn);
+                if (el) return el;
+                // Busy-wait with minimal delay (can't use setTimeout in sync JS)
+                var waitUntil = Date.now() + pollIntervalMs;
+                while (Date.now() < waitUntil) { /* spin */ }
+            }
+            return null;
+        }
+
+        // Phase 1: Click Reserve button
+        result.phase = 'reserve_click';
+        result.timing.reserveStart = Date.now() - startTime;
+
+        var items = document.querySelectorAll('li.ui-datascroller-item');
+        var item = items[slotIndex];
+        if (!item) {
+            result.error = 'Slot item not found at index ' + slotIndex;
+            return result;
+        }
+
+        var reserveBtn = item.querySelector("a[id*='reserve_button']");
+        if (!reserveBtn) {
+            var spans = item.querySelectorAll('span.custom-free-slot-span');
+            reserveBtn = spans.length > 0 ? spans[0] : null;
+        }
+        if (!reserveBtn) reserveBtn = item.querySelector("a.slot-link");
+        if (!reserveBtn) {
+            result.error = 'Reserve button not found in slot';
+            return result;
+        }
+
+        reserveBtn.scrollIntoView({block: 'center'});
+        reserveBtn.click();
+        result.timing.reserveClicked = Date.now() - startTime;
+
+        // Phase 2: Check for blocked-slot popup (fast check before waiting for modal)
+        result.phase = 'blocked_check';
+        var blockedPopup = pollFor(
+            function() {
+                var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
+                if (popup && popup.getAttribute('aria-hidden') === 'false') {
+                    return popup;
+                }
+                return null;
+            },
+            300,  // Only wait 300ms for blocked popup
+            'blocked popup'
+        );
+
+        if (blockedPopup) {
+            result.blocked = true;
+            result.error = 'Slot blocked by another user';
+            result.timing.blockedDetected = Date.now() - startTime;
+            // Try to dismiss the popup
+            var okBtn = blockedPopup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
+            if (okBtn) okBtn.click();
+            return result;
+        }
+
+        // Phase 3: Wait for player count selector to appear
+        result.phase = 'player_count_wait';
+        var playerSelector = pollFor(
+            function() {
+                // Look for the player count button group
+                // It has radio inputs with values 1,2,3,4 (not 0,1,2,3 like the time filter)
+                var groups = document.querySelectorAll('.ui-selectonebutton');
+                for (var i = 0; i < groups.length; i++) {
+                    var radio = groups[i].querySelector('input[type="radio"][value="' + numPlayers + '"]');
+                    if (radio) {
+                        // Verify this isn't the time filter (which has value="0")
+                        var hasValue0 = groups[i].querySelector('input[type="radio"][value="0"]');
+                        if (!hasValue0) {
+                            return {group: groups[i], radio: radio};
+                        }
+                    }
+                }
+                return null;
+            },
+            maxWaitMs,
+            'player selector'
+        );
+
+        if (!playerSelector) {
+            result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
+            result.timing.playerSelectorTimeout = Date.now() - startTime;
+            return result;
+        }
+        result.timing.playerSelectorFound = Date.now() - startTime;
+
+        // Phase 4: Click player count button
+        result.phase = 'player_count_click';
+        var playerButton = playerSelector.radio.parentElement;
+        if (playerButton.classList.contains('ui-state-disabled')) {
+            result.error = 'Player count ' + numPlayers + ' button is disabled';
+            return result;
+        }
+        playerButton.click();
+        result.timing.playerCountClicked = Date.now() - startTime;
+
+        // Phase 5: Add TBD Registered Guests (if numPlayers > 1)
+        if (numPlayers > 1) {
+            result.phase = 'tbd_guests';
+            var numTbd = numPlayers - 1;
+            var tbdClicked = 0;
+
+            // Wait for player rows to appear
+            var playerRows = pollFor(
+                function() {
+                    var rows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
+                    if (rows.length >= numPlayers) return rows;
+                    rows = document.querySelectorAll('table[id*="player"] tbody tr');
+                    if (rows.length >= numPlayers) return rows;
+                    return null;
+                },
+                3000,
+                'player rows'
+            );
+
+            if (!playerRows) {
+                result.error = 'Player rows did not appear after selecting ' + numPlayers + ' players';
+                return result;
+            }
+            result.timing.playerRowsFound = Date.now() - startTime;
+
+            // Click TBD button on each guest row (skip first row = member)
+            for (var r = 1; r < playerRows.length && tbdClicked < numTbd; r++) {
+                var row = playerRows[r];
+                var tbd = row.querySelector('a[id*="tbd"], span[id*="tbd"], a.ui-commandlink');
+                if (!tbd) {
+                    // Try XPath-style search
+                    var links = row.querySelectorAll('a');
+                    for (var l = 0; l < links.length; l++) {
+                        if (links[l].textContent && links[l].textContent.toUpperCase().indexOf('TBD') !== -1) {
+                            tbd = links[l];
+                            break;
+                        }
+                    }
+                }
+                if (tbd) {
+                    tbd.click();
+                    tbdClicked++;
+                    // Brief wait for AJAX
+                    var waitUntil = Date.now() + 200;
+                    while (Date.now() < waitUntil) { /* spin */ }
+                }
+            }
+
+            if (tbdClicked < numTbd) {
+                result.error = 'Only clicked ' + tbdClicked + ' of ' + numTbd + ' TBD buttons';
+                return result;
+            }
+            result.timing.tbdGuestsAdded = Date.now() - startTime;
+        }
+
+        // Phase 6: Click Book Now button
+        result.phase = 'book_now';
+        var bookNow = pollFor(
+            function() {
+                // Primary: by ID
+                var btn = document.querySelector('a[id*="bookTeeTimeAction"]');
+                if (btn) return btn;
+                // Fallback: by text
+                var links = document.querySelectorAll('a');
+                for (var i = 0; i < links.length; i++) {
+                    var txt = links[i].textContent || '';
+                    if (txt.indexOf('Book Now') !== -1 || txt.indexOf('Book') !== -1) {
+                        return links[i];
+                    }
+                }
+                return null;
+            },
+            5000,
+            'Book Now button'
+        );
+
+        if (!bookNow) {
+            result.error = 'Book Now button not found';
+            result.timing.bookNowTimeout = Date.now() - startTime;
+            return result;
+        }
+        result.timing.bookNowFound = Date.now() - startTime;
+
+        bookNow.scrollIntoView({block: 'center'});
+        bookNow.click();
+        result.timing.bookNowClicked = Date.now() - startTime;
+
+        result.phase = 'complete';
+        result.success = true;
+        result.timing.totalMs = Date.now() - startTime;
+
+        return result;
+        """
+
+        # Execute the fast chain with configurable timeouts
+        # maxWaitMs: how long to wait for player selector (the critical race window)
+        # pollIntervalMs: how often to check for elements (lower = faster but more CPU)
+        max_wait_ms = 5000  # 5 seconds max for player selector
+        poll_interval_ms = 10  # 10ms polling interval
+
+        logger.info(
+            f"FAST_BOOKING: Starting rapid JS chain for slot {slot_index}, "
+            f"{num_players} players"
+        )
+
+        result: dict[str, Any] = driver.execute_script(
+            js_fast_chain,
+            slot_index,
+            num_players,
+            max_wait_ms,
+            poll_interval_ms,
+        )
+
+        timing = result.get("timing", {})
+        logger.info(
+            f"FAST_BOOKING: Chain completed in {timing.get('totalMs', 'N/A')}ms - "
+            f"phase={result.get('phase')}, success={result.get('success')}, "
+            f"blocked={result.get('blocked')}, error={result.get('error')}"
+        )
+        logger.debug(f"FAST_BOOKING: Timing breakdown: {timing}")
+
+        return result
+
+    def _check_slot_blocked_popup(self, driver: webdriver.Chrome) -> bool:
+        """
+        Check if the 'slot blocked by another user' popup is visible.
+
+        This is a fallback check used by the Python-based booking flow.
+        The fast JS chain has its own inline check.
+
+        Args:
+            driver: The WebDriver instance
+
+        Returns:
+            True if the blocked popup is visible, False otherwise
+        """
+        try:
+            popup = driver.find_element(By.CSS_SELECTOR, DOM.SLOT_BLOCKED.popup_visible)
+            if popup.is_displayed():
+                logger.warning("BOOKING_DEBUG: Slot blocked popup detected")
+                # Try to extract the error message
+                try:
+                    label = popup.find_element(By.TAG_NAME, "label")
+                    logger.warning(f"BOOKING_DEBUG: Blocked popup text: {label.text}")
+                except NoSuchElementException:
+                    pass
+                # Try to dismiss the popup
+                try:
+                    ok_btn = popup.find_element(By.CSS_SELECTOR, DOM.SLOT_BLOCKED.ok_button)
+                    ok_btn.click()
+                    logger.debug("BOOKING_DEBUG: Dismissed blocked popup")
+                except NoSuchElementException:
+                    pass
+                return True
+        except NoSuchElementException:
+            pass
+        return False
 
     def _precision_wait_until(self, execute_at: datetime) -> None:
         """
@@ -3811,6 +4163,17 @@ class WaldenGolfProvider(ReservationProvider):
                 # Use JavaScript click to bypass any overlay issues
                 driver.execute_script("arguments[0].click();", reserve_element)
                 logger.debug("BOOKING_DEBUG: Clicked Reserve button")
+
+            # Check for blocked-slot popup BEFORE waiting for modal
+            # This happens when another user grabs the slot at the same moment
+            self.wait_strategy.simple_wait(fixed_duration=0.3, event_driven_duration=0.1)
+            if self._check_slot_blocked_popup(driver):
+                self._capture_diagnostic_info(driver, "slot_blocked_by_other_user")
+                return BookingResult(
+                    success=False,
+                    error_message="Slot blocked by another user",
+                    booked_time=booked_time,
+                )
 
             # Attempt to detect the booking modal/dialog. If found, scope all
             # subsequent element searches to the modal to avoid matching elements
