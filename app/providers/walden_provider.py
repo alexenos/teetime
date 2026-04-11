@@ -2335,7 +2335,37 @@ class WaldenGolfProvider(ReservationProvider):
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
 
-            # Fast chain succeeded - verify and extract confirmation
+            # Fast chain succeeded - wait briefly for page to settle after Book Now click
+            # The JS chain clicked Book Now but the page may still be processing
+            try:
+                # Wait for either URL change or success indicators
+                wait = WebDriverWait(driver, 5)
+                try:
+                    # First check if URL changed (common for successful bookings)
+                    wait.until(
+                        lambda d: "confirmation" in d.current_url.lower()
+                        or "success" in d.current_url.lower()
+                        or "thank" in d.current_url.lower()
+                    )
+                except TimeoutException:
+                    # URL didn't change, try waiting for success text on page
+                    try:
+                        wait.until(
+                            expected_conditions.presence_of_element_located(
+                                (
+                                    By.XPATH,
+                                    "//*[contains(text(), 'success') or "
+                                    "contains(text(), 'confirm') or "
+                                    "contains(text(), 'thank')]",
+                                )
+                            )
+                        )
+                    except TimeoutException:
+                        # No explicit success indicator, proceed with verification
+                        pass
+            except Exception as e:
+                logger.debug(f"FAST_BOOKING: Post-chain wait exception (non-fatal): {e}")
+
             confirmation_number = self._extract_confirmation_number(driver)
             if self._verify_booking_success(driver):
                 return BookingResult(
@@ -2898,8 +2928,24 @@ class WaldenGolfProvider(ReservationProvider):
         );
 
         if (blockedPopup) {
-            result.blocked = true;
-            result.error = 'Slot blocked by another user';
+            // Check popup text against known blocked-slot patterns
+            var blockedPatterns = arguments[8];  // Array of substrings
+            var popupText = (blockedPopup.textContent || '').toLowerCase();
+            var isBlockedSlot = false;
+            for (var p = 0; p < blockedPatterns.length; p++) {
+                if (popupText.indexOf(blockedPatterns[p].toLowerCase()) !== -1) {
+                    isBlockedSlot = true;
+                    break;
+                }
+            }
+
+            if (isBlockedSlot) {
+                result.blocked = true;
+                result.error = 'Slot blocked by another user';
+            } else {
+                // Generic validation error, not specifically blocked
+                result.error = 'Validation error: ' + popupText.substring(0, 100);
+            }
             result.timing.blockedDetected = Date.now() - startTime;
             // Try to dismiss the popup
             var okBtn = blockedPopup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
@@ -2973,11 +3019,29 @@ class WaldenGolfProvider(ReservationProvider):
             result.timing.playerRowsFound = Date.now() - startTime;
 
             // Click TBD button on each guest row (skip first row = member)
-            for (var r = 1; r < playerRows.length && tbdClicked < numTbd; r++) {
-                var row = playerRows[r];
+            // Re-query rows on each iteration to avoid stale references after AJAX
+            while (tbdClicked < numTbd) {
+                // Fresh query for player rows each iteration
+                var currentRows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
+                if (currentRows.length === 0) {
+                    currentRows = document.querySelectorAll('table[id*="player"] tbody tr');
+                }
+                if (currentRows.length <= 1) {
+                    result.error = 'Player rows disappeared while clicking TBD buttons';
+                    return result;
+                }
+
+                // Find the next guest row (skip member row at index 0)
+                var guestIndex = tbdClicked + 1;  // 1-indexed for guests
+                if (guestIndex >= currentRows.length) {
+                    result.error = 'Not enough player rows for TBD guests';
+                    return result;
+                }
+
+                var row = currentRows[guestIndex];
                 var tbd = row.querySelector('a[id*="tbd"], span[id*="tbd"], a.ui-commandlink');
                 if (!tbd) {
-                    // Try XPath-style search
+                    // Try text-based search
                     var links = row.querySelectorAll('a');
                     for (var l = 0; l < links.length; l++) {
                         if (links[l].textContent && links[l].textContent.toUpperCase().indexOf('TBD') !== -1) {
@@ -2989,9 +3053,13 @@ class WaldenGolfProvider(ReservationProvider):
                 if (tbd) {
                     tbd.click();
                     tbdClicked++;
-                    // Brief wait for AJAX
+                    // Brief wait for AJAX to update DOM
                     var waitUntil = Date.now() + 200;
                     while (Date.now() < waitUntil) { /* spin */ }
+                } else {
+                    // TBD button not found on this row, might already be filled
+                    result.error = 'TBD button not found on guest row ' + guestIndex;
+                    return result;
                 }
             }
 
@@ -3052,12 +3120,16 @@ class WaldenGolfProvider(ReservationProvider):
             f"{num_players} players"
         )
 
+        # Convert blocked patterns tuple to list for JSON serialization
+        blocked_patterns = list(DOM.SLOT_BLOCKED.blocked_text_patterns)
+
         result: dict[str, Any] = driver.execute_script(
             js_fast_chain,
             slot_index,
             num_players,
             max_wait_ms,
             poll_interval_ms,
+            blocked_patterns,
         )
 
         timing = result.get("timing", {})
@@ -3077,30 +3149,46 @@ class WaldenGolfProvider(ReservationProvider):
         This is a fallback check used by the Python-based booking flow.
         The fast JS chain has its own inline check.
 
+        Only returns True if the popup text matches one of the known
+        blocked_text_patterns. Other validation errors are logged but
+        not treated as blocked slots.
+
         Args:
             driver: The WebDriver instance
 
         Returns:
-            True if the blocked popup is visible, False otherwise
+            True if the blocked popup is visible AND contains blocked-slot text,
+            False otherwise
         """
         try:
             popup = driver.find_element(By.CSS_SELECTOR, DOM.SLOT_BLOCKED.popup_visible)
             if popup.is_displayed():
-                logger.warning("BOOKING_DEBUG: Slot blocked popup detected")
-                # Try to extract the error message
-                try:
-                    label = popup.find_element(By.TAG_NAME, "label")
-                    logger.warning(f"BOOKING_DEBUG: Blocked popup text: {label.text}")
-                except NoSuchElementException:
-                    pass
-                # Try to dismiss the popup
+                # Extract popup text
+                popup_text = popup.text.lower() if popup.text else ""
+                logger.warning(
+                    f"BOOKING_DEBUG: Validation popup detected, text: {popup_text[:100]}"
+                )
+
+                # Check if text matches blocked-slot patterns
+                is_blocked = any(
+                    pattern.lower() in popup_text
+                    for pattern in DOM.SLOT_BLOCKED.blocked_text_patterns
+                )
+
+                # Try to dismiss the popup regardless
                 try:
                     ok_btn = popup.find_element(By.CSS_SELECTOR, DOM.SLOT_BLOCKED.ok_button)
                     ok_btn.click()
-                    logger.debug("BOOKING_DEBUG: Dismissed blocked popup")
+                    logger.debug("BOOKING_DEBUG: Dismissed validation popup")
                 except NoSuchElementException:
                     pass
-                return True
+
+                if is_blocked:
+                    logger.warning("BOOKING_DEBUG: Popup matches blocked-slot pattern")
+                    return True
+                else:
+                    logger.warning("BOOKING_DEBUG: Popup is generic validation error, not blocked")
+                    return False
         except NoSuchElementException:
             pass
         return False

@@ -1703,6 +1703,9 @@ class TestFindAndBookFastJS:
             5,
             4,  # driver, slot_index, num_players
         )
+        # Verify confirmation extraction and verification were called
+        provider._extract_confirmation_number.assert_called_once_with(mock_driver)
+        provider._verify_booking_success.assert_called_once_with(mock_driver)
 
     def test_fast_js_returns_failure_when_no_slot(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -1773,6 +1776,10 @@ class TestFindAndBookFastJS:
 
         assert result.success is False
         assert "blocked" in result.error_message.lower()
+        # Verify diagnostic capture was called with correct key
+        provider._capture_diagnostic_info.assert_called_once_with(
+            mock_driver, "slot_blocked_by_other_user"
+        )
 
     def test_fast_js_returns_failure_when_chain_fails(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -1823,6 +1830,10 @@ class TestFindAndBookFastJS:
 
         assert result.success is False
         assert "player_count_wait" in result.error_message
+        # Verify diagnostic capture was called with correct key
+        provider._capture_diagnostic_info.assert_called_once_with(
+            mock_driver, "fast_chain_failed_player_count_wait"
+        )
 
 
 class TestBatchBookingPreparation:
