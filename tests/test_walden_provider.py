@@ -1160,10 +1160,12 @@ class TestPlayerCountModalScoping:
             ) as mock_select:
                 provider.wait_strategy = MagicMock()
                 # Also mock _capture_diagnostic_info to avoid side effects
+                # Mock _check_slot_blocked_popup to return False (no blocked popup)
                 with patch.object(provider, "_capture_diagnostic_info"):
-                    result = provider._complete_booking_sync(
-                        mock_driver, mock_reserve_element, time(8, 26), 4
-                    )
+                    with patch.object(provider, "_check_slot_blocked_popup", return_value=False):
+                        result = provider._complete_booking_sync(
+                            mock_driver, mock_reserve_element, time(8, 26), 4
+                        )
 
                 # Player count selection was called (it returns False, so booking fails)
                 assert result.success is False
@@ -1643,7 +1645,7 @@ class TestFindAndBookFastJS:
     def test_fast_js_finds_and_books_exact_match(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that fast JS path finds slot, clicks it, and completes booking."""
+        """Test that fast JS path finds slot and executes fast booking chain."""
         mock_driver = MagicMock()
 
         # Mock JS slot finder
@@ -1663,21 +1665,25 @@ class TestFindAndBookFastJS:
             ),
         )
 
-        # Mock JS click
-        monkeypatch.setattr(provider, "_click_slot_by_index_js", MagicMock(return_value=True))
-
-        # Mock complete booking
+        # Mock fast booking chain - returns success
         monkeypatch.setattr(
             provider,
-            "_complete_booking_sync",
+            "_execute_fast_booking_chain_js",
             MagicMock(
-                return_value=SimpleNamespace(
-                    success=True,
-                    booked_time=time(8, 42),
-                    confirmation_number="ABC123",
-                    course_name=None,
-                )
+                return_value={
+                    "success": True,
+                    "blocked": False,
+                    "phase": "complete",
+                    "error": None,
+                    "timing": {"totalMs": 1500},
+                }
             ),
+        )
+
+        # Mock verification and confirmation extraction
+        monkeypatch.setattr(provider, "_verify_booking_success", MagicMock(return_value=True))
+        monkeypatch.setattr(
+            provider, "_extract_confirmation_number", MagicMock(return_value="ABC123")
         )
 
         result = provider._find_and_book_time_slot_sync(
@@ -1690,9 +1696,16 @@ class TestFindAndBookFastJS:
         )
 
         assert result.success is True
-        # Verify _complete_booking_sync was called with already_clicked=True
-        call_kwargs = provider._complete_booking_sync.call_args[1]
-        assert call_kwargs["already_clicked"] is True
+        assert result.confirmation_number == "ABC123"
+        # Verify _execute_fast_booking_chain_js was called with correct args
+        provider._execute_fast_booking_chain_js.assert_called_once_with(
+            mock_driver,
+            5,
+            4,  # driver, slot_index, num_players
+        )
+        # Verify confirmation extraction and verification were called
+        provider._extract_confirmation_number.assert_called_once_with(mock_driver)
+        provider._verify_booking_success.assert_called_once_with(mock_driver)
 
     def test_fast_js_returns_failure_when_no_slot(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -1714,10 +1727,10 @@ class TestFindAndBookFastJS:
         assert result.success is False
         assert "No time slots" in result.error_message
 
-    def test_fast_js_returns_failure_when_click_fails(
+    def test_fast_js_returns_failure_when_slot_blocked(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that fast JS path returns failure when click fails."""
+        """Test that fast JS path returns failure when slot is blocked by another user."""
         mock_driver = MagicMock()
 
         monkeypatch.setattr(
@@ -1736,7 +1749,21 @@ class TestFindAndBookFastJS:
             ),
         )
 
-        monkeypatch.setattr(provider, "_click_slot_by_index_js", MagicMock(return_value=False))
+        # Mock fast booking chain - returns blocked
+        monkeypatch.setattr(
+            provider,
+            "_execute_fast_booking_chain_js",
+            MagicMock(
+                return_value={
+                    "success": False,
+                    "blocked": True,
+                    "phase": "blocked_check",
+                    "error": "Slot blocked by another user",
+                    "timing": {"blockedDetected": 300},
+                }
+            ),
+        )
+        monkeypatch.setattr(provider, "_capture_diagnostic_info", MagicMock())
 
         result = provider._find_and_book_time_slot_sync(
             mock_driver,
@@ -1748,7 +1775,65 @@ class TestFindAndBookFastJS:
         )
 
         assert result.success is False
-        assert "Failed to click Reserve" in result.error_message
+        assert "blocked" in result.error_message.lower()
+        # Verify diagnostic capture was called with correct key
+        provider._capture_diagnostic_info.assert_called_once_with(
+            mock_driver, "slot_blocked_by_other_user"
+        )
+
+    def test_fast_js_returns_failure_when_chain_fails(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that fast JS path returns failure when booking chain fails."""
+        mock_driver = MagicMock()
+
+        monkeypatch.setattr(
+            provider,
+            "_find_target_slot_js",
+            MagicMock(
+                return_value={
+                    "timeStr": "8:42",
+                    "hours": 8,
+                    "minutes": 42,
+                    "index": 5,
+                    "diff": 0,
+                    "available": 4,
+                    "isExact": True,
+                }
+            ),
+        )
+
+        # Mock fast booking chain - returns failure at player_count phase
+        monkeypatch.setattr(
+            provider,
+            "_execute_fast_booking_chain_js",
+            MagicMock(
+                return_value={
+                    "success": False,
+                    "blocked": False,
+                    "phase": "player_count_wait",
+                    "error": "Player count selector not found within 5000ms",
+                    "timing": {"playerSelectorTimeout": 5000},
+                }
+            ),
+        )
+        monkeypatch.setattr(provider, "_capture_diagnostic_info", MagicMock())
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+        )
+
+        assert result.success is False
+        assert "player_count_wait" in result.error_message
+        # Verify diagnostic capture was called with correct key
+        provider._capture_diagnostic_info.assert_called_once_with(
+            mock_driver, "fast_chain_failed_player_count_wait"
+        )
 
 
 class TestBatchBookingPreparation:

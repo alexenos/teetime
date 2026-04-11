@@ -347,6 +347,30 @@ class BookingCompletionSelectors:
 
 
 @dataclass(frozen=True)
+class SlotBlockedSelectors:
+    """Selectors for the 'slot blocked by another user' popup.
+
+    When another user grabs a slot at exactly the same moment, the Walden site
+    shows a teeSheetValidationErrorPopup dialog instead of opening the booking
+    modal. Detecting this popup allows the booking flow to fail fast and retry
+    the next slot instead of timing out on stale element references.
+    """
+
+    # The popup container (hidden by default, shown on conflict)
+    popup_container: str = "div[id*='teeSheetValidationErrorPopup']"
+    # Popup visibility check (aria-hidden becomes 'false' when shown)
+    popup_visible: str = "div[id*='teeSheetValidationErrorPopup'][aria-hidden='false']"
+    # The OK button to dismiss the popup
+    ok_button: str = "a[id*='j_idt1076'], .dialogOKBtn"
+    # Error text patterns that indicate a blocked slot
+    blocked_text_patterns: tuple[str, ...] = (
+        "blocked by another user",
+        "slot is blocked",
+        "already reserved",
+    )
+
+
+@dataclass(frozen=True)
 class ErrorMessageSelectors:
     """Selectors for error/alert message containers."""
 
@@ -440,6 +464,7 @@ class WaldenDOMSchema:
     PLAYER_COUNT: PlayerCountSelectors = PlayerCountSelectors()
     TBD_GUESTS: TBDGuestSelectors = TBDGuestSelectors()
     BOOKING_COMPLETION: BookingCompletionSelectors = BookingCompletionSelectors()
+    SLOT_BLOCKED: SlotBlockedSelectors = SlotBlockedSelectors()
     ERROR_MESSAGES: ErrorMessageSelectors = ErrorMessageSelectors()
     CANCELLATION: CancellationSelectors = CancellationSelectors()
     COURSE_FILTERING: CourseFilteringSelectors = CourseFilteringSelectors()
