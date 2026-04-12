@@ -1839,10 +1839,15 @@ class TestFindAndBookFastJS:
 class TestBatchBookingPreparation:
     """Tests for the restructured batch booking flow with pre-6:30 preparation."""
 
-    def test_batch_booking_does_prep_before_wait(
+    def test_batch_booking_does_prep_before_booking(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that date selection and scrolling happen before execute_at wait."""
+        """Test that date selection and scrolling happen before booking.
+
+        With timed booking mode, precision wait is handled by the JS chain itself,
+        not by a separate Python call. This test verifies that all prep work
+        (date selection, scrolling, pre-location) happens before the booking call.
+        """
         from datetime import datetime
 
         import app.providers.walden_provider as walden_module
@@ -1875,17 +1880,16 @@ class TestBatchBookingPreparation:
         def mock_scroll(*_args: object, **_kwargs: object) -> None:
             call_order.append("scroll")
 
-        def mock_precision_wait(execute_at: object) -> None:
-            call_order.append("precision_wait")
-
         def mock_find_and_book(*_args: object, **_kwargs: object) -> object:
             call_order.append("find_and_book")
+            # Verify execute_at_timestamp_ms is passed for first booking
+            if "execute_at_timestamp_ms" in _kwargs:
+                call_order.append(f"timed_booking_{_kwargs['execute_at_timestamp_ms'] is not None}")
             return SimpleNamespace(success=True, booked_time=time(8, 42), confirmation_number="X")
 
         monkeypatch.setattr(provider, "_select_date_sync", mock_select_date)
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", mock_scroll)
         monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
-        monkeypatch.setattr(provider, "_precision_wait_until", mock_precision_wait)
         monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
 
         from app.providers.base import BatchBookingRequest
@@ -1899,10 +1903,11 @@ class TestBatchBookingPreparation:
         )
 
         assert result.total_succeeded == 1
-        # Verify order: date selection and scroll happen BEFORE precision wait
-        assert call_order.index("select_date") < call_order.index("precision_wait")
-        assert call_order.index("scroll") < call_order.index("precision_wait")
-        assert call_order.index("precision_wait") < call_order.index("find_and_book")
+        # Verify order: date selection and scroll happen BEFORE booking
+        assert call_order.index("select_date") < call_order.index("find_and_book")
+        assert call_order.index("scroll") < call_order.index("find_and_book")
+        # Verify timed mode was used (execute_at_timestamp_ms was passed)
+        assert "timed_booking_True" in call_order
 
     def test_batch_booking_uses_fast_js_when_execute_at_set(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
