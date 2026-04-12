@@ -2954,27 +2954,55 @@ class WaldenGolfProvider(ReservationProvider):
         }
 
         // Phase 3: Wait for player count selector to appear
+        // Also check for blocked popup during the wait (server might respond late)
         result.phase = 'player_count_wait';
-        var playerSelector = pollFor(
-            function() {
-                // Look for the player count button group
-                // It has radio inputs with values 1,2,3,4 (not 0,1,2,3 like the time filter)
-                var groups = document.querySelectorAll('.ui-selectonebutton');
-                for (var i = 0; i < groups.length; i++) {
-                    var radio = groups[i].querySelector('input[type="radio"][value="' + numPlayers + '"]');
-                    if (radio) {
-                        // Verify this isn't the time filter (which has value="0")
-                        var hasValue0 = groups[i].querySelector('input[type="radio"][value="0"]');
-                        if (!hasValue0) {
-                            return {group: groups[i], radio: radio};
-                        }
+        var blockedPatterns = arguments[8];  // Array of substrings (passed as arg)
+        var playerSelector = null;
+        var deadline = Date.now() + maxWaitMs;
+
+        while (Date.now() < deadline) {
+            // Check for blocked popup first (fail fast if slot was taken)
+            var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
+            if (popup && popup.getAttribute('aria-hidden') === 'false') {
+                var popupText = (popup.textContent || '').toLowerCase();
+                var isBlockedSlot = false;
+                for (var bp = 0; bp < blockedPatterns.length; bp++) {
+                    if (popupText.indexOf(blockedPatterns[bp].toLowerCase()) !== -1) {
+                        isBlockedSlot = true;
+                        break;
                     }
                 }
-                return null;
-            },
-            maxWaitMs,
-            'player selector'
-        );
+                if (isBlockedSlot) {
+                    result.blocked = true;
+                    result.error = 'Slot blocked by another user';
+                } else {
+                    result.error = 'Validation error during wait: ' + popupText.substring(0, 100);
+                }
+                result.timing.blockedDetectedDuringWait = Date.now() - startTime;
+                var okBtn = popup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
+                if (okBtn) okBtn.click();
+                return result;
+            }
+
+            // Now check for player selector
+            var groups = document.querySelectorAll('.ui-selectonebutton');
+            for (var i = 0; i < groups.length; i++) {
+                var radio = groups[i].querySelector('input[type="radio"][value="' + numPlayers + '"]');
+                if (radio) {
+                    // Verify this isn't the time filter (which has value="0")
+                    var hasValue0 = groups[i].querySelector('input[type="radio"][value="0"]');
+                    if (!hasValue0) {
+                        playerSelector = {group: groups[i], radio: radio};
+                        break;
+                    }
+                }
+            }
+            if (playerSelector) break;
+
+            // Busy-wait with minimal delay
+            var waitUntil = Date.now() + pollIntervalMs;
+            while (Date.now() < waitUntil) { /* spin */ }
+        }
 
         if (!playerSelector) {
             result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
