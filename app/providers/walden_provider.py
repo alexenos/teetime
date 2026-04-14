@@ -652,18 +652,19 @@ class WaldenGolfProvider(ReservationProvider):
             # Instead of Python waiting then calling JS, we inject JS that self-triggers
             # at the exact timestamp. This eliminates Python→Selenium→JS handoff latency.
             execute_at_timestamp_ms: int | None = None
-            if execute_at and use_fast_booking:
-                # Convert execute_at to Unix timestamp in milliseconds
-                execute_at_timestamp_ms = int(execute_at.timestamp() * 1000)
+            if execute_at:
+                # Normalize to naive CT first (execute_at may be aware or naive),
+                # then convert via relative delta to avoid host-timezone interpretation.
+                # This mirrors the approach in _precision_wait_until.
+                execute_at_ct = CTDateTime.to_naive_ct(execute_at)
+                now_ct = CTDateTime.to_naive_ct(CTDateTime.now())
+                delay_ms = max(0, int((execute_at_ct - now_ct).total_seconds() * 1000))
+                execute_at_timestamp_ms = int(time_module.time() * 1000) + delay_ms
                 logger.info(
                     f"BATCH_BOOKING: Step 7 - Timed booking mode, "
                     f"target timestamp: {execute_at_timestamp_ms} "
-                    f"({execute_at.strftime('%H:%M:%S.%f')})"
+                    f"({execute_at_ct.strftime('%H:%M:%S.%f')} CT, delay={delay_ms}ms)"
                 )
-            elif execute_at:
-                # Fallback: if not using fast JS, do the old precision wait
-                logger.info("BATCH_BOOKING: Step 7 - Precision wait until booking window opens")
-                self._precision_wait_until(execute_at)
 
             # Track times that have been successfully booked to avoid conflicts
             # When a booking succeeds, we add its booked_time to this set
@@ -3529,16 +3530,34 @@ class WaldenGolfProvider(ReservationProvider):
             f"{num_players} players, target in {ms_until_target}ms"
         )
 
-        # Execute the JS - it will busy-wait internally until the target time
-        result: dict[str, Any] = driver.execute_script(
-            js_timed_chain,
-            slot_index,
-            num_players,
-            target_timestamp_ms,
-            max_wait_ms,
-            poll_interval_ms,
-            blocked_patterns,
-        )
+        # Set script timeout to accommodate the busy-wait period plus booking flow
+        # Default Selenium timeout is 30s, but we may wait up to 2+ minutes (6:28 → 6:30)
+        # Add buffer for booking flow after click (max_wait_ms + TBD clicks + Book Now)
+        script_timeout_ms = max(ms_until_target, 0) + max_wait_ms + 30000  # +30s buffer
+        script_timeout_s = max(60, script_timeout_ms // 1000)  # At least 60s
+
+        # Store original timeout to restore later
+        original_timeouts = driver.timeouts
+        try:
+            driver.set_script_timeout(script_timeout_s)
+            logger.debug(f"TIMED_BOOKING: Set script timeout to {script_timeout_s}s")
+
+            # Execute the JS - it will busy-wait internally until the target time
+            result: dict[str, Any] = driver.execute_script(
+                js_timed_chain,
+                slot_index,
+                num_players,
+                target_timestamp_ms,
+                max_wait_ms,
+                poll_interval_ms,
+                blocked_patterns,
+            )
+        finally:
+            # Restore original script timeout
+            if original_timeouts and original_timeouts.script is not None:
+                driver.set_script_timeout(original_timeouts.script)
+            else:
+                driver.set_script_timeout(30)  # Default Selenium timeout
 
         timing = result.get("timing", {})
         logger.info(

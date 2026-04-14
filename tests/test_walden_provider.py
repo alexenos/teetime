@@ -1845,8 +1845,12 @@ class TestBatchBookingPreparation:
         """Test that date selection and scrolling happen before booking.
 
         With timed booking mode, precision wait is handled by the JS chain itself,
-        not by a separate Python call. This test verifies that all prep work
-        (date selection, scrolling, pre-location) happens before the booking call.
+        not by a separate Python call. This test verifies that:
+        1. Date selection happens before booking
+        2. Scrolling happens before booking
+        3. Timed mode is used (execute_at_timestamp_ms is passed)
+
+        Note: Pre-location via _find_target_slot_js is tested separately.
         """
         from datetime import datetime
 
