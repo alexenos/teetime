@@ -2924,7 +2924,9 @@ class WaldenGolfProvider(ReservationProvider):
             - blocked: bool (if slot was grabbed by another user)
             - phase: str (which phase completed/failed)
         """
-        js_fast_chain = _JS_BLOCKED_POPUP_HELPERS + """
+        js_fast_chain = (
+            _JS_BLOCKED_POPUP_HELPERS
+            + """
         var slotIndex = arguments[0];
         var numPlayers = arguments[1];
         var maxWaitMs = arguments[2];
@@ -3190,6 +3192,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         return result;
         """
+        )
 
         # Execute the fast chain with configurable timeouts
         # maxWaitMs: how long to wait for player selector (the critical race window)
@@ -3247,7 +3250,9 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             Dict with result info (same as _execute_fast_booking_chain_js)
         """
-        js_timed_chain = _JS_BLOCKED_POPUP_HELPERS + """
+        js_timed_chain = (
+            _JS_BLOCKED_POPUP_HELPERS
+            + """
         var slotIndex = arguments[0];
         var numPlayers = arguments[1];
         var targetTimestampMs = arguments[2];
@@ -3349,7 +3354,7 @@ class WaldenGolfProvider(ReservationProvider):
             // between our script execution and the next check
             var enabledDeadline = enabledWaitStart + enabledMaxWait;
             var enabledPollInterval = 5;  // 5ms between checks
-            
+
             while (Date.now() < enabledDeadline) {
                 disableDivChecks++;
                 // Force DOM re-read by accessing classList
@@ -3593,6 +3598,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         return result;
         """
+        )
 
         max_wait_ms = 5000
         poll_interval_ms = 10
