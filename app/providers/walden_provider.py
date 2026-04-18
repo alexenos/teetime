@@ -3040,6 +3040,29 @@ class WaldenGolfProvider(ReservationProvider):
         }
 
         if (!playerSelector) {
+            // Final blocked-popup check before returning timeout error
+            // The server may have been slow to respond with the blocked popup
+            var finalPopup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
+            if (finalPopup && finalPopup.getAttribute('aria-hidden') === 'false') {
+                var finalPopupText = (finalPopup.textContent || '').toLowerCase();
+                var finalIsBlocked = false;
+                for (var fp = 0; fp < blockedPatterns.length; fp++) {
+                    if (finalPopupText.indexOf(blockedPatterns[fp].toLowerCase()) !== -1) {
+                        finalIsBlocked = true;
+                        break;
+                    }
+                }
+                if (finalIsBlocked) {
+                    result.blocked = true;
+                    result.error = 'Slot blocked by another user (detected after timeout)';
+                } else {
+                    result.error = 'Validation error after timeout: ' + finalPopupText.substring(0, 100);
+                }
+                result.timing.blockedDetectedAfterTimeout = Date.now() - startTime;
+                var finalOkBtn = finalPopup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
+                if (finalOkBtn) finalOkBtn.click();
+                return result;
+            }
             result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
             result.timing.playerSelectorTimeout = Date.now() - startTime;
             return result;
@@ -3395,6 +3418,29 @@ class WaldenGolfProvider(ReservationProvider):
         }
 
         if (!playerSelector) {
+            // Final blocked-popup check before returning timeout error
+            // The server may have been slow to respond with the blocked popup
+            var finalPopup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
+            if (finalPopup && finalPopup.getAttribute('aria-hidden') === 'false') {
+                var finalPopupText = (finalPopup.textContent || '').toLowerCase();
+                var finalIsBlocked = false;
+                for (var fp = 0; fp < blockedPatterns.length; fp++) {
+                    if (finalPopupText.indexOf(blockedPatterns[fp].toLowerCase()) !== -1) {
+                        finalIsBlocked = true;
+                        break;
+                    }
+                }
+                if (finalIsBlocked) {
+                    result.blocked = true;
+                    result.error = 'Slot blocked by another user (detected after timeout)';
+                } else {
+                    result.error = 'Validation error after timeout: ' + finalPopupText.substring(0, 100);
+                }
+                result.timing.blockedDetectedAfterTimeout = Date.now() - startTime;
+                var finalOkBtn = finalPopup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
+                if (finalOkBtn) finalOkBtn.click();
+                return result;
+            }
             result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
             result.timing.playerSelectorTimeout = Date.now() - startTime;
             return result;
