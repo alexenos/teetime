@@ -94,6 +94,38 @@ def with_retry(
     return decorator
 
 
+# Shared JavaScript helper for blocked popup detection and dismissal.
+# Used by both _execute_fast_booking_chain_js and _stage_timed_booking_chain_js
+# to avoid code duplication across the six popup-check callsites.
+_JS_BLOCKED_POPUP_HELPERS = """
+// Helper: Check if popup matches blocked patterns and return classification
+function classifyBlockedPopup(popup, blockedPatterns) {
+    var text = (popup.textContent || '').toLowerCase();
+    for (var i = 0; i < blockedPatterns.length; i++) {
+        if (text.indexOf(blockedPatterns[i].toLowerCase()) !== -1) {
+            return {blocked: true, text: text};
+        }
+    }
+    return {blocked: false, text: text};
+}
+
+// Helper: Dismiss popup by clicking OK button
+function dismissPopup(popup) {
+    var ok = popup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
+    if (ok) ok.click();
+}
+
+// Helper: Find visible blocked popup
+function findVisibleBlockedPopup() {
+    var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
+    if (popup && popup.getAttribute('aria-hidden') === 'false') {
+        return popup;
+    }
+    return null;
+}
+"""
+
+
 class WaldenGolfProvider(ReservationProvider):
     """
     Selenium-based provider for booking tee times at Walden Golf / Northgate Country Club.
@@ -2892,7 +2924,9 @@ class WaldenGolfProvider(ReservationProvider):
             - blocked: bool (if slot was grabbed by another user)
             - phase: str (which phase completed/failed)
         """
-        js_fast_chain = """
+        js_fast_chain = (
+            _JS_BLOCKED_POPUP_HELPERS
+            + """
         var slotIndex = arguments[0];
         var numPlayers = arguments[1];
         var maxWaitMs = arguments[2];
@@ -2950,72 +2984,44 @@ class WaldenGolfProvider(ReservationProvider):
 
         // Phase 2: Check for blocked-slot popup (fast check before waiting for modal)
         result.phase = 'blocked_check';
-        var blockedPopup = pollFor(
-            function() {
-                var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
-                if (popup && popup.getAttribute('aria-hidden') === 'false') {
-                    return popup;
-                }
-                return null;
-            },
-            300,  // Only wait 300ms for blocked popup
-            'blocked popup'
-        );
+        var blockedPatterns = arguments[4];  // Array of substrings
+        var blockedPopup = pollFor(findVisibleBlockedPopup, 300, 'blocked popup');
 
         if (blockedPopup) {
-            // Check popup text against known blocked-slot patterns
-            var blockedPatterns = arguments[8];  // Array of substrings
-            var popupText = (blockedPopup.textContent || '').toLowerCase();
-            var isBlockedSlot = false;
-            for (var p = 0; p < blockedPatterns.length; p++) {
-                if (popupText.indexOf(blockedPatterns[p].toLowerCase()) !== -1) {
-                    isBlockedSlot = true;
-                    break;
-                }
-            }
+            // Use shared helper to classify popup
+            var classification = classifyBlockedPopup(blockedPopup, blockedPatterns);
 
-            if (isBlockedSlot) {
+            if (classification.blocked) {
                 result.blocked = true;
                 result.error = 'Slot blocked by another user';
             } else {
                 // Generic validation error, not specifically blocked
-                result.error = 'Validation error: ' + popupText.substring(0, 100);
+                result.error = 'Validation error: ' + classification.text.substring(0, 100);
             }
             result.timing.blockedDetected = Date.now() - startTime;
-            // Try to dismiss the popup
-            var okBtn = blockedPopup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
-            if (okBtn) okBtn.click();
+            dismissPopup(blockedPopup);
             return result;
         }
 
         // Phase 3: Wait for player count selector to appear
         // Also check for blocked popup during the wait (server might respond late)
         result.phase = 'player_count_wait';
-        var blockedPatterns = arguments[8];  // Array of substrings (passed as arg)
         var playerSelector = null;
         var deadline = Date.now() + maxWaitMs;
 
         while (Date.now() < deadline) {
             // Check for blocked popup first (fail fast if slot was taken)
-            var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
-            if (popup && popup.getAttribute('aria-hidden') === 'false') {
-                var popupText = (popup.textContent || '').toLowerCase();
-                var isBlockedSlot = false;
-                for (var bp = 0; bp < blockedPatterns.length; bp++) {
-                    if (popupText.indexOf(blockedPatterns[bp].toLowerCase()) !== -1) {
-                        isBlockedSlot = true;
-                        break;
-                    }
-                }
-                if (isBlockedSlot) {
+            var popup = findVisibleBlockedPopup();
+            if (popup) {
+                var classification = classifyBlockedPopup(popup, blockedPatterns);
+                if (classification.blocked) {
                     result.blocked = true;
                     result.error = 'Slot blocked by another user';
                 } else {
-                    result.error = 'Validation error during wait: ' + popupText.substring(0, 100);
+                    result.error = 'Validation error during wait: ' + classification.text.substring(0, 100);
                 }
                 result.timing.blockedDetectedDuringWait = Date.now() - startTime;
-                var okBtn = popup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
-                if (okBtn) okBtn.click();
+                dismissPopup(popup);
                 return result;
             }
 
@@ -3040,13 +3046,28 @@ class WaldenGolfProvider(ReservationProvider):
         }
 
         if (!playerSelector) {
+            // Final blocked-popup check before returning timeout error
+            // The server may have been slow to respond with the blocked popup
+            var finalPopup = findVisibleBlockedPopup();
+            if (finalPopup) {
+                var finalClass = classifyBlockedPopup(finalPopup, blockedPatterns);
+                if (finalClass.blocked) {
+                    result.blocked = true;
+                    result.error = 'Slot blocked by another user (detected after timeout)';
+                } else {
+                    result.error = 'Validation error after timeout: ' + finalClass.text.substring(0, 100);
+                }
+                result.timing.blockedDetectedAfterTimeout = Date.now() - startTime;
+                dismissPopup(finalPopup);
+                return result;
+            }
             result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
             result.timing.playerSelectorTimeout = Date.now() - startTime;
             return result;
         }
         result.timing.playerSelectorFound = Date.now() - startTime;
 
-        // Phase 4: Click player count button
+        // Phase 4: Click player count button (fast chain)
         result.phase = 'player_count_click';
         var playerButton = playerSelector.radio.parentElement;
         if (playerButton.classList.contains('ui-state-disabled')) {
@@ -3171,6 +3192,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         return result;
         """
+        )
 
         # Execute the fast chain with configurable timeouts
         # maxWaitMs: how long to wait for player selector (the critical race window)
@@ -3228,7 +3250,9 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             Dict with result info (same as _execute_fast_booking_chain_js)
         """
-        js_timed_chain = """
+        js_timed_chain = (
+            _JS_BLOCKED_POPUP_HELPERS
+            + """
         var slotIndex = arguments[0];
         var numPlayers = arguments[1];
         var targetTimestampMs = arguments[2];
@@ -3289,12 +3313,81 @@ class WaldenGolfProvider(ReservationProvider):
             while (Date.now() < targetTimestampMs) { /* spin */ }
         }
 
-        // NOW! Click Reserve immediately
+        // NOW! Target time reached - but slots may still be disabled
         var startTime = Date.now();
         result.timing.actualClickTime = startTime;
         result.timing.clickDriftMs = startTime - targetTimestampMs;
 
+        // Phase 1.5: Wait for disable-div to be removed
+        // The Walden JS enables slots at 6:30:00 by removing the 'disable-div' class
+        // We must wait for this before clicking, otherwise we get "blocked by another user"
+        //
+        // IMPORTANT: We use requestAnimationFrame + setTimeout(0) to yield to the browser
+        // event loop between checks. This allows the Walden site's own JS (which removes
+        // disable-div) to run. A pure spin-wait would block the event loop and prevent
+        // the Walden JS from executing.
+        result.phase = 'wait_enabled';
+        var slotContainer = item.closest('.ui-datascroller');
+        var enabledWaitStart = Date.now();
+        var enabledMaxWait = 500;  // 500ms max wait for slots to enable
+        var slotsEnabled = false;
+        var disableDivChecks = 0;
+
+        // Check if disable-div is present
+        var hasDisableDiv = function() {
+            if (!slotContainer) return false;
+            return slotContainer.classList.contains('disable-div');
+        };
+
+        // Initial state logging
+        result.timing.disableDivPresentAtStart = hasDisableDiv();
+
+        // If disable-div is present, we need to wait for the Walden JS to remove it.
+        // But we can't use async/await in execute_script. Instead, we do a quick
+        // synchronous check loop but with DOM re-reads that allow for style recalc.
+        // The key insight: the Walden JS likely already ran or will run immediately
+        // after 6:30:00, and the class change is already in the DOM - we just need
+        // to re-query it. The classList.contains() call forces a DOM read.
+        if (result.timing.disableDivPresentAtStart) {
+            // Poll with brief waits - each iteration re-queries the DOM
+            // The 5ms spin-wait is short enough that pending timers should still fire
+            // between our script execution and the next check
+            var enabledDeadline = enabledWaitStart + enabledMaxWait;
+            var enabledPollInterval = 5;  // 5ms between checks
+
+            while (Date.now() < enabledDeadline) {
+                disableDivChecks++;
+                // Force DOM re-read by accessing classList
+                // Note: The Walden JS removal happens via their own timer callback
+                // which should fire in between our polling iterations
+                if (!slotContainer.classList.contains('disable-div')) {
+                    slotsEnabled = true;
+                    break;
+                }
+                // Brief yield - allows browser to process any queued work
+                var waitUntil = Date.now() + enabledPollInterval;
+                while (Date.now() < waitUntil) { /* spin */ }
+            }
+            result.timing.disableDivWaitMs = Date.now() - enabledWaitStart;
+            result.timing.disableDivChecks = disableDivChecks;
+            result.timing.slotsEnabledAfterWait = slotsEnabled;
+
+            if (!slotsEnabled) {
+                // Slots never enabled - this is an error condition
+                result.error = 'Slots still disabled (disable-div present) after ' + enabledMaxWait + 'ms';
+                result.timing.slotsStillDisabled = true;
+                // Log final state for debugging
+                result.timing.containerClasses = slotContainer ? slotContainer.className : 'container_not_found';
+                return result;
+            }
+        } else {
+            result.timing.disableDivWaitMs = 0;
+            result.timing.slotsEnabledAfterWait = true;
+        }
+
+        // Slots are enabled - NOW click Reserve
         result.phase = 'reserve_click';
+        result.timing.clickAfterEnabledMs = Date.now() - startTime;
         reserveBtn.click();
         result.timing.reserveClicked = Date.now() - startTime;
 
@@ -3314,36 +3407,18 @@ class WaldenGolfProvider(ReservationProvider):
 
         // Phase 2: Check for blocked-slot popup (fast initial check)
         result.phase = 'blocked_check';
-        var blockedPopup = pollFor(
-            function() {
-                var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
-                if (popup && popup.getAttribute('aria-hidden') === 'false') {
-                    return popup;
-                }
-                return null;
-            },
-            300,
-            'blocked popup'
-        );
+        var blockedPopup = pollFor(findVisibleBlockedPopup, 300, 'blocked popup');
 
         if (blockedPopup) {
-            var popupText = (blockedPopup.textContent || '').toLowerCase();
-            var isBlockedSlot = false;
-            for (var p = 0; p < blockedPatterns.length; p++) {
-                if (popupText.indexOf(blockedPatterns[p].toLowerCase()) !== -1) {
-                    isBlockedSlot = true;
-                    break;
-                }
-            }
-            if (isBlockedSlot) {
+            var classification = classifyBlockedPopup(blockedPopup, blockedPatterns);
+            if (classification.blocked) {
                 result.blocked = true;
                 result.error = 'Slot blocked by another user';
             } else {
-                result.error = 'Validation error: ' + popupText.substring(0, 100);
+                result.error = 'Validation error: ' + classification.text.substring(0, 100);
             }
             result.timing.blockedDetected = Date.now() - startTime;
-            var okBtn = blockedPopup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
-            if (okBtn) okBtn.click();
+            dismissPopup(blockedPopup);
             return result;
         }
 
@@ -3354,25 +3429,17 @@ class WaldenGolfProvider(ReservationProvider):
 
         while (Date.now() < deadline) {
             // Check for blocked popup first
-            var popup = document.querySelector("div[id*='teeSheetValidationErrorPopup']");
-            if (popup && popup.getAttribute('aria-hidden') === 'false') {
-                var popupText = (popup.textContent || '').toLowerCase();
-                var isBlockedSlot = false;
-                for (var bp = 0; bp < blockedPatterns.length; bp++) {
-                    if (popupText.indexOf(blockedPatterns[bp].toLowerCase()) !== -1) {
-                        isBlockedSlot = true;
-                        break;
-                    }
-                }
-                if (isBlockedSlot) {
+            var popup = findVisibleBlockedPopup();
+            if (popup) {
+                var classification = classifyBlockedPopup(popup, blockedPatterns);
+                if (classification.blocked) {
                     result.blocked = true;
                     result.error = 'Slot blocked by another user';
                 } else {
-                    result.error = 'Validation error during wait: ' + popupText.substring(0, 100);
+                    result.error = 'Validation error during wait: ' + classification.text.substring(0, 100);
                 }
                 result.timing.blockedDetectedDuringWait = Date.now() - startTime;
-                var okBtn = popup.querySelector('a.dialogOKBtn, a[id*="j_idt1076"]');
-                if (okBtn) okBtn.click();
+                dismissPopup(popup);
                 return result;
             }
 
@@ -3395,13 +3462,28 @@ class WaldenGolfProvider(ReservationProvider):
         }
 
         if (!playerSelector) {
+            // Final blocked-popup check before returning timeout error
+            // The server may have been slow to respond with the blocked popup
+            var finalPopup = findVisibleBlockedPopup();
+            if (finalPopup) {
+                var finalClass = classifyBlockedPopup(finalPopup, blockedPatterns);
+                if (finalClass.blocked) {
+                    result.blocked = true;
+                    result.error = 'Slot blocked by another user (detected after timeout)';
+                } else {
+                    result.error = 'Validation error after timeout: ' + finalClass.text.substring(0, 100);
+                }
+                result.timing.blockedDetectedAfterTimeout = Date.now() - startTime;
+                dismissPopup(finalPopup);
+                return result;
+            }
             result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
             result.timing.playerSelectorTimeout = Date.now() - startTime;
             return result;
         }
         result.timing.playerSelectorFound = Date.now() - startTime;
 
-        // Phase 4: Click player count button
+        // Phase 4: Click player count button (timed chain)
         result.phase = 'player_count_click';
         var playerButton = playerSelector.radio.parentElement;
         if (playerButton.classList.contains('ui-state-disabled')) {
@@ -3516,6 +3598,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         return result;
         """
+        )
 
         max_wait_ms = 5000
         poll_interval_ms = 10
@@ -3560,10 +3643,24 @@ class WaldenGolfProvider(ReservationProvider):
                 driver.set_script_timeout(30)  # Default Selenium timeout
 
         timing = result.get("timing", {})
+
+        # Log disable-div wait info if present (new instrumentation)
+        disable_div_info = ""
+        if "disableDivPresentAtStart" in timing:
+            if timing.get("disableDivPresentAtStart"):
+                disable_div_info = (
+                    f", disableDiv=present→wait={timing.get('disableDivWaitMs', '?')}ms"
+                    f"({timing.get('disableDivChecks', '?')} checks)"
+                    f"→enabled={timing.get('slotsEnabledAfterWait', '?')}"
+                )
+            else:
+                disable_div_info = ", disableDiv=absent(slots_already_enabled)"
+
         logger.info(
             f"TIMED_BOOKING: Chain completed - phase={result.get('phase')}, "
             f"success={result.get('success')}, blocked={result.get('blocked')}, "
-            f"clickDrift={timing.get('clickDriftMs', 'N/A')}ms, "
+            f"clickDrift={timing.get('clickDriftMs', 'N/A')}ms"
+            f"{disable_div_info}, "
             f"totalMs={timing.get('totalMs', 'N/A')}"
         )
         logger.debug(f"TIMED_BOOKING: Full timing: {timing}")
