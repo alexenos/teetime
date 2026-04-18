@@ -3312,12 +3312,64 @@ class WaldenGolfProvider(ReservationProvider):
             while (Date.now() < targetTimestampMs) { /* spin */ }
         }
 
-        // NOW! Click Reserve immediately
+        // NOW! Target time reached - but slots may still be disabled
         var startTime = Date.now();
         result.timing.actualClickTime = startTime;
         result.timing.clickDriftMs = startTime - targetTimestampMs;
 
+        // Phase 1.5: Wait for disable-div to be removed
+        // The Walden JS enables slots at 6:30:00 by removing the 'disable-div' class
+        // We must wait for this before clicking, otherwise we get "blocked by another user"
+        result.phase = 'wait_enabled';
+        var slotContainer = item.closest('.ui-datascroller');
+        var enabledWaitStart = Date.now();
+        var enabledMaxWait = 500;  // 500ms max wait for slots to enable
+        var enabledPollInterval = 5;  // 5ms polling interval
+        var slotsEnabled = false;
+        var disableDivChecks = 0;
+
+        // Check if disable-div is present
+        var hasDisableDiv = function() {
+            if (!slotContainer) return false;
+            return slotContainer.classList.contains('disable-div');
+        };
+
+        // Initial state logging
+        result.timing.disableDivPresentAtStart = hasDisableDiv();
+
+        if (result.timing.disableDivPresentAtStart) {
+            // Poll until disable-div is removed or timeout
+            var enabledDeadline = enabledWaitStart + enabledMaxWait;
+            while (Date.now() < enabledDeadline) {
+                disableDivChecks++;
+                if (!hasDisableDiv()) {
+                    slotsEnabled = true;
+                    break;
+                }
+                // Brief spin wait
+                var waitUntil = Date.now() + enabledPollInterval;
+                while (Date.now() < waitUntil) { /* spin */ }
+            }
+            result.timing.disableDivWaitMs = Date.now() - enabledWaitStart;
+            result.timing.disableDivChecks = disableDivChecks;
+            result.timing.slotsEnabledAfterWait = slotsEnabled;
+
+            if (!slotsEnabled) {
+                // Slots never enabled - this is an error condition
+                result.error = 'Slots still disabled (disable-div present) after ' + enabledMaxWait + 'ms';
+                result.timing.slotsStillDisabled = true;
+                // Log final state
+                result.timing.containerClasses = slotContainer ? slotContainer.className : 'container_not_found';
+                return result;
+            }
+        } else {
+            result.timing.disableDivWaitMs = 0;
+            result.timing.slotsEnabledAfterWait = true;
+        }
+
+        // Slots are enabled - NOW click Reserve
         result.phase = 'reserve_click';
+        result.timing.clickAfterEnabledMs = Date.now() - startTime;
         reserveBtn.click();
         result.timing.reserveClicked = Date.now() - startTime;
 
@@ -3606,10 +3658,24 @@ class WaldenGolfProvider(ReservationProvider):
                 driver.set_script_timeout(30)  # Default Selenium timeout
 
         timing = result.get("timing", {})
+
+        # Log disable-div wait info if present (new instrumentation)
+        disable_div_info = ""
+        if "disableDivPresentAtStart" in timing:
+            if timing.get("disableDivPresentAtStart"):
+                disable_div_info = (
+                    f", disableDiv=present→wait={timing.get('disableDivWaitMs', '?')}ms"
+                    f"({timing.get('disableDivChecks', '?')} checks)"
+                    f"→enabled={timing.get('slotsEnabledAfterWait', '?')}"
+                )
+            else:
+                disable_div_info = ", disableDiv=absent(slots_already_enabled)"
+
         logger.info(
             f"TIMED_BOOKING: Chain completed - phase={result.get('phase')}, "
             f"success={result.get('success')}, blocked={result.get('blocked')}, "
-            f"clickDrift={timing.get('clickDriftMs', 'N/A')}ms, "
+            f"clickDrift={timing.get('clickDriftMs', 'N/A')}ms"
+            f"{disable_div_info}, "
             f"totalMs={timing.get('totalMs', 'N/A')}"
         )
         logger.debug(f"TIMED_BOOKING: Full timing: {timing}")
