@@ -2984,7 +2984,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         // Phase 2: Check for blocked-slot popup (fast check before waiting for modal)
         result.phase = 'blocked_check';
-        var blockedPatterns = arguments[8];  // Array of substrings
+        var blockedPatterns = arguments[4];  // Array of substrings
         var blockedPopup = pollFor(findVisibleBlockedPopup, 300, 'blocked popup');
 
         if (blockedPopup) {
