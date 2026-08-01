@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        # .env may carry keys this branch doesn't know about (e.g. settings
+        # introduced on another branch); ignore them instead of crashing.
+        extra = "ignore"
 
 
 settings = Settings()

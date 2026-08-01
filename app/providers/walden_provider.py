@@ -126,6 +126,411 @@ function findVisibleBlockedPopup() {
 """
 
 
+# Shared async booking chain used by both the fast path (subsequent batch
+# bookings) and the timed path (the 6:30:00 race). Runs via
+# execute_async_script: every wait is setTimeout-based so the page event loop
+# keeps running between polls. This is essential - the things the chain waits
+# for (the site's own timer removing the 'disable-div' overlay at 6:30, the
+# PrimeFaces AJAX response that renders the player page, the blocked-slot
+# popup) are all delivered BY that event loop. The previous synchronous
+# spin-wait implementation blocked the loop and starved every one of them.
+# The only remaining busy-wait is the final <=25ms before the target
+# timestamp, for sub-millisecond click precision.
+#
+# Arguments (Selenium appends the async callback as the last argument):
+#   0: slotIndex          index into li.ui-datascroller-item
+#   1: numPlayers         1-4
+#   2: targetTimestampMs  epoch ms to click Reserve at, or null for "now"
+#   3: maxWaitMs          player-selector wait budget after Reserve click
+#   4: pollIntervalMs     polling cadence for element waits
+#   5: blockedPatterns    substrings identifying the blocked-slot popup
+#   6: enabledMaxWaitMs   wait budget for disable-div removal
+_JS_ASYNC_BOOKING_CHAIN = """
+        var slotIndex = arguments[0];
+        var numPlayers = arguments[1];
+        var targetTimestampMs = arguments[2];
+        var maxWaitMs = arguments[3];
+        var pollIntervalMs = arguments[4];
+        var blockedPatterns = arguments[5];
+        var enabledMaxWaitMs = arguments[6];
+        var done = arguments[arguments.length - 1];
+
+        var result = {
+            success: false,
+            error: null,
+            blocked: false,
+            phase: 'init',
+            timing: {}
+        };
+        var startTime = null;  // click-time reference; set in waitEnabled()
+
+        function finish() { done(result); }
+
+        // Any exception inside a scheduled callback would otherwise leave the
+        // async script hanging (done never called) until Selenium's script
+        // timeout - minutes, on the timed path. Route every continuation
+        // through this guard so failures surface immediately instead.
+        function guard(fn) {
+            return function() {
+                try { return fn.apply(null, arguments); }
+                catch (e) {
+                    result.error = 'JS chain error in phase ' + result.phase + ': ' + e.message;
+                    finish();
+                }
+            };
+        }
+
+        // Async poll: checkFn is evaluated now and then every intervalMs via
+        // setTimeout, yielding to the event loop between checks so page JS
+        // (AJAX handlers, site timers) can run. Truthy return -> onFound(value).
+        // The tick (including onFound/onTimeout) is guarded: a throw completes
+        // the script with an error rather than hanging it.
+        function pollUntil(checkFn, timeoutMs, intervalMs, onFound, onTimeout) {
+            var deadline = Date.now() + timeoutMs;
+            var tick = guard(function() {
+                var val = null;
+                try { val = checkFn(); } catch (e) { /* keep polling */ }
+                if (val) { onFound(val); return; }
+                if (Date.now() >= deadline) { onTimeout(); return; }
+                setTimeout(tick, intervalMs);
+            });
+            tick();
+        }
+
+        function handlePopup(popup, timingKey, suffix) {
+            var classification = classifyBlockedPopup(popup, blockedPatterns);
+            if (classification.blocked) {
+                result.blocked = true;
+                result.error = 'Slot blocked by another user' + (suffix || '');
+            } else {
+                result.error = 'Validation error: ' + classification.text.substring(0, 100);
+            }
+            result.timing[timingKey] = Date.now() - startTime;
+            dismissPopup(popup);
+            finish();
+        }
+
+        // Phase 0: Pre-locate the Reserve button BEFORE any waiting
+        result.phase = 'pre_locate';
+        var items = document.querySelectorAll('li.ui-datascroller-item');
+        var item = items[slotIndex];
+        if (!item) {
+            result.error = 'Slot item not found at index ' + slotIndex;
+            return finish();
+        }
+
+        var reserveBtn = item.querySelector("a[id*='reserve_button']");
+        if (!reserveBtn) {
+            var spans = item.querySelectorAll('span.custom-free-slot-span');
+            reserveBtn = spans.length > 0 ? spans[0] : null;
+        }
+        if (!reserveBtn) reserveBtn = item.querySelector('a.slot-link');
+        if (!reserveBtn) {
+            result.error = 'Reserve button not found in slot';
+            return finish();
+        }
+
+        // Scroll into view NOW (before waiting) to eliminate scroll latency at 6:30
+        reserveBtn.scrollIntoView({block: 'center'});
+        result.timing.preLocatedAt = Date.now();
+
+        // Phase 1: Wait until the target timestamp (timed mode only).
+        // Coarse wait via setTimeout (event loop stays free for the site's own
+        // JS), then spin only the final ~25ms for sub-millisecond precision.
+        function beginPrecisionWait() {
+            if (targetTimestampMs === null || targetTimestampMs === undefined) {
+                waitEnabled();
+                return;
+            }
+            result.phase = 'precision_wait';
+            result.timing.msUntilTarget = targetTimestampMs - Date.now();
+            var coarseMs = targetTimestampMs - Date.now() - 25;
+            if (coarseMs > 0) {
+                setTimeout(guard(finalSpin), coarseMs);
+            } else {
+                finalSpin();
+            }
+        }
+
+        function finalSpin() {
+            while (Date.now() < targetTimestampMs) { /* spin */ }
+            waitEnabled();
+        }
+
+        // Phase 1.5: Wait for the site's JS to remove the 'disable-div' class
+        // that gates the tee sheet until booking opens. Clicking while it is
+        // present yields a server-side rejection. Because pollUntil yields to
+        // the event loop, the site's removal timer can actually fire here.
+        function waitEnabled() {
+            startTime = Date.now();
+            if (targetTimestampMs !== null && targetTimestampMs !== undefined) {
+                // Drift of the wait start vs target; the true click drift is
+                // recorded in clickReserve() (it additionally includes any
+                // disable-div wait).
+                result.timing.waitStartDriftMs = startTime - targetTimestampMs;
+            }
+            // The coarse wait yields to the page event loop, so a PrimeFaces
+            // partial update may have replaced the pre-located nodes. A
+            // detached node reads stale classes and swallows click() silently.
+            if (!item.isConnected) {
+                var freshItems = document.querySelectorAll('li.ui-datascroller-item');
+                var freshItem = freshItems[slotIndex];
+                if (!freshItem) {
+                    result.error = 'Slot item disappeared before click at index ' + slotIndex;
+                    return finish();
+                }
+                item = freshItem;
+                reserveBtn = item.querySelector("a[id*='reserve_button']") ||
+                    item.querySelector('span.custom-free-slot-span') ||
+                    item.querySelector('a.slot-link');
+                if (!reserveBtn) {
+                    result.error = 'Reserve button disappeared before click';
+                    return finish();
+                }
+                result.timing.slotReQueried = true;
+            }
+            result.phase = 'wait_enabled';
+            var slotContainer = item.closest('.ui-datascroller');
+            var hasDisableDiv = function() {
+                return !!(slotContainer && slotContainer.classList.contains('disable-div'));
+            };
+            result.timing.disableDivPresentAtStart = hasDisableDiv();
+            if (!result.timing.disableDivPresentAtStart) {
+                result.timing.disableDivWaitMs = 0;
+                result.timing.slotsEnabledAfterWait = true;
+                clickReserve();
+                return;
+            }
+            var enabledWaitStart = Date.now();
+            pollUntil(
+                function() { return hasDisableDiv() ? null : true; },
+                enabledMaxWaitMs,
+                2,  // tight 2ms cadence: click within ~2ms of the overlay coming off
+                function() {
+                    result.timing.disableDivWaitMs = Date.now() - enabledWaitStart;
+                    result.timing.slotsEnabledAfterWait = true;
+                    clickReserve();
+                },
+                function() {
+                    result.timing.disableDivWaitMs = Date.now() - enabledWaitStart;
+                    result.timing.slotsEnabledAfterWait = false;
+                    result.timing.slotsStillDisabled = true;
+                    result.timing.containerClasses =
+                        slotContainer ? slotContainer.className : 'container_not_found';
+                    result.error = 'Slots still disabled (disable-div present) after ' +
+                        enabledMaxWaitMs + 'ms';
+                    finish();
+                }
+            );
+        }
+
+        // Phase 2: Click Reserve
+        function clickReserve() {
+            result.phase = 'reserve_click';
+            result.timing.clickAfterEnabledMs = Date.now() - startTime;
+            reserveBtn.click();
+            result.timing.actualClickTime = Date.now();
+            result.timing.reserveClicked = result.timing.actualClickTime - startTime;
+            if (targetTimestampMs !== null && targetTimestampMs !== undefined) {
+                result.timing.clickDriftMs = result.timing.actualClickTime - targetTimestampMs;
+            }
+            waitPlayerSelector();
+        }
+
+        // Phase 3: Wait for the player-count selector to render, watching for
+        // the blocked-slot popup the whole time (single merged poll).
+        function waitPlayerSelector() {
+            result.phase = 'player_count_wait';
+            pollUntil(
+                function() {
+                    var popup = findVisibleBlockedPopup();
+                    if (popup) return {popup: popup};
+                    var groups = document.querySelectorAll('.ui-selectonebutton');
+                    for (var i = 0; i < groups.length; i++) {
+                        var radio = groups[i].querySelector(
+                            'input[type="radio"][value="' + numPlayers + '"]');
+                        if (radio) {
+                            // Skip the time filter group (it has a value="0" option)
+                            var hasValue0 = groups[i].querySelector(
+                                'input[type="radio"][value="0"]');
+                            if (!hasValue0) {
+                                return {selector: {group: groups[i], radio: radio}};
+                            }
+                        }
+                    }
+                    return null;
+                },
+                maxWaitMs,
+                pollIntervalMs,
+                function(found) {
+                    if (found.popup) {
+                        handlePopup(found.popup, 'blockedDetectedDuringWait');
+                        return;
+                    }
+                    result.timing.playerSelectorFound = Date.now() - startTime;
+                    clickPlayerCount(found.selector);
+                },
+                function() {
+                    var finalPopup = findVisibleBlockedPopup();
+                    if (finalPopup) {
+                        handlePopup(finalPopup, 'blockedDetectedAfterTimeout',
+                            ' (detected after timeout)');
+                        return;
+                    }
+                    result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
+                    result.timing.playerSelectorTimeout = Date.now() - startTime;
+                    finish();
+                }
+            );
+        }
+
+        // Phase 4: Select player count. The page may restore the last-used
+        // count (e.g. via "Use Last Play"); clicking an already-active
+        // PrimeFaces button toggles it off, so skip the click in that case.
+        function clickPlayerCount(sel) {
+            result.phase = 'player_count_click';
+            var playerButton = sel.radio.parentElement;
+            if (playerButton.classList.contains('ui-state-disabled')) {
+                result.error = 'Player count ' + numPlayers + ' button is disabled';
+                return finish();
+            }
+            if (sel.radio.checked || playerButton.classList.contains('ui-state-active')) {
+                result.timing.playerCountAlreadySelected = true;
+            } else {
+                playerButton.click();
+            }
+            result.timing.playerCountClicked = Date.now() - startTime;
+            tbdGuests();
+        }
+
+        function queryPlayerRows() {
+            var rows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
+            if (rows.length === 0) {
+                rows = document.querySelectorAll('table[id*="player"] tbody tr');
+            }
+            return rows;
+        }
+
+        // Phase 5: Add TBD guests (rows re-queried each step; 200ms yields let
+        // the PrimeFaces AJAX row updates actually process between clicks)
+        function tbdGuests() {
+            if (numPlayers <= 1) {
+                bookNowPhase();
+                return;
+            }
+            result.phase = 'tbd_guests';
+            pollUntil(
+                function() {
+                    var rows = queryPlayerRows();
+                    return rows.length >= numPlayers ? rows : null;
+                },
+                3000,
+                pollIntervalMs,
+                function() {
+                    result.timing.playerRowsFound = Date.now() - startTime;
+                    clickNextTbd(0, numPlayers - 1);
+                },
+                function() {
+                    result.error = 'Player rows did not appear after selecting ' +
+                        numPlayers + ' players';
+                    finish();
+                }
+            );
+        }
+
+        function clickNextTbd(tbdClicked, numTbd) {
+            if (tbdClicked >= numTbd) {
+                result.timing.tbdGuestsAdded = Date.now() - startTime;
+                bookNowPhase();
+                return;
+            }
+            var currentRows = queryPlayerRows();
+            if (currentRows.length <= 1) {
+                result.error = 'Player rows disappeared while clicking TBD buttons';
+                return finish();
+            }
+            var guestIndex = tbdClicked + 1;  // 1-indexed: row 0 is the member
+            if (guestIndex >= currentRows.length) {
+                result.error = 'Not enough player rows for TBD guests';
+                return finish();
+            }
+            var row = currentRows[guestIndex];
+            var tbd = row.querySelector('a[id*="tbd"], span[id*="tbd"], a.ui-commandlink');
+            if (!tbd) {
+                var links = row.querySelectorAll('a');
+                for (var l = 0; l < links.length; l++) {
+                    if (links[l].textContent &&
+                        links[l].textContent.toUpperCase().indexOf('TBD') !== -1) {
+                        tbd = links[l];
+                        break;
+                    }
+                }
+            }
+            if (!tbd) {
+                result.error = 'TBD button not found on guest row ' + guestIndex;
+                return finish();
+            }
+            tbd.click();
+            setTimeout(guard(function() { clickNextTbd(tbdClicked + 1, numTbd); }), 200);
+        }
+
+        // Phase 6: Click Book Now
+        function bookNowPhase() {
+            result.phase = 'book_now';
+            pollUntil(
+                function() {
+                    var btn = document.querySelector('a[id*="bookTeeTimeAction"]');
+                    if (btn) return btn;
+                    // Exact-text fallback only: substring matching ('Book')
+                    // would hit nav links like 'Booked' or 'Book a Tee Time'.
+                    var links = document.querySelectorAll('a');
+                    for (var i = 0; i < links.length; i++) {
+                        var txt = (links[i].textContent || '').trim().toLowerCase();
+                        if (txt === 'book now' || txt === 'book') {
+                            return links[i];
+                        }
+                    }
+                    return null;
+                },
+                5000,
+                pollIntervalMs,
+                function(bookNow) {
+                    result.timing.bookNowFound = Date.now() - startTime;
+                    bookNow.scrollIntoView({block: 'center'});
+                    bookNow.click();
+                    result.timing.bookNowClicked = Date.now() - startTime;
+                    result.phase = 'complete';
+                    result.success = true;
+                    result.timing.totalMs = Date.now() - startTime;
+                    finish();
+                },
+                function() {
+                    result.error = 'Book Now button not found';
+                    result.timing.bookNowTimeout = Date.now() - startTime;
+                    finish();
+                }
+            );
+        }
+
+        try {
+            beginPrecisionWait();
+        } catch (e) {
+            result.error = 'JS chain error in phase ' + result.phase + ': ' + e.message;
+            finish();
+        }
+"""
+
+# Timing budgets for the shared booking chain
+_CHAIN_MAX_WAIT_MS = 5000  # player-selector wait after Reserve click
+_CHAIN_POLL_INTERVAL_MS = 10  # element polling cadence
+# Wait budget for the site's JS to remove the disable-div overlay at 6:30.
+# Generous on purpose: the wait starts at the local-clock target, so this must
+# absorb clock offset plus any lag in the site's own enable timer. Waiting
+# costs nothing when the overlay comes off early - the 2ms poll clicks
+# immediately - but timing out here forfeits the attempt.
+_CHAIN_ENABLED_MAX_WAIT_MS = 5000
+
+
 class WaldenGolfProvider(ReservationProvider):
     """
     Selenium-based provider for booking tee times at Walden Golf / Northgate Country Club.
@@ -2896,21 +3301,11 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Execute the entire booking flow in a single rapid JS sequence.
 
-        This is the speed-critical path for winning the 6:30 AM race. Instead of:
-            1. Click Reserve → wait for modal (up to 10s)
-            2. Find player selector → click it → wait
-            3. Find TBD buttons → click each → wait
-            4. Find Book Now → click it
-
-        We execute a tight JS loop that:
-            1. Clicks Reserve
-            2. Polls for modal/player selector (sub-100ms intervals)
-            3. Clicks player count immediately when found
-            4. Polls for and clicks TBD buttons
-            5. Polls for and clicks Book Now
-
-        The entire sequence should complete in under 2 seconds if the slot
-        is available, vs 7-15 seconds with the Python-based flow.
+        This is the speed path for bookings after the window is already open
+        (e.g. second and later bookings in a batch). It runs the shared async
+        chain (see _JS_ASYNC_BOOKING_CHAIN) with no target timestamp: Reserve
+        is clicked immediately, then the chain polls the live DOM for the
+        player page, TBD guests, and Book Now.
 
         Args:
             driver: The WebDriver instance
@@ -2923,299 +3318,14 @@ class WaldenGolfProvider(ReservationProvider):
             - error: str (if failed)
             - blocked: bool (if slot was grabbed by another user)
             - phase: str (which phase completed/failed)
+            - timing: dict of per-phase timing metrics
         """
-        js_fast_chain = (
-            _JS_BLOCKED_POPUP_HELPERS
-            + """
-        var slotIndex = arguments[0];
-        var numPlayers = arguments[1];
-        var maxWaitMs = arguments[2];
-        var pollIntervalMs = arguments[3];
-
-        var result = {
-            success: false,
-            error: null,
-            blocked: false,
-            phase: 'init',
-            timing: {}
-        };
-        var startTime = Date.now();
-
-        // Helper: poll for element with timeout
-        function pollFor(selectorOrFn, timeoutMs, desc) {
-            var deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-                var el = typeof selectorOrFn === 'function'
-                    ? selectorOrFn()
-                    : document.querySelector(selectorOrFn);
-                if (el) return el;
-                // Busy-wait with minimal delay (can't use setTimeout in sync JS)
-                var waitUntil = Date.now() + pollIntervalMs;
-                while (Date.now() < waitUntil) { /* spin */ }
-            }
-            return null;
-        }
-
-        // Phase 1: Click Reserve button
-        result.phase = 'reserve_click';
-        result.timing.reserveStart = Date.now() - startTime;
-
-        var items = document.querySelectorAll('li.ui-datascroller-item');
-        var item = items[slotIndex];
-        if (!item) {
-            result.error = 'Slot item not found at index ' + slotIndex;
-            return result;
-        }
-
-        var reserveBtn = item.querySelector("a[id*='reserve_button']");
-        if (!reserveBtn) {
-            var spans = item.querySelectorAll('span.custom-free-slot-span');
-            reserveBtn = spans.length > 0 ? spans[0] : null;
-        }
-        if (!reserveBtn) reserveBtn = item.querySelector("a.slot-link");
-        if (!reserveBtn) {
-            result.error = 'Reserve button not found in slot';
-            return result;
-        }
-
-        reserveBtn.scrollIntoView({block: 'center'});
-        reserveBtn.click();
-        result.timing.reserveClicked = Date.now() - startTime;
-
-        // Phase 2: Check for blocked-slot popup (fast check before waiting for modal)
-        result.phase = 'blocked_check';
-        var blockedPatterns = arguments[4];  // Array of substrings
-        var blockedPopup = pollFor(findVisibleBlockedPopup, 300, 'blocked popup');
-
-        if (blockedPopup) {
-            // Use shared helper to classify popup
-            var classification = classifyBlockedPopup(blockedPopup, blockedPatterns);
-
-            if (classification.blocked) {
-                result.blocked = true;
-                result.error = 'Slot blocked by another user';
-            } else {
-                // Generic validation error, not specifically blocked
-                result.error = 'Validation error: ' + classification.text.substring(0, 100);
-            }
-            result.timing.blockedDetected = Date.now() - startTime;
-            dismissPopup(blockedPopup);
-            return result;
-        }
-
-        // Phase 3: Wait for player count selector to appear
-        // Also check for blocked popup during the wait (server might respond late)
-        result.phase = 'player_count_wait';
-        var playerSelector = null;
-        var deadline = Date.now() + maxWaitMs;
-
-        while (Date.now() < deadline) {
-            // Check for blocked popup first (fail fast if slot was taken)
-            var popup = findVisibleBlockedPopup();
-            if (popup) {
-                var classification = classifyBlockedPopup(popup, blockedPatterns);
-                if (classification.blocked) {
-                    result.blocked = true;
-                    result.error = 'Slot blocked by another user';
-                } else {
-                    result.error = 'Validation error during wait: ' + classification.text.substring(0, 100);
-                }
-                result.timing.blockedDetectedDuringWait = Date.now() - startTime;
-                dismissPopup(popup);
-                return result;
-            }
-
-            // Now check for player selector
-            var groups = document.querySelectorAll('.ui-selectonebutton');
-            for (var i = 0; i < groups.length; i++) {
-                var radio = groups[i].querySelector('input[type="radio"][value="' + numPlayers + '"]');
-                if (radio) {
-                    // Verify this isn't the time filter (which has value="0")
-                    var hasValue0 = groups[i].querySelector('input[type="radio"][value="0"]');
-                    if (!hasValue0) {
-                        playerSelector = {group: groups[i], radio: radio};
-                        break;
-                    }
-                }
-            }
-            if (playerSelector) break;
-
-            // Busy-wait with minimal delay
-            var waitUntil = Date.now() + pollIntervalMs;
-            while (Date.now() < waitUntil) { /* spin */ }
-        }
-
-        if (!playerSelector) {
-            // Final blocked-popup check before returning timeout error
-            // The server may have been slow to respond with the blocked popup
-            var finalPopup = findVisibleBlockedPopup();
-            if (finalPopup) {
-                var finalClass = classifyBlockedPopup(finalPopup, blockedPatterns);
-                if (finalClass.blocked) {
-                    result.blocked = true;
-                    result.error = 'Slot blocked by another user (detected after timeout)';
-                } else {
-                    result.error = 'Validation error after timeout: ' + finalClass.text.substring(0, 100);
-                }
-                result.timing.blockedDetectedAfterTimeout = Date.now() - startTime;
-                dismissPopup(finalPopup);
-                return result;
-            }
-            result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
-            result.timing.playerSelectorTimeout = Date.now() - startTime;
-            return result;
-        }
-        result.timing.playerSelectorFound = Date.now() - startTime;
-
-        // Phase 4: Click player count button (fast chain)
-        result.phase = 'player_count_click';
-        var playerButton = playerSelector.radio.parentElement;
-        if (playerButton.classList.contains('ui-state-disabled')) {
-            result.error = 'Player count ' + numPlayers + ' button is disabled';
-            return result;
-        }
-        playerButton.click();
-        result.timing.playerCountClicked = Date.now() - startTime;
-
-        // Phase 5: Add TBD Registered Guests (if numPlayers > 1)
-        if (numPlayers > 1) {
-            result.phase = 'tbd_guests';
-            var numTbd = numPlayers - 1;
-            var tbdClicked = 0;
-
-            // Wait for player rows to appear
-            var playerRows = pollFor(
-                function() {
-                    var rows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
-                    if (rows.length >= numPlayers) return rows;
-                    rows = document.querySelectorAll('table[id*="player"] tbody tr');
-                    if (rows.length >= numPlayers) return rows;
-                    return null;
-                },
-                3000,
-                'player rows'
-            );
-
-            if (!playerRows) {
-                result.error = 'Player rows did not appear after selecting ' + numPlayers + ' players';
-                return result;
-            }
-            result.timing.playerRowsFound = Date.now() - startTime;
-
-            // Click TBD button on each guest row (skip first row = member)
-            // Re-query rows on each iteration to avoid stale references after AJAX
-            while (tbdClicked < numTbd) {
-                // Fresh query for player rows each iteration
-                var currentRows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
-                if (currentRows.length === 0) {
-                    currentRows = document.querySelectorAll('table[id*="player"] tbody tr');
-                }
-                if (currentRows.length <= 1) {
-                    result.error = 'Player rows disappeared while clicking TBD buttons';
-                    return result;
-                }
-
-                // Find the next guest row (skip member row at index 0)
-                var guestIndex = tbdClicked + 1;  // 1-indexed for guests
-                if (guestIndex >= currentRows.length) {
-                    result.error = 'Not enough player rows for TBD guests';
-                    return result;
-                }
-
-                var row = currentRows[guestIndex];
-                var tbd = row.querySelector('a[id*="tbd"], span[id*="tbd"], a.ui-commandlink');
-                if (!tbd) {
-                    // Try text-based search
-                    var links = row.querySelectorAll('a');
-                    for (var l = 0; l < links.length; l++) {
-                        if (links[l].textContent && links[l].textContent.toUpperCase().indexOf('TBD') !== -1) {
-                            tbd = links[l];
-                            break;
-                        }
-                    }
-                }
-                if (tbd) {
-                    tbd.click();
-                    tbdClicked++;
-                    // Brief wait for AJAX to update DOM
-                    var waitUntil = Date.now() + 200;
-                    while (Date.now() < waitUntil) { /* spin */ }
-                } else {
-                    // TBD button not found on this row, might already be filled
-                    result.error = 'TBD button not found on guest row ' + guestIndex;
-                    return result;
-                }
-            }
-
-            if (tbdClicked < numTbd) {
-                result.error = 'Only clicked ' + tbdClicked + ' of ' + numTbd + ' TBD buttons';
-                return result;
-            }
-            result.timing.tbdGuestsAdded = Date.now() - startTime;
-        }
-
-        // Phase 6: Click Book Now button
-        result.phase = 'book_now';
-        var bookNow = pollFor(
-            function() {
-                // Primary: by ID
-                var btn = document.querySelector('a[id*="bookTeeTimeAction"]');
-                if (btn) return btn;
-                // Fallback: by text
-                var links = document.querySelectorAll('a');
-                for (var i = 0; i < links.length; i++) {
-                    var txt = links[i].textContent || '';
-                    if (txt.indexOf('Book Now') !== -1 || txt.indexOf('Book') !== -1) {
-                        return links[i];
-                    }
-                }
-                return null;
-            },
-            5000,
-            'Book Now button'
-        );
-
-        if (!bookNow) {
-            result.error = 'Book Now button not found';
-            result.timing.bookNowTimeout = Date.now() - startTime;
-            return result;
-        }
-        result.timing.bookNowFound = Date.now() - startTime;
-
-        bookNow.scrollIntoView({block: 'center'});
-        bookNow.click();
-        result.timing.bookNowClicked = Date.now() - startTime;
-
-        result.phase = 'complete';
-        result.success = true;
-        result.timing.totalMs = Date.now() - startTime;
-
-        return result;
-        """
-        )
-
-        # Execute the fast chain with configurable timeouts
-        # maxWaitMs: how long to wait for player selector (the critical race window)
-        # pollIntervalMs: how often to check for elements (lower = faster but more CPU)
-        max_wait_ms = 5000  # 5 seconds max for player selector
-        poll_interval_ms = 10  # 10ms polling interval
-
         logger.info(
             f"FAST_BOOKING: Starting rapid JS chain for slot {slot_index}, "
             f"{num_players} players"
         )
 
-        # Convert blocked patterns tuple to list for JSON serialization
-        blocked_patterns = list(DOM.SLOT_BLOCKED.blocked_text_patterns)
-
-        result: dict[str, Any] = driver.execute_script(
-            js_fast_chain,
-            slot_index,
-            num_players,
-            max_wait_ms,
-            poll_interval_ms,
-            blocked_patterns,
-        )
+        result = self._run_booking_chain_js(driver, slot_index, num_players)
 
         timing = result.get("timing", {})
         logger.info(
@@ -3237,9 +3347,11 @@ class WaldenGolfProvider(ReservationProvider):
         """
         Stage a booking chain that self-triggers at the exact target timestamp.
 
-        This eliminates Python→Selenium→JS handoff latency at the critical moment.
-        The JS is injected BEFORE the target time and busy-waits internally until
-        the exact millisecond, then immediately clicks Reserve.
+        This eliminates Python->Selenium->JS handoff latency at the critical
+        moment. The JS is injected BEFORE the target time; it waits internally
+        (coarse setTimeout, then a <=25ms spin for millisecond precision),
+        waits for the site's own JS to remove the 'disable-div' overlay, then
+        clicks Reserve and completes the booking flow.
 
         Args:
             driver: The WebDriver instance
@@ -3250,360 +3362,6 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             Dict with result info (same as _execute_fast_booking_chain_js)
         """
-        js_timed_chain = (
-            _JS_BLOCKED_POPUP_HELPERS
-            + """
-        var slotIndex = arguments[0];
-        var numPlayers = arguments[1];
-        var targetTimestampMs = arguments[2];
-        var maxWaitMs = arguments[3];
-        var pollIntervalMs = arguments[4];
-        var blockedPatterns = arguments[5];
-
-        var result = {
-            success: false,
-            error: null,
-            blocked: false,
-            phase: 'init',
-            timing: {}
-        };
-
-        // Phase 0: Pre-locate the Reserve button BEFORE waiting
-        result.phase = 'pre_locate';
-        var items = document.querySelectorAll('li.ui-datascroller-item');
-        var item = items[slotIndex];
-        if (!item) {
-            result.error = 'Slot item not found at index ' + slotIndex;
-            return result;
-        }
-
-        var reserveBtn = item.querySelector("a[id*='reserve_button']");
-        if (!reserveBtn) {
-            var spans = item.querySelectorAll('span.custom-free-slot-span');
-            reserveBtn = spans.length > 0 ? spans[0] : null;
-        }
-        if (!reserveBtn) reserveBtn = item.querySelector("a.slot-link");
-        if (!reserveBtn) {
-            result.error = 'Reserve button not found in slot';
-            return result;
-        }
-
-        // Scroll into view NOW (before waiting) to eliminate scroll latency at 6:30
-        reserveBtn.scrollIntoView({block: 'center'});
-        result.timing.preLocatedAt = Date.now();
-
-        // Phase 1: Precision wait until target timestamp
-        // This is the critical timing loop - busy-wait with sub-millisecond precision
-        result.phase = 'precision_wait';
-        var waitStart = Date.now();
-        var msUntilTarget = targetTimestampMs - waitStart;
-        result.timing.msUntilTarget = msUntilTarget;
-
-        if (msUntilTarget > 0) {
-            // Coarse wait until 5ms before target (reduce CPU burn)
-            if (msUntilTarget > 5) {
-                var coarseDeadline = targetTimestampMs - 5;
-                while (Date.now() < coarseDeadline) {
-                    // Yield briefly during coarse wait
-                    var yieldUntil = Date.now() + 1;
-                    while (Date.now() < yieldUntil) { /* spin */ }
-                }
-            }
-            // Tight spin for final ~5ms
-            while (Date.now() < targetTimestampMs) { /* spin */ }
-        }
-
-        // NOW! Target time reached - but slots may still be disabled
-        var startTime = Date.now();
-        result.timing.actualClickTime = startTime;
-        result.timing.clickDriftMs = startTime - targetTimestampMs;
-
-        // Phase 1.5: Wait for disable-div to be removed
-        // The Walden JS enables slots at 6:30:00 by removing the 'disable-div' class
-        // We must wait for this before clicking, otherwise we get "blocked by another user"
-        //
-        // IMPORTANT: We use requestAnimationFrame + setTimeout(0) to yield to the browser
-        // event loop between checks. This allows the Walden site's own JS (which removes
-        // disable-div) to run. A pure spin-wait would block the event loop and prevent
-        // the Walden JS from executing.
-        result.phase = 'wait_enabled';
-        var slotContainer = item.closest('.ui-datascroller');
-        var enabledWaitStart = Date.now();
-        var enabledMaxWait = 500;  // 500ms max wait for slots to enable
-        var slotsEnabled = false;
-        var disableDivChecks = 0;
-
-        // Check if disable-div is present
-        var hasDisableDiv = function() {
-            if (!slotContainer) return false;
-            return slotContainer.classList.contains('disable-div');
-        };
-
-        // Initial state logging
-        result.timing.disableDivPresentAtStart = hasDisableDiv();
-
-        // If disable-div is present, we need to wait for the Walden JS to remove it.
-        // But we can't use async/await in execute_script. Instead, we do a quick
-        // synchronous check loop but with DOM re-reads that allow for style recalc.
-        // The key insight: the Walden JS likely already ran or will run immediately
-        // after 6:30:00, and the class change is already in the DOM - we just need
-        // to re-query it. The classList.contains() call forces a DOM read.
-        if (result.timing.disableDivPresentAtStart) {
-            // Poll with brief waits - each iteration re-queries the DOM
-            // The 5ms spin-wait is short enough that pending timers should still fire
-            // between our script execution and the next check
-            var enabledDeadline = enabledWaitStart + enabledMaxWait;
-            var enabledPollInterval = 5;  // 5ms between checks
-
-            while (Date.now() < enabledDeadline) {
-                disableDivChecks++;
-                // Force DOM re-read by accessing classList
-                // Note: The Walden JS removal happens via their own timer callback
-                // which should fire in between our polling iterations
-                if (!slotContainer.classList.contains('disable-div')) {
-                    slotsEnabled = true;
-                    break;
-                }
-                // Brief yield - allows browser to process any queued work
-                var waitUntil = Date.now() + enabledPollInterval;
-                while (Date.now() < waitUntil) { /* spin */ }
-            }
-            result.timing.disableDivWaitMs = Date.now() - enabledWaitStart;
-            result.timing.disableDivChecks = disableDivChecks;
-            result.timing.slotsEnabledAfterWait = slotsEnabled;
-
-            if (!slotsEnabled) {
-                // Slots never enabled - this is an error condition
-                result.error = 'Slots still disabled (disable-div present) after ' + enabledMaxWait + 'ms';
-                result.timing.slotsStillDisabled = true;
-                // Log final state for debugging
-                result.timing.containerClasses = slotContainer ? slotContainer.className : 'container_not_found';
-                return result;
-            }
-        } else {
-            result.timing.disableDivWaitMs = 0;
-            result.timing.slotsEnabledAfterWait = true;
-        }
-
-        // Slots are enabled - NOW click Reserve
-        result.phase = 'reserve_click';
-        result.timing.clickAfterEnabledMs = Date.now() - startTime;
-        reserveBtn.click();
-        result.timing.reserveClicked = Date.now() - startTime;
-
-        // Helper: poll for element with timeout
-        function pollFor(selectorOrFn, timeoutMs, desc) {
-            var deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-                var el = typeof selectorOrFn === 'function'
-                    ? selectorOrFn()
-                    : document.querySelector(selectorOrFn);
-                if (el) return el;
-                var waitUntil = Date.now() + pollIntervalMs;
-                while (Date.now() < waitUntil) { /* spin */ }
-            }
-            return null;
-        }
-
-        // Phase 2: Check for blocked-slot popup (fast initial check)
-        result.phase = 'blocked_check';
-        var blockedPopup = pollFor(findVisibleBlockedPopup, 300, 'blocked popup');
-
-        if (blockedPopup) {
-            var classification = classifyBlockedPopup(blockedPopup, blockedPatterns);
-            if (classification.blocked) {
-                result.blocked = true;
-                result.error = 'Slot blocked by another user';
-            } else {
-                result.error = 'Validation error: ' + classification.text.substring(0, 100);
-            }
-            result.timing.blockedDetected = Date.now() - startTime;
-            dismissPopup(blockedPopup);
-            return result;
-        }
-
-        // Phase 3: Wait for player count selector (with continuous blocked check)
-        result.phase = 'player_count_wait';
-        var playerSelector = null;
-        var deadline = Date.now() + maxWaitMs;
-
-        while (Date.now() < deadline) {
-            // Check for blocked popup first
-            var popup = findVisibleBlockedPopup();
-            if (popup) {
-                var classification = classifyBlockedPopup(popup, blockedPatterns);
-                if (classification.blocked) {
-                    result.blocked = true;
-                    result.error = 'Slot blocked by another user';
-                } else {
-                    result.error = 'Validation error during wait: ' + classification.text.substring(0, 100);
-                }
-                result.timing.blockedDetectedDuringWait = Date.now() - startTime;
-                dismissPopup(popup);
-                return result;
-            }
-
-            // Check for player selector
-            var groups = document.querySelectorAll('.ui-selectonebutton');
-            for (var i = 0; i < groups.length; i++) {
-                var radio = groups[i].querySelector('input[type="radio"][value="' + numPlayers + '"]');
-                if (radio) {
-                    var hasValue0 = groups[i].querySelector('input[type="radio"][value="0"]');
-                    if (!hasValue0) {
-                        playerSelector = {group: groups[i], radio: radio};
-                        break;
-                    }
-                }
-            }
-            if (playerSelector) break;
-
-            var waitUntil = Date.now() + pollIntervalMs;
-            while (Date.now() < waitUntil) { /* spin */ }
-        }
-
-        if (!playerSelector) {
-            // Final blocked-popup check before returning timeout error
-            // The server may have been slow to respond with the blocked popup
-            var finalPopup = findVisibleBlockedPopup();
-            if (finalPopup) {
-                var finalClass = classifyBlockedPopup(finalPopup, blockedPatterns);
-                if (finalClass.blocked) {
-                    result.blocked = true;
-                    result.error = 'Slot blocked by another user (detected after timeout)';
-                } else {
-                    result.error = 'Validation error after timeout: ' + finalClass.text.substring(0, 100);
-                }
-                result.timing.blockedDetectedAfterTimeout = Date.now() - startTime;
-                dismissPopup(finalPopup);
-                return result;
-            }
-            result.error = 'Player count selector not found within ' + maxWaitMs + 'ms';
-            result.timing.playerSelectorTimeout = Date.now() - startTime;
-            return result;
-        }
-        result.timing.playerSelectorFound = Date.now() - startTime;
-
-        // Phase 4: Click player count button (timed chain)
-        result.phase = 'player_count_click';
-        var playerButton = playerSelector.radio.parentElement;
-        if (playerButton.classList.contains('ui-state-disabled')) {
-            result.error = 'Player count ' + numPlayers + ' button is disabled';
-            return result;
-        }
-        playerButton.click();
-        result.timing.playerCountClicked = Date.now() - startTime;
-
-        // Phase 5: Add TBD Registered Guests (if numPlayers > 1)
-        if (numPlayers > 1) {
-            result.phase = 'tbd_guests';
-            var numTbd = numPlayers - 1;
-            var tbdClicked = 0;
-
-            var playerRows = pollFor(
-                function() {
-                    var rows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
-                    if (rows.length >= numPlayers) return rows;
-                    rows = document.querySelectorAll('table[id*="player"] tbody tr');
-                    if (rows.length >= numPlayers) return rows;
-                    return null;
-                },
-                3000,
-                'player rows'
-            );
-
-            if (!playerRows) {
-                result.error = 'Player rows did not appear after selecting ' + numPlayers + ' players';
-                return result;
-            }
-            result.timing.playerRowsFound = Date.now() - startTime;
-
-            while (tbdClicked < numTbd) {
-                var currentRows = document.querySelectorAll('[id*="playersTable"] tbody tr[data-ri]');
-                if (currentRows.length === 0) {
-                    currentRows = document.querySelectorAll('table[id*="player"] tbody tr');
-                }
-                if (currentRows.length <= 1) {
-                    result.error = 'Player rows disappeared while clicking TBD buttons';
-                    return result;
-                }
-
-                var guestIndex = tbdClicked + 1;
-                if (guestIndex >= currentRows.length) {
-                    result.error = 'Not enough player rows for TBD guests';
-                    return result;
-                }
-
-                var row = currentRows[guestIndex];
-                var tbd = row.querySelector('a[id*="tbd"], span[id*="tbd"], a.ui-commandlink');
-                if (!tbd) {
-                    var links = row.querySelectorAll('a');
-                    for (var l = 0; l < links.length; l++) {
-                        if (links[l].textContent && links[l].textContent.toUpperCase().indexOf('TBD') !== -1) {
-                            tbd = links[l];
-                            break;
-                        }
-                    }
-                }
-                if (tbd) {
-                    tbd.click();
-                    tbdClicked++;
-                    var waitUntil = Date.now() + 200;
-                    while (Date.now() < waitUntil) { /* spin */ }
-                } else {
-                    result.error = 'TBD button not found on guest row ' + guestIndex;
-                    return result;
-                }
-            }
-
-            if (tbdClicked < numTbd) {
-                result.error = 'Only clicked ' + tbdClicked + ' of ' + numTbd + ' TBD buttons';
-                return result;
-            }
-            result.timing.tbdGuestsAdded = Date.now() - startTime;
-        }
-
-        // Phase 6: Click Book Now button
-        result.phase = 'book_now';
-        var bookNow = pollFor(
-            function() {
-                var btn = document.querySelector('a[id*="bookTeeTimeAction"]');
-                if (btn) return btn;
-                var links = document.querySelectorAll('a');
-                for (var i = 0; i < links.length; i++) {
-                    var txt = links[i].textContent || '';
-                    if (txt.indexOf('Book Now') !== -1 || txt.indexOf('Book') !== -1) {
-                        return links[i];
-                    }
-                }
-                return null;
-            },
-            5000,
-            'Book Now button'
-        );
-
-        if (!bookNow) {
-            result.error = 'Book Now button not found';
-            result.timing.bookNowTimeout = Date.now() - startTime;
-            return result;
-        }
-        result.timing.bookNowFound = Date.now() - startTime;
-
-        bookNow.scrollIntoView({block: 'center'});
-        bookNow.click();
-        result.timing.bookNowClicked = Date.now() - startTime;
-
-        result.phase = 'complete';
-        result.success = true;
-        result.timing.totalMs = Date.now() - startTime;
-
-        return result;
-        """
-        )
-
-        max_wait_ms = 5000
-        poll_interval_ms = 10
-        blocked_patterns = list(DOM.SLOT_BLOCKED.blocked_text_patterns)
-
         # Calculate how far in the future the target is
         now_ms = int(datetime.now().timestamp() * 1000)
         ms_until_target = target_timestamp_ms - now_ms
@@ -3613,30 +3371,20 @@ class WaldenGolfProvider(ReservationProvider):
             f"{num_players} players, target in {ms_until_target}ms"
         )
 
-        # Set script timeout to accommodate the busy-wait period plus booking flow
-        # Default Selenium timeout is 30s, but we may wait up to 2+ minutes (6:28 → 6:30)
-        # Add buffer for booking flow after click (max_wait_ms + TBD clicks + Book Now)
-        script_timeout_ms = max(ms_until_target, 0) + max_wait_ms + 30000  # +30s buffer
-        script_timeout_s = max(60, script_timeout_ms // 1000)  # At least 60s
+        # Set script timeout to accommodate the wait period plus booking flow.
+        # Default Selenium timeout is 30s, but we may wait 2+ minutes (6:28 -> 6:30).
+        script_timeout_ms = max(ms_until_target, 0) + _CHAIN_MAX_WAIT_MS + 30000
+        script_timeout_s = max(60, script_timeout_ms // 1000)
 
-        # Store original timeout to restore later
         original_timeouts = driver.timeouts
         try:
             driver.set_script_timeout(script_timeout_s)
             logger.debug(f"TIMED_BOOKING: Set script timeout to {script_timeout_s}s")
 
-            # Execute the JS - it will busy-wait internally until the target time
-            result: dict[str, Any] = driver.execute_script(
-                js_timed_chain,
-                slot_index,
-                num_players,
-                target_timestamp_ms,
-                max_wait_ms,
-                poll_interval_ms,
-                blocked_patterns,
+            result = self._run_booking_chain_js(
+                driver, slot_index, num_players, target_timestamp_ms
             )
         finally:
-            # Restore original script timeout
             if original_timeouts and original_timeouts.script is not None:
                 driver.set_script_timeout(original_timeouts.script)
             else:
@@ -3644,14 +3392,12 @@ class WaldenGolfProvider(ReservationProvider):
 
         timing = result.get("timing", {})
 
-        # Log disable-div wait info if present (new instrumentation)
         disable_div_info = ""
         if "disableDivPresentAtStart" in timing:
             if timing.get("disableDivPresentAtStart"):
                 disable_div_info = (
-                    f", disableDiv=present→wait={timing.get('disableDivWaitMs', '?')}ms"
-                    f"({timing.get('disableDivChecks', '?')} checks)"
-                    f"→enabled={timing.get('slotsEnabledAfterWait', '?')}"
+                    f", disableDiv=present->wait={timing.get('disableDivWaitMs', '?')}ms"
+                    f"->enabled={timing.get('slotsEnabledAfterWait', '?')}"
                 )
             else:
                 disable_div_info = ", disableDiv=absent(slots_already_enabled)"
@@ -3666,6 +3412,53 @@ class WaldenGolfProvider(ReservationProvider):
         logger.debug(f"TIMED_BOOKING: Full timing: {timing}")
 
         return result
+
+    def _run_booking_chain_js(
+        self,
+        driver: webdriver.Chrome,
+        slot_index: int,
+        num_players: int,
+        target_timestamp_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Run the shared async booking chain via execute_async_script.
+
+        The chain MUST run as an async script: everything it waits on (the
+        site's timer removing 'disable-div' at 6:30, the PrimeFaces AJAX
+        response that renders the player page, the blocked-slot popup) is
+        delivered by the page's event loop, which a synchronous execute_script
+        would block for its entire duration. See _JS_ASYNC_BOOKING_CHAIN.
+
+        Args:
+            driver: The WebDriver instance
+            slot_index: Index of the slot in the li.ui-datascroller-item NodeList
+            num_players: Number of players (1-4)
+            target_timestamp_ms: Epoch ms to click Reserve at, or None for now
+
+        Returns:
+            The chain result dict (success/error/blocked/phase/timing).
+        """
+        blocked_patterns = list(DOM.SLOT_BLOCKED.blocked_text_patterns)
+
+        raw = driver.execute_async_script(
+            _JS_BLOCKED_POPUP_HELPERS + _JS_ASYNC_BOOKING_CHAIN,
+            slot_index,
+            num_players,
+            target_timestamp_ms,
+            _CHAIN_MAX_WAIT_MS,
+            _CHAIN_POLL_INTERVAL_MS,
+            blocked_patterns,
+            _CHAIN_ENABLED_MAX_WAIT_MS,
+        )
+        if isinstance(raw, dict):
+            return raw
+        return {
+            "success": False,
+            "error": f"Booking chain returned unexpected result: {raw!r}",
+            "blocked": False,
+            "phase": "unknown",
+            "timing": {},
+        }
 
     def _check_slot_blocked_popup(self, driver: webdriver.Chrome) -> bool:
         """
