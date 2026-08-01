@@ -65,9 +65,13 @@ def measure(host: str, samples: int, poll_interval: float) -> None:
         sample_date_header(conn)
 
     rtts: list[float] = []
-    transitions: list[float] = []  # offset estimates, one per observed tick
+    # Per observed tick, the offset lies in [lower, upper]: the server second
+    # rolled over somewhere between the previous sample and the one that first
+    # showed the new value, so we get a bounded interval, not a point.
+    transition_bounds: list[tuple[float, float]] = []
     coarse_offsets: list[float] = []
     last_server_epoch: float | None = None
+    last_midpoint: float | None = None
 
     for _ in range(samples):
         try:
@@ -75,16 +79,24 @@ def measure(host: str, samples: int, poll_interval: float) -> None:
         except (http.client.HTTPException, OSError):
             conn.close()
             conn = http.client.HTTPSConnection(host, timeout=10, context=ctx)
+            time.sleep(poll_interval)  # honor the polling rate on failures too
             continue
         rtt = t_recv - t_send
         midpoint = (t_send + t_recv) / 2
         rtts.append(rtt)
         coarse_offsets.append(server_epoch - midpoint)
 
-        if last_server_epoch is not None and server_epoch > last_server_epoch:
-            # Server second just ticked: server clock was ~server_epoch.000 now.
-            transitions.append(server_epoch - midpoint)
+        if (
+            last_server_epoch is not None
+            and last_midpoint is not None
+            and server_epoch > last_server_epoch
+        ):
+            # The tick happened between the previous sample and this one, so
+            # in local-clock terms tick_local is in (last_midpoint, midpoint];
+            # offset = server_epoch - tick_local, bounded accordingly.
+            transition_bounds.append((server_epoch - midpoint, server_epoch - last_midpoint))
         last_server_epoch = server_epoch
+        last_midpoint = midpoint
 
         time.sleep(poll_interval)
 
@@ -106,18 +118,23 @@ def measure(host: str, samples: int, poll_interval: float) -> None:
         "\n  (positive = server clock ahead of local clock)"
     )
 
-    if transitions:
-        est = statistics.median(transitions)
-        spread = (max(transitions) - min(transitions)) * 1000 if len(transitions) > 1 else 0.0
+    if transition_bounds:
+        lower = statistics.median(b[0] for b in transition_bounds)
+        upper = statistics.median(b[1] for b in transition_bounds)
+        est = (lower + upper) / 2
+        half_width = max((upper - lower) / 2, 0.0)
         print(
-            f"Tick-transition offset estimate ({len(transitions)} ticks observed): "
-            f"{est * 1000:+.0f}ms  (spread {spread:.0f}ms)"
+            f"Tick-transition offset estimate ({len(transition_bounds)} ticks observed): "
+            f"{est * 1000:+.0f}ms +/- {half_width * 1000:.0f}ms "
+            f"(bounds [{lower * 1000:+.0f}ms, {upper * 1000:+.0f}ms])"
         )
         fire_early_ms = est * 1000 + rtt_min / 2
         print(
             "\nTo have a request ARRIVE when the server clock reads T, "
             f"send at local T {'-' if fire_early_ms >= 0 else '+'} "
-            f"{abs(fire_early_ms):.0f}ms."
+            f"{abs(fire_early_ms):.0f}ms "
+            f"(+/- {half_width * 1000:.0f}ms measurement uncertainty; tighten "
+            "with a smaller --interval)."
         )
     else:
         print(
@@ -132,4 +149,8 @@ if __name__ == "__main__":
     parser.add_argument("--samples", type=int, default=80)
     parser.add_argument("--interval", type=float, default=0.05, help="poll interval seconds")
     args = parser.parse_args()
+    if args.samples <= 0:
+        parser.error("--samples must be greater than zero")
+    if args.interval <= 0:
+        parser.error("--interval must be greater than zero")
     measure(args.host, args.samples, args.interval)

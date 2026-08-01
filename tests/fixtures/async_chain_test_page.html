@@ -46,6 +46,13 @@ function renderPlayerPage() {
   var checked = preselect ? ' checked' : '';
   var active = preselect ? ' ui-state-active' : '';
   pp.innerHTML =
+    // Decoy: the real tee sheet's time-period filter shares .ui-selectonebutton
+    // and has a value="0" option (Issue #105). The chain must skip it.
+    '<div class="ui-selectonebutton">' +
+    [0, 1, 2, 3].map(function (n) {
+      return '<div class="ui-button"><input type="radio" value="' + n + '"></div>';
+    }).join('') +
+    '</div>' +
     '<div class="ui-selectonebutton">' +
     [1, 2, 3, 4].map(function (n) {
       var isTarget = n === 4;

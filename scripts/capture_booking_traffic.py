@@ -21,6 +21,7 @@ Output: scripts/captures/traffic_<timestamp>.json
 
 import argparse
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,20 @@ def drain_performance_log(driver: webdriver.Chrome, events: list[dict]) -> None:
             events.append(msg)
 
 
+_SENSITIVE_PARAM_RE = re.compile(r"([^&=]*(?:password|passwd|pwd)[^&=]*)=[^&]*", re.IGNORECASE)
+_SENSITIVE_HEADERS = {"cookie", "authorization", "set-cookie"}
+
+
+def redact_body(url: str, body: str | None) -> str | None:
+    """Strip credentials from a captured request body before persistence."""
+    if body is None:
+        return None
+    if "login" in url.lower():
+        # Never persist the login POST body (contains the plaintext password).
+        return "<redacted: login request>"
+    return _SENSITIVE_PARAM_RE.sub(r"\1=<redacted>", body)
+
+
 def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> None:
     """Ask CDP for request POST data of interesting requests (best effort)."""
     for ev in events:
@@ -73,6 +88,20 @@ def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> None:
                 req["postData"] = body.get("postData")
             except Exception:  # noqa: BLE001 - body may be gone; fine
                 pass
+
+
+def sanitize_events(events: list[dict]) -> None:
+    """Redact credentials and session tokens from captured network events."""
+    for ev in events:
+        req = ev.get("params", {}).get("request")
+        if not req:
+            continue
+        req["postData"] = redact_body(req.get("url", ""), req.get("postData"))
+        headers = req.get("headers")
+        if headers:
+            for name in list(headers):
+                if name.lower() in _SENSITIVE_HEADERS:
+                    headers[name] = "<redacted>"
 
 
 def extract_viewstates(driver: webdriver.Chrome) -> list[str]:
@@ -95,7 +124,7 @@ def main() -> None:
     if not settings.walden_member_number or not settings.walden_password:
         raise SystemExit("Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD (e.g. in .env) first.")
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    OUTPUT_DIR.mkdir(mode=0o700, exist_ok=True)
     events: list[dict] = []
 
     provider = WaldenGolfProvider()
@@ -124,10 +153,13 @@ def main() -> None:
             print("Stopping early.")
         drain_performance_log(driver, events)
         fetch_post_bodies(driver, events)
+        sanitize_events(events)
 
         snapshot = {
             "captured_at": datetime.now().isoformat(),
-            "cookies": driver.get_cookies(),
+            # Keep cookie names/attributes (needed to design the replay);
+            # drop the live session-token values.
+            "cookies": [{**cookie, "value": "<redacted>"} for cookie in driver.get_cookies()],
             "current_url": driver.current_url,
             "viewstates_on_final_page": extract_viewstates(driver),
             "network_events": events,
@@ -137,6 +169,7 @@ def main() -> None:
 
     out = OUTPUT_DIR / f"traffic_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     out.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
+    out.chmod(0o600)  # best effort; no-op semantics on Windows, effective on POSIX
     print(f"\nWrote {len(events)} network events to {out}")
     print("Grep for 'reserve_button' and 'javax.faces.ViewState' to find the booking POSTs.")
 

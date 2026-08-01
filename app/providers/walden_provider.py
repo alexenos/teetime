@@ -166,18 +166,35 @@ _JS_ASYNC_BOOKING_CHAIN = """
 
         function finish() { done(result); }
 
+        // Any exception inside a scheduled callback would otherwise leave the
+        // async script hanging (done never called) until Selenium's script
+        // timeout - minutes, on the timed path. Route every continuation
+        // through this guard so failures surface immediately instead.
+        function guard(fn) {
+            return function() {
+                try { return fn.apply(null, arguments); }
+                catch (e) {
+                    result.error = 'JS chain error in phase ' + result.phase + ': ' + e.message;
+                    finish();
+                }
+            };
+        }
+
         // Async poll: checkFn is evaluated now and then every intervalMs via
         // setTimeout, yielding to the event loop between checks so page JS
         // (AJAX handlers, site timers) can run. Truthy return -> onFound(value).
+        // The tick (including onFound/onTimeout) is guarded: a throw completes
+        // the script with an error rather than hanging it.
         function pollUntil(checkFn, timeoutMs, intervalMs, onFound, onTimeout) {
             var deadline = Date.now() + timeoutMs;
-            (function tick() {
+            var tick = guard(function() {
                 var val = null;
                 try { val = checkFn(); } catch (e) { /* keep polling */ }
                 if (val) { onFound(val); return; }
                 if (Date.now() >= deadline) { onTimeout(); return; }
                 setTimeout(tick, intervalMs);
-            })();
+            });
+            tick();
         }
 
         function handlePopup(popup, timingKey, suffix) {
@@ -229,7 +246,7 @@ _JS_ASYNC_BOOKING_CHAIN = """
             result.timing.msUntilTarget = targetTimestampMs - Date.now();
             var coarseMs = targetTimestampMs - Date.now() - 25;
             if (coarseMs > 0) {
-                setTimeout(finalSpin, coarseMs);
+                setTimeout(guard(finalSpin), coarseMs);
             } else {
                 finalSpin();
             }
@@ -247,8 +264,30 @@ _JS_ASYNC_BOOKING_CHAIN = """
         function waitEnabled() {
             startTime = Date.now();
             if (targetTimestampMs !== null && targetTimestampMs !== undefined) {
-                result.timing.actualClickTime = startTime;
-                result.timing.clickDriftMs = startTime - targetTimestampMs;
+                // Drift of the wait start vs target; the true click drift is
+                // recorded in clickReserve() (it additionally includes any
+                // disable-div wait).
+                result.timing.waitStartDriftMs = startTime - targetTimestampMs;
+            }
+            // The coarse wait yields to the page event loop, so a PrimeFaces
+            // partial update may have replaced the pre-located nodes. A
+            // detached node reads stale classes and swallows click() silently.
+            if (!item.isConnected) {
+                var freshItems = document.querySelectorAll('li.ui-datascroller-item');
+                var freshItem = freshItems[slotIndex];
+                if (!freshItem) {
+                    result.error = 'Slot item disappeared before click at index ' + slotIndex;
+                    return finish();
+                }
+                item = freshItem;
+                reserveBtn = item.querySelector("a[id*='reserve_button']") ||
+                    item.querySelector('span.custom-free-slot-span') ||
+                    item.querySelector('a.slot-link');
+                if (!reserveBtn) {
+                    result.error = 'Reserve button disappeared before click';
+                    return finish();
+                }
+                result.timing.slotReQueried = true;
             }
             result.phase = 'wait_enabled';
             var slotContainer = item.closest('.ui-datascroller');
@@ -290,7 +329,11 @@ _JS_ASYNC_BOOKING_CHAIN = """
             result.phase = 'reserve_click';
             result.timing.clickAfterEnabledMs = Date.now() - startTime;
             reserveBtn.click();
-            result.timing.reserveClicked = Date.now() - startTime;
+            result.timing.actualClickTime = Date.now();
+            result.timing.reserveClicked = result.timing.actualClickTime - startTime;
+            if (targetTimestampMs !== null && targetTimestampMs !== undefined) {
+                result.timing.clickDriftMs = result.timing.actualClickTime - targetTimestampMs;
+            }
             waitPlayerSelector();
         }
 
@@ -428,7 +471,7 @@ _JS_ASYNC_BOOKING_CHAIN = """
                 return finish();
             }
             tbd.click();
-            setTimeout(function() { clickNextTbd(tbdClicked + 1, numTbd); }, 200);
+            setTimeout(guard(function() { clickNextTbd(tbdClicked + 1, numTbd); }), 200);
         }
 
         // Phase 6: Click Book Now
@@ -438,10 +481,12 @@ _JS_ASYNC_BOOKING_CHAIN = """
                 function() {
                     var btn = document.querySelector('a[id*="bookTeeTimeAction"]');
                     if (btn) return btn;
+                    // Exact-text fallback only: substring matching ('Book')
+                    // would hit nav links like 'Booked' or 'Book a Tee Time'.
                     var links = document.querySelectorAll('a');
                     for (var i = 0; i < links.length; i++) {
-                        var txt = links[i].textContent || '';
-                        if (txt.indexOf('Book Now') !== -1 || txt.indexOf('Book') !== -1) {
+                        var txt = (links[i].textContent || '').trim().toLowerCase();
+                        if (txt === 'book now' || txt === 'book') {
                             return links[i];
                         }
                     }
@@ -478,7 +523,12 @@ _JS_ASYNC_BOOKING_CHAIN = """
 # Timing budgets for the shared booking chain
 _CHAIN_MAX_WAIT_MS = 5000  # player-selector wait after Reserve click
 _CHAIN_POLL_INTERVAL_MS = 10  # element polling cadence
-_CHAIN_ENABLED_MAX_WAIT_MS = 1500  # disable-div removal wait at 6:30
+# Wait budget for the site's JS to remove the disable-div overlay at 6:30.
+# Generous on purpose: the wait starts at the local-clock target, so this must
+# absorb clock offset plus any lag in the site's own enable timer. Waiting
+# costs nothing when the overlay comes off early - the 2ms poll clicks
+# immediately - but timing out here forfeits the attempt.
+_CHAIN_ENABLED_MAX_WAIT_MS = 5000
 
 
 class WaldenGolfProvider(ReservationProvider):
