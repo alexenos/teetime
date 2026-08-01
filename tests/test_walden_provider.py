@@ -1528,7 +1528,9 @@ class TestWaldenProviderFormatBlockedSlotMessage:
 
     def test_truncates_more_than_three_reasons(self, provider: WaldenGolfProvider) -> None:
         result = provider._format_blocked_slot_message(["A", "B", "C", "D", "E"])
-        assert result == "Nearby tee times are unavailable: A, B, C and 2 more (cannot be reserved)."
+        assert (
+            result == "Nearby tee times are unavailable: A, B, C and 2 more (cannot be reserved)."
+        )
 
 
 class TestWaldenProviderEnhancedErrorMessages:

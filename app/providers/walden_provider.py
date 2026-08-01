@@ -4216,9 +4216,7 @@ class WaldenGolfProvider(ReservationProvider):
 
                     # Restrict to the requested window when we can read the time.
                     slot_time = None
-                    labels = slot_item.find_elements(
-                        By.CSS_SELECTOR, DOM.DISABLED_SLOT.time_label
-                    )
+                    labels = slot_item.find_elements(By.CSS_SELECTOR, DOM.DISABLED_SLOT.time_label)
                     for label in labels:
                         match = time_pattern.search(label.text.strip())
                         if match:
@@ -4303,9 +4301,7 @@ class WaldenGolfProvider(ReservationProvider):
             parts.append(event_message)
 
         blocked_message = self._format_blocked_slot_message(
-            self._extract_blocked_slot_reasons(
-                search_context, target_time, fallback_window_minutes
-            )
+            self._extract_blocked_slot_reasons(search_context, target_time, fallback_window_minutes)
         )
         if blocked_message:
             parts.append(blocked_message)

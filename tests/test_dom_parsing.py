@@ -127,9 +127,7 @@ class TestDisabledSlotSelectors:
     (e.g. aerification, weather delay) instead of only reporting no openings.
     """
 
-    def test_disabled_headings_present_with_reason_text(
-        self, tee_time_page_html: BeautifulSoup
-    ):
+    def test_disabled_headings_present_with_reason_text(self, tee_time_page_html: BeautifulSoup):
         """Disabled slots expose a reason heading (e.g. 'Weather delay')."""
         headings = tee_time_page_html.select(".custom-disabled-heading")
         assert len(headings) >= 1, "No disabled-slot reason headings found"
@@ -139,15 +137,11 @@ class TestDisabledSlotSelectors:
         # The captured fixture is a frost/weather-delayed morning.
         assert "Weather delay" in reasons
 
-    def test_disabled_slot_marked_cannot_be_reserved(
-        self, tee_time_page_html: BeautifulSoup
-    ):
+    def test_disabled_slot_marked_cannot_be_reserved(self, tee_time_page_html: BeautifulSoup):
         """Disabled slots carry the generic 'Cannot be reserved' subheading."""
         subheadings = tee_time_page_html.select(".custom-disabled-subheading-txt")
         assert len(subheadings) >= 1
-        assert any(
-            "cannot be reserved" in s.get_text(strip=True).lower() for s in subheadings
-        )
+        assert any("cannot be reserved" in s.get_text(strip=True).lower() for s in subheadings)
 
     def test_disabled_slot_has_time_label(self, tee_time_page_html: BeautifulSoup):
         """A disabled slot still shows its tee time via the time label."""
