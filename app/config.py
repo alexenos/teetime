@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     twilio_phone_number: str = ""
     twilio_channel: str = "whatsapp"  # "sms" or "whatsapp"
 
+    discord_bot_token: str = ""
+    discord_user_id: str = ""  # Snowflake ID of the (single) user allowed to DM the bot
+    messaging_channel: str = "twilio"  # "twilio" or "discord"
+
     gemini_api_key: str = ""
 
     walden_member_number: str = ""

@@ -1,4 +1,5 @@
 from app.config import settings
+from app.providers.discord_provider import DiscordProvider
 from app.providers.sms_base import SMSProvider
 from app.providers.twilio_provider import MockSMSProvider, TwilioSMSProvider
 
@@ -17,13 +18,17 @@ class SMSService:
     @property
     def provider(self) -> SMSProvider:
         """
-        Lazily initialize and return the SMS provider.
+        Lazily initialize and return the messaging provider.
 
-        Uses TwilioSMSProvider if credentials are configured,
-        otherwise falls back to MockSMSProvider for development.
+        Selection order:
+        1. DiscordProvider when MESSAGING_CHANNEL=discord and a bot token is set
+        2. TwilioSMSProvider when Twilio credentials are configured
+        3. MockSMSProvider otherwise (local development)
         """
         if self._provider is None:
-            if settings.twilio_account_sid and settings.twilio_auth_token:
+            if settings.messaging_channel == "discord" and settings.discord_bot_token:
+                self._provider = DiscordProvider()
+            elif settings.twilio_account_sid and settings.twilio_auth_token:
                 self._provider = TwilioSMSProvider()
             else:
                 self._provider = MockSMSProvider()
