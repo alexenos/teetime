@@ -40,15 +40,15 @@ variable "cloud_run_cpu" {
 }
 
 variable "cloud_run_max_instances" {
-  description = "Maximum number of Cloud Run instances"
+  description = "Maximum number of Cloud Run instances. Must be 1 while the Discord gateway runs in-process: a second instance would open a second gateway session and double-process every message."
   type        = number
-  default     = 10
+  default     = 1
 }
 
 variable "cloud_run_min_instances" {
-  description = "Minimum number of Cloud Run instances (0 allows scale to zero)"
+  description = "Minimum number of Cloud Run instances. Must be 1 while the Discord gateway runs in-process (a persistent WebSocket needs an always-on instance; with cpu_idle=false this bills roughly USD 50/month for 1 vCPU + 1GiB)."
   type        = number
-  default     = 0
+  default     = 1
 }
 
 variable "timezone" {
@@ -97,6 +97,12 @@ variable "container_image" {
   description = "Container image to deploy (passed from Cloud Build)"
   type        = string
   default     = ""
+}
+
+variable "messaging_channel" {
+  description = "User messaging channel: 'discord' (gateway in-process, requires min/max instances = 1 and always-on CPU) or 'twilio'"
+  type        = string
+  default     = "discord"
 }
 
 variable "log_level" {
