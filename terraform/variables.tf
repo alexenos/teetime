@@ -103,6 +103,14 @@ variable "messaging_channel" {
   description = "User messaging channel: 'discord' (gateway in-process, requires min/max instances = 1 and always-on CPU) or 'twilio'"
   type        = string
   default     = "discord"
+
+  validation {
+    # Matched exactly (not case-folded) by both the cpu_idle expression here
+    # and settings.messaging_channel in the app, so a near-miss like "Discord"
+    # would silently run with no gateway at all.
+    condition     = contains(["discord", "twilio"], var.messaging_channel)
+    error_message = "messaging_channel must be exactly \"discord\" or \"twilio\" (lowercase)."
+  }
 }
 
 variable "log_level" {

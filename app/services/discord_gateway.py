@@ -93,7 +93,8 @@ class DiscordGateway:
                 "is the Message Content intent enabled in the Developer Portal?"
             )
             return
-        logger.info(f"Discord DM received from {author_id}: {content[:80]}")
+        source = "DM" if is_dm else f"guild channel #{getattr(message.channel, 'name', '?')}"
+        logger.info(f"Discord message received from {author_id} via {source}: {content[:80]}")
         try:
             response = await self._message_handler(author_id, content)
         except Exception:

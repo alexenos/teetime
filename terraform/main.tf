@@ -33,7 +33,18 @@ locals {
     "iam.googleapis.com",
     "storage.googleapis.com",
   ]
-  secrets = [
+  discord_secrets = [
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_USER_ID",
+  ]
+
+  # Every secret this project stores. Deliberately NOT scoped by
+  # messaging_channel: dropping a secret from this list would have Terraform
+  # delete it (and its versions) from Secret Manager, so flipping the channel
+  # would destroy stored credentials. Channel scoping is applied to the
+  # runtime env references and IAM grants below instead - that is where
+  # least-privilege actually matters.
+  secrets = concat([
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "TWILIO_PHONE_NUMBER",
@@ -42,22 +53,28 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
-    "DISCORD_BOT_TOKEN",
-    "DISCORD_USER_ID",
-  ]
+  ], local.discord_secrets)
+
+  # Secrets the running container may read. The Discord credentials are only
+  # mounted (and only readable) when the Discord channel is active.
+  runtime_secrets = var.messaging_channel == "discord" ? toset(local.secrets) : setsubtract(
+    toset(local.secrets), toset(local.discord_secrets)
+  )
 }
 
 # The Discord secrets were created (with versions) via gcloud before this
 # config landed, so the Cloud Run revision could reference them on its first
-# deploy. These blocks adopt them into state; they are no-ops afterwards.
+# deploy. These blocks adopt them into state; Terraform ignores an import
+# block whose target is already in state, so they are no-ops afterwards and
+# can be deleted once this has applied successfully.
 import {
   to = google_secret_manager_secret.secrets["DISCORD_BOT_TOKEN"]
-  id = "projects/gen-lang-client-0822973627/secrets/DISCORD_BOT_TOKEN"
+  id = "projects/${var.project_id}/secrets/DISCORD_BOT_TOKEN"
 }
 
 import {
   to = google_secret_manager_secret.secrets["DISCORD_USER_ID"]
-  id = "projects/gen-lang-client-0822973627/secrets/DISCORD_USER_ID"
+  id = "projects/${var.project_id}/secrets/DISCORD_USER_ID"
 }
 
 data "google_project" "project" {
@@ -99,7 +116,7 @@ resource "google_service_account" "cloud_run" {
 }
 
 resource "google_secret_manager_secret_iam_member" "cloud_run_secret_access" {
-  for_each = toset(local.secrets)
+  for_each = toset(local.runtime_secrets)
 
   secret_id = google_secret_manager_secret.secrets[each.value].id
   role      = "roles/secretmanager.secretAccessor"
@@ -110,6 +127,25 @@ resource "google_cloud_run_v2_service" "teetime" {
   name     = local.service_name
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
+
+  # Variable validation blocks cannot reference other variables on the
+  # Terraform version Cloud Build pins (1.6), so the cross-variable invariant
+  # is enforced here instead.
+  lifecycle {
+    precondition {
+      condition = (
+        var.messaging_channel != "discord" ||
+        (var.cloud_run_min_instances == 1 && var.cloud_run_max_instances == 1)
+      )
+      error_message = join(" ", [
+        "messaging_channel=\"discord\" requires cloud_run_min_instances and",
+        "cloud_run_max_instances to both be exactly 1: the gateway holds a",
+        "persistent WebSocket, so 0 instances drops the connection and >1",
+        "opens a second session that double-processes every message.",
+        "Got min=${var.cloud_run_min_instances}, max=${var.cloud_run_max_instances}.",
+      ])
+    }
+  }
 
   template {
     service_account = google_service_account.cloud_run.email
@@ -179,7 +215,7 @@ resource "google_cloud_run_v2_service" "teetime" {
       }
 
       dynamic "env" {
-        for_each = toset(local.secrets)
+        for_each = toset(local.runtime_secrets)
         content {
           name = env.value
           value_source {
@@ -371,8 +407,8 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
 }
 
 resource "google_cloud_scheduler_job" "execute_bookings" {
-  name             = "${local.service_name}-execute-bookings"
-  description      = "Execute due tee time bookings"
+  name        = "${local.service_name}-execute-bookings"
+  description = "Execute due tee time bookings"
   # Run 2 minutes early (6:28 AM CT) to allow login before booking window opens at 6:30 AM
   # The job queries for bookings due at 6:30 AM and waits until that time to book
   schedule         = "28 6 * * *"

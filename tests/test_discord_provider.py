@@ -1,6 +1,7 @@
-"""Tests for the Discord messaging provider and gateway message filtering."""
+"""Tests for the Discord messaging provider and gateway message handling."""
 
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -11,7 +12,7 @@ from app.providers.discord_provider import (
     DiscordProvider,
     split_message,
 )
-from app.services.discord_gateway import should_handle_message
+from app.services.discord_gateway import DiscordGateway, should_handle_message
 
 
 class TestSplitMessage:
@@ -141,3 +142,115 @@ class TestShouldHandleMessage:
 
     def test_no_allowlist_fails_closed(self) -> None:
         assert not should_handle_message(self.ALLOWED, False, "")
+
+
+BOT_ID = 999000111
+ALLOWED_ID = "111222333444555666"
+
+
+def make_message(
+    *,
+    author_id: str = ALLOWED_ID,
+    content: str = "book saturday 8am",
+    is_bot: bool = False,
+    in_guild: bool = False,
+) -> MagicMock:
+    """Build a stand-in for discord.Message with a spy on channel.send."""
+    message = MagicMock()
+    message.author.id = int(author_id)
+    message.author.bot = is_bot
+    message.content = content
+    message.guild = MagicMock() if in_guild else None
+    message.channel.name = "tee-times"
+    message.channel.send = AsyncMock()
+    return message
+
+
+@pytest.fixture
+def gateway(monkeypatch: pytest.MonkeyPatch) -> tuple[DiscordGateway, AsyncMock]:
+    """A gateway whose discord.Client is replaced by a stub bot identity."""
+    monkeypatch.setattr(settings, "discord_user_id", ALLOWED_ID)
+    handler = AsyncMock(return_value="ok")
+    gw = DiscordGateway(handler)
+    gw.client = MagicMock()  # type: ignore[assignment]
+    gw.client.user.id = BOT_ID
+    return gw, handler
+
+
+class TestGatewayOnMessage:
+    async def test_dm_from_allowed_user_dispatched(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        gw, handler = gateway
+        message = make_message()
+
+        await gw._on_message(message)
+
+        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am")
+        message.channel.send.assert_awaited_once_with("ok")
+
+    async def test_guild_message_from_allowed_user_dispatched(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        """Server-channel messages must work, not just DMs."""
+        gw, handler = gateway
+        message = make_message(in_guild=True)
+
+        await gw._on_message(message)
+
+        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am")
+        message.channel.send.assert_awaited_once_with("ok")
+
+    async def test_own_message_suppressed(
+        self,
+        gateway,  # type: ignore[no-untyped-def]
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The bot must not react to its own outbound messages.
+
+        The allowlist is deliberately pointed at the bot's own ID so this
+        exercises the self-check rather than passing for the incidental
+        reason that the bot isn't the allowed user.
+        """
+        gw, handler = gateway
+        monkeypatch.setattr(settings, "discord_user_id", str(BOT_ID))
+        message = make_message(author_id=str(BOT_ID), is_bot=False)
+
+        await gw._on_message(message)
+
+        handler.assert_not_awaited()
+        message.channel.send.assert_not_awaited()
+
+    async def test_other_user_ignored(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        gw, handler = gateway
+        message = make_message(author_id="424242424242")
+
+        await gw._on_message(message)
+
+        handler.assert_not_awaited()
+        message.channel.send.assert_not_awaited()
+
+    async def test_empty_content_ignored(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        """Empty content signals a missing Message Content intent."""
+        gw, handler = gateway
+        message = make_message(content="   ")
+
+        await gw._on_message(message)
+
+        handler.assert_not_awaited()
+        message.channel.send.assert_not_awaited()
+
+    async def test_handler_error_reported_to_user(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        gw, handler = gateway
+        handler.side_effect = RuntimeError("gemini exploded")
+        message = make_message()
+
+        await gw._on_message(message)
+
+        message.channel.send.assert_awaited_once()
+        assert "went wrong" in message.channel.send.await_args.args[0]
+
+    async def test_long_response_sent_in_chunks(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        gw, handler = gateway
+        handler.return_value = "z" * (MAX_MESSAGE_LEN + 10)
+        message = make_message()
+
+        await gw._on_message(message)
+
+        assert message.channel.send.await_count == 2
