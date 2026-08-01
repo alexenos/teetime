@@ -371,6 +371,25 @@ class SlotBlockedSelectors:
 
 
 @dataclass(frozen=True)
+class DisabledSlotSelectors:
+    """Selectors for slots the club has disabled with a stated reason.
+
+    Unbookable slots (aerification, weather delay, frost delay, etc.) render a
+    disabled block that shows the reason as a heading (e.g. "Aerification")
+    above the generic "Cannot be reserved" subheading, in place of a Reserve
+    button. Reading the heading lets us tell the user *why* nothing in their
+    requested window could be booked.
+    """
+
+    # The disabled block heading that holds the human-readable reason text
+    reason_heading: str = ".custom-disabled-heading"
+    # The slot's time label (e.g. "07:30 AM") within a disabled block
+    time_label: str = ".custom-time-label"
+    # Generic subheading text confirming a slot is unbookable
+    cannot_reserve_text: str = "cannot be reserved"
+
+
+@dataclass(frozen=True)
 class ErrorMessageSelectors:
     """Selectors for error/alert message containers."""
 
@@ -465,6 +484,7 @@ class WaldenDOMSchema:
     TBD_GUESTS: TBDGuestSelectors = TBDGuestSelectors()
     BOOKING_COMPLETION: BookingCompletionSelectors = BookingCompletionSelectors()
     SLOT_BLOCKED: SlotBlockedSelectors = SlotBlockedSelectors()
+    DISABLED_SLOT: DisabledSlotSelectors = DisabledSlotSelectors()
     ERROR_MESSAGES: ErrorMessageSelectors = ErrorMessageSelectors()
     CANCELLATION: CancellationSelectors = CancellationSelectors()
     COURSE_FILTERING: CourseFilteringSelectors = CourseFilteringSelectors()

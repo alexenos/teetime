@@ -25,6 +25,11 @@ class Settings(BaseSettings):
 
     discord_bot_token: str = ""
     discord_user_id: str = ""  # Snowflake ID of the (single) user allowed to DM the bot
+    # Snowflake ID of a shared channel (e.g. #general) to post outbound
+    # notifications into. When set, booking confirmations/failures go to this
+    # channel (mentioning the user) instead of a private DM, so the whole
+    # conversation stays in one place. Leave empty to fall back to DMs.
+    discord_channel_id: str = ""
     messaging_channel: str = "twilio"  # "twilio" or "discord"
 
     gemini_api_key: str = ""

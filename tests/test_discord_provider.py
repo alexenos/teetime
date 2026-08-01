@@ -123,6 +123,50 @@ class TestSendSms:
         result = await provider.send_sms("", "hello")
         assert not result.success
 
+    async def test_posts_to_shared_channel_when_configured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With DISCORD_CHANNEL_ID set, send to that channel (mentioning the user),
+        not a private DM."""
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"id": "msg-1"})
+
+        provider = make_provider(handler)
+        result = await provider.send_sms("123456789012345678", "tee time confirmed")
+
+        assert result.success
+        # No DM channel was opened; the message went straight to the channel.
+        assert all(not r.url.path.endswith("/users/@me/channels") for r in requests)
+        assert requests[0].url.path.endswith("/channels/9001/messages")
+        assert json.loads(requests[0].content) == {
+            "content": "<@123456789012345678> tee time confirmed"
+        }
+
+    async def test_shared_channel_unset_falls_back_to_dm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "discord_channel_id", "")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path.endswith("/users/@me/channels"):
+                return httpx.Response(200, json={"id": "555"})
+            return httpx.Response(200, json={"id": "msg-1"})
+
+        provider = make_provider(handler)
+        result = await provider.send_sms("123456789012345678", "hi")
+
+        assert result.success
+        # A DM channel was opened and used.
+        assert requests[0].url.path.endswith("/users/@me/channels")
+        assert requests[1].url.path.endswith("/channels/555/messages")
+        assert json.loads(requests[1].content) == {"content": "hi"}
+
     def test_validate_request_always_true(self) -> None:
         provider = DiscordProvider()
         assert provider.validate_request("http://x", {}, None)

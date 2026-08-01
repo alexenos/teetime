@@ -2767,13 +2767,19 @@ class WaldenGolfProvider(ReservationProvider):
                 )
 
             if slot_info is None:
+                error_message = (
+                    f"No time slots with {num_players} available spots within "
+                    f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
+                )
+                detail = self._build_unavailability_detail(
+                    driver, target_time, fallback_window_minutes
+                )
+                if detail:
+                    error_message += f". {detail}"
                 return BookingResult(
                     success=False,
                     course_name=self.NORTHGATE_COURSE_NAME,
-                    error_message=(
-                        f"No time slots with {num_players} available spots within "
-                        f"{fallback_window_minutes} minutes of {target_time.strftime('%I:%M %p')}"
-                    ),
+                    error_message=error_message,
                 )
 
             booked_time = time(slot_info["hours"], slot_info["minutes"])
@@ -2926,6 +2932,14 @@ class WaldenGolfProvider(ReservationProvider):
                 error_message = (
                     f"No time slots with {num_players} available spots found. {event_message}"
                 )
+
+            blocked_message = self._format_blocked_slot_message(
+                self._extract_blocked_slot_reasons(
+                    search_context, target_time, fallback_window_minutes
+                )
+            )
+            if blocked_message:
+                error_message += f" {blocked_message}"
 
             return BookingResult(
                 success=False,
@@ -3093,6 +3107,14 @@ class WaldenGolfProvider(ReservationProvider):
             event_message = self._format_event_block_message(event_blocks)
             if event_message:
                 error_message += f". {event_message}"
+
+            blocked_message = self._format_blocked_slot_message(
+                self._extract_blocked_slot_reasons(
+                    search_context, target_time, fallback_window_minutes
+                )
+            )
+            if blocked_message:
+                error_message += f" {blocked_message}"
 
             return BookingResult(
                 success=False,
@@ -4141,6 +4163,154 @@ class WaldenGolfProvider(ReservationProvider):
             )
 
         return event_names
+
+    def _extract_blocked_slot_reasons(
+        self,
+        search_context: Any,
+        target_time: time,
+        fallback_window_minutes: int,
+    ) -> list[str]:
+        """
+        Extract the reasons individual tee-time slots are disabled/unbookable.
+
+        Beyond tournament time-range blocks (see _extract_event_blocks), the
+        Walden Golf tee sheet renders individually disabled slots that show the
+        slot time (e.g. "07:30 AM") alongside a reason heading such as
+        "Aerification" or "Weather delay" and the subheading "Cannot be
+        reserved". When nothing is bookable this tells the user *why* (e.g. the
+        course is closed for aerification) rather than only that no open times
+        were found.
+
+        Only slots whose time falls within the target +/- fallback window are
+        considered, so the reasons reflect the times the user actually asked
+        for. Slots whose time cannot be parsed are still counted, so a fully
+        disabled sheet is not silently dropped.
+
+        Args:
+            search_context: The WebDriver element (or driver) to search within
+            target_time: The target tee time being searched for
+            fallback_window_minutes: The fallback window in minutes
+
+        Returns:
+            List of distinct reason strings, ordered by first appearance.
+        """
+        reasons: list[str] = []
+        target_minutes = target_time.hour * 60 + target_time.minute
+        min_time_minutes = max(0, target_minutes - fallback_window_minutes)
+        max_time_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
+
+        time_pattern = re.compile(r"(\d{1,2}):(\d{2})\s*([AaPp][Mm])")
+
+        try:
+            slot_items = search_context.find_elements(
+                By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.slot_items
+            )
+
+            for slot_item in slot_items:
+                try:
+                    headings = slot_item.find_elements(
+                        By.CSS_SELECTOR, DOM.DISABLED_SLOT.reason_heading
+                    )
+                    if not headings:
+                        continue  # Not a disabled slot
+
+                    # Restrict to the requested window when we can read the time.
+                    slot_time = None
+                    labels = slot_item.find_elements(
+                        By.CSS_SELECTOR, DOM.DISABLED_SLOT.time_label
+                    )
+                    for label in labels:
+                        match = time_pattern.search(label.text.strip())
+                        if match:
+                            hour = int(match.group(1))
+                            minute = int(match.group(2))
+                            ampm = match.group(3).upper()
+                            if ampm == "PM" and hour != 12:
+                                hour += 12
+                            if ampm == "AM" and hour == 12:
+                                hour = 0
+                            slot_time = time(hour, minute)
+                            break
+
+                    if slot_time is not None:
+                        slot_minutes = slot_time.hour * 60 + slot_time.minute
+                        if not (min_time_minutes <= slot_minutes <= max_time_minutes):
+                            continue
+
+                    reason = " ".join(headings[0].text.split())
+                    if not reason or reason.lower() == DOM.DISABLED_SLOT.cannot_reserve_text:
+                        continue
+                    if reason not in reasons:
+                        logger.debug(f"Found blocked slot reason: '{reason}'")
+                        reasons.append(reason)
+
+                except Exception as e:
+                    logger.debug(f"Error processing slot item for blocked reason: {e}")
+                    continue
+
+        except Exception as e:
+            logger.debug(f"Error extracting blocked slot reasons: {e}")
+
+        if reasons:
+            logger.info(
+                f"Found {len(reasons)} blocked-slot reason(s) in requested window: {reasons}"
+            )
+
+        return reasons
+
+    def _format_blocked_slot_message(self, reasons: list[str]) -> str | None:
+        """
+        Format disabled-slot reasons into a human-readable message suffix.
+
+        Args:
+            reasons: List of reason headings (e.g. ["Aerification"]) that make
+                nearby slots unbookable.
+
+        Returns:
+            Formatted message string, or None if there are no reasons.
+        """
+        if not reasons:
+            return None
+
+        if len(reasons) == 1:
+            return f"Nearby tee times are unavailable: {reasons[0]} (cannot be reserved)."
+
+        reason_list = ", ".join(reasons[:3])
+        if len(reasons) > 3:
+            reason_list += f" and {len(reasons) - 3} more"
+        return f"Nearby tee times are unavailable: {reason_list} (cannot be reserved)."
+
+    def _build_unavailability_detail(
+        self,
+        search_context: Any,
+        target_time: time,
+        fallback_window_minutes: int,
+    ) -> str | None:
+        """
+        Build a combined explanation of why nothing in the window was bookable.
+
+        Merges tournament/event time-range blocks (_extract_event_blocks) with
+        individually disabled slot reasons (_extract_blocked_slot_reasons) into
+        a single suffix for the failure message. Returns None when neither
+        source has anything to report.
+        """
+        parts: list[str] = []
+
+        event_message = self._format_event_block_message(
+            self._extract_event_blocks(search_context, target_time, fallback_window_minutes)
+        )
+        if event_message:
+            parts.append(event_message)
+
+        blocked_message = self._format_blocked_slot_message(
+            self._extract_blocked_slot_reasons(
+                search_context, target_time, fallback_window_minutes
+            )
+        )
+        if blocked_message:
+            parts.append(blocked_message)
+
+        return " ".join(parts) if parts else None
 
     @with_retry(max_attempts=3, backoff_base=0.5)
     def _find_available_slots(self, search_context: Any) -> list[tuple[time, Any]]:

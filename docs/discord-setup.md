@@ -35,17 +35,30 @@ Discord gateway (a persistent WebSocket), so the service must run with
    This goes in `DISCORD_USER_ID` and is the allowlist — the bot ignores
    everyone else.
 
+7. **(Optional) Get a channel ID for shared replies**: with Developer Mode on,
+   right-click the channel you want the bot to talk in (e.g. `#general`) →
+   **Copy Channel ID**. Put it in `DISCORD_CHANNEL_ID`. When set, the bot posts
+   booking confirmations and failures into that channel (mentioning you)
+   instead of a private DM, so the whole conversation stays in one place. Make
+   sure the bot has **Send Messages** and **View Channels** permission there.
+
 ## App configuration
 
 ```
 MESSAGING_CHANNEL=discord
 DISCORD_BOT_TOKEN=<token from step 3>
 DISCORD_USER_ID=<id from step 6>
+DISCORD_CHANNEL_ID=<id from step 7, optional>
 ```
 
 Locally: put these in `.env` and run the server; the gateway starts inside
 the FastAPI process (log line: `Discord gateway connected as TeeTime#...`).
-Send the bot a DM — message flow is identical to the old SMS flow.
+Message the bot — message flow is identical to the old SMS flow. Talk to it in
+your shared channel by @-mentioning it, or send a DM.
+
+By default, async notifications (the booking result at 6:30 AM when the window
+opens) are sent as a DM. Set `DISCORD_CHANNEL_ID` to have those replies posted
+in your shared channel instead, matching where you asked for the booking.
 
 For Cloud Run, add the two secrets and set
 `--min-instances=1` so the gateway stays connected.
