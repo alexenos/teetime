@@ -47,6 +47,20 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
 
+    discord_gateway = None
+    if settings.messaging_channel == "discord":
+        if settings.discord_bot_token:
+            from app.services.discord_gateway import DiscordGateway
+
+            logger.info("Discord messaging channel enabled - starting gateway listener")
+            discord_gateway = DiscordGateway(booking_service.handle_incoming_message)
+            discord_gateway.start()
+        else:
+            logger.warning(
+                "MESSAGING_CHANNEL=discord but DISCORD_BOT_TOKEN is not set. "
+                "Inbound Discord messages will not work."
+            )
+
     if not settings.scheduler_api_key:
         logger.warning(
             "SCHEDULER_API_KEY is not configured. "
@@ -67,6 +81,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
+    if discord_gateway is not None:
+        await discord_gateway.stop()
     await provider.close()
 
 
