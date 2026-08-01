@@ -31,19 +31,19 @@ MessageHandler = Callable[[str, str], Awaitable[str]]
 def should_handle_message(
     author_id: str,
     author_is_bot: bool,
-    is_dm: bool,
     allowed_user_id: str,
 ) -> bool:
     """Decide whether an incoming Discord message should be processed.
 
-    Only direct messages from the single configured user are handled; everything
-    else (other users, guild channels, other bots, our own messages) is ignored.
-    An empty allowed_user_id means no one is authorized - fail closed.
+    Messages from the single configured user are handled wherever the bot can
+    see them (DMs or a shared server channel); everything else (other users,
+    other bots, our own messages) is ignored. An empty allowed_user_id means
+    no one is authorized - fail closed.
     """
-    if author_is_bot or not is_dm:
+    if author_is_bot:
         return False
     if not allowed_user_id:
-        logger.warning("DISCORD_USER_ID not configured; ignoring DM from %s", author_id)
+        logger.warning("DISCORD_USER_ID not configured; ignoring message from %s", author_id)
         return False
     return author_id == allowed_user_id
 
@@ -56,7 +56,9 @@ class DiscordGateway:
         self._task: asyncio.Task[None] | None = None
 
         intents = discord.Intents.none()
+        intents.guilds = True  # channel/guild state; silences discord.py state warnings
         intents.dm_messages = True
+        intents.guild_messages = True  # let the user talk to the bot in a server channel too
         intents.message_content = True
         self.client = discord.Client(intents=intents)
 
@@ -72,12 +74,24 @@ class DiscordGateway:
     async def _on_message(self, message: discord.Message) -> None:
         author_id = str(message.author.id)
         is_dm = message.guild is None
-        if not should_handle_message(
-            author_id, message.author.bot, is_dm, settings.discord_user_id
-        ):
+        if message.author.id == getattr(self.client.user, "id", None):
+            return  # our own outbound messages
+        logger.info(
+            f"Discord message event: author={author_id}, bot={message.author.bot}, "
+            f"dm={is_dm}, content_len={len(message.content or '')}"
+        )
+        if not should_handle_message(author_id, message.author.bot, settings.discord_user_id):
+            logger.info(
+                f"Ignoring Discord message from {author_id} "
+                f"(allowed user: {settings.discord_user_id or '<unset>'})"
+            )
             return
         content = message.content.strip()
         if not content:
+            logger.warning(
+                "Discord message from allowed user has empty content - "
+                "is the Message Content intent enabled in the Developer Portal?"
+            )
             return
         logger.info(f"Discord DM received from {author_id}: {content[:80]}")
         try:
