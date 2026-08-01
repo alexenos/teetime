@@ -252,6 +252,17 @@ class GeminiService:
 
     async def parse_message(self, message: str, context: str | None = None) -> ParsedIntent:
         if not self.model:
+            # Distinct from the API-error path below: this only fires when
+            # GEMINI_API_KEY itself is unset (the local-dev-without-a-key case).
+            # In deployed environments the key is a required Secret Manager
+            # mount, so reaching here means that's missing - log loudly so a
+            # misconfiguration doesn't silently guess bookings the way the
+            # dead-model fallback used to.
+            logger.warning(
+                "GEMINI_API_KEY not configured; using _mock_parse (guessed dates/times) "
+                "for message: %r",
+                message,
+            )
             return self._mock_parse(message)
 
         try:

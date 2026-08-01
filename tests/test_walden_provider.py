@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from selenium.webdriver.common.by import By
 
+from app.providers.walden_dom_schema import DOM
 from app.providers.walden_provider import WaldenGolfProvider
 from app.utils.timezone import CTDateTime
 
@@ -1150,17 +1152,28 @@ class TestPlayerCountModalScoping:
         # 1. element_to_be_clickable (reserve button check)
         # 2. visibility_of_any_elements_located (modal detection - returns a list)
         # 3+ any remaining calls (Book Now wait, url_changes, success indicators, etc.)
-        with patch("app.providers.walden_provider.WebDriverWait") as mock_wait_cls:
+        with (
+            patch("app.providers.walden_provider.WebDriverWait") as mock_wait_cls,
+            patch(
+                "app.providers.walden_provider.expected_conditions.visibility_of_any_elements_located"
+            ) as mock_visibility_any,
+        ):
             mock_wait_instance = MagicMock()
             mock_wait_cls.return_value = mock_wait_instance
-            # Use a default return for .until() but make the second call return the modal
+            modal_condition = mock_visibility_any.return_value
+
+            # Use a default return for .until() but make the second call return the modal.
+            # Asserting on the condition object (not just call order) is what catches a
+            # regression back to visibility_of_element_located, which silently passes
+            # since this mock doesn't otherwise care which predicate it was given.
             call_count = [0]
 
-            def until_side_effect(*args, **kwargs):
+            def until_side_effect(condition, *args, **kwargs):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return mock_reserve_element  # clickable check
                 elif call_count[0] == 2:
+                    assert condition == modal_condition
                     return [mock_modal]  # modal detection (visible matches)
                 else:
                     return mock_confirm_button  # all subsequent calls
@@ -1188,6 +1201,13 @@ class TestPlayerCountModalScoping:
                 mock_select.assert_called_once()
                 call_kwargs = mock_select.call_args
                 assert call_kwargs.kwargs.get("search_context") is mock_modal
+
+                # Modal detection used the any-elements predicate (checks every
+                # match for visibility) with the booking modal locator, not just
+                # the first element in the DOM
+                mock_visibility_any.assert_called_once_with(
+                    (By.CSS_SELECTOR, DOM.BOOKING_MODAL.modal_container)
+                )
 
 
 class TestWaldenProviderExtractEventBlocks:
