@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head><title>Async chain test harness</title></head>
+<body>
+<!--
+  Synthetic stand-in for the Walden tee sheet, reproducing the dynamics the
+  booking chain must survive:
+  - the datascroller starts with class 'disable-div', removed by a page TIMER
+    (so it only ever disappears if the chain yields to the event loop)
+  - clicking Reserve renders the player page asynchronously (like the
+    PrimeFaces AJAX partial update)
+  - TBD clicks fill rows asynchronously
+  Query params tune behavior: ?enableAfter=300&playerDelay=400&preselect=1&blocked=1
+-->
+<div class="ui-datascroller disable-div">
+  <ul>
+    <li class="ui-datascroller-item"><a id="slot0_reserve_button" href="#">Reserve</a></li>
+    <li class="ui-datascroller-item"><a id="slot1_reserve_button" href="#">Reserve</a></li>
+  </ul>
+</div>
+
+<div id="playerPage" style="display:none"></div>
+<div id="teeSheetValidationErrorPopup" aria-hidden="true" style="display:none">
+  This slot is blocked by another user
+  <a class="dialogOKBtn" href="#">OK</a>
+</div>
+
+<script>
+var params = new URLSearchParams(location.search);
+var enableAfter = parseInt(params.get('enableAfter') || '300', 10);
+var playerDelay = parseInt(params.get('playerDelay') || '400', 10);
+var preselect = params.get('preselect') === '1';
+var blocked = params.get('blocked') === '1';
+
+window.testLog = [];
+
+// The site's own gate: a timer removes disable-div. Under a blocked event
+// loop this never fires - exactly the failure mode the chain must avoid.
+setTimeout(function () {
+  document.querySelector('.ui-datascroller').classList.remove('disable-div');
+  window.testLog.push('disable-div removed at ' + Date.now());
+}, enableAfter);
+
+function renderPlayerPage() {
+  var pp = document.getElementById('playerPage');
+  var checked = preselect ? ' checked' : '';
+  var active = preselect ? ' ui-state-active' : '';
+  pp.innerHTML =
+    '<div class="ui-selectonebutton">' +
+    [1, 2, 3, 4].map(function (n) {
+      var isTarget = n === 4;
+      return '<div class="ui-button' + (isTarget ? active : '') + '">' +
+        '<input type="radio" value="' + n + '"' + (isTarget ? checked : '') + '></div>';
+    }).join('') +
+    '</div>' +
+    '<table id="playersTable"><tbody>' +
+    '<tr data-ri="0"><td>Member</td></tr>' +
+    '<tr data-ri="1"><td><a href="#" class="tbdBtn" id="tbd1">TBD</a></td></tr>' +
+    '<tr data-ri="2"><td><a href="#" class="tbdBtn" id="tbd2">TBD</a></td></tr>' +
+    '<tr data-ri="3"><td><a href="#" class="tbdBtn" id="tbd3">TBD</a></td></tr>' +
+    '</tbody></table>' +
+    '<a id="bookTeeTimeAction" href="#">Book Now</a>';
+  pp.style.display = 'block';
+
+  Array.prototype.forEach.call(document.querySelectorAll('.tbdBtn'), function (btn) {
+    btn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      // Row updates land asynchronously, like the PrimeFaces AJAX round-trip
+      setTimeout(function () {
+        btn.parentElement.textContent = 'TBD Guest';
+        window.testLog.push(btn.id + ' filled');
+      }, 50);
+    });
+  });
+
+  document.getElementById('bookTeeTimeAction').addEventListener('click', function (ev) {
+    ev.preventDefault();
+    window.bookNowClicked = true;
+    window.testLog.push('book now clicked at ' + Date.now());
+  });
+}
+
+Array.prototype.forEach.call(
+  document.querySelectorAll("a[id*='reserve_button']"),
+  function (btn) {
+    btn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      window.reserveClickedAt = Date.now();
+      window.testLog.push('reserve clicked at ' + window.reserveClickedAt);
+      if (document.querySelector('.ui-datascroller').classList.contains('disable-div')) {
+        window.testLog.push('CLICKED WHILE DISABLED');
+      }
+      if (blocked) {
+        setTimeout(function () {
+          var popup = document.getElementById('teeSheetValidationErrorPopup');
+          popup.setAttribute('aria-hidden', 'false');
+          popup.style.display = 'block';
+        }, 100);
+      } else {
+        // Async render, like the PrimeFaces partial update
+        setTimeout(renderPlayerPage, playerDelay);
+      }
+    });
+  }
+);
+</script>
+</body>
+</html>
