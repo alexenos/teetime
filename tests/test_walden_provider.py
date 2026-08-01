@@ -1379,11 +1379,15 @@ class TestWaldenProviderFormatEventBlockMessage:
         assert result == "Times blocked by events: Event A, Event B, Event C and 2 more"
 
 
-def _make_disabled_slot(reason: str | None, time_text: str | None) -> MagicMock:
+def _make_disabled_slot(
+    reason: str | None, time_text: str | None, course_index: str = "0"
+) -> MagicMock:
     """Build a mock datascroller slot item for _extract_blocked_slot_reasons.
 
     Passing reason=None simulates a normal (bookable) slot with no disabled
     heading; time_text=None simulates a disabled slot whose time can't be read.
+    course_index tags the slot's course via the teeTimeCourses:<n> element-ID
+    pattern ("0" = Northgate, "1" = Walden on Lake Conroe).
     """
     slot = MagicMock()
 
@@ -1407,6 +1411,9 @@ def _make_disabled_slot(reason: str | None, time_text: str | None) -> MagicMock:
         return []
 
     slot.find_elements.side_effect = find_elements
+    slot.get_attribute.return_value = (
+        f"<div id='...teeTimeCourses:{course_index}:teeTimeSlots:0:slotTee:0:slotTeeDIV'></div>"
+    )
     return slot
 
 
@@ -1414,6 +1421,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
     """Tests for the _extract_blocked_slot_reasons method."""
 
     def test_extracts_single_reason_in_window(self, provider: WaldenGolfProvider) -> None:
+        """A single disabled slot in the window yields its reason."""
         search_context = MagicMock()
         search_context.find_elements.return_value = [
             _make_disabled_slot("Aerification", "05:07 PM")
@@ -1426,6 +1434,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         assert result == ["Aerification"]
 
     def test_deduplicates_repeated_reason(self, provider: WaldenGolfProvider) -> None:
+        """A reason shared by many blocked slots is reported once."""
         search_context = MagicMock()
         search_context.find_elements.return_value = [
             _make_disabled_slot("Aerification", "05:07 PM"),
@@ -1440,6 +1449,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         assert result == ["Aerification"]
 
     def test_collects_distinct_reasons_in_order(self, provider: WaldenGolfProvider) -> None:
+        """Distinct reasons are collected in first-seen order."""
         search_context = MagicMock()
         search_context.find_elements.return_value = [
             _make_disabled_slot("Weather delay", "07:30 AM"),
@@ -1453,6 +1463,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         assert result == ["Weather delay", "Aerification"]
 
     def test_ignores_reasons_outside_window(self, provider: WaldenGolfProvider) -> None:
+        """Blocked slots outside the target +/- window are ignored."""
         search_context = MagicMock()
         search_context.find_elements.return_value = [
             _make_disabled_slot("Aerification", "07:30 AM")
@@ -1466,6 +1477,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         assert result == []
 
     def test_ignores_bookable_slots(self, provider: WaldenGolfProvider) -> None:
+        """Normal (non-disabled) slots contribute no reason."""
         search_context = MagicMock()
         # No disabled heading -> a normal, bookable slot.
         search_context.find_elements.return_value = [_make_disabled_slot(None, "05:07 PM")]
@@ -1475,6 +1487,25 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         )
 
         assert result == []
+
+    def test_excludes_non_northgate_course(self, provider: WaldenGolfProvider) -> None:
+        """A disabled slot from another course (Walden) is not reported.
+
+        When no dedicated Northgate section exists the search spans the whole
+        page, so Walden-on-Lake-Conroe disabled slots must be filtered out by
+        course index rather than surfaced in a Northgate failure message.
+        """
+        search_context = MagicMock()
+        search_context.find_elements.return_value = [
+            _make_disabled_slot("Aerification", "05:07 PM", course_index="1"),  # Walden
+            _make_disabled_slot("Weather delay", "05:15 PM", course_index="0"),  # Northgate
+        ]
+
+        result = provider._extract_blocked_slot_reasons(
+            search_context, target_time=time(17, 7), fallback_window_minutes=32
+        )
+
+        assert result == ["Weather delay"]
 
     def test_includes_reason_when_time_unreadable(self, provider: WaldenGolfProvider) -> None:
         """A disabled slot with no parseable time is still surfaced."""
@@ -1488,6 +1519,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         assert result == ["Aerification"]
 
     def test_skips_generic_cannot_be_reserved_heading(self, provider: WaldenGolfProvider) -> None:
+        """The generic 'Cannot be reserved' text is not treated as a reason."""
         search_context = MagicMock()
         search_context.find_elements.return_value = [
             _make_disabled_slot("Cannot be reserved", "05:07 PM")
@@ -1500,6 +1532,7 @@ class TestWaldenProviderExtractBlockedSlotReasons:
         assert result == []
 
     def test_handles_empty_search_context(self, provider: WaldenGolfProvider) -> None:
+        """An empty tee sheet yields no reasons and does not error."""
         search_context = MagicMock()
         search_context.find_elements.return_value = []
 
@@ -1514,19 +1547,23 @@ class TestWaldenProviderFormatBlockedSlotMessage:
     """Tests for the _format_blocked_slot_message helper method."""
 
     def test_returns_none_for_empty_list(self, provider: WaldenGolfProvider) -> None:
+        """No reasons produces no message suffix."""
         assert provider._format_blocked_slot_message([]) is None
 
     def test_formats_single_reason(self, provider: WaldenGolfProvider) -> None:
+        """A single reason renders as a one-item sentence."""
         result = provider._format_blocked_slot_message(["Aerification"])
         assert result == "Nearby tee times are unavailable: Aerification (cannot be reserved)."
 
     def test_formats_multiple_reasons(self, provider: WaldenGolfProvider) -> None:
+        """Multiple reasons are comma-joined."""
         result = provider._format_blocked_slot_message(["Aerification", "Weather delay"])
         assert result == (
             "Nearby tee times are unavailable: Aerification, Weather delay (cannot be reserved)."
         )
 
     def test_truncates_more_than_three_reasons(self, provider: WaldenGolfProvider) -> None:
+        """More than three reasons are truncated with an 'and N more' tail."""
         result = provider._format_blocked_slot_message(["A", "B", "C", "D", "E"])
         assert (
             result == "Nearby tee times are unavailable: A, B, C and 2 more (cannot be reserved)."

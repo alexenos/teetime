@@ -4184,7 +4184,10 @@ class WaldenGolfProvider(ReservationProvider):
         Only slots whose time falls within the target +/- fallback window are
         considered, so the reasons reflect the times the user actually asked
         for. Slots whose time cannot be parsed are still counted, so a fully
-        disabled sheet is not silently dropped.
+        disabled sheet is not silently dropped. When the search context is the
+        whole page (no dedicated Northgate section), slots belonging to another
+        course are skipped so a Walden reason never leaks into a Northgate
+        failure.
 
         Args:
             search_context: The WebDriver element (or driver) to search within
@@ -4213,6 +4216,15 @@ class WaldenGolfProvider(ReservationProvider):
                     )
                     if not headings:
                         continue  # Not a disabled slot
+
+                    # Skip slots that positively belong to another course. The
+                    # course index is embedded in child element IDs
+                    # (teeTimeCourses:0 = Northgate, :1 = Walden). When the
+                    # index can't be read we keep the slot (best-effort).
+                    slot_html = slot_item.get_attribute("innerHTML") or ""
+                    course_index = self._get_course_index_from_element_id(slot_html)
+                    if course_index is not None and course_index != self.NORTHGATE_COURSE_INDEX:
+                        continue
 
                     # Restrict to the requested window when we can read the time.
                     slot_time = None

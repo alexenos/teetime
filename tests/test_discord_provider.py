@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
-from app.config import settings
+from app.config import Settings, settings
 from app.providers.discord_provider import (
     MAX_MESSAGE_LEN,
     DiscordProvider,
@@ -149,6 +150,7 @@ class TestSendSms:
     async def test_shared_channel_unset_falls_back_to_dm(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """With no DISCORD_CHANNEL_ID, delivery opens and uses a private DM."""
         monkeypatch.setattr(settings, "discord_channel_id", "")
         requests: list[httpx.Request] = []
 
@@ -170,6 +172,25 @@ class TestSendSms:
     def test_validate_request_always_true(self) -> None:
         provider = DiscordProvider()
         assert provider.validate_request("http://x", {}, None)
+
+
+class TestDiscordChannelIdValidation:
+    """DISCORD_CHANNEL_ID must be a numeric snowflake, or empty (DM fallback)."""
+
+    def test_empty_is_allowed(self) -> None:
+        """An unset channel ID is valid and means 'use DMs'."""
+        assert Settings(discord_channel_id="").discord_channel_id == ""
+
+    def test_valid_snowflake_is_accepted_and_trimmed(self) -> None:
+        """A numeric ID (with surrounding whitespace) is accepted and trimmed."""
+        assert Settings(discord_channel_id="  123456789012345678  ").discord_channel_id == (
+            "123456789012345678"
+        )
+
+    def test_channel_name_is_rejected(self) -> None:
+        """A channel name like '#general' is rejected at load time."""
+        with pytest.raises(ValidationError):
+            Settings(discord_channel_id="#general")
 
 
 class TestShouldHandleMessage:

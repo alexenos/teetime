@@ -44,7 +44,7 @@ Discord gateway (a persistent WebSocket), so the service must run with
 
 ## App configuration
 
-```
+```dotenv
 MESSAGING_CHANNEL=discord
 DISCORD_BOT_TOKEN=<token from step 3>
 DISCORD_USER_ID=<id from step 6>

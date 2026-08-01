@@ -1,5 +1,6 @@
 from enum import Enum
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -60,6 +61,25 @@ class Settings(BaseSettings):
 
     # Wait strategy for Selenium operations (fixed, event_driven, hybrid)
     wait_mode: WaitMode = WaitMode.FIXED
+
+    @field_validator("discord_channel_id")
+    @classmethod
+    def _validate_discord_channel_id(cls, v: str) -> str:
+        """Reject a non-numeric DISCORD_CHANNEL_ID at load time.
+
+        The value is interpolated straight into /channels/{id}/messages, so a
+        channel *name* like "#general" would only fail later at send time. Trim
+        whitespace and require a numeric snowflake; empty stays valid and means
+        "fall back to DMs".
+        """
+        v = v.strip()
+        if v and not v.isdigit():
+            raise ValueError(
+                "DISCORD_CHANNEL_ID must be a numeric Discord channel ID (snowflake); "
+                f"got {v!r}. In Discord, enable Developer Mode, then right-click the "
+                "channel and choose Copy Channel ID. Leave it unset to use DMs."
+            )
+        return v
 
     class Config:
         env_file = ".env"
