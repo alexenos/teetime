@@ -130,17 +130,14 @@ class TestSendSms:
 class TestShouldHandleMessage:
     ALLOWED = "111222333444555666"
 
-    def test_dm_from_allowed_user(self) -> None:
-        assert should_handle_message(self.ALLOWED, False, True, self.ALLOWED)
+    def test_message_from_allowed_user(self) -> None:
+        assert should_handle_message(self.ALLOWED, False, self.ALLOWED)
 
-    def test_dm_from_other_user_ignored(self) -> None:
-        assert not should_handle_message("999", False, True, self.ALLOWED)
-
-    def test_guild_message_ignored(self) -> None:
-        assert not should_handle_message(self.ALLOWED, False, False, self.ALLOWED)
+    def test_message_from_other_user_ignored(self) -> None:
+        assert not should_handle_message("999", False, self.ALLOWED)
 
     def test_bot_message_ignored(self) -> None:
-        assert not should_handle_message(self.ALLOWED, True, True, self.ALLOWED)
+        assert not should_handle_message(self.ALLOWED, True, self.ALLOWED)
 
     def test_no_allowlist_fails_closed(self) -> None:
-        assert not should_handle_message(self.ALLOWED, False, True, "")
+        assert not should_handle_message(self.ALLOWED, False, "")
