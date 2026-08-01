@@ -93,9 +93,18 @@ class DiscordProvider(SMSProvider):
         user_id = self.resolve_user_id(to_number)
         if not user_id:
             return SMSResult(success=False, error_message="No Discord user ID configured")
+
+        # When a shared channel is configured, post there (mentioning the user)
+        # so async notifications land in the same place the request was made,
+        # instead of splitting the conversation into a private DM.
+        shared_channel_id = settings.discord_channel_id.strip()
         try:
             async with self._client() as client:
-                channel_id = await self._get_dm_channel(client, user_id)
+                if shared_channel_id:
+                    channel_id = shared_channel_id
+                    message = f"<@{user_id}> {message}" if user_id.isdigit() else message
+                else:
+                    channel_id = await self._get_dm_channel(client, user_id)
                 last_message_id: str | None = None
                 for chunk in split_message(message):
                     resp = await client.post(

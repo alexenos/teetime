@@ -120,6 +120,41 @@ class TestTeeTimeSlotSelectors:
             assert "Reserve" in el.get_text(), f"Button doesn't say Reserve: {el.get_text()}"
 
 
+class TestDisabledSlotSelectors:
+    """Tests validating the disabled-slot reason selectors against real HTML.
+
+    These selectors let the provider explain *why* a window is unbookable
+    (e.g. aerification, weather delay) instead of only reporting no openings.
+    """
+
+    def test_disabled_headings_present_with_reason_text(self, tee_time_page_html: BeautifulSoup):
+        """Disabled slots expose a reason heading (e.g. 'Weather delay')."""
+        headings = tee_time_page_html.select(".custom-disabled-heading")
+        assert len(headings) >= 1, "No disabled-slot reason headings found"
+
+        reasons = {h.get_text(strip=True) for h in headings}
+        assert any(r for r in reasons), "Disabled headings had no reason text"
+        # The captured fixture is a frost/weather-delayed morning.
+        assert "Weather delay" in reasons
+
+    def test_disabled_slot_marked_cannot_be_reserved(self, tee_time_page_html: BeautifulSoup):
+        """Disabled slots carry the generic 'Cannot be reserved' subheading."""
+        subheadings = tee_time_page_html.select(".custom-disabled-subheading-txt")
+        assert len(subheadings) >= 1
+        assert any("cannot be reserved" in s.get_text(strip=True).lower() for s in subheadings)
+
+    def test_disabled_slot_has_time_label(self, tee_time_page_html: BeautifulSoup):
+        """A disabled slot still shows its tee time via the time label."""
+        li_items = tee_time_page_html.select("li.ui-datascroller-item")
+        disabled_items = [li for li in li_items if li.select_one(".custom-disabled-heading")]
+        assert len(disabled_items) >= 1
+
+        time_pattern = re.compile(r"\d{1,2}:\d{2}\s*(AM|PM)", re.IGNORECASE)
+        label = disabled_items[0].select_one(".custom-time-label")
+        assert label is not None
+        assert time_pattern.match(label.get_text(strip=True))
+
+
 class TestCourseIdentification:
     """Tests for identifying which course a slot belongs to."""
 

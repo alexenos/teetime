@@ -1,5 +1,6 @@
 from enum import Enum
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -25,6 +26,11 @@ class Settings(BaseSettings):
 
     discord_bot_token: str = ""
     discord_user_id: str = ""  # Snowflake ID of the (single) user allowed to DM the bot
+    # Snowflake ID of a shared channel (e.g. #general) to post outbound
+    # notifications into. When set, booking confirmations/failures go to this
+    # channel (mentioning the user) instead of a private DM, so the whole
+    # conversation stays in one place. Leave empty to fall back to DMs.
+    discord_channel_id: str = ""
     messaging_channel: str = "twilio"  # "twilio" or "discord"
 
     gemini_api_key: str = ""
@@ -55,6 +61,25 @@ class Settings(BaseSettings):
 
     # Wait strategy for Selenium operations (fixed, event_driven, hybrid)
     wait_mode: WaitMode = WaitMode.FIXED
+
+    @field_validator("discord_channel_id")
+    @classmethod
+    def _validate_discord_channel_id(cls, v: str) -> str:
+        """Reject a non-numeric DISCORD_CHANNEL_ID at load time.
+
+        The value is interpolated straight into /channels/{id}/messages, so a
+        channel *name* like "#general" would only fail later at send time. Trim
+        whitespace and require a numeric snowflake; empty stays valid and means
+        "fall back to DMs".
+        """
+        v = v.strip()
+        if v and not v.isdigit():
+            raise ValueError(
+                "DISCORD_CHANNEL_ID must be a numeric Discord channel ID (snowflake); "
+                f"got {v!r}. In Discord, enable Developer Mode, then right-click the "
+                "channel and choose Copy Channel ID. Leave it unset to use DMs."
+            )
+        return v
 
     class Config:
         env_file = ".env"
