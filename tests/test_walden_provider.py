@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from selenium.webdriver.common.by import By
 
+from app.providers.walden_dom_schema import DOM
 from app.providers.walden_provider import WaldenGolfProvider
 from app.utils.timezone import CTDateTime
 
@@ -1069,23 +1071,26 @@ class TestWaldenDOMSchema:
 class TestPlayerCountModalScoping:
     """Tests for Issue #105 fix: player count selection scoped to booking modal."""
 
+    @staticmethod
+    def _make_button_group(*, has_radio: bool) -> MagicMock:
+        """A .ui-selectonebutton group that does or doesn't offer the player count."""
+        group = MagicMock()
+        radio = MagicMock()
+        button_div = MagicMock()
+        button_div.get_attribute.return_value = "ui-button"
+        radio.find_element.return_value = button_div  # parent div (XPATH call)
+
+        group.find_elements.return_value = [radio] if has_radio else []
+        group.find_element.return_value = radio
+        return group
+
     def test_select_player_count_uses_search_context(self, provider: WaldenGolfProvider) -> None:
-        """When search_context is provided, find_element is called on it, not driver."""
+        """When search_context is provided, the search runs on it, not the driver."""
         mock_driver = MagicMock()
         mock_modal = MagicMock()
 
-        # Set up the mock modal to return a button group with a valid radio input
-        mock_button_group = MagicMock()
-        mock_radio = MagicMock()
-        mock_button_div = MagicMock()
-        mock_button_div.get_attribute.return_value = "ui-button"
-
-        # Make the modal find the button group with the first selector
-        mock_modal.find_element.return_value = mock_button_group
-        mock_button_group.find_element.side_effect = [
-            mock_radio,  # radio input
-            mock_button_div,  # parent div (XPATH call)
-        ]
+        mock_button_group = self._make_button_group(has_radio=True)
+        mock_modal.find_elements.return_value = [mock_button_group]
 
         # Mock wait_strategy to be a no-op
         provider.wait_strategy = MagicMock()
@@ -1095,8 +1100,9 @@ class TestPlayerCountModalScoping:
             result = provider._select_player_count_sync(mock_driver, 4, search_context=mock_modal)
 
         assert result is True
-        # The critical assertion: find_element was called on the MODAL, not the driver
-        mock_modal.find_element.assert_called()
+        # The critical assertion: the search ran on the MODAL, not the driver
+        mock_modal.find_elements.assert_called()
+        mock_driver.find_elements.assert_not_called()
         # execute_script should still use driver (not modal)
         mock_driver.execute_script.assert_called()
 
@@ -1104,17 +1110,8 @@ class TestPlayerCountModalScoping:
         """When no search_context is provided, defaults to using driver."""
         mock_driver = MagicMock()
 
-        # Set up the mock driver to return a button group with a valid radio input
-        mock_button_group = MagicMock()
-        mock_radio = MagicMock()
-        mock_button_div = MagicMock()
-        mock_button_div.get_attribute.return_value = "ui-button"
-
-        mock_driver.find_element.return_value = mock_button_group
-        mock_button_group.find_element.side_effect = [
-            mock_radio,  # radio input
-            mock_button_div,  # parent div
-        ]
+        mock_button_group = self._make_button_group(has_radio=True)
+        mock_driver.find_elements.return_value = [mock_button_group]
 
         provider.wait_strategy = MagicMock()
 
@@ -1122,8 +1119,26 @@ class TestPlayerCountModalScoping:
             result = provider._select_player_count_sync(mock_driver, 4)
 
         assert result is True
-        # find_element called on the driver (default search_context)
-        mock_driver.find_element.assert_called()
+        # search ran on the driver (default search_context)
+        mock_driver.find_elements.assert_called()
+
+    def test_select_player_count_skips_decoy_group(self, provider: WaldenGolfProvider) -> None:
+        """The tee sheet's time period filter shares .ui-selectonebutton and comes
+        first in the DOM; the group carrying the player count must win."""
+        mock_driver = MagicMock()
+
+        time_period_filter = self._make_button_group(has_radio=False)  # ALL/MORNING/...
+        player_count_group = self._make_button_group(has_radio=True)
+        mock_driver.find_elements.return_value = [time_period_filter, player_count_group]
+
+        provider.wait_strategy = MagicMock()
+
+        with patch.object(provider, "_verify_player_rows_appeared", return_value=True):
+            result = provider._select_player_count_sync(mock_driver, 4)
+
+        assert result is True
+        player_count_group.find_element.assert_called()
+        time_period_filter.find_element.assert_not_called()
 
     def test_complete_booking_passes_modal_as_context(self, provider: WaldenGolfProvider) -> None:
         """_complete_booking_sync captures modal element and passes it to player count selection."""
@@ -1135,20 +1150,31 @@ class TestPlayerCountModalScoping:
 
         # Make the WebDriverWait return values for each .until() call:
         # 1. element_to_be_clickable (reserve button check)
-        # 2. visibility_of_element_located (modal detection)
+        # 2. visibility_of_any_elements_located (modal detection - returns a list)
         # 3+ any remaining calls (Book Now wait, url_changes, success indicators, etc.)
-        with patch("app.providers.walden_provider.WebDriverWait") as mock_wait_cls:
+        with (
+            patch("app.providers.walden_provider.WebDriverWait") as mock_wait_cls,
+            patch(
+                "app.providers.walden_provider.expected_conditions.visibility_of_any_elements_located"
+            ) as mock_visibility_any,
+        ):
             mock_wait_instance = MagicMock()
             mock_wait_cls.return_value = mock_wait_instance
-            # Use a default return for .until() but make the second call return the modal
+            modal_condition = mock_visibility_any.return_value
+
+            # Use a default return for .until() but make the second call return the modal.
+            # Asserting on the condition object (not just call order) is what catches a
+            # regression back to visibility_of_element_located, which silently passes
+            # since this mock doesn't otherwise care which predicate it was given.
             call_count = [0]
 
-            def until_side_effect(*args, **kwargs):
+            def until_side_effect(condition, *args, **kwargs):
                 call_count[0] += 1
                 if call_count[0] == 1:
                     return mock_reserve_element  # clickable check
                 elif call_count[0] == 2:
-                    return mock_modal  # modal detection
+                    assert condition == modal_condition
+                    return [mock_modal]  # modal detection (visible matches)
                 else:
                     return mock_confirm_button  # all subsequent calls
 
@@ -1175,6 +1201,13 @@ class TestPlayerCountModalScoping:
                 mock_select.assert_called_once()
                 call_kwargs = mock_select.call_args
                 assert call_kwargs.kwargs.get("search_context") is mock_modal
+
+                # Modal detection used the any-elements predicate (checks every
+                # match for visibility) with the booking modal locator, not just
+                # the first element in the DOM
+                mock_visibility_any.assert_called_once_with(
+                    (By.CSS_SELECTOR, DOM.BOOKING_MODAL.modal_container)
+                )
 
 
 class TestWaldenProviderExtractEventBlocks:

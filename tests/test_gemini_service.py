@@ -525,14 +525,34 @@ class TestGeminiServiceParseMessage:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_parse_message_api_error_fallback(self, gemini_service: GeminiService) -> None:
-        """Test that parse_message falls back to mock on API error."""
+    async def test_parse_message_api_error_reports_failure(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """An API error must surface, never a guessed booking.
+
+        The mock parser ignores the date/time in the message and defaults to
+        "7 days out at 8:00 AM", so falling back to it on an API error confirms
+        a booking the user never asked for (what a retired model did in prod).
+        """
         with patch.object(gemini_service, "_model", MagicMock()):
             gemini_service._model.generate_content = MagicMock(side_effect=Exception("API Error"))
 
-            result = await gemini_service.parse_message("Book Saturday")
+            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
 
-            assert result.intent == "book"
+            assert result.intent == "unclear"
+            assert result.tee_time_request is None
+            assert result.tee_time_requests is None
+            assert "nothing was booked" in result.response_message
+
+    def test_model_name_comes_from_settings(self, gemini_service: GeminiService) -> None:
+        """The model is configurable so a retirement can be worked around by env."""
+        with patch("app.services.gemini_service.settings") as mock_settings:
+            mock_settings.gemini_api_key = "test-key"
+            mock_settings.gemini_model = "gemini-test-model"
+            with patch("app.services.gemini_service.genai") as mock_genai:
+                _ = gemini_service.model
+
+            assert mock_genai.GenerativeModel.call_args.kwargs["model_name"] == "gemini-test-model"
 
     @pytest.mark.asyncio
     async def test_parse_message_successful_api_response(

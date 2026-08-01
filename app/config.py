@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     messaging_channel: str = "twilio"  # "twilio" or "discord"
 
     gemini_api_key: str = ""
+    # Floating alias rather than a pinned version: a pinned model (gemini-2.0-flash)
+    # was retired out from under us and every message silently mis-parsed.
+    gemini_model: str = "gemini-flash-latest"
 
     walden_member_number: str = ""
     walden_password: str = ""
