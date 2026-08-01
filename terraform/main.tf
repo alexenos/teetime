@@ -42,7 +42,22 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_USER_ID",
   ]
+}
+
+# The Discord secrets were created (with versions) via gcloud before this
+# config landed, so the Cloud Run revision could reference them on its first
+# deploy. These blocks adopt them into state; they are no-ops afterwards.
+import {
+  to = google_secret_manager_secret.secrets["DISCORD_BOT_TOKEN"]
+  id = "projects/gen-lang-client-0822973627/secrets/DISCORD_BOT_TOKEN"
+}
+
+import {
+  to = google_secret_manager_secret.secrets["DISCORD_USER_ID"]
+  id = "projects/gen-lang-client-0822973627/secrets/DISCORD_USER_ID"
 }
 
 data "google_project" "project" {
@@ -112,6 +127,10 @@ resource "google_cloud_run_v2_service" "teetime" {
           cpu    = var.cloud_run_cpu
           memory = var.cloud_run_memory
         }
+        # The Discord gateway holds a WebSocket outside of any HTTP request;
+        # with the default (cpu_idle = true) the instance is CPU-throttled
+        # between requests and the gateway connection starves.
+        cpu_idle = var.messaging_channel == "discord" ? false : true
       }
 
       env {
@@ -147,6 +166,11 @@ resource "google_cloud_run_v2_service" "teetime" {
       env {
         name  = "LOG_LEVEL"
         value = var.log_level
+      }
+
+      env {
+        name  = "MESSAGING_CHANNEL"
+        value = var.messaging_channel
       }
 
       env {
