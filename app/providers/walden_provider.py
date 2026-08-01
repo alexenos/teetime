@@ -2234,18 +2234,40 @@ class WaldenGolfProvider(ReservationProvider):
             # Each button contains a radio input with value 1, 2, 3, or 4
             # The button div has class "ui-button" and we need to click the one with the correct value
 
-            # First try to find the button group (scoped to search_context)
+            # First try to find the button group (scoped to search_context).
+            # Prefer a group that actually offers the requested player count:
+            # when the search context is the full page, .ui-selectonebutton also
+            # matches the tee sheet's time period filter (ALL/MORNING/AFTERNOON/
+            # AVAILABLE), which comes first in the DOM. Taking that first match
+            # is how a live booking failed with "Could not find radio input".
             button_group = None
+            decoy_group = None
+            radio_selector = DOM.PLAYER_COUNT.radio_input_template.format(value=num_players)
             for selector in DOM.PLAYER_COUNT.button_group:
-                try:
-                    button_group = search_context.find_element(By.CSS_SELECTOR, selector)
-                    logger.info(
-                        f"BOOKING_DEBUG: Found player button group with selector: {selector}"
-                    )
-                    break
-                except NoSuchElementException:
+                candidates = search_context.find_elements(By.CSS_SELECTOR, selector)
+                if not candidates:
                     logger.debug(f"BOOKING_DEBUG: Button group not found with selector: {selector}")
                     continue
+                for candidate in candidates:
+                    if candidate.find_elements(By.CSS_SELECTOR, radio_selector):
+                        button_group = candidate
+                        logger.info(
+                            f"BOOKING_DEBUG: Found player button group with selector: {selector}"
+                        )
+                        break
+                if button_group is not None:
+                    break
+                if decoy_group is None:
+                    decoy_group = candidates[0]
+                    logger.debug(
+                        f"BOOKING_DEBUG: {len(candidates)} group(s) matched {selector}, none with a "
+                        f"radio input for {num_players} players"
+                    )
+
+            # No group offered the requested count - fall through to the label and
+            # dropdown strategies below with the best candidate we saw.
+            if button_group is None:
+                button_group = decoy_group
 
             if button_group:
                 # Find the button with the correct value
@@ -4588,12 +4610,16 @@ class WaldenGolfProvider(ReservationProvider):
             # See Issue #105.
             booking_context: webdriver.Chrome | WebElement = driver  # default: full page
             try:
-                modal_element = wait.until(
-                    expected_conditions.visibility_of_element_located(
+                # visibility_of_element_located only ever inspects the FIRST match,
+                # and the tee sheet ships a permanently hidden golfEventDetailPopup
+                # ahead of any real dialog - so the wait timed out even when the
+                # booking modal was open. Check every match for visibility instead.
+                visible_modals = wait.until(
+                    expected_conditions.visibility_of_any_elements_located(
                         (By.CSS_SELECTOR, DOM.BOOKING_MODAL.modal_container)
                     )
                 )
-                booking_context = modal_element
+                booking_context = visible_modals[0]
                 logger.debug(
                     "BOOKING_DEBUG: Booking dialog/modal appeared, scoping searches to modal"
                 )

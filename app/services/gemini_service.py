@@ -140,7 +140,7 @@ class GeminiService:
             if settings.gemini_api_key:
                 genai.configure(api_key=settings.gemini_api_key)  # type: ignore[attr-defined]
                 self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
-                    model_name="gemini-2.0-flash",
+                    model_name=settings.gemini_model,
                     system_instruction=SYSTEM_PROMPT,
                     tools=[{"function_declarations": FUNCTION_DECLARATIONS}],
                 )
@@ -293,7 +293,19 @@ class GeminiService:
 
         except Exception as e:
             logger.exception(f"Gemini API error for message '{message}': {e}")
-            return self._mock_parse(message)
+            # Do NOT fall back to _mock_parse here. The mock ignores the date and
+            # time in the message and defaults to "7 days out at 8:00 AM", so a
+            # dead model turned "book 8/2 at 5:06p" into a confident confirmation
+            # of a booking the user never asked for. Failing loudly is the only
+            # safe answer when we cannot understand the request.
+            return ParsedIntent(
+                intent="unclear",
+                raw_message=message,
+                response_message=(
+                    "I couldn't understand that - my language model is unavailable "
+                    "right now, so nothing was booked. Please try again in a minute."
+                ),
+            )
 
     def _build_parsed_intent(
         self, args: dict[str, Any], raw_message: str | None = None

@@ -16,6 +16,7 @@ with min-instances=1 when the Discord channel is enabled.
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 
 import discord
@@ -46,6 +47,18 @@ def should_handle_message(
         logger.warning("DISCORD_USER_ID not configured; ignoring message from %s", author_id)
         return False
     return author_id == allowed_user_id
+
+
+def strip_bot_mention(content: str, bot_user_id: int | str | None) -> str:
+    """Remove mentions of the bot from message content.
+
+    In a server channel the user has to @-mention the bot, so the raw content
+    arrives as "<@1533170206082339016> book 8/2 at 5:06p". The snowflake is
+    noise the LLM parser has to see past - strip it before dispatching.
+    """
+    if bot_user_id is None:
+        return content.strip()
+    return re.sub(rf"<@!?{bot_user_id}>", " ", content).strip()
 
 
 class DiscordGateway:
@@ -86,12 +99,15 @@ class DiscordGateway:
                 f"(allowed user: {settings.discord_user_id or '<unset>'})"
             )
             return
-        content = message.content.strip()
-        if not content:
+        if not message.content.strip():
             logger.warning(
                 "Discord message from allowed user has empty content - "
                 "is the Message Content intent enabled in the Developer Portal?"
             )
+            return
+        content = strip_bot_mention(message.content, getattr(self.client.user, "id", None))
+        if not content:
+            logger.info("Discord message was only a bot mention; nothing to parse")
             return
         source = "DM" if is_dm else f"guild channel #{getattr(message.channel, 'name', '?')}"
         logger.info(f"Discord message received from {author_id} via {source}: {content[:80]}")

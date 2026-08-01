@@ -236,6 +236,25 @@ class TestGatewayOnMessage:
         handler.assert_not_awaited()
         message.channel.send.assert_not_awaited()
 
+    async def test_bot_mention_stripped_before_dispatch(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        """In a server channel the user @-mentions the bot; the raw snowflake
+        must not reach the parser."""
+        gw, handler = gateway
+        message = make_message(content=f"<@{BOT_ID}> book 8/2 at 5:06p", in_guild=True)
+
+        await gw._on_message(message)
+
+        handler.assert_awaited_once_with(ALLOWED_ID, "book 8/2 at 5:06p")
+
+    async def test_mention_only_message_ignored(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        gw, handler = gateway
+        message = make_message(content=f"<@{BOT_ID}>", in_guild=True)
+
+        await gw._on_message(message)
+
+        handler.assert_not_awaited()
+        message.channel.send.assert_not_awaited()
+
     async def test_handler_error_reported_to_user(self, gateway) -> None:  # type: ignore[no-untyped-def]
         gw, handler = gateway
         handler.side_effect = RuntimeError("gemini exploded")
