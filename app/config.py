@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     walden_password: str = ""
     walden_base_url: str = "https://www.waldengolf.com"
 
+    # Run the 6:30 booking chain as direct PrimeFaces HTTP calls instead of
+    # browser clicks. Login, navigation and slot discovery still run in Chrome;
+    # only the race itself moves to HTTP. Any failure falls back to the JS
+    # chain, so the worst case is the current behavior plus one wasted POST.
+    # Off by default until it has won a real race.
+    walden_direct_http_booking: bool = False
+
     user_phone_number: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./teetime.db"
