@@ -37,6 +37,8 @@ from app.providers.base import (
 )
 from app.providers.wait_helper import WaitStrategy
 from app.providers.walden_dom_schema import DOM
+from app.providers.walden_http import PrimeFacesSession, visible_text
+from app.providers.walden_http_booker import PRE_SUBMIT_PHASES, DirectHttpBooker
 from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
@@ -2840,19 +2842,32 @@ class WaldenGolfProvider(ReservationProvider):
             # When execute_at_timestamp_ms is provided, use the timed chain which
             # busy-waits in JS until the exact target timestamp before clicking.
             # This eliminates Python→Selenium→JS handoff latency at the critical moment.
-            if execute_at_timestamp_ms is not None:
-                chain_result = self._stage_timed_booking_chain_js(
-                    driver,
-                    slot_info["index"],
-                    num_players,
-                    execute_at_timestamp_ms,
-                )
-            else:
-                chain_result = self._execute_fast_booking_chain_js(
-                    driver,
-                    slot_info["index"],
-                    num_players,
-                )
+            # The direct-HTTP path replays the same PrimeFaces requests without
+            # the browser on the critical path. It returns None when it is
+            # disabled or could not be staged, and a result whose phase says
+            # the booking was never submitted when it failed early - both mean
+            # the JS chain below is still free to run.
+            chain_result = self._try_direct_http_booking(
+                driver,
+                slot_info,
+                num_players,
+                execute_at_timestamp_ms,
+            )
+
+            if chain_result is None:
+                if execute_at_timestamp_ms is not None:
+                    chain_result = self._stage_timed_booking_chain_js(
+                        driver,
+                        slot_info["index"],
+                        num_players,
+                        execute_at_timestamp_ms,
+                    )
+                else:
+                    chain_result = self._execute_fast_booking_chain_js(
+                        driver,
+                        slot_info["index"],
+                        num_players,
+                    )
 
             if chain_result.get("blocked"):
                 # Slot was grabbed by another user at the same moment
@@ -2871,6 +2886,33 @@ class WaldenGolfProvider(ReservationProvider):
                 return BookingResult(
                     success=False,
                     error_message=f"Fast booking failed at {phase}: {error}",
+                    booked_time=booked_time,
+                    course_name=self.NORTHGATE_COURSE_NAME,
+                )
+
+            # The direct-HTTP chain never touches the browser, so the DOM still
+            # shows the pre-booking tee sheet. Verifying against it would time
+            # out on every wait and then report a completed booking as failed;
+            # the last partial response is the only record of the outcome.
+            direct_markup = chain_result.get("finalMarkup")
+            if direct_markup:
+                page_text = visible_text(direct_markup)
+                confirmation_number = self._extract_confirmation_number_from_text(page_text)
+                if self._verify_booking_success_text(page_text, "direct HTTP response"):
+                    return BookingResult(
+                        success=True,
+                        booked_time=booked_time,
+                        confirmation_number=confirmation_number,
+                        fallback_reason=fallback_reason,
+                        course_name=self.NORTHGATE_COURSE_NAME,
+                    )
+                self._capture_diagnostic_info(driver, "direct_http_verify_failed")
+                return BookingResult(
+                    success=False,
+                    error_message=(
+                        "Direct-HTTP booking chain completed but the response did not "
+                        "confirm the reservation"
+                    ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
@@ -3363,6 +3405,12 @@ class WaldenGolfProvider(ReservationProvider):
 
             if (!isAvailable) continue;
 
+            // Component id of the slot's Reserve link. The direct-HTTP path
+            // replays that component's PrimeFaces request, so it needs the id
+            // rather than the NodeList index the JS chain clicks by.
+            var reserveEl = item.querySelector("a[id*='reserve_button']") ||
+                item.querySelector('a.slot-link');
+
             var slotInfo = {
                 timeStr: h + ':' + (m < 10 ? '0' : '') + m,
                 hours: h,
@@ -3370,7 +3418,8 @@ class WaldenGolfProvider(ReservationProvider):
                 index: i,
                 diff: diff,
                 available: availableCount,
-                isExact: (diff === 0)
+                isExact: (diff === 0),
+                reserveId: reserveEl ? reserveEl.id : null
             };
 
             if (diff === 0) {
@@ -3624,6 +3673,117 @@ class WaldenGolfProvider(ReservationProvider):
             "phase": "unknown",
             "timing": {},
         }
+
+    # Chain phases the direct-HTTP path can fail in without having submitted
+    # anything the server acted on. Past these, a Selenium retry would be
+    # racing our own half-finished booking against a stale browser DOM, so the
+    # failure is reported instead of retried. Imported rather than restated so
+    # the two modules cannot drift apart on which phases are recoverable.
+    _DIRECT_HTTP_FALLBACK_PHASES = PRE_SUBMIT_PHASES
+
+    def _try_direct_http_booking(
+        self,
+        driver: webdriver.Chrome,
+        slot_info: dict[str, Any],
+        num_players: int,
+        execute_at_timestamp_ms: int | None,
+    ) -> dict[str, Any] | None:
+        """
+        Attempt the booking chain over direct HTTP instead of browser clicks.
+
+        Adopts the browser's cookies and form state, stages the Reserve request
+        (serialized body plus a warm TLS connection) and fires it at the target
+        timestamp. See app/providers/walden_http.py for why this is faster than
+        driving the same requests through Chrome.
+
+        Args:
+            driver: The WebDriver instance, already logged in and on the tee sheet
+            slot_info: Slot dict from _find_target_slot_js; needs 'reserveId'
+            num_players: Number of players (1-4)
+            execute_at_timestamp_ms: Epoch ms to fire Reserve at, or None for now
+
+        Returns:
+            A chain-result dict (same shape as _run_booking_chain_js) when the
+            direct path produced an outcome worth honoring, or None when the
+            caller should fall back to the JavaScript chain.
+        """
+        if not settings.walden_direct_http_booking:
+            return None
+
+        reserve_id = slot_info.get("reserveId")
+        if not reserve_id:
+            logger.info(
+                "DIRECT_HTTP: Slot at index %s exposes no Reserve component id "
+                "(partially-booked slot); using the JS chain",
+                slot_info.get("index"),
+            )
+            return None
+
+        session: PrimeFacesSession | None = None
+        try:
+            session = PrimeFacesSession.from_selenium(driver)
+            booker = DirectHttpBooker(session)
+            booker.prepare(reserve_id, driver.page_source)
+        except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
+            # Staging parses live markup, so a malformed page can surface as
+            # almost anything. Nothing has reached the server yet, so every
+            # failure here is recoverable by the JS chain - and none of it may
+            # escape into _book_tee_time_sync, which handles only WebDriver
+            # errors and would raise instead of returning a BookingResult.
+            logger.warning(
+                "DIRECT_HTTP: Could not stage direct booking (%s: %s); using the JS chain",
+                type(e).__name__,
+                e,
+            )
+            if session is not None:
+                session.close()
+            return None
+
+        try:
+            result = booker.book(num_players, target_timestamp_ms=execute_at_timestamp_ms)
+        except Exception as e:  # noqa: BLE001 - see above
+            # book() turns its own failures into results, so anything raised
+            # here is a bug. Reserve may already have been sent, so report it
+            # rather than handing the slot to a browser retry.
+            logger.exception("DIRECT_HTTP: Booking attempt raised unexpectedly")
+            return {
+                "success": False,
+                "blocked": False,
+                "phase": "unknown",
+                "error": f"Direct-HTTP booking raised {type(e).__name__}: {e}",
+                "timing": {},
+            }
+        finally:
+            session.close()
+
+        logger.info(
+            "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
+            "clickDrift=%sms, totalMs=%s, error=%s",
+            result.phase,
+            result.success,
+            result.blocked,
+            result.timing.get("clickDriftMs", "N/A"),
+            result.timing.get("totalMs", "N/A"),
+            result.error,
+        )
+
+        if result.success or result.blocked:
+            return result.as_chain_result()
+
+        if result.phase in self._DIRECT_HTTP_FALLBACK_PHASES:
+            logger.warning(
+                "DIRECT_HTTP: Failed in phase %s before any booking was submitted; "
+                "falling back to the JS chain",
+                result.phase,
+            )
+            return None
+
+        logger.error(
+            "DIRECT_HTTP: Failed in phase %s after Reserve was accepted; not retrying "
+            "in the browser (the slot may be held server-side)",
+            result.phase,
+        )
+        return result.as_chain_result()
 
     def _check_slot_blocked_popup(self, driver: webdriver.Chrome) -> bool:
         """
@@ -5079,7 +5239,18 @@ class WaldenGolfProvider(ReservationProvider):
     def _extract_confirmation_number(self, driver: webdriver.Chrome) -> str | None:
         """Try to extract a confirmation number from the page after booking."""
         try:
-            page_text = self._get_visible_page_text(driver)
+            return self._extract_confirmation_number_from_text(self._get_visible_page_text(driver))
+        except Exception as e:
+            logger.debug(f"Could not extract confirmation number: {e}")
+            return None
+
+    def _extract_confirmation_number_from_text(self, page_text: str) -> str | None:
+        """Extract a confirmation number from post-booking page text.
+
+        Split from the driver-reading wrapper so the direct-HTTP path can run the
+        same extraction against its final partial response.
+        """
+        try:
             page_text_lower = page_text.lower()
 
             if (
@@ -5112,10 +5283,31 @@ class WaldenGolfProvider(ReservationProvider):
         without positive confirmation.
         """
         try:
-            logger.info(
-                f"BOOKING_DEBUG: Verifying booking success. Current URL: {driver.current_url}"
+            return self._verify_booking_success_text(
+                self._get_visible_page_text(driver), driver.current_url
             )
-            page_text = self._get_visible_page_text(driver).lower()
+        except Exception as e:
+            logger.error(f"BOOKING_DEBUG: Error verifying booking: {e}")
+            return False
+
+    def _verify_booking_success_text(self, text: str, context: str) -> bool:
+        """
+        Verify a booking outcome from page text.
+
+        Split from the driver-reading wrapper so the direct-HTTP path can apply
+        the same phrase checks to its final partial response, whose markup is the
+        only record of that booking's outcome.
+
+        Args:
+            text: Visible text from the page or partial response
+            context: Where the text came from, for logging
+
+        Returns:
+            True only on positive confirmation; ambiguity is treated as failure.
+        """
+        try:
+            logger.info(f"BOOKING_DEBUG: Verifying booking success. Source: {context}")
+            page_text = text.lower()
 
             success_indicators = [
                 "successfully",
@@ -5158,7 +5350,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             logger.warning(
                 f"BOOKING_DEBUG: No clear success or failure indicators found - treating as failure. "
-                f"URL: {driver.current_url}"
+                f"Source: {context}"
             )
             return False
 
