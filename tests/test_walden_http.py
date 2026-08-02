@@ -28,6 +28,7 @@ from app.providers.walden_http import (
 )
 from app.providers.walden_http_booker import (
     PHASE_RESERVE_SENT,
+    PRE_SUBMIT_PHASES,
     DirectHttpBooker,
 )
 
@@ -773,16 +774,24 @@ class TestDirectHttpBooker:
         assert result.error is not None and "connection reset" in result.error
 
     def test_book_without_prepare_is_rejected(self) -> None:
-        """The Reserve request must be staged before the race."""
+        """Misuse is a pre-submit result, so the caller falls back rather than
+        losing the booking to a bug in an opt-in path."""
         session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
-        with pytest.raises(DirectHttpError, match="prepare"):
-            DirectHttpBooker(session).book(4)
+        result = DirectHttpBooker(session).book(4)
+
+        assert not result.success
+        assert result.phase in PRE_SUBMIT_PHASES
+        assert result.error is not None and "prepare" in result.error
 
     def test_invalid_player_count_is_rejected(self) -> None:
-        """Player counts outside 1-4 are refused up front."""
-        booker = make_booker(ChainRecorder([BOOKED_PAGE]))
-        with pytest.raises(DirectHttpError, match="num_players"):
-            booker.book(5)
+        """Player counts outside 1-4 are refused before anything is sent."""
+        recorder = ChainRecorder([BOOKED_PAGE])
+        result = make_booker(recorder).book(5)
+
+        assert not result.success
+        assert result.phase in PRE_SUBMIT_PHASES
+        assert result.error is not None and "num_players" in result.error
+        assert recorder.sources == []
 
     def test_timed_mode_waits_for_the_target(self) -> None:
         """Timed mode holds the POST until the target instant."""

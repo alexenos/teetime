@@ -157,12 +157,19 @@ class DirectHttpBooker:
         Returns:
             The outcome; never raises for an ordinary booking failure.
         """
-        if self._reserve_config is None or self._reserve_body is None:
-            raise DirectHttpError("prepare() must be called before book()")
-        if not 1 <= num_players <= _MAX_PLAYERS:
-            raise DirectHttpError(f"num_players must be 1-{_MAX_PLAYERS}, got {num_players}")
-
         result = DirectBookingResult()
+
+        # Misuse, not a booking outcome - but reported as a PHASE_INIT result
+        # rather than raised, because nothing has been sent and the caller's
+        # correct response is to fall back, not to lose the booking.
+        if self._reserve_config is None or self._reserve_body is None:
+            result.error = "prepare() must be called before book()"
+            logger.error("DIRECT_HTTP: %s", result.error)
+            return result
+        if not 1 <= num_players <= _MAX_PLAYERS:
+            result.error = f"num_players must be 1-{_MAX_PLAYERS}, got {num_players}"
+            logger.error("DIRECT_HTTP: %s", result.error)
+            return result
         try:
             return self._run_chain(num_players, target_timestamp_ms, result)
         except DirectHttpError as exc:
