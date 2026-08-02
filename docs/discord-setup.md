@@ -35,12 +35,13 @@ Discord gateway (a persistent WebSocket), so the service must run with
    This goes in `DISCORD_USER_ID` and is the allowlist — the bot ignores
    everyone else.
 
-7. **(Optional) Get a channel ID for shared replies**: with Developer Mode on,
-   right-click the channel you want the bot to talk in (e.g. `#general`) →
-   **Copy Channel ID**. Put it in `DISCORD_CHANNEL_ID`. When set, the bot posts
-   booking confirmations and failures into that channel (mentioning you)
-   instead of a private DM, so the whole conversation stays in one place. Make
-   sure the bot has **Send Messages** and **View Channels** permission there.
+7. **(Optional) Get a fallback channel ID**: with Developer Mode on, right-click
+   a channel → **Copy Channel ID** and put it in `DISCORD_CHANNEL_ID`. Replies
+   already follow the conversation on their own (see below), so this is only the
+   destination for notifications with no conversation behind them — bookings
+   made through the REST API, and any created before this behavior existed.
+   Make sure the bot has **Send Messages** and **View Channels** permission
+   wherever you talk to it.
 
 ## App configuration
 
@@ -56,9 +57,18 @@ the FastAPI process (log line: `Discord gateway connected as TeeTime#...`).
 Message the bot — message flow is identical to the old SMS flow. Talk to it in
 your shared channel by @-mentioning it, or send a DM.
 
-By default, async notifications (the booking result at 6:30 AM when the window
-opens) are sent as a DM. Set `DISCORD_CHANNEL_ID` to have those replies posted
-in your shared channel instead, matching where you asked for the booking.
+### Where replies go
+
+Replies land wherever the conversation started. Ask for a booking in
+`#general` and the result — including the 6:30 AM confirmation or failure that
+arrives days later — is posted in `#general`, mentioning you. Ask in a DM and
+everything stays in the DM.
+
+This works because the channel of each incoming message is recorded on your
+session and copied onto any booking it creates, so the notification can find
+its way back long after the request. Bookings with no channel recorded (the
+REST API, SMS, or bookings made before this existed) fall back to
+`DISCORD_CHANNEL_ID`, and to a DM if that is unset.
 
 For Cloud Run, add the two secrets and set
 `--min-instances=1` so the gateway stays connected.
@@ -66,10 +76,12 @@ For Cloud Run, add the two secrets and set
 ## How it maps onto the old SMS design
 
 - `app/providers/discord_provider.py` implements the same `SMSProvider`
-  interface Twilio used; outbound "SMS" become DMs via the Discord REST API.
-- `app/services/discord_gateway.py` replaces the Twilio inbound webhook; DMs
-  from `DISCORD_USER_ID` are routed into
-  `booking_service.handle_incoming_message()` unchanged.
+  interface Twilio used; outbound "SMS" become channel posts or DMs via the
+  Discord REST API.
+- `app/services/discord_gateway.py` replaces the Twilio inbound webhook;
+  messages from `DISCORD_USER_ID` are routed into
+  `booking_service.handle_incoming_message()` along with the channel they
+  arrived in.
 - The `phone_number` identifier field now carries your Discord user ID
   (a numeric snowflake, fits the existing schema). Twilio remains available
   by setting `MESSAGING_CHANNEL=twilio`.

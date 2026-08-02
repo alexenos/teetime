@@ -87,6 +87,10 @@ class TeeTimeBooking(BaseModel):
             populated on SUCCESS.
         error_message: Description of why the booking failed. Only populated
             on FAILED status.
+        origin_channel_id: Discord channel the booking was requested in, captured
+            when the booking is created so the result notification (sent days
+            later, at 6:30am) goes back to the same conversation instead of a DM.
+            None for bookings made over SMS or the REST API.
         created_at: When this booking record was created.
         updated_at: When this booking record was last modified.
     """
@@ -95,6 +99,7 @@ class TeeTimeBooking(BaseModel):
     phone_number: str
     request: TeeTimeRequest
     status: BookingStatus = BookingStatus.PENDING
+    origin_channel_id: str | None = None
     scheduled_execution_time: datetime | None = None
     actual_booked_time: time | None = None
     confirmation_number: str | None = None
@@ -147,6 +152,10 @@ class UserSession(BaseModel):
             None when IDLE.
         pending_cancellation_id: ID of a booking awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for them to confirm.
+        origin_channel_id: Discord channel the user's current conversation is
+            happening in, refreshed on every inbound message. Bookings copy it at
+            creation time so their notifications reply in the same place. None for
+            SMS users, who have no channel concept.
         last_interaction: Timestamp of the user's last message. Used for
             session timeout logic.
     """
@@ -156,6 +165,7 @@ class UserSession(BaseModel):
     pending_request: TeeTimeRequest | None = None
     pending_requests: list[TeeTimeRequest] | None = None
     pending_cancellation_id: str | None = None
+    origin_channel_id: str | None = None
     last_interaction: datetime = Field(default_factory=datetime.utcnow)
 
 

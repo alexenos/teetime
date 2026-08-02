@@ -59,7 +59,9 @@ class BookingService:
         session.last_interaction = datetime.now(UTC).replace(tzinfo=None)
         await database_service.update_session(session)
 
-    async def handle_incoming_message(self, phone_number: str, message: str) -> str:
+    async def handle_incoming_message(
+        self, phone_number: str, message: str, origin_channel_id: str | None = None
+    ) -> str:
         """
         Process an incoming SMS message and return a response.
 
@@ -73,11 +75,17 @@ class BookingService:
         Args:
             phone_number: The sender's phone number.
             message: The text content of the SMS.
+            origin_channel_id: For Discord, the channel this message arrived in.
+                Stored on the session and copied onto any booking created from
+                this conversation, so the booking result days later replies in
+                the same place. None for SMS, which has no channels.
 
         Returns:
             The response message to send back to the user.
         """
         session = await self.get_session(phone_number)
+        if origin_channel_id:
+            session.origin_channel_id = origin_channel_id
 
         context = None
         if session.state != ConversationState.IDLE:
@@ -166,7 +174,9 @@ class BookingService:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
         try:
-            booking = await self.create_booking(session.phone_number, session.pending_request)
+            booking = await self.create_booking(
+                session.phone_number, session.pending_request, session.origin_channel_id
+            )
         except ValueError as e:
             session.pending_request = None
             session.state = ConversationState.IDLE
@@ -225,7 +235,9 @@ class BookingService:
 
         for request in session.pending_requests:
             try:
-                booking = await self.create_booking(session.phone_number, request)
+                booking = await self.create_booking(
+                    session.phone_number, request, session.origin_channel_id
+                )
                 successful_bookings.append(booking)
             except ValueError as e:
                 failed_requests.append((request, str(e)))
@@ -531,7 +543,12 @@ class BookingService:
             await database_service.update_booking(booking)
             return False
 
-    async def create_booking(self, phone_number: str, request: TeeTimeRequest) -> TeeTimeBooking:
+    async def create_booking(
+        self,
+        phone_number: str,
+        request: TeeTimeRequest,
+        origin_channel_id: str | None = None,
+    ) -> TeeTimeBooking:
         """
         Create a new booking record and schedule it for execution.
 
@@ -549,6 +566,9 @@ class BookingService:
         Args:
             phone_number: The phone number to associate with the booking.
             request: The tee time request details.
+            origin_channel_id: Discord channel this booking was requested in, so
+                the success/failure notification replies there. None for SMS and
+                REST API callers.
 
         Returns:
             The created TeeTimeBooking record.
@@ -584,6 +604,7 @@ class BookingService:
             request=request,
             status=BookingStatus.SCHEDULED,
             scheduled_execution_time=execution_time,
+            origin_channel_id=origin_channel_id,
         )
 
         created_booking = await database_service.create_booking(booking)
@@ -733,6 +754,7 @@ class BookingService:
                 booking.phone_number,
                 "System not configured for booking",
                 booking_details=booking_details,
+                origin_channel_id=booking.origin_channel_id,
             )
             return False
 
@@ -764,7 +786,9 @@ class BookingService:
                 if result.fallback_reason:
                     details += f"\n\nNote: {result.fallback_reason}"
 
-                await sms_service.send_booking_confirmation(booking.phone_number, details)
+                await sms_service.send_booking_confirmation(
+                    booking.phone_number, details, booking.origin_channel_id
+                )
                 return True
             else:
                 booking.status = BookingStatus.FAILED
@@ -783,6 +807,7 @@ class BookingService:
                     result.error_message or "Unknown error",
                     result.alternatives,
                     booking_details,
+                    booking.origin_channel_id,
                 )
                 return False
 
@@ -797,7 +822,10 @@ class BookingService:
             booking_details = f"{date_str} at {time_str} for {booking.request.num_players} players"
 
             await sms_service.send_booking_failure(
-                booking.phone_number, str(e), booking_details=booking_details
+                booking.phone_number,
+                str(e),
+                booking_details=booking_details,
+                origin_channel_id=booking.origin_channel_id,
             )
             return False
 

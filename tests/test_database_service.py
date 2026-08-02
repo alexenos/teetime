@@ -1023,3 +1023,67 @@ class TestGetDueBookings:
         result = await database_service.get_due_bookings(due_before)
 
         assert len(result) == 0
+
+
+class TestOriginChannelPersistence:
+    """The originating channel must survive the round trip to the database.
+
+    A booking is executed days after it is created, in a different process, so
+    the channel is only useful if it is actually stored and read back.
+    """
+
+    @pytest.mark.asyncio
+    async def test_booking_origin_channel_round_trips(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """A booking's channel is readable after being written and re-fetched."""
+        sample_booking.origin_channel_id = "778899001122334455"
+        await database_service.create_booking(sample_booking)
+
+        retrieved = await database_service.get_booking("test1234")
+
+        assert retrieved is not None
+        assert retrieved.origin_channel_id == "778899001122334455"
+
+    @pytest.mark.asyncio
+    async def test_booking_without_origin_channel_is_none(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """SMS and REST bookings store no channel, which reads back as None."""
+        await database_service.create_booking(sample_booking)
+
+        retrieved = await database_service.get_booking("test1234")
+
+        assert retrieved is not None
+        assert retrieved.origin_channel_id is None
+
+    @pytest.mark.asyncio
+    async def test_booking_origin_channel_survives_status_update(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Marking the booking IN_PROGRESS at execution time must not drop the
+        channel the result notification depends on."""
+        sample_booking.origin_channel_id = "778899001122334455"
+        await database_service.create_booking(sample_booking)
+
+        sample_booking.status = BookingStatus.SUCCESS
+        updated = await database_service.update_booking(sample_booking)
+
+        assert updated.origin_channel_id == "778899001122334455"
+
+    @pytest.mark.asyncio
+    async def test_session_origin_channel_round_trips(
+        self, database_service: DatabaseService, sample_session: UserSession
+    ) -> None:
+        """A session's channel persists across updates, so a multi-turn
+        conversation still knows where it started when the user confirms."""
+        await database_service.create_session(sample_session)
+
+        sample_session.origin_channel_id = "778899001122334455"
+        sample_session.state = ConversationState.AWAITING_CONFIRMATION
+        await database_service.update_session(sample_session)
+
+        retrieved = await database_service.get_session("+15551234567")
+
+        assert retrieved is not None
+        assert retrieved.origin_channel_id == "778899001122334455"

@@ -903,3 +903,89 @@ class TestJobsIntegration:
             assert result[0].id == "scheduled-booking"
 
         await engine.dispose()
+
+
+class TestOriginChannelRouting:
+    """The 6:30am batch job is the real notification path: its messages must go
+    back to the channel each booking was requested in."""
+
+    def test_confirmation_routed_to_booking_origin_channel(
+        self,
+        test_client: TestClient,
+        sample_booking: TeeTimeBooking,
+        successful_booking: TeeTimeBooking,
+    ) -> None:
+        """A successful booking's confirmation carries the originating channel."""
+        sample_booking.origin_channel_id = "778899001122334455"
+        successful_booking.origin_channel_id = "778899001122334455"
+
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.scheduler_api_key = "test-api-key"
+            mock_settings.timezone = "America/Chicago"
+
+            with patch("app.api.jobs.booking_service") as mock_service:
+                mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        (
+                            "test1234",
+                            BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF123",
+                            ),
+                        )
+                    ]
+                )
+                mock_service.get_booking = AsyncMock(return_value=successful_booking)
+
+                with patch("app.api.jobs.sms_service") as mock_sms:
+                    mock_sms.send_booking_confirmation = AsyncMock()
+
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"X-Scheduler-API-Key": "test-api-key"},
+                    )
+
+                    assert response.status_code == 200
+                    args = mock_sms.send_booking_confirmation.call_args.args
+                    assert args[2] == "778899001122334455"
+
+    def test_failure_routed_to_booking_origin_channel(
+        self,
+        test_client: TestClient,
+        sample_booking: TeeTimeBooking,
+        failed_booking: TeeTimeBooking,
+    ) -> None:
+        """A failure notification - the case in the bug report - goes to the
+        channel rather than a DM."""
+        sample_booking.origin_channel_id = "778899001122334455"
+        failed_booking.origin_channel_id = "778899001122334455"
+
+        with patch("app.api.jobs.settings") as mock_settings:
+            mock_settings.scheduler_api_key = "test-api-key"
+            mock_settings.timezone = "America/Chicago"
+
+            with patch("app.api.jobs.booking_service") as mock_service:
+                mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
+                mock_service.execute_bookings_batch = AsyncMock(
+                    return_value=[
+                        (
+                            "test1234",
+                            BookingResult(success=False, error_message="No available slots"),
+                        )
+                    ]
+                )
+                mock_service.get_booking = AsyncMock(return_value=failed_booking)
+
+                with patch("app.api.jobs.sms_service") as mock_sms:
+                    mock_sms.send_booking_failure = AsyncMock()
+
+                    response = test_client.post(
+                        "/jobs/execute-due-bookings",
+                        headers={"X-Scheduler-API-Key": "test-api-key"},
+                    )
+
+                    assert response.status_code == 200
+                    kwargs = mock_sms.send_booking_failure.call_args.kwargs
+                    assert kwargs["origin_channel_id"] == "778899001122334455"

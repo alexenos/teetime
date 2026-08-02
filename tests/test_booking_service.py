@@ -1631,7 +1631,7 @@ class TestMultipleBookings:
         )
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest
+            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test123",
@@ -1677,7 +1677,7 @@ class TestMultipleBookings:
         call_count = 0
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest
+            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
         ) -> TeeTimeBooking:
             nonlocal call_count
             call_count += 1
@@ -1746,7 +1746,7 @@ class TestMultipleBookings:
         )
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest
+            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
         ) -> TeeTimeBooking:
             raise ValueError("Multi-player bookings within 48 hours")
 
@@ -1823,3 +1823,193 @@ class TestMultipleBookings:
         assert "2 players" in response
         assert "4 players" in response
         assert sample_session.pending_requests == requests
+
+
+class TestOriginChannelRouting:
+    """A booking's notification must reply where its conversation started.
+
+    The 6:30am result arrives days after the request, so the originating channel
+    is captured on the session, copied onto the booking, and handed to the
+    messaging provider at notification time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_incoming_message_records_origin_channel(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """The channel an inbound message arrived in is stored on the session."""
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch("app.services.booking_service.gemini_service") as mock_gemini,
+        ):
+            mock_db.get_or_create_session = AsyncMock(return_value=sample_session)
+            mock_db.update_session = AsyncMock()
+            mock_gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="help"))
+
+            await booking_service.handle_incoming_message("+15551234567", "help", "778899")
+
+        assert sample_session.origin_channel_id == "778899"
+
+    @pytest.mark.asyncio
+    async def test_incoming_message_without_channel_keeps_existing(
+        self, booking_service: BookingService
+    ) -> None:
+        """An SMS message (no channel) must not erase a recorded Discord origin."""
+        session = UserSession(phone_number="+15551234567", origin_channel_id="778899")
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch("app.services.booking_service.gemini_service") as mock_gemini,
+        ):
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock()
+            mock_gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="help"))
+
+            await booking_service.handle_incoming_message("+15551234567", "help")
+
+        assert session.origin_channel_id == "778899"
+
+    @pytest.mark.asyncio
+    async def test_create_booking_stores_origin_channel(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """create_booking persists the channel so it survives until execution."""
+        import pytz
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+
+            async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
+
+            future_request = TeeTimeRequest(
+                requested_date=date(2025, 12, 29),
+                requested_time=time(8, 0),
+                num_players=4,
+            )
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                tz = pytz.timezone("America/Chicago")
+                mock_ct_now.return_value = tz.localize(datetime(2025, 12, 20, 10, 0))
+                result = await booking_service.create_booking(
+                    "+15551234567", future_request, "778899"
+                )
+
+        assert result.origin_channel_id == "778899"
+
+    @pytest.mark.asyncio
+    async def test_confirm_intent_passes_session_origin_to_booking(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Confirming a pending request carries the session's channel onto the booking."""
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=sample_request,
+            origin_channel_id="778899",
+        )
+
+        async def create_booking_side_effect(
+            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+        ) -> TeeTimeBooking:
+            return TeeTimeBooking(
+                id="test1234",
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+                origin_channel_id=origin_channel_id,
+            )
+
+        with patch.object(
+            booking_service, "create_booking", side_effect=create_booking_side_effect
+        ) as mock_create:
+            await booking_service._handle_confirm_intent(session)
+
+        mock_create.assert_awaited_once_with("+15551234567", sample_request, "778899")
+
+    @pytest.mark.asyncio
+    async def test_confirm_multiple_bookings_passes_session_origin_to_each(
+        self, booking_service: BookingService
+    ) -> None:
+        """Confirming several requests at once is a separate loop from the single
+        booking path; every booking it creates must carry the channel too."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=4
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 31), requested_time=time(9, 0), num_players=4
+            ),
+        ]
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=requests,
+            origin_channel_id="778899",
+        )
+
+        async def create_booking_side_effect(
+            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+        ) -> TeeTimeBooking:
+            return TeeTimeBooking(
+                id="test1234",
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 23, 6, 30),
+                origin_channel_id=origin_channel_id,
+            )
+
+        with patch.object(
+            booking_service, "create_booking", side_effect=create_booking_side_effect
+        ) as mock_create:
+            await booking_service._handle_confirm_multiple_bookings(session)
+
+        assert len(mock_create.await_args_list) == len(requests)
+        assert all(call.args[2] == "778899" for call in mock_create.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_execute_booking_success_notifies_origin_channel(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """The confirmation is routed back to the booking's channel, not a DM."""
+        sample_booking.origin_channel_id = "778899"
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(
+                    success=True, booked_time=time(8, 0), confirmation_number="CONF123"
+                )
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+                await booking_service.execute_booking(sample_booking.id)
+
+        assert mock_sms.send_booking_confirmation.await_args.args[2] == "778899"
+
+    @pytest.mark.asyncio
+    async def test_execute_booking_failure_notifies_origin_channel(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Failures follow the same route as confirmations."""
+        sample_booking.origin_channel_id = "778899"
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(success=False, error_message="No slots")
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                await booking_service.execute_booking(sample_booking.id)
+
+        assert mock_sms.send_booking_failure.await_args.args[4] == "778899"
