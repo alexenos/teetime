@@ -54,23 +54,31 @@ class SMSService:
         """
         return self.provider.validate_request(url, params, signature)
 
-    async def send_sms(self, to_number: str, message: str) -> str | None:
+    async def send_sms(
+        self, to_number: str, message: str, origin_channel_id: str | None = None
+    ) -> str | None:
         """
         Send an SMS message.
 
         Args:
             to_number: The recipient's phone number.
             message: The message content.
+            origin_channel_id: Channel the conversation started in, for providers
+                that support channels (Discord). Ignored by SMS providers.
 
         Returns:
             The message SID if successful, None otherwise.
         """
-        result = await self.provider.send_sms(to_number, message)
+        result = await self.provider.send_sms(to_number, message, origin_channel_id)
         return result.message_sid if result.success else None
 
-    async def send_booking_confirmation(self, to_number: str, booking_details: str) -> str | None:
+    async def send_booking_confirmation(
+        self, to_number: str, booking_details: str, origin_channel_id: str | None = None
+    ) -> str | None:
         """Send a booking confirmation SMS."""
-        result = await self.provider.send_booking_confirmation(to_number, booking_details)
+        result = await self.provider.send_booking_confirmation(
+            to_number, booking_details, origin_channel_id
+        )
         return result.message_sid if result.success else None
 
     async def send_booking_failure(
@@ -79,6 +87,7 @@ class SMSService:
         reason: str,
         alternatives: str | None = None,
         booking_details: str | None = None,
+        origin_channel_id: str | None = None,
     ) -> str | None:
         """Send a booking failure notification SMS.
 
@@ -88,15 +97,19 @@ class SMSService:
             alternatives: Optional alternative time slots available.
             booking_details: Optional details about the specific booking that failed
                            (e.g., "Sunday, February 01 at 08:58 AM for 4 players").
+            origin_channel_id: Channel the booking was requested in, so the
+                failure replies there instead of a DM.
         """
         result = await self.provider.send_booking_failure(
-            to_number, reason, alternatives, booking_details
+            to_number, reason, alternatives, booking_details, origin_channel_id
         )
         return result.message_sid if result.success else None
 
-    async def send_weekly_prompt(self, to_number: str) -> str | None:
+    async def send_weekly_prompt(
+        self, to_number: str, origin_channel_id: str | None = None
+    ) -> str | None:
         """Send a weekly tee time prompt SMS."""
-        result = await self.provider.send_weekly_prompt(to_number)
+        result = await self.provider.send_weekly_prompt(to_number, origin_channel_id)
         return result.message_sid if result.success else None
 
 

@@ -99,13 +99,16 @@ class TwilioSMSProvider(SMSProvider):
             return False
         return bool(self.validator.validate(url, params, signature))
 
-    async def send_sms(self, to_number: str, message: str) -> SMSResult:
+    async def send_sms(
+        self, to_number: str, message: str, origin_channel_id: str | None = None
+    ) -> SMSResult:
         """
         Send a message via Twilio (SMS or WhatsApp based on channel setting).
 
         Args:
             to_number: The recipient's phone number in E.164 format.
             message: The message content to send.
+            origin_channel_id: Unused; SMS has no channels, only a recipient.
 
         Returns:
             SMSResult with success status and message SID or error message.
@@ -151,7 +154,9 @@ class MockSMSProvider(SMSProvider):
         """Always return True for mock provider."""
         return True
 
-    async def send_sms(self, to_number: str, message: str) -> SMSResult:
+    async def send_sms(
+        self, to_number: str, message: str, origin_channel_id: str | None = None
+    ) -> SMSResult:
         """Record the message and return a mock success result."""
         self.sent_messages.append({"to": to_number, "message": message})
         logger.debug("[SMS Mock] To: %s, Message: %s", to_number, message)

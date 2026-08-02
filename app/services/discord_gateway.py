@@ -3,9 +3,11 @@ Discord gateway listener: the inbound half of the Discord messaging channel.
 
 Discord bots receive messages over a persistent WebSocket (the "gateway"),
 unlike Twilio's HTTP webhooks. This module runs a discord.py client as a
-background task inside the FastAPI process and routes DMs from the configured
-user into the same booking_service.handle_incoming_message() entry point the
-Twilio webhook uses.
+background task inside the FastAPI process and routes messages from the
+configured user - whether sent in a DM or a shared server channel - into the
+same booking_service.handle_incoming_message() entry point the Twilio webhook
+uses. It passes along the channel each message arrived in so that later
+notifications about the resulting booking reply in the same conversation.
 
 Requires the "Message Content Intent" to be enabled for the bot in the
 Discord Developer Portal, and DISCORD_BOT_TOKEN / DISCORD_USER_ID settings.
@@ -22,11 +24,12 @@ from collections.abc import Awaitable, Callable
 import discord
 
 from app.config import settings
-from app.providers.discord_provider import split_message
+from app.providers.discord_provider import DM_ORIGIN, split_message
 
 logger = logging.getLogger(__name__)
 
-MessageHandler = Callable[[str, str], Awaitable[str]]
+# (user_id, content, origin_channel_id) -> reply text
+MessageHandler = Callable[[str, str, str], Awaitable[str]]
 
 
 def should_handle_message(
@@ -111,8 +114,11 @@ class DiscordGateway:
             return
         source = "DM" if is_dm else f"guild channel #{getattr(message.channel, 'name', '?')}"
         logger.info(f"Discord message received from {author_id} via {source}: {content[:80]}")
+        # Record where this conversation is happening so async notifications
+        # (the 6:30am booking result) reply here rather than opening a DM.
+        origin_channel_id = DM_ORIGIN if is_dm else str(message.channel.id)
         try:
-            response = await self._message_handler(author_id, content)
+            response = await self._message_handler(author_id, content, origin_channel_id)
         except Exception:
             logger.exception("Error handling Discord message")
             response = "Sorry, something went wrong processing that message."

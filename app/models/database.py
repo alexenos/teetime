@@ -52,6 +52,9 @@ class BookingRecord(Base):
             from requested_time if fallback was used).
         confirmation_number: Confirmation number from the club website.
         error_message: Details about why a booking failed.
+        origin_channel_id: Discord channel ID the booking was requested in, so
+            the result notification replies in that conversation rather than a
+            DM. NULL for SMS and REST API bookings.
         created_at: When this record was created.
         updated_at: When this record was last modified.
     """
@@ -70,6 +73,7 @@ class BookingRecord(Base):
     actual_booked_time = Column(Time, nullable=True)
     confirmation_number = Column(String(100), nullable=True)
     error_message = Column(Text, nullable=True)
+    origin_channel_id = Column(String(32), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -90,6 +94,8 @@ class SessionRecord(Base):
             through the conversation. NULL when state is IDLE.
         pending_cancellation_id: Booking ID awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for confirmation.
+        origin_channel_id: Discord channel ID of the user's current conversation,
+            refreshed on each inbound message. NULL for SMS users.
         last_interaction: Timestamp of the user's last message.
     """
 
@@ -100,6 +106,7 @@ class SessionRecord(Base):
     state: Column[Any] = Column(Enum(ConversationState), default=ConversationState.IDLE)
     pending_request_json = Column(Text, nullable=True)
     pending_cancellation_id = Column(String(50), nullable=True)
+    origin_channel_id = Column(String(32), nullable=True)
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
@@ -118,6 +125,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+# Columns added after the initial deployment, as (table, column, SQL type).
+# create_all() only creates missing tables, so existing installs need these
+# backfilled explicitly. Append to this list when adding a nullable column.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("sessions", "pending_cancellation_id", "VARCHAR(50)"),
+    ("sessions", "origin_channel_id", "VARCHAR(32)"),
+    ("bookings", "origin_channel_id", "VARCHAR(32)"),
+]
+
+
 async def _run_column_migrations(conn: Any) -> None:
     """
     Run idempotent schema migrations for columns added after initial deployment.
@@ -128,24 +145,22 @@ async def _run_column_migrations(conn: Any) -> None:
     is_postgres = settings.database_url.startswith("postgresql")
     is_sqlite = settings.database_url.startswith("sqlite")
 
-    if is_postgres:
-        await conn.execute(
-            text(
-                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_cancellation_id VARCHAR(50)"
-            )
-        )
-        logger.info("Checked/added pending_cancellation_id column to sessions table")
-    elif is_sqlite:
-        try:
+    for table, column, sql_type in _ADDED_COLUMNS:
+        if is_postgres:
             await conn.execute(
-                text("ALTER TABLE sessions ADD COLUMN pending_cancellation_id VARCHAR(50)")
+                text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {sql_type}")
             )
-            logger.info("Added pending_cancellation_id column to sessions table")
-        except Exception as e:
-            if "duplicate column" in str(e).lower():
-                logger.debug("pending_cancellation_id column already exists")
-            else:
-                raise
+            logger.info(f"Checked/added {column} column to {table} table")
+        elif is_sqlite:
+            # SQLite has no ADD COLUMN IF NOT EXISTS; a duplicate is the no-op case.
+            try:
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+                logger.info(f"Added {column} column to {table} table")
+            except Exception as e:
+                if "duplicate column" in str(e).lower():
+                    logger.debug(f"{column} column already exists on {table}")
+                else:
+                    raise
 
 
 async def _run_enum_migrations() -> None:

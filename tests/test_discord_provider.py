@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from app.config import Settings, settings
 from app.providers.discord_provider import (
+    DM_ORIGIN,
     MAX_MESSAGE_LEN,
     DiscordProvider,
     split_message,
@@ -169,9 +170,94 @@ class TestSendSms:
         assert requests[1].url.path.endswith("/channels/555/messages")
         assert json.loads(requests[1].content) == {"content": "hi"}
 
+    async def test_origin_channel_wins_over_configured_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A notification replies in the channel its conversation started in,
+        even when a different shared channel is configured."""
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"id": "msg-1"})
+
+        provider = make_provider(handler)
+        result = await provider.send_sms("123456789012345678", "booked", origin_channel_id="4242")
+
+        assert result.success
+        assert requests[0].url.path.endswith("/channels/4242/messages")
+        assert json.loads(requests[0].content) == {"content": "<@123456789012345678> booked"}
+
+    async def test_dm_origin_stays_a_dm_despite_configured_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A conversation started in a DM is answered in the DM, without a
+        mention, rather than being aired in the configured shared channel."""
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path.endswith("/users/@me/channels"):
+                return httpx.Response(200, json={"id": "555"})
+            return httpx.Response(200, json={"id": "msg-1"})
+
+        provider = make_provider(handler)
+        result = await provider.send_sms(
+            "123456789012345678", "booked", origin_channel_id=DM_ORIGIN
+        )
+
+        assert result.success
+        assert requests[0].url.path.endswith("/users/@me/channels")
+        assert requests[1].url.path.endswith("/channels/555/messages")
+        assert json.loads(requests[1].content) == {"content": "booked"}
+
+    async def test_unrecognized_origin_falls_back_to_configured_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed stored origin must not be interpolated into the API path;
+        it falls back to the configured channel."""
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"id": "msg-1"})
+
+        provider = make_provider(handler)
+        result = await provider.send_sms("123456789012345678", "hi", origin_channel_id="#general")
+
+        assert result.success
+        assert requests[0].url.path.endswith("/channels/9001/messages")
+
     def test_validate_request_always_true(self) -> None:
         provider = DiscordProvider()
         assert provider.validate_request("http://x", {}, None)
+
+
+class TestResolveChannelId:
+    """Destination precedence: origin channel, then DM sentinel, then config."""
+
+    def test_numeric_origin_used_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        assert DiscordProvider.resolve_channel_id("4242") == "4242"
+
+    def test_origin_is_trimmed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "discord_channel_id", "")
+        assert DiscordProvider.resolve_channel_id("  4242  ") == "4242"
+
+    def test_dm_sentinel_means_dm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        assert DiscordProvider.resolve_channel_id(DM_ORIGIN) is None
+
+    def test_no_origin_uses_configured_channel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "discord_channel_id", "9001")
+        assert DiscordProvider.resolve_channel_id(None) == "9001"
+
+    def test_no_origin_and_no_config_means_dm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "discord_channel_id", "")
+        assert DiscordProvider.resolve_channel_id(None) is None
 
 
 class TestDiscordChannelIdValidation:
@@ -211,6 +297,7 @@ class TestShouldHandleMessage:
 
 BOT_ID = 999000111
 ALLOWED_ID = "111222333444555666"
+GUILD_CHANNEL_ID = "778899001122334455"
 
 
 def make_message(
@@ -219,6 +306,7 @@ def make_message(
     content: str = "book saturday 8am",
     is_bot: bool = False,
     in_guild: bool = False,
+    channel_id: str = GUILD_CHANNEL_ID,
 ) -> MagicMock:
     """Build a stand-in for discord.Message with a spy on channel.send."""
     message = MagicMock()
@@ -226,6 +314,7 @@ def make_message(
     message.author.bot = is_bot
     message.content = content
     message.guild = MagicMock() if in_guild else None
+    message.channel.id = channel_id
     message.channel.name = "tee-times"
     message.channel.send = AsyncMock()
     return message
@@ -249,17 +338,18 @@ class TestGatewayOnMessage:
 
         await gw._on_message(message)
 
-        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am")
+        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am", DM_ORIGIN)
         message.channel.send.assert_awaited_once_with("ok")
 
     async def test_guild_message_from_allowed_user_dispatched(self, gateway) -> None:  # type: ignore[no-untyped-def]
-        """Server-channel messages must work, not just DMs."""
+        """Server-channel messages must work, not just DMs, and the channel they
+        arrived in is passed along so later notifications can reply there."""
         gw, handler = gateway
         message = make_message(in_guild=True)
 
         await gw._on_message(message)
 
-        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am")
+        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am", GUILD_CHANNEL_ID)
         message.channel.send.assert_awaited_once_with("ok")
 
     async def test_own_message_suppressed(
@@ -313,7 +403,7 @@ class TestGatewayOnMessage:
 
         await gw._on_message(message)
 
-        handler.assert_awaited_once_with(ALLOWED_ID, "book 8/2 at 5:06p")
+        handler.assert_awaited_once_with(ALLOWED_ID, "book 8/2 at 5:06p", GUILD_CHANNEL_ID)
 
     @pytest.mark.parametrize("mention_fmt", ["<@{id}>", "<@!{id}>"])
     async def test_mention_only_message_ignored(self, gateway, mention_fmt: str) -> None:  # type: ignore[no-untyped-def]
