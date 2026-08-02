@@ -31,6 +31,7 @@ import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from selenium.webdriver.common.by import By
@@ -43,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import settings  # noqa: E402
 from app.providers.walden_http import (  # noqa: E402
+    AbConfig,
     DirectHttpError,
     PrimeFacesSession,
     find_ab_for_element,
@@ -58,7 +60,7 @@ logger = logging.getLogger("probe")
 SAFE_COMPONENT_SUFFIX = "showLegends"
 
 
-def find_safe_component(page_html: str) -> tuple[str, object]:
+def find_safe_component(page_html: str) -> tuple[str, AbConfig]:
     """Locate the read-only component this probe will exercise."""
     document = parse_html(page_html)
     for node in document.descendants():
@@ -71,13 +73,13 @@ def find_safe_component(page_html: str) -> tuple[str, object]:
     )
 
 
-def time_direct_http(session: PrimeFacesSession, config: object, samples: int) -> list[float]:
+def time_direct_http(session: PrimeFacesSession, config: AbConfig, samples: int) -> list[float]:
     """Time the component's request over direct HTTP."""
     timings = []
-    body = session.build_body(config)  # type: ignore[arg-type]
+    body = session.build_body(config)
     for i in range(samples):
         started = time.perf_counter()
-        response = session.post(config, body=body)  # type: ignore[arg-type]
+        response = session.post(config, body=body)
         elapsed_ms = (time.perf_counter() - started) * 1000
         timings.append(elapsed_ms)
         logger.info(
@@ -88,22 +90,22 @@ def time_direct_http(session: PrimeFacesSession, config: object, samples: int) -
             "refreshed" if response.view_state else "unchanged",
         )
         # The ViewState may have rolled; re-serialize for the next sample.
-        body = session.build_body(config)  # type: ignore[arg-type]
+        body = session.build_body(config)
     return timings
 
 
 _BROWSER_TIMING_JS = """
 var cfg = arguments[0];
 var done = arguments[arguments.length - 1];
-var t0 = Date.now();
+var t0 = performance.now();
 PrimeFaces.ab({
     s: cfg.source, f: cfg.form, p: cfg.process, u: cfg.update,
-    onco: function() { done(Date.now() - t0); }
+    onco: function() { done(performance.now() - t0); }
 });
 """
 
 
-def time_browser(driver: object, config: object, samples: int) -> list[float]:
+def time_browser(driver: Any, config: AbConfig, samples: int) -> list[float]:
     """Time the identical request as the browser performs it.
 
     Measured from issuing the PrimeFaces call to its ``oncomplete`` - so it
@@ -113,13 +115,13 @@ def time_browser(driver: object, config: object, samples: int) -> list[float]:
     timings = []
     for i in range(samples):
         elapsed_ms = float(
-            driver.execute_async_script(  # type: ignore[attr-defined]
+            driver.execute_async_script(
                 _BROWSER_TIMING_JS,
                 {
-                    "source": config.source,  # type: ignore[attr-defined]
-                    "form": config.form,  # type: ignore[attr-defined]
-                    "process": config.process,  # type: ignore[attr-defined]
-                    "update": config.update,  # type: ignore[attr-defined]
+                    "source": config.source,
+                    "form": config.form,
+                    "process": config.process,
+                    "update": config.update,
                 },
             )
         )
@@ -129,6 +131,7 @@ def time_browser(driver: object, config: object, samples: int) -> list[float]:
 
 
 def summarize(label: str, timings: list[float]) -> dict[str, float]:
+    """Log and return min/median/mean/max for one transport's samples."""
     stats = {
         "min": min(timings),
         "median": statistics.median(timings),
@@ -147,8 +150,11 @@ def summarize(label: str, timings: list[float]) -> dict[str, float]:
 
 
 def main() -> int:
+    """Run the probe end to end; returns a process exit code."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--samples", type=int, default=5, help="round trips per transport")
+    parser.add_argument(
+        "--samples", type=int, default=5, help="round trips per transport (minimum 1)"
+    )
     parser.add_argument(
         "--days-ahead",
         type=int,
@@ -157,6 +163,9 @@ def main() -> int:
     )
     parser.add_argument("--json", type=Path, help="write the timing summary here")
     args = parser.parse_args()
+
+    if args.samples < 1:
+        parser.error("--samples must be at least 1")
 
     if not settings.walden_member_number or not settings.walden_password:
         logger.error("WALDEN_MEMBER_NUMBER / WALDEN_PASSWORD are not set")

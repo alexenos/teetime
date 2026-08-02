@@ -44,8 +44,9 @@ class Settings(BaseSettings):
 
     # Run the 6:30 booking chain as direct PrimeFaces HTTP calls instead of
     # browser clicks. Login, navigation and slot discovery still run in Chrome;
-    # only the race itself moves to HTTP. Any failure falls back to the JS
-    # chain, so the worst case is the current behavior plus one wasted POST.
+    # only the race itself moves to HTTP. A failure before the reservation is
+    # submitted falls back to the JS chain; a failure after it is reported
+    # without a browser retry, because the slot may already be held.
     # Off by default until it has won a real race.
     walden_direct_http_booking: bool = False
 

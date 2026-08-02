@@ -2584,6 +2584,7 @@ class TestDirectHttpBookingWiring:
     def test_success_is_returned_as_a_chain_result(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Success is returned as a chain result."""
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         result = self._direct_result(success=True, phase="complete", timing={"totalMs": 300})
         booker, session = self._patch_booker(monkeypatch, result)
@@ -2609,7 +2610,7 @@ class TestDirectHttpBookingWiring:
         assert chain_result is not None
         assert chain_result["blocked"] is True
 
-    @pytest.mark.parametrize("phase", ["init", "precision_wait", "reserve_click"])
+    @pytest.mark.parametrize("phase", ["init", "precision_wait", "reserve_staged"])
     def test_failure_before_submission_falls_back(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch, phase: str
     ) -> None:
@@ -2620,7 +2621,7 @@ class TestDirectHttpBookingWiring:
 
         assert provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, None) is None
 
-    @pytest.mark.parametrize("phase", ["player_count", "tbd_guests", "book_now"])
+    @pytest.mark.parametrize("phase", ["reserve_sent", "player_count", "tbd_guests", "book_now"])
     def test_failure_after_reserve_is_not_retried_in_the_browser(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch, phase: str
     ) -> None:
@@ -2635,16 +2636,34 @@ class TestDirectHttpBookingWiring:
         assert chain_result["success"] is False
         assert chain_result["phase"] == phase
 
-    def test_session_is_closed_even_when_book_raises(
+    def test_book_failure_is_reported_not_raised(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """An escape here would reach _book_tee_time_sync, which only handles
+        WebDriver errors, and raise instead of returning a BookingResult."""
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         booker, session = self._patch_booker(monkeypatch, None)
         booker.book.side_effect = DirectHttpError("exploded")
 
-        with pytest.raises(DirectHttpError):
-            provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, None)
+        chain_result = provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, None)
+
+        # Reserve may already have been sent, so this is terminal, not a retry.
+        assert chain_result is not None
+        assert chain_result["success"] is False
+        assert "exploded" in chain_result["error"]
         session.close.assert_called_once()
+
+    def test_unexpected_staging_error_falls_back(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Staging parses live markup; a malformed page can raise anything."""
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        monkeypatch.setattr(
+            "app.providers.walden_provider.PrimeFacesSession.from_selenium",
+            MagicMock(side_effect=AttributeError("unexpected markup")),
+        )
+
+        assert provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, None) is None
 
     def test_js_chain_runs_when_direct_path_declines(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -2681,6 +2700,98 @@ class TestDirectHttpBookingWiring:
 
         assert result.success is True
         timed_chain.assert_called_once()
+
+    def test_direct_success_verifies_against_the_response_not_the_browser(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression that stubs used to hide.
+
+        A direct-HTTP booking never touches the browser, so the DOM still shows
+        the pre-booking tee sheet. Verification is left unstubbed here: reading
+        the driver would find no confirmation and report a completed booking as
+        failed.
+        """
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        driver = MagicMock()
+        # The browser still shows the tee sheet - no booking confirmation.
+        driver.current_url = "https://www.waldengolf.com/group/pages/book-a-tee-time"
+        driver.page_source = "<html><body>Tee sheet - slots unavailable</body></html>"
+        driver.find_element.side_effect = Exception("no body text")
+
+        monkeypatch.setattr(
+            provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider,
+            "_try_direct_http_booking",
+            MagicMock(
+                return_value={
+                    "success": True,
+                    "blocked": False,
+                    "phase": "complete",
+                    "error": None,
+                    "timing": {"totalMs": 250},
+                    "finalMarkup": (
+                        "<div><h2>Booking confirmed</h2>"
+                        "<p>Confirmation #12345 - your tee time is booked.</p></div>"
+                    ),
+                }
+            ),
+        )
+        timed_chain = MagicMock()
+        monkeypatch.setattr(provider, "_stage_timed_booking_chain_js", timed_chain)
+
+        result = provider._find_and_book_time_slot_sync(
+            driver,
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            execute_at_timestamp_ms=1770000000000,
+        )
+
+        assert result.success is True
+        assert result.confirmation_number == "12345"
+        timed_chain.assert_not_called()
+
+    def test_direct_success_without_confirmation_is_reported_as_failure(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The chain finishing is not the same as the reservation being made."""
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        monkeypatch.setattr(
+            provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider,
+            "_try_direct_http_booking",
+            MagicMock(
+                return_value={
+                    "success": True,
+                    "blocked": False,
+                    "phase": "complete",
+                    "error": None,
+                    "timing": {},
+                    "finalMarkup": "<div><p>Select the number of players.</p></div>",
+                }
+            ),
+        )
+        monkeypatch.setattr(provider, "_capture_diagnostic_info", MagicMock())
+
+        result = provider._find_and_book_time_slot_sync(
+            MagicMock(),
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            execute_at_timestamp_ms=1770000000000,
+        )
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "did not confirm" in result.error_message
 
     def test_direct_result_short_circuits_the_js_chain(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch

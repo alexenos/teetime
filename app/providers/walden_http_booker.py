@@ -44,20 +44,43 @@ logger = logging.getLogger(__name__)
 # chain there is no fixed inter-click delay to pay here.
 _MAX_PLAYERS = 4
 
+# Chain phases. These are a cross-module contract: the provider decides whether
+# a Selenium retry is safe by looking at which phase the chain stopped in, so
+# the names live here and are imported there rather than duplicated.
+#
+# The split around the Reserve POST is the point of the whole set. Once the
+# request is on the wire we cannot know whether the server acted on it, so a
+# browser retry from that point risks racing our own reservation.
+PHASE_INIT = "init"
+PHASE_PRECISION_WAIT = "precision_wait"
+PHASE_RESERVE_STAGED = "reserve_staged"  # request built, nothing sent yet
+PHASE_RESERVE_SENT = "reserve_sent"  # written to the socket, outcome unknown
+PHASE_PLAYER_COUNT = "player_count"
+PHASE_TBD_GUESTS = "tbd_guests"
+PHASE_BOOK_NOW = "book_now"
+PHASE_COMPLETE = "complete"
+
+# The only phases in which nothing can have reached the server, and therefore
+# the only ones after which a browser retry is safe.
+PRE_SUBMIT_PHASES = frozenset({PHASE_INIT, PHASE_PRECISION_WAIT, PHASE_RESERVE_STAGED})
+
 
 @dataclass
 class DirectBookingResult:
     """Outcome of a direct-HTTP booking attempt.
 
     Shaped to match the JS chain's result dict so the provider can log and
-    branch on both identically.
+    branch on both identically, plus ``final_markup`` - the last response body,
+    which is the only record of the booking outcome, since the browser DOM is
+    untouched by this path.
     """
 
     success: bool = False
     blocked: bool = False
-    phase: str = "init"
+    phase: str = PHASE_INIT
     error: str | None = None
     timing: dict[str, Any] = field(default_factory=dict)
+    final_markup: str = ""
 
     def as_chain_result(self) -> dict[str, Any]:
         """Render as the dict shape ``_run_booking_chain_js`` returns."""
@@ -67,6 +90,7 @@ class DirectBookingResult:
             "phase": self.phase,
             "error": self.error,
             "timing": self.timing,
+            "finalMarkup": self.final_markup,
         }
 
 
@@ -74,6 +98,7 @@ class DirectHttpBooker:
     """Runs one booking over HTTP against an adopted browser session."""
 
     def __init__(self, session: PrimeFacesSession) -> None:
+        """Bind the booker to an adopted, authenticated session."""
         self.session = session
         self._reserve_config: AbConfig | None = None
         self._reserve_body: bytes | None = None
@@ -158,20 +183,28 @@ class DirectHttpBooker:
         target_timestamp_ms: int | None,
         result: DirectBookingResult,
     ) -> DirectBookingResult:
+        """Drive the request sequence, advancing ``result.phase`` as it goes."""
         assert self._reserve_config is not None and self._reserve_body is not None
 
+        result.phase = PHASE_RESERVE_STAGED
+
         if target_timestamp_ms is not None:
-            result.phase = "precision_wait"
+            result.phase = PHASE_PRECISION_WAIT
             result.timing["msUntilTarget"] = target_timestamp_ms - int(time_module.time() * 1000)
             result.timing["clickDriftMs"] = sleep_until(target_timestamp_ms)
 
         start = time_module.perf_counter()
 
         def elapsed_ms() -> int:
+            """Milliseconds since the Reserve request went out."""
             return int((time_module.perf_counter() - start) * 1000)
 
-        result.phase = "reserve_click"
+        # Advance before the call, not after. Once the request is handed to the
+        # socket we cannot tell "never sent" from "sent, response lost", and a
+        # browser retry in the second case races our own reservation.
+        result.phase = PHASE_RESERVE_SENT
         response = self.session.post(self._reserve_config, body=self._reserve_body)
+        result.final_markup = response.markup
         result.timing["reserveMs"] = elapsed_ms()
 
         blocked_reason = _find_blocked_message(response)
@@ -181,8 +214,9 @@ class DirectHttpBooker:
             result.timing["blockedDetectedMs"] = elapsed_ms()
             return result
 
-        result.phase = "player_count"
+        result.phase = PHASE_PLAYER_COUNT
         response = self._select_player_count(response, num_players)
+        result.final_markup = response.markup
         result.timing["playerCountMs"] = elapsed_ms()
 
         blocked_reason = _find_blocked_message(response)
@@ -192,15 +226,17 @@ class DirectHttpBooker:
             return result
 
         if num_players > 1:
-            result.phase = "tbd_guests"
+            result.phase = PHASE_TBD_GUESTS
             response = self._add_tbd_guests(response, num_players)
+            result.final_markup = response.markup
             result.timing["tbdGuestsMs"] = elapsed_ms()
 
-        result.phase = "book_now"
+        result.phase = PHASE_BOOK_NOW
         response = self._click_book_now(response)
+        result.final_markup = response.markup
         result.timing["bookNowMs"] = elapsed_ms()
 
-        result.phase = "complete"
+        result.phase = PHASE_COMPLETE
         result.success = True
         result.timing["totalMs"] = elapsed_ms()
         return result
@@ -288,6 +324,7 @@ class DirectHttpBooker:
 
 
 def _parent_classes(node: Node) -> frozenset[str]:
+    """CSS classes of the node's parent, or an empty set at the root."""
     return node.parent.classes if node.parent is not None else frozenset()
 
 
@@ -328,10 +365,18 @@ def _find_player_rows(document: Node) -> list[Node]:
     ]
     if rows:
         return rows
-    return [n for n in document.find_all("tr") if _has_ancestor_id_containing(n, "player")]
+    # Require data cells: a <thead> row counted as row 0 would be mistaken for
+    # the member row and shift every guest index by one, clicking TBD on the
+    # wrong rows with no error to show for it.
+    return [
+        n
+        for n in document.find_all("tr")
+        if _has_ancestor_id_containing(n, "player") and n.find_all("td")
+    ]
 
 
 def _has_ancestor_id_containing(node: Node, fragment: str) -> bool:
+    """Report whether any ancestor's id contains the fragment, case-insensitively."""
     current: Node | None = node.parent
     while current is not None:
         if fragment.lower() in current.id.lower():
@@ -369,12 +414,23 @@ def _find_book_now(document: Node) -> Node | None:
 def _find_blocked_message(response: PartialResponse) -> str | None:
     """Detect the 'slot blocked by another user' validation popup.
 
+    Scoped to the popup element, and only when it is not explicitly hidden -
+    the same test the Selenium path applies (``aria-hidden`` flips to false when
+    the popup is shown). Matching the whole response instead would let a hidden
+    popup template, or any markup quoting one of these phrases, abort the chain
+    on a slot we actually hold.
+
     Returns the matched reason, or None when the response carries no blocked
-    indication. Uses the same patterns as the Selenium path so both report the
-    condition identically.
+    indication.
     """
-    text = response.markup.lower()
-    for pattern in DOM.SLOT_BLOCKED.blocked_text_patterns:
-        if pattern.lower() in text:
-            return f"Slot blocked by another user ({pattern})"
+    document = parse_html(response.markup)
+    for node in document.descendants():
+        if "teesheetvalidationerrorpopup" not in node.id.lower():
+            continue
+        if node.attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        text = node.text_content().lower()
+        for pattern in DOM.SLOT_BLOCKED.blocked_text_patterns:
+            if pattern.lower() in text:
+                return f"Slot blocked by another user ({pattern})"
     return None

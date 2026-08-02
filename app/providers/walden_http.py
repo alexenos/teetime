@@ -128,10 +128,12 @@ class Node:
 
     @property
     def id(self) -> str:
+        """The element's ``id`` attribute, or an empty string."""
         return self.attrs.get("id", "")
 
     @property
     def classes(self) -> frozenset[str]:
+        """The element's CSS classes as a set."""
         return frozenset(self.attrs.get("class", "").split())
 
     def descendants(self) -> "list[Node]":
@@ -145,10 +147,12 @@ class Node:
         return out
 
     def text_content(self) -> str:
+        """This element's text plus all descendant text, whitespace-collapsed."""
         parts = [self.text] + [d.text for d in self.descendants()]
         return " ".join(p for p in parts if p).strip()
 
     def find_by_id(self, element_id: str) -> "Node | None":
+        """Find the first descendant with the given id."""
         for node in self.descendants():
             if node.id == element_id:
                 return node
@@ -166,6 +170,7 @@ class Node:
         return found
 
     def find_with_class(self, css_class: str) -> "list[Node]":
+        """Find descendants carrying a CSS class."""
         return [n for n in self.descendants() if css_class in n.classes]
 
 
@@ -173,11 +178,13 @@ class _TreeBuilder(HTMLParser):
     """Builds a :class:`Node` tree, tolerating the tee sheet's unclosed tags."""
 
     def __init__(self) -> None:
+        """Start an empty document tree."""
         super().__init__(convert_charrefs=True)
         self.root = Node(tag="#document")
         self._stack: list[Node] = [self.root]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Open an element, descending into it unless it is a void tag."""
         node = Node(
             tag=tag,
             attrs={k: (v if v is not None else "") for k, v in attrs},
@@ -188,6 +195,7 @@ class _TreeBuilder(HTMLParser):
             self._stack.append(node)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Add a self-closing element without descending into it."""
         node = Node(
             tag=tag,
             attrs={k: (v if v is not None else "") for k, v in attrs},
@@ -196,6 +204,7 @@ class _TreeBuilder(HTMLParser):
         self._stack[-1].children.append(node)
 
     def handle_endtag(self, tag: str) -> None:
+        """Close the matching open element, ignoring stray end tags."""
         # Unwind to the matching open tag. Stray end tags are ignored rather
         # than allowed to pop the stack past their opener.
         for depth in range(len(self._stack) - 1, 0, -1):
@@ -204,6 +213,7 @@ class _TreeBuilder(HTMLParser):
                 return
 
     def handle_data(self, data: str) -> None:
+        """Attach non-whitespace text to the element currently open."""
         stripped = data.strip()
         if stripped:
             node = self._stack[-1]
@@ -216,6 +226,32 @@ def parse_html(html: str) -> Node:
     builder.feed(html)
     builder.close()
     return builder.root
+
+
+def visible_text(html: str) -> str:
+    """Extract user-visible text from markup, ignoring script and style bodies.
+
+    The HTTP-side counterpart of reading ``body.text`` from a WebDriver: it lets
+    the same success/failure phrase checks run against a partial response as
+    against a rendered page. Script contents are excluded so a JS string literal
+    cannot be mistaken for page copy.
+    """
+    document = parse_html(html)
+    parts = []
+    for node in [document, *document.descendants()]:
+        if node.text and not _has_ancestor_tag(node, ("script", "style")):
+            parts.append(node.text)
+    return " ".join(parts).strip()
+
+
+def _has_ancestor_tag(node: Node, tags: tuple[str, ...]) -> bool:
+    """Report whether the node sits inside any of the given tags."""
+    current: Node | None = node
+    while current is not None:
+        if current.tag in tags:
+            return True
+        current = current.parent
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +368,7 @@ class FormState:
 
     @property
     def view_state(self) -> str | None:
+        """The form's current ``javax.faces.ViewState``, if it carries one."""
         for name, value in self.fields:
             if name == _VIEW_STATE_PARAM:
                 return value
@@ -524,22 +561,34 @@ class PrimeFacesSession:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         client: httpx.Client | None = None,
     ) -> None:
+        """Build a session around a form's state and a browser's cookies.
+
+        Args:
+            form_state: The form this session will submit.
+            cookies: Cookie jar, normally adopted from a live WebDriver.
+            base_url: URL used to warm the connection and resolve relative actions.
+            user_agent: Sent on every request; match the browser's.
+            timeout_s: Per-request budget.
+            client: Optional pre-built client (tests inject a mock transport).
+        """
         self.form_state = form_state
         self.base_url = base_url
-        self._client = client or httpx.Client(
-            cookies=cookies,
-            timeout=timeout_s,
-            follow_redirects=False,
-            headers={
-                "User-Agent": user_agent,
-                # PrimeFaces sets these on every AJAX request; the bridge uses
-                # Faces-Request to route the call to the partial lifecycle.
-                "Faces-Request": "partial/ajax",
-                "X-Requested-With": "XMLHttpRequest",
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Accept": "application/xml, text/xml, */*; q=0.01",
-            },
-        )
+        headers = {
+            "User-Agent": user_agent,
+            # PrimeFaces sets these on every AJAX request; the bridge uses
+            # Faces-Request to route the call to the partial lifecycle.
+            "Faces-Request": "partial/ajax",
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept": "application/xml, text/xml, */*; q=0.01",
+        }
+        self._client = client or httpx.Client(timeout=timeout_s, follow_redirects=False)
+        # Applied after construction so an injected client (tests, or a caller
+        # supplying its own transport) gets the same protocol headers and cookie
+        # jar as one we build - otherwise the request under test is not the
+        # request production sends.
+        self._client.headers.update(headers)
+        self._client.cookies.update(cookies)
 
     @classmethod
     def from_selenium(
@@ -610,13 +659,32 @@ class PrimeFacesSession:
         """
         started = time_module.perf_counter()
         try:
-            self._client.get(self.base_url)
+            # HEAD first: the base URL is the portlet page, and a GET makes the
+            # server render the whole tee sheet seconds before the window for a
+            # body we discard. Liferay may not serve HEAD, so fall back to GET.
+            response = self._client.head(self.base_url)
+            if not response.is_success:
+                response = self._client.get(self.base_url)
         except httpx.HTTPError as exc:
             raise DirectHttpError(
                 f"Failed to warm up connection to {self.base_url}: {exc}"
             ) from exc
+
         rtt_ms = (time_module.perf_counter() - started) * 1000
-        logger.info("DIRECT_HTTP: Connection warm, round trip %.0fms", rtt_ms)
+        if not response.is_success:
+            # Anything but 2xx here means the adopted cookies did not carry the
+            # session - a logged-out portal answers with a redirect to the login
+            # page. Better to fail now, while falling back to the browser chain
+            # is still free, than as a baffling Reserve failure at 6:30.
+            raise DirectHttpError(
+                f"Warm-up of {self.base_url} returned HTTP {response.status_code}; "
+                "the adopted session may not be authenticated"
+            )
+        logger.info(
+            "DIRECT_HTTP: Connection warm, HTTP %d, round trip %.0fms",
+            response.status_code,
+            rtt_ms,
+        )
         return rtt_ms
 
     def post(self, config: AbConfig, *, body: bytes | None = None) -> PartialResponse:
@@ -639,6 +707,14 @@ class PrimeFacesSession:
             )
 
         response = parse_partial_response(http_response.text)
+        if response.redirect_url:
+            # JSF answers a dead session with a redirect to the login page
+            # rather than an error element. Without this the body is never
+            # updated and the chain would carry on against an expired view.
+            raise ViewExpiredError(
+                f"Server redirected {config.source} to {response.redirect_url}; "
+                "the adopted session is no longer valid"
+            )
         self._apply(response)
         return response
 
@@ -652,29 +728,46 @@ class PrimeFacesSession:
         """
         form_markup = self.form_state.form_id and response.updates.get(self.form_state.form_id)
         if form_markup and "<form" in form_markup:
-            try:
-                refreshed = FormState.from_html(form_markup, form_id=self.form_state.form_id)
-            except DirectHttpError as exc:
-                logger.warning("DIRECT_HTTP: Could not refresh form state from update: %s", exc)
+            document = parse_html(form_markup)
+            refreshed = next(
+                (f for f in document.find_all("form") if f.id == self.form_state.form_id), None
+            )
+            if refreshed is None:
+                logger.warning(
+                    "DIRECT_HTTP: Update for %s carried no matching form; keeping current fields",
+                    self.form_state.form_id,
+                )
             else:
-                self.form_state.fields = refreshed.fields
-                if refreshed.action_url:
-                    # A re-rendered form may carry a relative action; resolve it
-                    # against the URL we are already posting to.
+                # Field refresh and action resolution are independent: a
+                # re-rendered fragment often omits the action, and keeping stale
+                # fields in that case would submit the pre-click player count and
+                # guest state on the next step.
+                fields = _serialize_form(refreshed)
+                self.form_state.fields = fields
+                action_url = next(
+                    (value for name, value in fields if name == _ENCODED_URL_PARAM),
+                    refreshed.attrs.get("action", ""),
+                )
+                if action_url:
+                    # The action may be relative; resolve against the URL we are
+                    # already posting to.
                     self.form_state.action_url = urllib.parse.urljoin(
-                        self.form_state.action_url, refreshed.action_url
+                        self.form_state.action_url, action_url
                     )
 
         if response.view_state:
             self.form_state.set_field(_VIEW_STATE_PARAM, response.view_state)
 
     def close(self) -> None:
+        """Close the underlying HTTP client and its connection pool."""
         self._client.close()
 
     def __enter__(self) -> "PrimeFacesSession":
+        """Enter a context manager that closes the client on exit."""
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """Close the client when leaving the context."""
         self.close()
 
 
