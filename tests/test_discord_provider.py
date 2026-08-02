@@ -240,24 +240,39 @@ class TestResolveChannelId:
     """Destination precedence: origin channel, then DM sentinel, then config."""
 
     def test_numeric_origin_used_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The conversation's own channel outranks the configured one."""
         monkeypatch.setattr(settings, "discord_channel_id", "9001")
         assert DiscordProvider.resolve_channel_id("4242") == "4242"
 
     def test_origin_is_trimmed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Stray whitespace around a stored ID does not break the API path."""
         monkeypatch.setattr(settings, "discord_channel_id", "")
         assert DiscordProvider.resolve_channel_id("  4242  ") == "4242"
 
     def test_dm_sentinel_means_dm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A DM conversation stays a DM even with a shared channel configured."""
         monkeypatch.setattr(settings, "discord_channel_id", "9001")
         assert DiscordProvider.resolve_channel_id(DM_ORIGIN) is None
 
     def test_no_origin_uses_configured_channel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Notifications with no conversation behind them use the fallback."""
         monkeypatch.setattr(settings, "discord_channel_id", "9001")
         assert DiscordProvider.resolve_channel_id(None) == "9001"
 
     def test_no_origin_and_no_config_means_dm(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With nothing configured and no origin, delivery falls back to a DM."""
         monkeypatch.setattr(settings, "discord_channel_id", "")
         assert DiscordProvider.resolve_channel_id(None) is None
+
+    def test_non_numeric_configured_channel_falls_back_to_dm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Settings rejects a bad DISCORD_CHANNEL_ID at load, but the value is
+        interpolated into an API path, so a value that reached settings another
+        way (a direct assignment, bypassing validation) must not be used."""
+        monkeypatch.setattr(settings, "discord_channel_id", "../../users/@me")
+        assert DiscordProvider.resolve_channel_id(None) is None
+        assert DiscordProvider.resolve_channel_id(DM_ORIGIN) is None
 
 
 class TestDiscordChannelIdValidation:

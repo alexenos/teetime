@@ -115,6 +115,11 @@ class DiscordProvider(SMSProvider):
         3. No origin at all (REST API bookings, SMS, the weekly prompt, and
            bookings created before origins were recorded): DISCORD_CHANNEL_ID if
            set, else a DM.
+
+        Whatever comes back is interpolated into ``/channels/{id}/messages``, so
+        both sources are checked here rather than trusted. Settings already
+        rejects a non-numeric DISCORD_CHANNEL_ID at load time; re-checking keeps
+        that invariant local to the place that depends on it.
         """
         candidate = (origin_channel_id or "").strip()
         if candidate.isdigit():
@@ -123,7 +128,13 @@ class DiscordProvider(SMSProvider):
             return None
         if candidate:
             logger.warning(f"Ignoring unrecognized Discord origin channel {candidate!r}")
-        return settings.discord_channel_id.strip() or None
+
+        configured = settings.discord_channel_id.strip()
+        if configured.isdigit():
+            return configured
+        if configured:
+            logger.warning(f"Ignoring non-numeric DISCORD_CHANNEL_ID {configured!r}")
+        return None
 
     async def send_sms(
         self, to_number: str, message: str, origin_channel_id: str | None = None

@@ -1928,6 +1928,47 @@ class TestOriginChannelRouting:
         mock_create.assert_awaited_once_with("+15551234567", sample_request, "778899")
 
     @pytest.mark.asyncio
+    async def test_confirm_multiple_bookings_passes_session_origin_to_each(
+        self, booking_service: BookingService
+    ) -> None:
+        """Confirming several requests at once is a separate loop from the single
+        booking path; every booking it creates must carry the channel too."""
+        requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=4
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 12, 31), requested_time=time(9, 0), num_players=4
+            ),
+        ]
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_requests=requests,
+            origin_channel_id="778899",
+        )
+
+        async def create_booking_side_effect(
+            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+        ) -> TeeTimeBooking:
+            return TeeTimeBooking(
+                id="test1234",
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 23, 6, 30),
+                origin_channel_id=origin_channel_id,
+            )
+
+        with patch.object(
+            booking_service, "create_booking", side_effect=create_booking_side_effect
+        ) as mock_create:
+            await booking_service._handle_confirm_multiple_bookings(session)
+
+        assert len(mock_create.await_args_list) == len(requests)
+        assert all(call.args[2] == "778899" for call in mock_create.await_args_list)
+
+    @pytest.mark.asyncio
     async def test_execute_booking_success_notifies_origin_channel(
         self, booking_service: BookingService, sample_booking: TeeTimeBooking
     ) -> None:
