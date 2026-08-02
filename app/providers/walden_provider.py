@@ -530,6 +530,27 @@ _CHAIN_POLL_INTERVAL_MS = 10  # element polling cadence
 # immediately - but timing out here forfeits the attempt.
 _CHAIN_ENABLED_MAX_WAIT_MS = 5000
 
+# Timed mode only: the tee sheet is rendered before the booking window opens,
+# but its slots report no availability until the site enables them at 6:30, and
+# a PrimeFaces partial update can blank them mid-scan. An empty scan before the
+# target therefore says nothing about 6:30 and must not end the attempt - keep
+# re-scanning instead.
+_SLOT_RESCAN_INTERVAL_S = 0.25
+# Near the target the poll interval turns into click latency: a slot that only
+# becomes bookable at 6:30 gets clicked however long it takes us to notice it,
+# because the JS precision wait no-ops on a target already past. So tighten the
+# cadence for the final approach - but only there, and not further. Each scan is
+# a ~20ms synchronous DOM traversal of the whole tee sheet, and starving the
+# page's event loop at exactly the moment it has to process the disable-div
+# removal is the failure #116 had to undo.
+_SLOT_RESCAN_FINAL_APPROACH_MS = 3000
+_SLOT_RESCAN_FINAL_INTERVAL_S = 0.1
+# How long past the target to keep re-scanning, for slots that only become
+# bookable as the overlay comes off. Shares the disable-div budget because it
+# absorbs the same uncertainty - our clock's offset from the site's enable
+# timer - and because overrunning it delays every later booking in the batch.
+_SLOT_RESCAN_GRACE_MS = _CHAIN_ENABLED_MAX_WAIT_MS
+
 
 class WaldenGolfProvider(ReservationProvider):
     """
@@ -1128,9 +1149,14 @@ class WaldenGolfProvider(ReservationProvider):
                     if later_minutes > current_minutes:
                         times_to_exclude.add(later_time)
 
-                # For the FIRST booking, use timed mode (JS waits for exact timestamp)
-                # For subsequent bookings, use regular fast mode (window already open)
-                use_timed_for_this_booking = execute_at_timestamp_ms if i == 1 else None
+                # Every booking carries the target timestamp, not just the first.
+                # Giving it only to booking 1 made the whole batch's 6:30 gate
+                # depend on booking 1 getting far enough to reach its wait: when
+                # it failed early, the rest raced against a still-locked tee
+                # sheet. Handing the timestamp to all of them costs nothing once
+                # the window is genuinely open, because the JS precision wait
+                # no-ops on a target already in the past.
+                use_timed_for_this_booking = execute_at_timestamp_ms
 
                 logger.info(
                     f"BATCH_BOOKING: Booking {i}/{len(sorted_requests)} - "
@@ -2766,6 +2792,20 @@ class WaldenGolfProvider(ReservationProvider):
                     times_to_exclude,
                 )
 
+            # In timed mode an empty scan is not an answer about slot
+            # availability at the target - it usually just means the window has
+            # not opened yet - so keep looking rather than reporting no slots.
+            if slot_info is None and execute_at_timestamp_ms is not None:
+                slot_info = self._rescan_for_slot_until_window_open(
+                    driver,
+                    target_time,
+                    num_players,
+                    fallback_window_minutes,
+                    tee_time_interval_minutes,
+                    times_to_exclude,
+                    execute_at_timestamp_ms,
+                )
+
             if slot_info is None:
                 error_message = (
                     f"No time slots with {num_players} available spots within "
@@ -3124,6 +3164,87 @@ class WaldenGolfProvider(ReservationProvider):
                 if all_times
                 else None,
             )
+
+    def _rescan_for_slot_until_window_open(
+        self,
+        driver: webdriver.Chrome,
+        target_time: time,
+        num_players: int,
+        fallback_window_minutes: int,
+        tee_time_interval_minutes: int,
+        times_to_exclude: set[time],
+        execute_at_timestamp_ms: int,
+    ) -> dict[str, Any] | None:
+        """
+        Re-scan the tee sheet until a slot appears or the window has been open
+        for the grace period.
+
+        Only used in timed mode, after an initial scan found nothing. Before the
+        booking window opens the sheet renders its rows but reports no
+        availability, and a PrimeFaces partial update can briefly blank rows that
+        do have it, so a single empty scan cannot distinguish "nothing at 6:30"
+        from "not 6:30 yet". Returning the first slot found also keeps the
+        precision wait intact: whatever is found before the target is handed to
+        the JS chain, which still waits and clicks at the target itself.
+
+        Args:
+            driver: The WebDriver instance
+            target_time: The preferred tee time
+            num_players: Number of players (1-4)
+            fallback_window_minutes: Window to search for alternatives
+            tee_time_interval_minutes: Spacing between tee times
+            times_to_exclude: Times to skip when selecting fallback slots
+            execute_at_timestamp_ms: Unix ms timestamp when the window opens
+
+        Returns:
+            Slot dict from _find_target_slot_js, or None if none appeared
+        """
+        deadline_ms = execute_at_timestamp_ms + _SLOT_RESCAN_GRACE_MS
+        start_ms = int(time_module.time() * 1000)
+        logger.info(
+            f"SLOT_RESCAN: No slot yet for {target_time.strftime('%I:%M %p')}; "
+            f"re-scanning until {_SLOT_RESCAN_GRACE_MS}ms past the window "
+            f"({deadline_ms - start_ms}ms budget)"
+        )
+
+        attempts = 0
+        while True:
+            now_ms = int(time_module.time() * 1000)
+            if now_ms >= deadline_ms:
+                break
+            # Poll coarsely while the target is far off - there the wait is for
+            # the sheet to populate and 250ms of slop costs nothing - then
+            # tighten through the window opening, where it costs click latency.
+            remaining_ms = execute_at_timestamp_ms - now_ms
+            interval_s = (
+                _SLOT_RESCAN_INTERVAL_S
+                if remaining_ms > _SLOT_RESCAN_FINAL_APPROACH_MS
+                else _SLOT_RESCAN_FINAL_INTERVAL_S
+            )
+            time_module.sleep(interval_s)
+            attempts += 1
+            slot_info = self._find_target_slot_js(
+                driver,
+                target_time,
+                num_players,
+                fallback_window_minutes,
+                tee_time_interval_minutes,
+                times_to_exclude,
+            )
+            if slot_info is not None:
+                now_ms = int(time_module.time() * 1000)
+                logger.info(
+                    f"SLOT_RESCAN: Found slot at {slot_info['timeStr']} after "
+                    f"{attempts} re-scan(s), {now_ms - execute_at_timestamp_ms}ms "
+                    f"relative to the window opening"
+                )
+                return slot_info
+
+        logger.warning(
+            f"SLOT_RESCAN: Still no slot for {target_time.strftime('%I:%M %p')} "
+            f"after {attempts} re-scan(s) through the window opening"
+        )
+        return None
 
     def _find_target_slot_js(
         self,
