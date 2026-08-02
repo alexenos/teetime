@@ -536,6 +536,15 @@ _CHAIN_ENABLED_MAX_WAIT_MS = 5000
 # target therefore says nothing about 6:30 and must not end the attempt - keep
 # re-scanning instead.
 _SLOT_RESCAN_INTERVAL_S = 0.25
+# Near the target the poll interval turns into click latency: a slot that only
+# becomes bookable at 6:30 gets clicked however long it takes us to notice it,
+# because the JS precision wait no-ops on a target already past. So tighten the
+# cadence for the final approach - but only there, and not further. Each scan is
+# a ~20ms synchronous DOM traversal of the whole tee sheet, and starving the
+# page's event loop at exactly the moment it has to process the disable-div
+# removal is the failure #116 had to undo.
+_SLOT_RESCAN_FINAL_APPROACH_MS = 3000
+_SLOT_RESCAN_FINAL_INTERVAL_S = 0.1
 # How long past the target to keep re-scanning, for slots that only become
 # bookable as the overlay comes off. Shares the disable-div budget because it
 # absorbs the same uncertainty - our clock's offset from the site's enable
@@ -3199,8 +3208,20 @@ class WaldenGolfProvider(ReservationProvider):
         )
 
         attempts = 0
-        while int(time_module.time() * 1000) < deadline_ms:
-            time_module.sleep(_SLOT_RESCAN_INTERVAL_S)
+        while True:
+            now_ms = int(time_module.time() * 1000)
+            if now_ms >= deadline_ms:
+                break
+            # Poll coarsely while the target is far off - there the wait is for
+            # the sheet to populate and 250ms of slop costs nothing - then
+            # tighten through the window opening, where it costs click latency.
+            remaining_ms = execute_at_timestamp_ms - now_ms
+            interval_s = (
+                _SLOT_RESCAN_INTERVAL_S
+                if remaining_ms > _SLOT_RESCAN_FINAL_APPROACH_MS
+                else _SLOT_RESCAN_FINAL_INTERVAL_S
+            )
+            time_module.sleep(interval_s)
             attempts += 1
             slot_info = self._find_target_slot_js(
                 driver,

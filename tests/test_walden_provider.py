@@ -2204,6 +2204,63 @@ class TestTimedModeSlotRescan:
         assert result.success is False
         assert finder.call_count == 1, "no rescan loop without a target timestamp"
 
+    def test_rescan_tightens_cadence_through_the_window_opening(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Polling is coarse while the target is far off, tight as it arrives.
+
+        Near the window the poll interval becomes click latency, since a slot
+        that only appears at 6:30 is clicked as soon as it is noticed. Far from
+        the window it is just idle waiting, where scanning hard would pressure
+        the page's event loop for nothing.
+        """
+        import app.providers.walden_provider as walden_module
+
+        target_ms = 100_000
+
+        class FakeClock:
+            """Drives the loop off recorded sleeps instead of wall time."""
+
+            def __init__(self, start_ms: int) -> None:
+                self.now_ms = start_ms
+                self.sleeps: list[float] = []
+
+            def time(self) -> float:
+                return self.now_ms / 1000.0
+
+            def sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+                self.now_ms += int(seconds * 1000)
+
+        clock = FakeClock(target_ms - 10_000)
+        monkeypatch.setattr(walden_module, "time_module", clock)
+        monkeypatch.setattr(provider, "_find_target_slot_js", MagicMock(return_value=None))
+
+        result = provider._rescan_for_slot_until_window_open(
+            MagicMock(),
+            time(8, 0),
+            4,
+            32,
+            8,
+            set(),
+            target_ms,
+        )
+
+        assert result is None
+        coarse = walden_module._SLOT_RESCAN_INTERVAL_S
+        tight = walden_module._SLOT_RESCAN_FINAL_INTERVAL_S
+        assert set(clock.sleeps) == {coarse, tight}
+        # Coarse first, tight afterwards, and never back to coarse.
+        first_tight = clock.sleeps.index(tight)
+        assert all(s == coarse for s in clock.sleeps[:first_tight])
+        assert all(s == tight for s in clock.sleeps[first_tight:])
+        # The switch happens once the target is within the final approach.
+        elapsed_at_switch = sum(clock.sleeps[:first_tight]) * 1000
+        remaining_at_switch = 10_000 - elapsed_at_switch
+        assert remaining_at_switch <= walden_module._SLOT_RESCAN_FINAL_APPROACH_MS
+        # It kept scanning past the target, through the grace period.
+        assert clock.now_ms >= target_ms + walden_module._SLOT_RESCAN_GRACE_MS
+
 
 class TestBatchBookingPreparation:
     """Tests for the restructured batch booking flow with pre-6:30 preparation."""
