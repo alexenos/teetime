@@ -2326,9 +2326,7 @@ class TestBatchBookingPreparation:
                 return SimpleNamespace(
                     success=False, booked_time=None, error_message="No time slots"
                 )
-            return SimpleNamespace(
-                success=True, booked_time=time(8, 16), confirmation_number="X"
-            )
+            return SimpleNamespace(success=True, booked_time=time(8, 16), confirmation_number="X")
 
         monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
 
