@@ -2086,6 +2086,125 @@ class TestFindAndBookFastJS:
         )
 
 
+class TestTimedModeSlotRescan:
+    """Tests that an empty pre-window scan does not end a timed booking attempt.
+
+    Before the booking window opens the tee sheet renders its rows but reports
+    no availability, so scanning once at 6:28 and giving up reports "no slots"
+    about a sheet that was merely still locked.
+    """
+
+    SLOT = {
+        "timeStr": "8:08",
+        "hours": 8,
+        "minutes": 8,
+        "index": 7,
+        "diff": 8,
+        "available": 4,
+        "isExact": False,
+    }
+
+    @staticmethod
+    def _shrink_rescan_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep the rescan loop fast enough for a unit test."""
+        import app.providers.walden_provider as walden_module
+
+        monkeypatch.setattr(walden_module, "_SLOT_RESCAN_INTERVAL_S", 0.01)
+        monkeypatch.setattr(walden_module, "_SLOT_RESCAN_GRACE_MS", 200)
+
+    def test_empty_prewindow_scan_retries_until_slot_appears(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A slot that only appears once the window opens is still booked."""
+        import time as time_module
+
+        self._shrink_rescan_budget(monkeypatch)
+        mock_driver = MagicMock()
+
+        finder = MagicMock(side_effect=[None, None, self.SLOT])
+        monkeypatch.setattr(provider, "_find_target_slot_js", finder)
+
+        staged = MagicMock(
+            return_value={
+                "success": True,
+                "blocked": False,
+                "phase": "complete",
+                "error": None,
+                "timing": {},
+            }
+        )
+        monkeypatch.setattr(provider, "_stage_timed_booking_chain_js", staged)
+        monkeypatch.setattr(provider, "_verify_booking_success", MagicMock(return_value=True))
+        monkeypatch.setattr(
+            provider, "_extract_confirmation_number", MagicMock(return_value="ABC123")
+        )
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            execute_at_timestamp_ms=int(time_module.time() * 1000) + 100,
+        )
+
+        assert result.success is True
+        assert result.booked_time == time(8, 8)
+        assert finder.call_count == 3, "should have re-scanned after the empty scans"
+        # The slot found during the rescan still goes through the timed chain,
+        # so the JS precision wait is preserved rather than bypassed.
+        staged.assert_called_once()
+        assert staged.call_args[0][1] == 7, "should stage the slot index found by the rescan"
+
+    def test_rescan_gives_up_after_grace_window(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A genuinely empty sheet still fails, but only after the window opened."""
+        import time as time_module
+
+        self._shrink_rescan_budget(monkeypatch)
+        mock_driver = MagicMock()
+
+        finder = MagicMock(return_value=None)
+        monkeypatch.setattr(provider, "_find_target_slot_js", finder)
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            execute_at_timestamp_ms=int(time_module.time() * 1000) + 50,
+        )
+
+        assert result.success is False
+        assert "No time slots" in result.error_message
+        assert finder.call_count > 1, "should have retried before reporting no slots"
+
+    def test_no_rescan_outside_timed_mode(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ad-hoc bookings with the window long open still fail fast."""
+        mock_driver = MagicMock()
+
+        finder = MagicMock(return_value=None)
+        monkeypatch.setattr(provider, "_find_target_slot_js", finder)
+
+        result = provider._find_and_book_time_slot_sync(
+            mock_driver,
+            target_time=time(8, 0),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+        )
+
+        assert result.success is False
+        assert finder.call_count == 1, "no rescan loop without a target timestamp"
+
+
 class TestBatchBookingPreparation:
     """Tests for the restructured batch booking flow with pre-6:30 preparation."""
 
@@ -2162,6 +2281,75 @@ class TestBatchBookingPreparation:
         assert call_order.index("scroll") < call_order.index("find_and_book")
         # Verify timed mode was used (execute_at_timestamp_ms was passed)
         assert "timed_booking_True" in call_order
+
+    def test_every_booking_in_batch_gets_the_window_timestamp(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All bookings wait for 6:30, not just the first one.
+
+        Handing the timestamp only to booking 1 put the whole batch's window
+        gate behind that one booking: when it failed before reaching its wait,
+        every later booking raced against a still-locked tee sheet.
+        """
+        from datetime import datetime
+
+        import app.providers.walden_provider as walden_module
+
+        class DummyWait:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def until(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+        monkeypatch.setattr(walden_module, "WebDriverWait", DummyWait)
+        monkeypatch.setattr(
+            walden_module,
+            "expected_conditions",
+            SimpleNamespace(presence_of_element_located=lambda *_: None),
+        )
+
+        driver = MagicMock()
+        monkeypatch.setattr(provider, "_create_driver", lambda: driver)
+        monkeypatch.setattr(provider, "_perform_login", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_course_sync", lambda *_: True)
+        monkeypatch.setattr(provider, "_select_date_sync", lambda *_a, **_kw: True)
+        monkeypatch.setattr(provider, "_scroll_to_load_all_slots", lambda *_a, **_kw: None)
+        monkeypatch.setattr(provider, "_find_target_slot_js", lambda *_a, **_kw: None)
+
+        timestamps: list[int | None] = []
+
+        def mock_find_and_book(*_args: object, **kwargs: object) -> object:
+            timestamps.append(kwargs.get("execute_at_timestamp_ms"))
+            # First booking fails, exactly as it did on 2026-08-02.
+            if len(timestamps) == 1:
+                return SimpleNamespace(
+                    success=False, booked_time=None, error_message="No time slots"
+                )
+            return SimpleNamespace(
+                success=True, booked_time=time(8, 16), confirmation_number="X"
+            )
+
+        monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", mock_find_and_book)
+
+        from app.providers.base import BatchBookingRequest
+
+        result = provider._book_multiple_tee_times_sync(
+            target_date=date.today() + timedelta(days=7),
+            requests=[
+                BatchBookingRequest(booking_id="a", target_time=time(8, 0), num_players=4),
+                BatchBookingRequest(booking_id="b", target_time=time(8, 16), num_players=4),
+            ],
+            execute_at=datetime(2026, 2, 19, 6, 30, 0),
+        )
+
+        assert len(timestamps) == 2
+        assert all(ts is not None for ts in timestamps), (
+            "booking 2 must carry the timestamp too, so booking 1 failing early "
+            "cannot forfeit its wait for the window"
+        )
+        assert timestamps[0] == timestamps[1], "both should target the same moment"
+        assert result.total_succeeded == 1
 
     def test_batch_booking_uses_fast_js_when_execute_at_set(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
