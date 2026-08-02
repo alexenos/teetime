@@ -28,9 +28,16 @@ variable "github_branch" {
 }
 
 variable "cloud_run_memory" {
-  description = "Memory allocation for Cloud Run service"
+  description = <<-EOT
+    Memory allocation for Cloud Run service.
+
+    Headless Chrome peaks around 1 GiB on its own while a booking page with
+    150+ slots is loaded, on top of the always-on FastAPI process and Discord
+    gateway. At 1Gi the container was OOM-killed mid-booking (2026-08-02),
+    losing the result notification. Do not lower this below 2Gi.
+  EOT
   type        = string
-  default     = "1Gi"
+  default     = "2Gi"
 }
 
 variable "cloud_run_cpu" {

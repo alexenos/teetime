@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import sys
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
@@ -11,6 +13,9 @@ from app.models.database import init_db
 from app.providers.base import ReservationProvider
 from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
 from app.services.booking_service import booking_service
+
+if TYPE_CHECKING:
+    from app.services.discord_gateway import DiscordGateway
 
 
 def configure_logging() -> None:
@@ -33,10 +38,16 @@ def configure_logging() -> None:
     # Ensure our app loggers use the configured level
     logging.getLogger("app").setLevel(log_level)
 
-    # Reduce noise from third-party libraries unless in debug mode
-    if log_level > logging.DEBUG:
-        logging.getLogger("selenium").setLevel(logging.WARNING)
-        logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Silence the WebDriver wire loggers unconditionally - NOT gated on LOG_LEVEL.
+    #
+    # selenium.webdriver.remote.remote_connection logs every command payload at
+    # DEBUG, which includes the send_keys body used to fill the login form. With
+    # LOG_LEVEL=DEBUG (how this runs in production, to get BOOKING_DEBUG output)
+    # that wrote the Walden member number and password to Cloud Logging in
+    # cleartext on every booking run. These loggers must never be allowed to
+    # emit below WARNING regardless of how verbose the app itself is.
+    for wire_logger in ("selenium", "urllib3", "websockets", "httpcore"):
+        logging.getLogger(wire_logger).setLevel(logging.WARNING)
 
 
 configure_logging()
@@ -79,11 +90,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         provider = MockWaldenProvider()
     booking_service.set_reservation_provider(provider)
 
+    # Any booking still IN_PROGRESS is left over from a process that died
+    # mid-attempt, since no attempt survives a restart. Resolve those and tell
+    # the user, rather than leaving the row stuck and the request unanswered.
+    # This runs as a background task so a slow or unreachable messaging channel
+    # cannot block startup, and it waits for the gateway first so the
+    # notification has somewhere to go.
+    reconcile_task = asyncio.create_task(
+        _reconcile_after_startup(discord_gateway), name="reconcile-interrupted-bookings"
+    )
+
     yield
 
+    # Cancel and collect the reconcile task before tearing the gateway down, so
+    # it can't be left pending against a closed client.
+    reconcile_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await reconcile_task
+    # Let any booking attempt still in flight report its outcome before the
+    # provider closes underneath it.
+    await booking_service.wait_for_background_bookings()
     if discord_gateway is not None:
         await discord_gateway.stop()
     await provider.close()
+
+
+async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> None:
+    """Reconcile interrupted bookings once the messaging channel can deliver."""
+    try:
+        if discord_gateway is not None:
+            await discord_gateway.client.wait_until_ready()
+        await booking_service.reconcile_interrupted_bookings()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Failed to reconcile interrupted bookings at startup")
 
 
 app = FastAPI(
