@@ -50,6 +50,20 @@ class Settings(BaseSettings):
     # Off by default until it has won a real race.
     walden_direct_http_booking: bool = False
 
+    # Whether a booking uses the fast chain (JS, or direct HTTP when the flag
+    # above is on) instead of the original Selenium flow. This is deliberately
+    # NOT derived from whether the booking is timed: waiting for 6:30 and going
+    # fast are independent, and conflating them left the fast chain reachable
+    # only from the scheduled batch job. See issue #124.
+    #
+    # Batch (the 6:30 race) defaults on - that is what it was built for.
+    walden_fast_booking_batch: bool = True
+    # Ad-hoc bookings (a date inside the 7-day window, booked on the spot)
+    # default off, so they keep today's behavior until this is opted into.
+    # Turn it on to exercise the fast/direct chain off-race, where losing the
+    # slot costs nothing.
+    walden_fast_booking_immediate: bool = False
+
     user_phone_number: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./teetime.db"
