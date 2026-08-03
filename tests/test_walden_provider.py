@@ -2958,7 +2958,14 @@ class TestBookingPathDefaults:
     to be configured for.
     """
 
-    def test_direct_chain_is_on_for_both_paths(self) -> None:
+    # Field name -> shipped default. Uppercased, each is also its env var name.
+    FLAG_DEFAULTS = {
+        "walden_direct_http_booking": True,
+        "walden_fast_booking_immediate": True,
+        "walden_fast_booking_batch": True,
+    }
+
+    def test_direct_chain_is_on_for_both_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Direct HTTP plus the ad-hoc fast path: the off-race validation setup.
 
         Ad-hoc bookings are the safe place to meet the live site - a lost slot
@@ -2968,11 +2975,17 @@ class TestBookingPathDefaults:
         """
         from app.config import Settings
 
+        # _env_file=None silences .env but not the process environment -
+        # EnvSettingsSource still reads it. Without this the test would measure
+        # whatever the shell exported and pass while the shipped default drifted,
+        # which is the one thing it exists to catch.
+        for field in self.FLAG_DEFAULTS:
+            monkeypatch.delenv(field.upper(), raising=False)
+
         defaults = Settings(_env_file=None)
 
-        assert defaults.walden_direct_http_booking is True
-        assert defaults.walden_fast_booking_immediate is True
-        assert defaults.walden_fast_booking_batch is True
+        for field, expected in self.FLAG_DEFAULTS.items():
+            assert getattr(defaults, field) is expected, field
 
 
 class TestImmediateBookingFastPath:
