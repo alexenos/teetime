@@ -39,3 +39,11 @@ cloud_sql_disk_size = 10
 # Logging configuration
 # Set to "DEBUG" to see BOOKING_DEBUG messages in GCP Cloud Logs
 log_level = "DEBUG"
+
+# Booking path. The direct-HTTP chain and the ad-hoc (immediate) fast path are
+# both on so the direct path can be validated against the live site off-race:
+# book a tee time inside the 7-day window on a slot nobody wants, confirm it,
+# cancel it. Set both to false to put every booking back on the browser chain.
+walden_direct_http_booking    = true
+walden_fast_booking_batch     = true
+walden_fast_booking_immediate = true

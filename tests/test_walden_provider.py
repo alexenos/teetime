@@ -2652,10 +2652,10 @@ class TestDirectHttpBookingWiring:
 
         return DirectBookingResult(**overrides)  # type: ignore[arg-type]
 
-    def test_disabled_by_default(
+    def test_declines_when_the_flag_is_off(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The flag is off unless explicitly enabled."""
+        """Switching the flag off must take the direct path out of the picture."""
         monkeypatch.setattr(settings, "walden_direct_http_booking", False)
         assert provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, None) is None
 
@@ -2948,6 +2948,31 @@ class TestDirectHttpBookingWiring:
         assert result.success is True
         timed_chain.assert_not_called()
         fast_chain.assert_not_called()
+
+
+class TestBookingPathDefaults:
+    """The shipped defaults decide which chain books a real tee time.
+
+    Built from the code defaults alone (no .env, no deployment env) so this
+    pins what the repo ships rather than what the machine running it happens
+    to be configured for.
+    """
+
+    def test_direct_chain_is_on_for_both_paths(self) -> None:
+        """Direct HTTP plus the ad-hoc fast path: the off-race validation setup.
+
+        Ad-hoc bookings are the safe place to meet the live site - a lost slot
+        on a Tuesday afternoon costs nothing, a lost 6:30 race costs the tee
+        time. Flipping either of these back off is a deliberate decision, not
+        something that should slip through.
+        """
+        from app.config import Settings
+
+        defaults = Settings(_env_file=None)
+
+        assert defaults.walden_direct_http_booking is True
+        assert defaults.walden_fast_booking_immediate is True
+        assert defaults.walden_fast_booking_batch is True
 
 
 class TestImmediateBookingFastPath:

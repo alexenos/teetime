@@ -214,6 +214,26 @@ resource "google_cloud_run_v2_service" "teetime" {
         value = var.debug_artifacts_bucket
       }
 
+      # Booking-path flags. WALDEN_DIRECT_HTTP_BOOKING landed in #123 but was
+      # never wired through here, so the deployed service could only ever run
+      # the code default - the direct path has never actually executed in
+      # production. Passed explicitly now so all three can be flipped with a
+      # tfvars change instead of a code change.
+      env {
+        name  = "WALDEN_DIRECT_HTTP_BOOKING"
+        value = tostring(var.walden_direct_http_booking)
+      }
+
+      env {
+        name  = "WALDEN_FAST_BOOKING_BATCH"
+        value = tostring(var.walden_fast_booking_batch)
+      }
+
+      env {
+        name  = "WALDEN_FAST_BOOKING_IMMEDIATE"
+        value = tostring(var.walden_fast_booking_immediate)
+      }
+
       dynamic "env" {
         for_each = toset(local.runtime_secrets)
         content {

@@ -42,13 +42,17 @@ class Settings(BaseSettings):
     walden_password: str = ""
     walden_base_url: str = "https://www.waldengolf.com"
 
-    # Run the 6:30 booking chain as direct PrimeFaces HTTP calls instead of
-    # browser clicks. Login, navigation and slot discovery still run in Chrome;
-    # only the race itself moves to HTTP. A failure before the reservation is
-    # submitted falls back to the JS chain; a failure after it is reported
-    # without a browser retry, because the slot may already be held.
-    # Off by default until it has won a real race.
-    walden_direct_http_booking: bool = False
+    # Run the booking chain as direct PrimeFaces HTTP calls instead of browser
+    # clicks. Login, navigation and slot discovery still run in Chrome; only the
+    # chain itself moves to HTTP. A failure before the reservation is submitted
+    # falls back to the JS chain; a failure after it is reported without a
+    # browser retry, because the slot may already be held.
+    #
+    # On, paired with walden_fast_booking_immediate below, because the only way
+    # to exercise this against the live site is to run it there. Ad-hoc
+    # bookings are the safe place to find out - a lost slot on a Tuesday
+    # afternoon costs nothing, a lost 6:30 race costs the tee time.
+    walden_direct_http_booking: bool = True
 
     # Whether a booking uses the fast chain (JS, or direct HTTP when the flag
     # above is on) instead of the original Selenium flow. This is deliberately
@@ -58,11 +62,11 @@ class Settings(BaseSettings):
     #
     # Batch (the 6:30 race) defaults on - that is what it was built for.
     walden_fast_booking_batch: bool = True
-    # Ad-hoc bookings (a date inside the 7-day window, booked on the spot)
-    # default off, so they keep today's behavior until this is opted into.
-    # Turn it on to exercise the fast/direct chain off-race, where losing the
-    # slot costs nothing.
-    walden_fast_booking_immediate: bool = False
+    # Ad-hoc bookings (a date inside the 7-day window, booked on the spot) are
+    # on so the chain gets exercised off-race, where losing the slot costs
+    # nothing. Set this and walden_direct_http_booking to false together to put
+    # ad-hoc bookings back on the original Selenium flow.
+    walden_fast_booking_immediate: bool = True
 
     user_phone_number: str = ""
 
