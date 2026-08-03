@@ -5,7 +5,9 @@ These tests verify the core business logic for managing tee time bookings
 and SMS conversations.
 """
 
-from datetime import date, datetime, time
+import asyncio
+from collections.abc import Callable
+from datetime import date, datetime, time, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -393,8 +395,12 @@ class TestBookingServiceImmediateExecution:
 
                     result = await booking_service.create_booking("+15551234567", past_request)
 
+                    # create_booking returns as soon as the record exists so the
+                    # caller can acknowledge; the attempt runs in the background.
+                    assert result.status == BookingStatus.IN_PROGRESS
+                    await booking_service.wait_for_background_bookings()
+
             mock_provider.book_tee_time.assert_called_once()
-            assert result.status == BookingStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_create_booking_schedules_when_future(
@@ -492,8 +498,10 @@ class TestBookingServiceImmediateExecution:
 
                     result = await booking_service.create_booking("+15551234567", request)
 
+                    assert result.status == BookingStatus.IN_PROGRESS
+                    await booking_service.wait_for_background_bookings()
+
             mock_provider.book_tee_time.assert_called_once()
-            assert result.status == BookingStatus.SUCCESS
 
 
 class TestBookingServiceConfirmIntentImmediateExecution:
@@ -698,10 +706,22 @@ class TestBookingServiceIntentHandling:
         sample_booking: TeeTimeBooking,
     ) -> None:
         """Test handling a status intent with existing bookings."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
-            response = await booking_service._handle_status_intent(sample_session)
-            assert "upcoming bookings" in response.lower()
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                # sample_booking is for Dec 20; anchor "today" before it so the
+                # booking actually counts as upcoming rather than being filtered
+                # out (which would let the empty-state message satisfy the
+                # assertion by coincidence).
+                mock_ct_now.return_value = tz.localize(datetime(2025, 12, 13, 8, 0))
+                response = await booking_service._handle_status_intent(sample_session)
+
+        assert "upcoming bookings" in response.lower()
+        assert "Saturday, December 20" in response
+        assert "scheduled" in response
 
     @pytest.mark.asyncio
     async def test_handle_cancel_intent_no_bookings(
@@ -1471,6 +1491,8 @@ class TestBookingService48HourRestriction:
                 # for multi-player in test_multi_player_booking_rejected_within_48_hours)
                 booking = await booking_service.create_booking("+15551234567", request)
                 assert booking.request.num_players == 1
+                # Drain the background attempt before the database patch unwinds.
+                await booking_service.wait_for_background_bookings()
 
     @pytest.mark.asyncio
     async def test_multi_player_booking_allowed_after_48_hours(
@@ -2013,3 +2035,407 @@ class TestOriginChannelRouting:
                 await booking_service.execute_booking(sample_booking.id)
 
         assert mock_sms.send_booking_failure.await_args.args[4] == "778899"
+
+
+class TestStatusIntentVisibility:
+    """A booking must never be invisible just because it is mid-attempt.
+
+    A booking that was executing when the process died stayed IN_PROGRESS, and
+    the status listing only showed PENDING/SCHEDULED - so asking "did you book
+    it?" reported nothing at all about the booking that had just been made.
+    """
+
+    @staticmethod
+    def _booking(
+        status: BookingStatus,
+        requested_date: date,
+        requested_time: time = time(8, 0),
+        error_message: str | None = None,
+        actual_booked_time: time | None = None,
+    ) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id=f"id-{status.value}-{requested_date}",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=requested_date,
+                requested_time=requested_time,
+                num_players=4,
+            ),
+            status=status,
+            error_message=error_message,
+            actual_booked_time=actual_booked_time,
+        )
+
+    @pytest.mark.asyncio
+    async def test_in_progress_booking_is_listed(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """A booking that is mid-attempt shows up in the status listing."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        in_progress = self._booking(BookingStatus.IN_PROGRESS, date(2026, 8, 8), time(17, 0))
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[in_progress])
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = tz.localize(datetime(2026, 8, 2, 15, 31))
+                response = await booking_service._handle_status_intent(sample_session)
+
+        assert "Saturday, August 08" in response
+        assert "05:00 PM" in response
+        assert "in_progress" in response
+
+    @pytest.mark.asyncio
+    async def test_success_shows_the_time_actually_booked(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """A fallback booking lists the time secured, not the time asked for."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        # Asked for 5:00 PM, the fallback window landed 5:08 PM.
+        booked = self._booking(
+            BookingStatus.SUCCESS,
+            date(2026, 8, 8),
+            requested_time=time(17, 0),
+            actual_booked_time=time(17, 8),
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booked])
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = tz.localize(datetime(2026, 8, 2, 15, 31))
+                response = await booking_service._handle_status_intent(sample_session)
+
+        assert "05:08 PM" in response
+        # Showing the requested time here would tell the user to turn up eight
+        # minutes early for a slot that isn't theirs.
+        assert "05:00 PM" not in response
+        assert "success" in response
+
+    @pytest.mark.asyncio
+    async def test_future_failure_is_listed_with_reason(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Failures for tee times that haven't happened yet are surfaced."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        failed = self._booking(
+            BookingStatus.FAILED,
+            date(2026, 8, 9),
+            error_message="No time slots with 4 available spots",
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[failed])
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = tz.localize(datetime(2026, 8, 2, 15, 31))
+                response = await booking_service._handle_status_intent(sample_session)
+
+        assert "Recent failures" in response
+        assert "No time slots with 4 available spots" in response
+
+    @pytest.mark.asyncio
+    async def test_past_bookings_are_not_listed(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Old failures don't accumulate in the listing forever."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        stale = [
+            self._booking(BookingStatus.FAILED, date(2023, 12, 23)),
+            self._booking(BookingStatus.SUCCESS, date(2025, 12, 29)),
+        ]
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=stale)
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = tz.localize(datetime(2026, 8, 2, 15, 31))
+                response = await booking_service._handle_status_intent(sample_session)
+
+        assert "don't have any upcoming bookings" in response.lower()
+
+
+class TestReconcileInterruptedBookings:
+    """Bookings orphaned in IN_PROGRESS by a crash must be resolved and reported.
+
+    A row left at IN_PROGRESS by a run that died mid-attempt (an OOM kill, a
+    deploy) sits there forever, and the user is never told the attempt went
+    nowhere. Reconciliation resolves those - but only those: this instance sets
+    IN_PROGRESS itself for attempts that are still running, and failing one of
+    those would both lie to the user and clobber the result it is about to write.
+    """
+
+    @staticmethod
+    def _in_progress_booking(
+        origin_channel_id: str | None = None,
+        updated_at: datetime | None = None,
+    ) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id="orphan01",
+            phone_number="+15550001111",
+            request=TeeTimeRequest(
+                requested_date=date(2026, 8, 8),
+                requested_time=time(17, 0),
+                num_players=4,
+            ),
+            status=BookingStatus.IN_PROGRESS,
+            origin_channel_id=origin_channel_id,
+            # Default to a row last touched well before any test-constructed
+            # service started, i.e. a genuine prior-run orphan.
+            updated_at=updated_at or datetime(2026, 8, 2, 20, 21, 54),
+        )
+
+    @staticmethod
+    def _recorder(sink: list[TeeTimeBooking]) -> Callable[[TeeTimeBooking], TeeTimeBooking]:
+        """Build an update_booking side effect that records what it was given."""
+
+        def record(booking: TeeTimeBooking) -> TeeTimeBooking:
+            sink.append(booking)
+            return booking
+
+        return record
+
+    @pytest.mark.asyncio
+    async def test_marks_orphan_failed_and_notifies(self, booking_service: BookingService) -> None:
+        """An orphaned booking is marked failed and the user is told."""
+        orphan = self._in_progress_booking(origin_channel_id="9990001112223330")
+        updated: list[TeeTimeBooking] = []
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[orphan])
+            mock_db.update_booking = AsyncMock(side_effect=self._recorder(updated))
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        assert len(result) == 1
+        assert updated[0].status == BookingStatus.FAILED
+        # The reservation's true state is unknown - the message must say so
+        # rather than claiming the booking definitely failed.
+        assert updated[0].error_message is not None
+        assert "may or may not" in updated[0].error_message
+        mock_sms.send_booking_failure.assert_awaited_once()
+        assert (
+            mock_sms.send_booking_failure.await_args.kwargs["origin_channel_id"]
+            == "9990001112223330"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_orphans_is_a_noop(self, booking_service: BookingService) -> None:
+        """With nothing stuck, reconciliation does nothing and sends nothing."""
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.update_booking = AsyncMock()
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        assert result == []
+        mock_db.update_booking.assert_not_awaited()
+        mock_sms.send_booking_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_notification_failure_still_reconciles(
+        self, booking_service: BookingService
+    ) -> None:
+        """A dead messaging channel must not leave the row stuck IN_PROGRESS."""
+        orphan = self._in_progress_booking()
+        updated: list[TeeTimeBooking] = []
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[orphan])
+            mock_db.update_booking = AsyncMock(side_effect=self._recorder(updated))
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock(side_effect=RuntimeError("no gateway"))
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        assert len(result) == 1
+        assert updated[0].status == BookingStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_live_attempt_from_this_instance_is_left_alone(
+        self, booking_service: BookingService
+    ) -> None:
+        """An attempt this process started is still running, not orphaned.
+
+        The REST API, the scheduler's batch job and a confirmed chat booking can
+        all set IN_PROGRESS after startup. Reconciliation runs as a background
+        task once the gateway is ready, so it can overlap with those - and
+        failing one would both lie to the user and clobber the real outcome the
+        attempt is about to write.
+        """
+        live = self._in_progress_booking(
+            updated_at=booking_service._started_at + timedelta(seconds=1)
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[live])
+            mock_db.update_booking = AsyncMock()
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        assert result == []
+        mock_db.update_booking.assert_not_awaited()
+        mock_sms.send_booking_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unwritable_row_does_not_strand_the_others(
+        self, booking_service: BookingService
+    ) -> None:
+        """One row that won't persist must not abort the whole sweep."""
+        first = self._in_progress_booking()
+        first.id = "orphan-bad"
+        second = self._in_progress_booking()
+        second.id = "orphan-good"
+
+        async def update(booking: TeeTimeBooking) -> TeeTimeBooking:
+            if booking.id == "orphan-bad":
+                raise ValueError("Booking orphan-bad not found")
+            return booking
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[first, second])
+            mock_db.update_booking = AsyncMock(side_effect=update)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        # Only the row we actually persisted is reported, and only it is
+        # notified - telling the user about a failure we could not record would
+        # leave the row stuck and the message wrong.
+        assert [b.id for b in result] == ["orphan-good"]
+        assert mock_sms.send_booking_failure.await_count == 1
+
+
+class TestImmediateBookingDoesNotBlockReply:
+    """The caller's reply must not depend on the booking attempt finishing.
+
+    execute_booking used to be awaited inline inside create_booking, which meant
+    the Discord gateway could not send its reply until a ~75s Selenium run
+    finished. When the container was OOM-killed mid-attempt the reply died with
+    it and the user got silence.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_booking_returns_before_attempt_completes(
+        self, booking_service: BookingService
+    ) -> None:
+        """create_booking returns while the attempt is still running."""
+        import pytz
+
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 29),
+            requested_time=time(8, 0),
+            num_players=4,
+        )
+        release = asyncio.Event()
+
+        async def slow_booking(**_kwargs: object) -> BookingResult:
+            await release.wait()
+            return BookingResult(success=True, booked_time=time(8, 0))
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+            mock_db.get_booking = AsyncMock(
+                side_effect=lambda _id: TeeTimeBooking(
+                    id=_id,
+                    phone_number="+15551234567",
+                    request=request,
+                    status=BookingStatus.IN_PROGRESS,
+                )
+            )
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(side_effect=slow_booking)
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+
+                with patch.object(CTDateTime, "now") as mock_ct_now:
+                    tz = pytz.timezone("America/Chicago")
+                    mock_ct_now.return_value = tz.localize(datetime(2025, 12, 22, 10, 0))
+
+                    result = await booking_service.create_booking("+15551234567", request)
+
+                    # The attempt is deliberately still blocked here: create_booking
+                    # returned without waiting for it.
+                    assert result.status == BookingStatus.IN_PROGRESS
+                    assert not mock_sms.send_booking_confirmation.await_count
+
+                    release.set()
+                    await booking_service.wait_for_background_bookings()
+
+                # Only once the attempt finishes does the user get the outcome.
+                mock_sms.send_booking_confirmation.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_background_attempt_crash_is_contained(
+        self, booking_service: BookingService
+    ) -> None:
+        """An exception in the background attempt is logged, not left unretrieved."""
+        with patch.object(
+            booking_service, "execute_booking", new=AsyncMock(side_effect=RuntimeError("boom"))
+        ):
+            booking_service._spawn_booking_execution("orphan01")
+            assert booking_service._background_tasks
+
+            # Must not raise, and must not leave the task result unretrieved.
+            await booking_service.wait_for_background_bookings()
+
+        assert not booking_service._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_shutdown_wait_cancels_a_hung_attempt(
+        self, booking_service: BookingService
+    ) -> None:
+        """A hung Selenium run must not block gateway and provider cleanup.
+
+        Shutdown awaits this before stopping the gateway and closing the
+        provider, and Cloud Run allows only seconds between SIGTERM and SIGKILL.
+        """
+
+        async def never_finishes(_booking_id: str) -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        with patch.object(booking_service, "execute_booking", new=never_finishes):
+            booking_service._spawn_booking_execution("hung01")
+
+            await booking_service.wait_for_background_bookings(timeout=0.05)
+
+        assert not booking_service._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_spawned_task_is_strongly_referenced(
+        self, booking_service: BookingService
+    ) -> None:
+        """The task is held until it completes, so it can't be garbage collected."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_execute(_booking_id: str) -> bool:
+            started.set()
+            await release.wait()
+            return True
+
+        with patch.object(booking_service, "execute_booking", new=slow_execute):
+            booking_service._spawn_booking_execution("orphan01")
+            await started.wait()
+            assert len(booking_service._background_tasks) == 1
+
+            release.set()
+            await booking_service.wait_for_background_bookings()
+
+        assert not booking_service._background_tasks

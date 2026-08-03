@@ -28,9 +28,32 @@ variable "github_branch" {
 }
 
 variable "cloud_run_memory" {
-  description = "Memory allocation for Cloud Run service"
+  description = <<-EOT
+    Memory allocation for Cloud Run service.
+
+    Headless Chrome peaks around 1 GiB on its own while a booking page with
+    150+ slots is loaded, on top of the always-on FastAPI process and Discord
+    gateway. At 1Gi the container was OOM-killed mid-booking (2026-08-02),
+    losing the result notification. Do not lower this below 2Gi.
+  EOT
   type        = string
-  default     = "1Gi"
+  default     = "2Gi"
+
+  # The default only applies when a caller omits the variable; a tfvars override
+  # could still set 1Gi and silently reintroduce the OOM. Reject that outright.
+  #
+  # Normalises to MiB and compares once. Written as a single try() because
+  # Terraform does not guarantee short-circuit evaluation of && - a malformed
+  # value must fall through to false rather than erroring out of the check
+  # itself. Avoids endswith(), which needs Terraform 1.3 (this module allows 1.0).
+  validation {
+    condition = try(
+      tonumber(regex("^([0-9]+)(Mi|Gi)$", var.cloud_run_memory)[0]) *
+      (regex("^([0-9]+)(Mi|Gi)$", var.cloud_run_memory)[1] == "Gi" ? 1024 : 1) >= 2048,
+      false
+    )
+    error_message = "cloud_run_memory must be at least 2Gi (or 2048Mi), formatted like \"2Gi\" or \"2048Mi\". Headless Chrome OOM-killed the container at 1Gi, losing the booking result."
+  }
 }
 
 variable "cloud_run_cpu" {

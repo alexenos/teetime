@@ -5,6 +5,8 @@ This module provides the core business logic for handling SMS conversations,
 processing booking requests, and executing reservations at the scheduled time.
 """
 
+import asyncio
+import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
@@ -22,6 +24,17 @@ from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
+
+logger = logging.getLogger(__name__)
+
+# Error recorded on bookings that were still IN_PROGRESS when the process died.
+# The club website may or may not have accepted the reservation, so the message
+# deliberately tells the user to verify rather than asserting either outcome.
+INTERRUPTED_ERROR_MESSAGE = (
+    "The booking attempt was interrupted before it finished (the service "
+    "restarted mid-attempt). The reservation may or may not have gone through - "
+    "please check the club website before rebooking."
+)
 
 
 class BookingService:
@@ -45,6 +58,14 @@ class BookingService:
     def __init__(self) -> None:
         """Initialize the booking service."""
         self._reservation_provider: ReservationProvider | None = None
+        # Strong references to in-flight background booking tasks. asyncio only
+        # holds weak references to tasks, so without this a booking run could be
+        # garbage collected mid-attempt.
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        # When this instance came up, in the same naive-UTC space the database
+        # stamps onto updated_at. Startup reconciliation uses it to tell rows
+        # orphaned by a previous process from attempts running right now.
+        self._started_at = datetime.now(UTC).replace(tzinfo=None)
 
     def set_reservation_provider(self, provider: ReservationProvider) -> None:
         """Set the reservation provider for executing bookings."""
@@ -206,9 +227,13 @@ class BookingService:
                 f"I'll text you with more details."
             )
         elif booking.status == BookingStatus.IN_PROGRESS:
+            # The booking window is already open, so the attempt is running right
+            # now in the background. This is the acknowledgement the user gets
+            # up front; the outcome arrives as a separate message.
             return (
-                f"Booking in progress for {date_str} at {time_str} "
-                f"for {request.num_players} players. I'll text you with the result."
+                f"On it - booking {date_str} at {time_str} "
+                f"for {request.num_players} players now. "
+                f"This takes a minute or two; I'll message you with the result."
             )
 
         exec_time = booking.scheduled_execution_time
@@ -300,8 +325,8 @@ class BookingService:
                         )
                     elif booking.status == BookingStatus.IN_PROGRESS:
                         response_parts.append(
-                            f"Booking in progress for {date_str} at {time_str}. "
-                            "I'll text you with the result."
+                            f"On it - booking {date_str} at {time_str} now. "
+                            "I'll message you with the result."
                         )
 
         if failed_requests:
@@ -318,19 +343,122 @@ class BookingService:
         if not user_bookings:
             return "You don't have any scheduled bookings. Would you like to book a tee time?"
 
-        pending = [
-            b for b in user_bookings if b.status in [BookingStatus.PENDING, BookingStatus.SCHEDULED]
+        today = CTDateTime.now().date()
+        upcoming = [b for b in user_bookings if b.request.requested_date >= today]
+
+        # IN_PROGRESS and SUCCESS belong here alongside PENDING/SCHEDULED. Leaving
+        # them out once made a booking that was mid-attempt look like it had never
+        # been created at all, which is worse than showing an unfinished state.
+        active = [
+            b
+            for b in upcoming
+            if b.status
+            in [
+                BookingStatus.PENDING,
+                BookingStatus.SCHEDULED,
+                BookingStatus.IN_PROGRESS,
+                BookingStatus.SUCCESS,
+            ]
         ]
-        if not pending:
+        # Failures are only worth surfacing for tee times that haven't happened
+        # yet - those are the ones the user can still do something about.
+        failed = [b for b in upcoming if b.status == BookingStatus.FAILED]
+
+        if not active and not failed:
             return "You don't have any upcoming bookings. Would you like to book a tee time?"
 
-        status_lines = []
-        for booking in pending:
+        def describe(booking: TeeTimeBooking) -> str:
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             time_str = booking.request.requested_time.strftime("%I:%M %p")
-            status_lines.append(f"- {date_str} at {time_str}: {booking.status.value}")
+            if booking.status == BookingStatus.SUCCESS and booking.actual_booked_time:
+                time_str = booking.actual_booked_time.strftime("%I:%M %p")
+            return f"- {date_str} at {time_str}: {booking.status.value}"
 
-        return "Your upcoming bookings:\n" + "\n".join(status_lines)
+        active.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
+        failed.sort(key=lambda b: (b.request.requested_date, b.request.requested_time))
+
+        sections = []
+        if active:
+            sections.append("Your upcoming bookings:\n" + "\n".join(describe(b) for b in active))
+        if failed:
+            failure_lines = []
+            for booking in failed:
+                line = describe(booking)
+                if booking.error_message:
+                    line += f"\n  {booking.error_message}"
+                failure_lines.append(line)
+            sections.append("Recent failures:\n" + "\n".join(failure_lines))
+
+        return "\n\n".join(sections)
+
+    async def reconcile_interrupted_bookings(self) -> list[TeeTimeBooking]:
+        """Resolve bookings left IN_PROGRESS by a crash or restart.
+
+        A booking attempt drives Selenium for a minute or more with the row held
+        at IN_PROGRESS. If the process dies in that window (an OOM kill, a
+        deploy, a Cloud Run instance replacement), nothing ever moves the row
+        off IN_PROGRESS and nothing tells the user - the request simply goes
+        quiet.
+
+        Only rows last touched before this process started are treated as
+        orphans. This instance can set IN_PROGRESS itself - through the REST
+        API, the scheduler's batch job, or a confirmed chat booking - and those
+        attempts are still running, so failing them here would both lie to the
+        user and clobber the real outcome they are about to write.
+
+        Each orphan is marked FAILED with an explanation that the reservation's
+        true state is unknown, and the user is notified. Callers should invoke
+        this once at startup, after the messaging channel is ready.
+
+        Returns:
+            The bookings that were successfully reconciled.
+        """
+        in_progress = await database_service.get_bookings(status=BookingStatus.IN_PROGRESS)
+        orphaned = [b for b in in_progress if b.updated_at < self._started_at]
+        if not orphaned:
+            return []
+
+        live = len(in_progress) - len(orphaned)
+        logger.warning(
+            "Found %d booking(s) stuck IN_PROGRESS from a previous run; marking failed "
+            "(%d in-progress booking(s) started by this instance left alone)",
+            len(orphaned),
+            live,
+        )
+
+        reconciled: list[TeeTimeBooking] = []
+        for booking in orphaned:
+            booking.status = BookingStatus.FAILED
+            booking.error_message = INTERRUPTED_ERROR_MESSAGE
+
+            try:
+                await database_service.update_booking(booking)
+            except Exception:
+                # One unwritable row must not strand every other orphan. Skip it
+                # and leave it for the next startup rather than telling the user
+                # about a failure we could not actually record.
+                logger.exception("Could not reconcile interrupted booking %s", booking.id)
+                continue
+
+            reconciled.append(booking)
+
+            date_str = booking.request.requested_date.strftime("%A, %B %d")
+            time_str = booking.request.requested_time.strftime("%I:%M %p")
+            booking_details = f"{date_str} at {time_str} for {booking.request.num_players} players"
+            logger.warning("Reconciled interrupted booking %s (%s)", booking.id, booking_details)
+
+            try:
+                await sms_service.send_booking_failure(
+                    booking.phone_number,
+                    INTERRUPTED_ERROR_MESSAGE,
+                    booking_details=booking_details,
+                    origin_channel_id=booking.origin_channel_id,
+                )
+            except Exception:
+                # A notification failure must not stop us reconciling the rest.
+                logger.exception("Could not notify user about interrupted booking %s", booking.id)
+
+        return reconciled
 
     async def _handle_cancel_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
@@ -556,8 +684,10 @@ class BookingService:
         conversation flow and the REST API.
 
         If the calculated execution time is in the past (i.e., the booking window
-        has already opened), the booking is executed immediately instead of being
-        scheduled for later.
+        has already opened), the attempt starts immediately in the background
+        rather than being scheduled for later. This call returns as soon as the
+        record is created, with the booking in IN_PROGRESS; the outcome is
+        reported to the user by execute_booking when the attempt finishes.
 
         Multi-player bookings (2+ players) are rejected if the tee time is within
         48 hours, because the Walden Golf website disables TBD guest placeholders
@@ -618,10 +748,71 @@ class BookingService:
         if exec_ct <= now_ct:
             booking_id_opt: str | None = created_booking.id
             if booking_id_opt is not None:
-                await self.execute_booking(booking_id_opt)
-                return await database_service.get_booking(booking_id_opt) or created_booking
+                # The booking window is already open, so this runs now rather
+                # than waiting for the scheduler. Run it as a background task
+                # instead of awaiting it: a booking attempt drives Selenium for
+                # a minute or more, and the caller (the Discord gateway) cannot
+                # send its reply until this returns. Awaiting it here means any
+                # crash during the attempt takes the user's reply down with it,
+                # leaving them with silence. The caller now acknowledges
+                # immediately and execute_booking sends the real outcome when
+                # it lands.
+                created_booking.status = BookingStatus.IN_PROGRESS
+                await database_service.update_booking(created_booking)
+                self._spawn_booking_execution(booking_id_opt)
 
         return created_booking
+
+    def _spawn_booking_execution(self, booking_id: str) -> None:
+        """Run execute_booking as a tracked background task."""
+        task = asyncio.create_task(
+            self._execute_booking_in_background(booking_id),
+            name=f"execute-booking-{booking_id}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _execute_booking_in_background(self, booking_id: str) -> None:
+        """Execute a booking, ensuring failures are logged rather than swallowed.
+
+        execute_booking already reports its own outcome to the user and records
+        it on the booking row. This wrapper only guards against an exception
+        escaping into an unretrieved task result, where it would vanish silently.
+        """
+        try:
+            await self.execute_booking(booking_id)
+        except Exception:
+            logger.exception("Background booking execution failed for %s", booking_id)
+
+    async def wait_for_background_bookings(self, timeout: float | None = None) -> None:
+        """Wait for all in-flight background booking attempts to finish.
+
+        Used by shutdown and by tests, which need the attempt to complete before
+        asserting on its result.
+
+        Args:
+            timeout: Seconds to wait before cancelling whatever is still
+                running. A booking attempt drives Selenium and can hang, so
+                shutdown passes a bound to keep one stuck attempt from blocking
+                gateway and provider cleanup. None waits indefinitely.
+        """
+        while self._background_tasks:
+            pending = tuple(self._background_tasks)
+            if timeout is None:
+                await asyncio.gather(*pending, return_exceptions=True)
+                continue
+
+            _, still_running = await asyncio.wait(pending, timeout=timeout)
+            if still_running:
+                logger.warning(
+                    "Cancelling %d booking attempt(s) still running after %ss",
+                    len(still_running),
+                    timeout,
+                )
+                for task in still_running:
+                    task.cancel()
+                await asyncio.gather(*still_running, return_exceptions=True)
+            return
 
     async def get_booking(self, booking_id: str) -> TeeTimeBooking | None:
         """
