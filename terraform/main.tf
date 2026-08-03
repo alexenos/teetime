@@ -217,8 +217,12 @@ resource "google_cloud_run_v2_service" "teetime" {
       # Booking-path flags. WALDEN_DIRECT_HTTP_BOOKING landed in #123 but was
       # never wired through here, so the deployed service could only ever run
       # the code default - the direct path has never actually executed in
-      # production. Passed explicitly now so all three can be flipped with a
-      # tfvars change instead of a code change.
+      # production.
+      #
+      # To change one of these for the deployed service, edit its default in
+      # variables.tf. cloudbuild.yaml applies with only four -var flags and
+      # *.tfvars is gitignored, so terraform.tfvars is not in the Cloud Build
+      # checkout and every other variable resolves to its default.
       env {
         name  = "WALDEN_DIRECT_HTTP_BOOKING"
         value = tostring(var.walden_direct_http_booking)
