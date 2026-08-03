@@ -62,6 +62,10 @@ class BookingService:
         # holds weak references to tasks, so without this a booking run could be
         # garbage collected mid-attempt.
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # When this instance came up, in the same naive-UTC space the database
+        # stamps onto updated_at. Startup reconciliation uses it to tell rows
+        # orphaned by a previous process from attempts running right now.
+        self._started_at = datetime.now(UTC).replace(tzinfo=None)
 
     def set_reservation_provider(self, provider: ReservationProvider) -> None:
         """Set the reservation provider for executing bookings."""
@@ -394,29 +398,49 @@ class BookingService:
         at IN_PROGRESS. If the process dies in that window (an OOM kill, a
         deploy, a Cloud Run instance replacement), nothing ever moves the row
         off IN_PROGRESS and nothing tells the user - the request simply goes
-        quiet. Because no attempt can survive a restart, any IN_PROGRESS row
-        found at startup is by definition orphaned.
+        quiet.
+
+        Only rows last touched before this process started are treated as
+        orphans. This instance can set IN_PROGRESS itself - through the REST
+        API, the scheduler's batch job, or a confirmed chat booking - and those
+        attempts are still running, so failing them here would both lie to the
+        user and clobber the real outcome they are about to write.
 
         Each orphan is marked FAILED with an explanation that the reservation's
         true state is unknown, and the user is notified. Callers should invoke
         this once at startup, after the messaging channel is ready.
 
         Returns:
-            The bookings that were reconciled.
+            The bookings that were successfully reconciled.
         """
-        orphaned = await database_service.get_bookings(status=BookingStatus.IN_PROGRESS)
+        in_progress = await database_service.get_bookings(status=BookingStatus.IN_PROGRESS)
+        orphaned = [b for b in in_progress if b.updated_at < self._started_at]
         if not orphaned:
             return []
 
+        live = len(in_progress) - len(orphaned)
         logger.warning(
-            "Found %d booking(s) stuck IN_PROGRESS from a previous run; marking failed",
+            "Found %d booking(s) stuck IN_PROGRESS from a previous run; marking failed "
+            "(%d in-progress booking(s) started by this instance left alone)",
             len(orphaned),
+            live,
         )
 
+        reconciled: list[TeeTimeBooking] = []
         for booking in orphaned:
             booking.status = BookingStatus.FAILED
             booking.error_message = INTERRUPTED_ERROR_MESSAGE
-            await database_service.update_booking(booking)
+
+            try:
+                await database_service.update_booking(booking)
+            except Exception:
+                # One unwritable row must not strand every other orphan. Skip it
+                # and leave it for the next startup rather than telling the user
+                # about a failure we could not actually record.
+                logger.exception("Could not reconcile interrupted booking %s", booking.id)
+                continue
+
+            reconciled.append(booking)
 
             date_str = booking.request.requested_date.strftime("%A, %B %d")
             time_str = booking.request.requested_time.strftime("%I:%M %p")
@@ -434,7 +458,7 @@ class BookingService:
                 # A notification failure must not stop us reconciling the rest.
                 logger.exception("Could not notify user about interrupted booking %s", booking.id)
 
-        return orphaned
+        return reconciled
 
     async def _handle_cancel_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
@@ -760,14 +784,35 @@ class BookingService:
         except Exception:
             logger.exception("Background booking execution failed for %s", booking_id)
 
-    async def wait_for_background_bookings(self) -> None:
+    async def wait_for_background_bookings(self, timeout: float | None = None) -> None:
         """Wait for all in-flight background booking attempts to finish.
 
         Used by shutdown and by tests, which need the attempt to complete before
         asserting on its result.
+
+        Args:
+            timeout: Seconds to wait before cancelling whatever is still
+                running. A booking attempt drives Selenium and can hang, so
+                shutdown passes a bound to keep one stuck attempt from blocking
+                gateway and provider cleanup. None waits indefinitely.
         """
         while self._background_tasks:
-            await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
+            pending = tuple(self._background_tasks)
+            if timeout is None:
+                await asyncio.gather(*pending, return_exceptions=True)
+                continue
+
+            _, still_running = await asyncio.wait(pending, timeout=timeout)
+            if still_running:
+                logger.warning(
+                    "Cancelling %d booking attempt(s) still running after %ss",
+                    len(still_running),
+                    timeout,
+                )
+                for task in still_running:
+                    task.cancel()
+                await asyncio.gather(*still_running, return_exceptions=True)
+            return
 
     async def get_booking(self, booking_id: str) -> TeeTimeBooking | None:
         """

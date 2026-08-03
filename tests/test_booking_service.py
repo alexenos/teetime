@@ -7,7 +7,7 @@ and SMS conversations.
 
 import asyncio
 from collections.abc import Callable
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2051,6 +2051,7 @@ class TestStatusIntentVisibility:
         requested_date: date,
         requested_time: time = time(8, 0),
         error_message: str | None = None,
+        actual_booked_time: time | None = None,
     ) -> TeeTimeBooking:
         return TeeTimeBooking(
             id=f"id-{status.value}-{requested_date}",
@@ -2062,6 +2063,7 @@ class TestStatusIntentVisibility:
             ),
             status=status,
             error_message=error_message,
+            actual_booked_time=actual_booked_time,
         )
 
     @pytest.mark.asyncio
@@ -2083,6 +2085,34 @@ class TestStatusIntentVisibility:
         assert "Saturday, August 08" in response
         assert "05:00 PM" in response
         assert "in_progress" in response
+
+    @pytest.mark.asyncio
+    async def test_success_shows_the_time_actually_booked(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """A fallback booking lists the time secured, not the time asked for."""
+        import pytz
+
+        tz = pytz.timezone("America/Chicago")
+        # Asked for 5:00 PM, the fallback window landed 5:08 PM.
+        booked = self._booking(
+            BookingStatus.SUCCESS,
+            date(2026, 8, 8),
+            requested_time=time(17, 0),
+            actual_booked_time=time(17, 8),
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booked])
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = tz.localize(datetime(2026, 8, 2, 15, 31))
+                response = await booking_service._handle_status_intent(sample_session)
+
+        assert "05:08 PM" in response
+        # Showing the requested time here would tell the user to turn up eight
+        # minutes early for a slot that isn't theirs.
+        assert "05:00 PM" not in response
+        assert "success" in response
 
     @pytest.mark.asyncio
     async def test_future_failure_is_listed_with_reason(
@@ -2132,17 +2162,21 @@ class TestStatusIntentVisibility:
 class TestReconcileInterruptedBookings:
     """Bookings orphaned in IN_PROGRESS by a crash must be resolved and reported.
 
-    No booking attempt survives a process restart, so any IN_PROGRESS row present
-    at startup is left over from a run that died mid-attempt (an OOM kill, a
-    deploy). Without reconciliation the row sits there forever and the user is
-    never told the attempt went nowhere.
+    A row left at IN_PROGRESS by a run that died mid-attempt (an OOM kill, a
+    deploy) sits there forever, and the user is never told the attempt went
+    nowhere. Reconciliation resolves those - but only those: this instance sets
+    IN_PROGRESS itself for attempts that are still running, and failing one of
+    those would both lie to the user and clobber the result it is about to write.
     """
 
     @staticmethod
-    def _in_progress_booking(origin_channel_id: str | None = None) -> TeeTimeBooking:
+    def _in_progress_booking(
+        origin_channel_id: str | None = None,
+        updated_at: datetime | None = None,
+    ) -> TeeTimeBooking:
         return TeeTimeBooking(
             id="orphan01",
-            phone_number="428931601318019073",
+            phone_number="+15550001111",
             request=TeeTimeRequest(
                 requested_date=date(2026, 8, 8),
                 requested_time=time(17, 0),
@@ -2150,6 +2184,9 @@ class TestReconcileInterruptedBookings:
             ),
             status=BookingStatus.IN_PROGRESS,
             origin_channel_id=origin_channel_id,
+            # Default to a row last touched well before any test-constructed
+            # service started, i.e. a genuine prior-run orphan.
+            updated_at=updated_at or datetime(2026, 8, 2, 20, 21, 54),
         )
 
     @staticmethod
@@ -2165,7 +2202,7 @@ class TestReconcileInterruptedBookings:
     @pytest.mark.asyncio
     async def test_marks_orphan_failed_and_notifies(self, booking_service: BookingService) -> None:
         """An orphaned booking is marked failed and the user is told."""
-        orphan = self._in_progress_booking(origin_channel_id="1533170075673296898")
+        orphan = self._in_progress_booking(origin_channel_id="9990001112223330")
         updated: list[TeeTimeBooking] = []
 
         with patch("app.services.booking_service.database_service") as mock_db:
@@ -2185,7 +2222,7 @@ class TestReconcileInterruptedBookings:
         mock_sms.send_booking_failure.assert_awaited_once()
         assert (
             mock_sms.send_booking_failure.await_args.kwargs["origin_channel_id"]
-            == "1533170075673296898"
+            == "9990001112223330"
         )
 
     @pytest.mark.asyncio
@@ -2221,6 +2258,63 @@ class TestReconcileInterruptedBookings:
 
         assert len(result) == 1
         assert updated[0].status == BookingStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_live_attempt_from_this_instance_is_left_alone(
+        self, booking_service: BookingService
+    ) -> None:
+        """An attempt this process started is still running, not orphaned.
+
+        The REST API, the scheduler's batch job and a confirmed chat booking can
+        all set IN_PROGRESS after startup. Reconciliation runs as a background
+        task once the gateway is ready, so it can overlap with those - and
+        failing one would both lie to the user and clobber the real outcome the
+        attempt is about to write.
+        """
+        live = self._in_progress_booking(
+            updated_at=booking_service._started_at + timedelta(seconds=1)
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[live])
+            mock_db.update_booking = AsyncMock()
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        assert result == []
+        mock_db.update_booking.assert_not_awaited()
+        mock_sms.send_booking_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unwritable_row_does_not_strand_the_others(
+        self, booking_service: BookingService
+    ) -> None:
+        """One row that won't persist must not abort the whole sweep."""
+        first = self._in_progress_booking()
+        first.id = "orphan-bad"
+        second = self._in_progress_booking()
+        second.id = "orphan-good"
+
+        async def update(booking: TeeTimeBooking) -> TeeTimeBooking:
+            if booking.id == "orphan-bad":
+                raise ValueError("Booking orphan-bad not found")
+            return booking
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[first, second])
+            mock_db.update_booking = AsyncMock(side_effect=update)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        # Only the row we actually persisted is reported, and only it is
+        # notified - telling the user about a failure we could not record would
+        # leave the row stuck and the message wrong.
+        assert [b.id for b in result] == ["orphan-good"]
+        assert mock_sms.send_booking_failure.await_count == 1
 
 
 class TestImmediateBookingDoesNotBlockReply:
@@ -2299,6 +2393,27 @@ class TestImmediateBookingDoesNotBlockReply:
 
             # Must not raise, and must not leave the task result unretrieved.
             await booking_service.wait_for_background_bookings()
+
+        assert not booking_service._background_tasks
+
+    @pytest.mark.asyncio
+    async def test_shutdown_wait_cancels_a_hung_attempt(
+        self, booking_service: BookingService
+    ) -> None:
+        """A hung Selenium run must not block gateway and provider cleanup.
+
+        Shutdown awaits this before stopping the gateway and closing the
+        provider, and Cloud Run allows only seconds between SIGTERM and SIGKILL.
+        """
+
+        async def never_finishes(_booking_id: str) -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        with patch.object(booking_service, "execute_booking", new=never_finishes):
+            booking_service._spawn_booking_execution("hung01")
+
+            await booking_service.wait_for_background_bookings(timeout=0.05)
 
         assert not booking_service._background_tasks
 

@@ -28,14 +28,25 @@ def isolated_logging() -> Iterator[None]:
     to WARNING. Without clearing them first a test would observe that leftover
     state rather than what the call under test actually did - and would pass
     even against a configure_logging() that never touched them.
+
+    Handlers are saved too: configure_logging() calls basicConfig(force=True),
+    which detaches every existing root handler - including pytest's capture
+    handler. Restoring only levels would leave later tests in the session
+    running against a root logger this fixture had quietly rewired.
     """
     names = [*WIRE_LOGGERS, "app", ""]
-    saved = {name: logging.getLogger(name).level for name in names}
+    saved_levels = {name: logging.getLogger(name).level for name in names}
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+
     for name in names:
         logging.getLogger(name).setLevel(logging.NOTSET)
-    yield
-    for name, level in saved.items():
-        logging.getLogger(name).setLevel(level)
+    try:
+        yield
+    finally:
+        for name, level in saved_levels.items():
+            logging.getLogger(name).setLevel(level)
+        root.handlers[:] = saved_handlers
 
 
 @pytest.mark.parametrize("log_level", ["DEBUG", "INFO", "WARNING"])

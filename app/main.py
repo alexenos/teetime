@@ -53,6 +53,16 @@ def configure_logging() -> None:
 configure_logging()
 logger = logging.getLogger(__name__)
 
+# How long startup reconciliation waits for the Discord gateway before giving up
+# on delivering its notifications and resolving the stuck rows regardless.
+GATEWAY_READY_TIMEOUT_SECONDS = 60
+
+# How long shutdown waits for in-flight booking attempts to report their result.
+# Cloud Run allows roughly 10s between SIGTERM and SIGKILL, so this only needs
+# to cover an attempt that is seconds from finishing; a hung Selenium run must
+# not hold up gateway and provider cleanup.
+SHUTDOWN_BOOKING_TIMEOUT_SECONDS = 8
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -108,8 +118,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     with suppress(asyncio.CancelledError):
         await reconcile_task
     # Let any booking attempt still in flight report its outcome before the
-    # provider closes underneath it.
-    await booking_service.wait_for_background_bookings()
+    # provider closes underneath it - but bounded, because a hung Selenium run
+    # would otherwise block gateway and provider cleanup until the platform
+    # kills the container.
+    await booking_service.wait_for_background_bookings(timeout=SHUTDOWN_BOOKING_TIMEOUT_SECONDS)
     if discord_gateway is not None:
         await discord_gateway.stop()
     await provider.close()
@@ -119,7 +131,21 @@ async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> 
     """Reconcile interrupted bookings once the messaging channel can deliver."""
     try:
         if discord_gateway is not None:
-            await discord_gateway.client.wait_until_ready()
+            try:
+                await asyncio.wait_for(
+                    discord_gateway.client.wait_until_ready(),
+                    timeout=GATEWAY_READY_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # A rejected token or an unreachable gateway would otherwise
+                # leave this waiting forever, and the stuck rows would never be
+                # resolved. Resolving them matters more than delivering the
+                # notification, so carry on and record why.
+                logger.warning(
+                    "Discord gateway not ready after %ss; reconciling anyway - "
+                    "interrupted-booking notifications may not be delivered",
+                    GATEWAY_READY_TIMEOUT_SECONDS,
+                )
         await booking_service.reconcile_interrupted_bookings()
     except asyncio.CancelledError:
         raise

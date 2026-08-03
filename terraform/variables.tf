@@ -38,6 +38,22 @@ variable "cloud_run_memory" {
   EOT
   type        = string
   default     = "2Gi"
+
+  # The default only applies when a caller omits the variable; a tfvars override
+  # could still set 1Gi and silently reintroduce the OOM. Reject that outright.
+  #
+  # Normalises to MiB and compares once. Written as a single try() because
+  # Terraform does not guarantee short-circuit evaluation of && - a malformed
+  # value must fall through to false rather than erroring out of the check
+  # itself. Avoids endswith(), which needs Terraform 1.3 (this module allows 1.0).
+  validation {
+    condition = try(
+      tonumber(regex("^([0-9]+)(Mi|Gi)$", var.cloud_run_memory)[0]) *
+      (regex("^([0-9]+)(Mi|Gi)$", var.cloud_run_memory)[1] == "Gi" ? 1024 : 1) >= 2048,
+      false
+    )
+    error_message = "cloud_run_memory must be at least 2Gi (or 2048Mi), formatted like \"2Gi\" or \"2048Mi\". Headless Chrome OOM-killed the container at 1Gi, losing the booking result."
+  }
 }
 
 variable "cloud_run_cpu" {
