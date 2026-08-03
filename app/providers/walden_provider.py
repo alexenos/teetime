@@ -785,12 +785,20 @@ class WaldenGolfProvider(ReservationProvider):
         earliest_time = time(earliest_minutes // 60, earliest_minutes % 60)
         latest_time = time(latest_minutes // 60, latest_minutes % 60)
 
+        # An ad-hoc booking is untimed, but untimed is not the same as slow. The
+        # fast chain is opt-in here (issue #124) so this path can exercise the
+        # JS/direct-HTTP chain off-race; with the flag off it runs exactly the
+        # Selenium flow it always has.
+        use_fast_js = settings.walden_fast_booking_immediate
+
         logger.info(
             f"BOOKING_DEBUG: === STARTING BOOKING ATTEMPT === "
             f"date={target_date} ({target_date.strftime('%A')}), "
             f"requested_time={target_time.strftime('%H:%M')}, "
             f"time_range={earliest_time.strftime('%H:%M')}-{latest_time.strftime('%H:%M')}, "
-            f"players={num_players}, fallback_window={fallback_window_minutes}min"
+            f"players={num_players}, fallback_window={fallback_window_minutes}min, "
+            f"mode={'fast chain' if use_fast_js else 'Selenium'}"
+            f"{' (direct HTTP enabled)' if use_fast_js and settings.walden_direct_http_booking else ''}"
         )
         driver = self._create_driver()
         try:
@@ -848,6 +856,7 @@ class WaldenGolfProvider(ReservationProvider):
                 num_players,
                 fallback_window_minutes,
                 tee_time_interval_minutes=tee_time_interval_minutes,
+                use_fast_js=use_fast_js,
             )
 
             logger.info(
@@ -1065,9 +1074,16 @@ class WaldenGolfProvider(ReservationProvider):
             # Each slot is cached by booking_id; at click time the prelocated slot
             # is reused unless a dynamic times_to_exclude conflict invalidates it,
             # in which case a fresh DOM scan occurs as a fallback.
-            use_fast_booking = execute_at is not None
+            #
+            # Fast-ness is a setting, not a consequence of being timed. Deriving
+            # it from execute_at made the fast/direct chain reachable only from
+            # the 6:30 job, which meant the least-verified code could only ever
+            # be exercised on the one morning that matters (issue #124).
+            # Pre-location, on the other hand, is purely about beating the
+            # window open, so it stays keyed to execute_at.
+            use_fast_booking = settings.walden_fast_booking_batch
             prelocated_slots: dict[str, dict[str, Any]] = {}
-            if use_fast_booking:
+            if use_fast_booking and execute_at is not None:
                 logger.info(
                     "BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript "
                     f"for {len(sorted_requests)} request(s)"
@@ -1126,14 +1142,29 @@ class WaldenGolfProvider(ReservationProvider):
                     f"({execute_at_ct.strftime('%H:%M:%S.%f')} CT, delay={delay_ms}ms)"
                 )
 
+                if not use_fast_booking:
+                    # The 6:30 gate lives inside the fast chain - the JS
+                    # precision wait, or the direct booker's. The Selenium flow
+                    # ignores execute_at_timestamp_ms entirely, so with the fast
+                    # chain switched off there is nothing left holding the
+                    # batch back and it would race a still-locked tee sheet.
+                    # Wait in Python instead: coarser, but a kill switch that
+                    # silently drops the window gate is worse than a slow one.
+                    logger.info(
+                        "BATCH_BOOKING: Fast chain disabled - waiting for the booking "
+                        "window in Python before the Selenium flow"
+                    )
+                    self._precision_wait_until(execute_at)
+
             # Track times that have been successfully booked to avoid conflicts
             # When a booking succeeds, we add its booked_time to this set
             booked_times: set[time] = set()
 
             logger.info(
                 f"BATCH_BOOKING: Step 8 - Booking {len(sorted_requests)} tee times"
-                f"{f' (timed JS mode, {len(prelocated_slots)} pre-located)' if execute_at_timestamp_ms else ''}"
+                f"{f' (timed JS mode, {len(prelocated_slots)} pre-located)' if use_fast_booking and execute_at_timestamp_ms else ''}"
                 f"{f' (fast JS mode, {len(prelocated_slots)} pre-located)' if use_fast_booking and not execute_at_timestamp_ms else ''}"
+                f"{' (Selenium mode, fast chain disabled)' if not use_fast_booking else ''}"
             )
             for i, req in enumerate(sorted_requests, 1):
                 # Calculate times to exclude: times already booked + times needed by later bookings

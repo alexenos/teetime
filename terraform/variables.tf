@@ -142,6 +142,49 @@ variable "log_level" {
   default     = "INFO"
 }
 
+variable "walden_direct_http_booking" {
+  description = <<-EOT
+    Run the booking chain as direct PrimeFaces HTTP calls instead of browser
+    clicks. Login, navigation and slot discovery still run in Chrome; only the
+    chain itself moves to HTTP, and a failure before the reservation is
+    submitted falls back to the JavaScript chain.
+
+    On, together with walden_fast_booking_immediate, so the path can be
+    validated against the live site off-race. Set both to false to revert to
+    the browser chain everywhere.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "walden_fast_booking_batch" {
+  description = <<-EOT
+    Whether the scheduled 6:30 batch runs the fast chain (JS, or direct HTTP
+    when the flag above is on) instead of the original Selenium flow. This is
+    what the fast chain was built for, so it defaults on.
+
+    Turning it off is a genuine kill switch, not just a speed change: the batch
+    falls back to a Python-side precision wait for the booking window, because
+    the 6:30 gate itself lives inside the fast chain.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "walden_fast_booking_immediate" {
+  description = <<-EOT
+    Whether an ad-hoc booking - a date already inside the 7-day window, booked
+    on the spot rather than at 6:30 - runs the fast chain instead of the
+    original Selenium flow.
+
+    On so the fast/direct chain can be exercised off-race, on a tee time where
+    losing the slot costs nothing, instead of first meeting real traffic during
+    a live 6:30 race. See issue #124.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "debug_artifacts_bucket" {
   description = "GCS bucket name for debug artifacts (screenshots + HTML)"
   type        = string
