@@ -1297,6 +1297,179 @@ class TestBookingServiceIncomingMessage:
                 assert "awaiting_date" in call_args[0][1].lower()
 
 
+class TestConfirmationShortcut:
+    """Tests for settling a pending confirmation without calling the LLM."""
+
+    @staticmethod
+    def _session_awaiting_confirmation() -> UserSession:
+        """Build a session parked on a single pending booking, awaiting yes/no."""
+        return UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+                num_players=4,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_yes_books_without_calling_the_llm(self, booking_service: BookingService) -> None:
+        """A bare 'yes' is already understood - it must not need the API."""
+        session = self._session_awaiting_confirmation()
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock(return_value=session)
+
+            with patch("app.services.booking_service.gemini_service") as mock_gemini:
+                mock_gemini.parse_message = AsyncMock()
+                with patch.object(
+                    booking_service,
+                    "_handle_confirm_intent",
+                    AsyncMock(return_value="Booking scheduled!"),
+                ) as mock_confirm:
+                    response = await booking_service.handle_incoming_message("+15551234567", "Yes")
+
+            assert response == "Booking scheduled!"
+            mock_confirm.assert_awaited_once_with(session)
+            mock_gemini.parse_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_llm_outage_no_longer_loses_a_confirmation(
+        self, booking_service: BookingService
+    ) -> None:
+        """Regression: the reported incident, where 'Yes' hit a Gemini failure.
+
+        Two tee times were parsed and echoed back, then the confirmation was
+        sent to the API purely to be told 'yes' means yes - and the API was
+        down that second, so nothing was booked.
+        """
+        session = self._session_awaiting_confirmation()
+        session.pending_request = None
+        session.pending_requests = [
+            TeeTimeRequest(
+                requested_date=date(2025, 8, 8), requested_time=time(17, 0), num_players=4
+            ),
+            TeeTimeRequest(
+                requested_date=date(2025, 8, 8), requested_time=time(17, 8), num_players=4
+            ),
+        ]
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock(return_value=session)
+
+            with patch("app.services.booking_service.gemini_service") as mock_gemini:
+                mock_gemini.parse_message = AsyncMock(side_effect=AssertionError("LLM is down"))
+                with patch.object(
+                    booking_service,
+                    "_handle_confirm_intent",
+                    AsyncMock(return_value="Booked 2 tee times."),
+                ):
+                    response = await booking_service.handle_incoming_message("+15551234567", "Yes")
+
+            assert response == "Booked 2 tee times."
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Yes",
+            "yes",
+            "yes!",
+            "  YES  ",
+            "y",
+            "yep",
+            "yeah",
+            "ok",
+            "Okay.",
+            "sure",
+            "confirm",
+            "do it",
+            "book it",
+            "sounds good",
+            "👍",
+        ],
+    )
+    def test_affirmative_variants_are_recognized(
+        self, booking_service: BookingService, message: str
+    ) -> None:
+        """Casing, trailing punctuation and a thumbs-up all read as yes."""
+        session = self._session_awaiting_confirmation()
+        assert booking_service._confirmation_shortcut(session, message) is True
+
+    @pytest.mark.parametrize("message", ["no", "No", "nope", "nah", "no thanks", "No thank you."])
+    def test_negative_variants_are_recognized(
+        self, booking_service: BookingService, message: str
+    ) -> None:
+        """The same normalization applies to an unambiguous no."""
+        session = self._session_awaiting_confirmation()
+        assert booking_service._confirmation_shortcut(session, message) is False
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "yesterday",
+            "no, make it 5:30",
+            "yes but move it to 6",
+            "book 8/9 at 5pm",
+            "not that one",
+            "cancel",
+            "1",
+            "",
+        ],
+    )
+    def test_anything_ambiguous_still_goes_to_the_llm(
+        self, booking_service: BookingService, message: str
+    ) -> None:
+        """Substring matches like 'yesterday' must not be read as 'yes'."""
+        session = self._session_awaiting_confirmation()
+        assert booking_service._confirmation_shortcut(session, message) is None
+
+    def test_shortcut_skipped_outside_awaiting_confirmation(
+        self, booking_service: BookingService
+    ) -> None:
+        """A stray 'yes' with no question pending still needs interpreting."""
+        session = self._session_awaiting_confirmation()
+        session.state = ConversationState.IDLE
+        assert booking_service._confirmation_shortcut(session, "yes") is None
+
+    def test_shortcut_skipped_without_a_pending_request(
+        self, booking_service: BookingService
+    ) -> None:
+        """Confirming state with nothing pending is not ours to shortcut."""
+        session = self._session_awaiting_confirmation()
+        session.pending_request = None
+        assert booking_service._confirmation_shortcut(session, "yes") is None
+
+    def test_shortcut_skipped_for_a_pending_cancellation(
+        self, booking_service: BookingService
+    ) -> None:
+        """'Yes' to 'cancel this booking?' must keep its existing handling."""
+        session = self._session_awaiting_confirmation()
+        session.pending_cancellation_id = "abc123"
+        assert booking_service._confirmation_shortcut(session, "yes") is None
+
+    @pytest.mark.asyncio
+    async def test_no_clears_the_pending_booking(self, booking_service: BookingService) -> None:
+        """Declining drops the pending booking and returns the session to idle."""
+        session = self._session_awaiting_confirmation()
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock(return_value=session)
+
+            with patch("app.services.booking_service.gemini_service") as mock_gemini:
+                mock_gemini.parse_message = AsyncMock()
+                response = await booking_service.handle_incoming_message("+15551234567", "no")
+
+            assert "won't book that" in response
+            assert session.pending_request is None
+            assert session.pending_requests is None
+            assert session.state == ConversationState.IDLE
+            mock_gemini.parse_message.assert_not_called()
+
+
 class TestBookingServiceHelpMessage:
     """Tests for the help message."""
 

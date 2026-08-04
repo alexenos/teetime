@@ -1,15 +1,54 @@
+import asyncio
 import logging
 import re
 from datetime import date, datetime, time, timedelta
+from time import monotonic
 from typing import Any
 
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from google.protobuf.json_format import MessageToDict
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
 
 logger = logging.getLogger(__name__)
+
+# Failures that are worth a second attempt: quota and rate limits, Google-side
+# overload, and timeouts. Everything else (a bad key, a retired model, a
+# malformed request) fails the same way on every attempt, so retrying it only
+# adds latency before the same error.
+#
+# Without this, a single blip surfaced to the user as "my language model is
+# unavailable" with nothing booked - which is exactly what happened to a 'Yes'
+# confirming two tee times, one minute after the same model had parsed the
+# booking request successfully.
+TRANSIENT_API_EXCEPTIONS = (
+    google_exceptions.ResourceExhausted,  # 429 - quota / rate limit
+    google_exceptions.TooManyRequests,  # 429
+    google_exceptions.ServiceUnavailable,  # 503 - model overloaded
+    google_exceptions.InternalServerError,  # 500
+    google_exceptions.DeadlineExceeded,  # request timed out
+    google_exceptions.Aborted,
+    google_exceptions.RetryError,
+    TimeoutError,
+    ConnectionError,
+)
+
+# Three attempts with 0.5s then 1.0s of backoff, enough to ride out the
+# sub-second failures that make up most of them.
+GEMINI_MAX_ATTEMPTS = 3
+GEMINI_RETRY_BASE_DELAY = 0.5
+
+# The whole parse, retries and backoff included, is bounded - not just the
+# sleeps between attempts. The Twilio webhook at app/api/webhooks.py:59 awaits
+# this call and then sends the reply before returning, and Twilio drops the
+# request after ~15s, so a budget built only from backoff delays would be
+# fiction: three slow-but-not-failing calls could blow through it while every
+# attempt "succeeds". Each attempt also carries its own provider-side deadline,
+# so a single hung request cannot eat the entire budget.
+GEMINI_REQUEST_TIMEOUT = 6.0
+GEMINI_TOTAL_BUDGET = 10.0
 
 
 def _convert_proto_to_dict(obj: Any) -> Any:
@@ -148,6 +187,58 @@ class GeminiService:
                 self._model = None
         return self._model
 
+    async def _generate_with_retry(self, prompt: str) -> Any:
+        """Call the model, retrying transient failures with exponential backoff.
+
+        Uses the SDK's async method rather than the blocking one: this runs on
+        the same event loop that serves every other request, so a slow Gemini
+        call must not stall the process - and retrying a blocking call would
+        stall it up to three times over.
+
+        Only the exceptions in TRANSIENT_API_EXCEPTIONS are retried. Anything
+        else propagates on the first attempt, as does a transient error that
+        survives the last one - the caller turns both into the honest "nothing
+        was booked" reply rather than a guess.
+
+        Attempts stop early once GEMINI_TOTAL_BUDGET is spent, so a run of slow
+        responses cannot outlast the webhook waiting on it.
+        """
+        deadline = monotonic() + GEMINI_TOTAL_BUDGET
+        last_error: Exception | None = None
+
+        for attempt in range(GEMINI_MAX_ATTEMPTS):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+
+            try:
+                return await self.model.generate_content_async(
+                    prompt,
+                    request_options={"timeout": min(GEMINI_REQUEST_TIMEOUT, remaining)},
+                )
+            except TRANSIENT_API_EXCEPTIONS as e:
+                last_error = e
+                delay = GEMINI_RETRY_BASE_DELAY * (2**attempt)
+                if attempt == GEMINI_MAX_ATTEMPTS - 1 or monotonic() + delay >= deadline:
+                    break
+                logger.warning(
+                    "Transient Gemini failure (attempt %d/%d): %s: %s. Retrying in %.1fs",
+                    attempt + 1,
+                    GEMINI_MAX_ATTEMPTS,
+                    type(e).__name__,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        if last_error is not None:
+            raise last_error
+
+        # Budget gone before a single attempt could start.
+        raise TimeoutError(
+            f"Gemini budget of {GEMINI_TOTAL_BUDGET}s exhausted before any attempt completed"
+        )
+
     def _resolve_relative_date(self, date_str: str) -> date | None:
         today = datetime.now().date()
         date_str_lower = date_str.lower()
@@ -277,7 +368,7 @@ class GeminiService:
                 prompt += f"Previous context: {context}\n\n"
             prompt += f"User message: {message}"
 
-            response = self.model.generate_content(prompt)
+            response = await self._generate_with_retry(prompt)
 
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:

@@ -6,11 +6,16 @@ functionality, including the mock fallback when the API is not configured.
 """
 
 from datetime import date, datetime, time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from google.api_core import exceptions as google_exceptions
 
-from app.services.gemini_service import GeminiService
+from app.services.gemini_service import (
+    GEMINI_MAX_ATTEMPTS,
+    GEMINI_REQUEST_TIMEOUT,
+    GeminiService,
+)
 
 
 @pytest.fixture
@@ -535,7 +540,9 @@ class TestGeminiServiceParseMessage:
         a booking the user never asked for (what a retired model did in prod).
         """
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(side_effect=Exception("API Error"))
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=Exception("API Error")
+            )
 
             result = await gemini_service.parse_message("Book 8/2 at 5:06p")
 
@@ -543,6 +550,120 @@ class TestGeminiServiceParseMessage:
             assert result.tee_time_request is None
             assert result.tee_time_requests is None
             assert "nothing was booked" in result.response_message
+
+    @pytest.mark.asyncio
+    async def test_transient_error_is_retried_and_can_succeed(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """A 503 on the first call must not reach the user - retry it.
+
+        This is the failure that told a user "my language model is unavailable"
+        one minute after the same model had parsed their booking fine.
+        """
+        mock_function_call = MagicMock()
+        mock_function_call.args = {
+            "intent": "confirm",
+            "response_message": "Confirmed.",
+        }
+        mock_part = MagicMock()
+        mock_part.function_call = mock_function_call
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=[
+                    google_exceptions.ServiceUnavailable("model overloaded"),
+                    mock_response,
+                ]
+            )
+
+            with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
+                result = await gemini_service.parse_message("Yes")
+
+            assert result.intent == "confirm"
+            assert gemini_service._model.generate_content_async.call_count == 2
+            mock_sleep.assert_awaited_once_with(0.5)
+
+    @pytest.mark.asyncio
+    async def test_transient_error_gives_up_after_max_attempts(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """A sustained outage still fails honestly, after exhausting retries."""
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted("quota exceeded")
+            )
+
+            with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
+                result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+
+            assert result.intent == "unclear"
+            assert result.tee_time_request is None
+            assert "nothing was booked" in result.response_message
+            assert gemini_service._model.generate_content_async.call_count == GEMINI_MAX_ATTEMPTS
+            # Exponential backoff, and no sleep after the final attempt.
+            assert [call.args[0] for call in mock_sleep.await_args_list] == [0.5, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_each_attempt_carries_a_provider_deadline(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """A hung request must not sit there forever holding up the webhook."""
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.DeadlineExceeded("timed out")
+            )
+
+            with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()):
+                await gemini_service.parse_message("Book 8/2 at 5:06p")
+
+            first_call = gemini_service._model.generate_content_async.await_args_list[0]
+            assert first_call.kwargs["request_options"]["timeout"] == GEMINI_REQUEST_TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_retries_stop_once_the_total_budget_is_spent(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """Slow attempts eat the budget too, not just the backoff sleeps.
+
+        Twilio drops the webhook at ~15s, so the retry loop has to account for
+        how long the calls themselves took - three slow-but-successful attempts
+        would otherwise blow the deadline while every attempt "worked".
+        """
+        # monotonic() readings: budget start, then the remaining-time check and
+        # the post-failure check for attempt 1. The second reading lands past
+        # the deadline, so there is no second attempt.
+        with patch("app.services.gemini_service.monotonic", side_effect=[0.0, 1.0, 9.6]):
+            with patch.object(gemini_service, "_model", MagicMock()):
+                gemini_service._model.generate_content_async = AsyncMock(
+                    side_effect=google_exceptions.ServiceUnavailable("model overloaded")
+                )
+
+                with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
+                    result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+
+                assert result.intent == "unclear"
+                assert "nothing was booked" in result.response_message
+                assert gemini_service._model.generate_content_async.call_count == 1
+                mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_transient_error_is_not_retried(self, gemini_service: GeminiService) -> None:
+        """A bad key or retired model fails identically every time - fail fast."""
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.PermissionDenied("API key not valid")
+            )
+
+            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+
+            assert result.intent == "unclear"
+            assert gemini_service._model.generate_content_async.call_count == 1
 
     def test_model_name_comes_from_settings(self, gemini_service: GeminiService) -> None:
         """The model is configurable so a retirement can be worked around by env."""
@@ -584,7 +705,7 @@ class TestGeminiServiceParseMessage:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             with patch("app.services.gemini_service.datetime") as mock_datetime:
                 mock_datetime.now.return_value = fixed_now
@@ -615,7 +736,7 @@ class TestGeminiServiceParseMessage:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("random gibberish")
 
@@ -629,7 +750,7 @@ class TestGeminiServiceParseMessage:
         mock_response.candidates = []
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("test message")
 
@@ -657,7 +778,7 @@ class TestGeminiServiceParseMessage:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("What are my bookings?")
 
@@ -690,7 +811,7 @@ class TestGeminiServiceParseMessage:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("Book Saturday")
 
@@ -765,7 +886,7 @@ class TestGeminiServiceProtobufConversion:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("Book tee time at 8:58a and 9:06a")
 
@@ -824,7 +945,7 @@ class TestGeminiServiceProtobufConversion:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("Book next week at 08:58")
 
@@ -954,7 +1075,7 @@ class TestMessageToDictFieldNamePreservation:
         mock_response.candidates = [mock_candidate]
 
         with patch.object(gemini_service, "_model", MagicMock()):
-            gemini_service._model.generate_content = MagicMock(return_value=mock_response)
+            gemini_service._model.generate_content_async = AsyncMock(return_value=mock_response)
 
             result = await gemini_service.parse_message("Book tee time at 8:58a and 9:06a")
 
