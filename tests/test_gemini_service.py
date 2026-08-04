@@ -6,11 +6,12 @@ functionality, including the mock fallback when the API is not configured.
 """
 
 from datetime import date, datetime, time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from google.api_core import exceptions as google_exceptions
 
-from app.services.gemini_service import GeminiService
+from app.services.gemini_service import GEMINI_MAX_ATTEMPTS, GeminiService
 
 
 @pytest.fixture
@@ -543,6 +544,77 @@ class TestGeminiServiceParseMessage:
             assert result.tee_time_request is None
             assert result.tee_time_requests is None
             assert "nothing was booked" in result.response_message
+
+    @pytest.mark.asyncio
+    async def test_transient_error_is_retried_and_can_succeed(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """A 503 on the first call must not reach the user - retry it.
+
+        This is the failure that told a user "my language model is unavailable"
+        one minute after the same model had parsed their booking fine.
+        """
+        mock_function_call = MagicMock()
+        mock_function_call.args = {
+            "intent": "confirm",
+            "response_message": "Confirmed.",
+        }
+        mock_part = MagicMock()
+        mock_part.function_call = mock_function_call
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(
+                side_effect=[
+                    google_exceptions.ServiceUnavailable("model overloaded"),
+                    mock_response,
+                ]
+            )
+
+            with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
+                result = await gemini_service.parse_message("Yes")
+
+            assert result.intent == "confirm"
+            assert gemini_service._model.generate_content.call_count == 2
+            mock_sleep.assert_awaited_once_with(0.5)
+
+    @pytest.mark.asyncio
+    async def test_transient_error_gives_up_after_max_attempts(
+        self, gemini_service: GeminiService
+    ) -> None:
+        """A sustained outage still fails honestly, after exhausting retries."""
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(
+                side_effect=google_exceptions.ResourceExhausted("quota exceeded")
+            )
+
+            with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
+                result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+
+            assert result.intent == "unclear"
+            assert result.tee_time_request is None
+            assert "nothing was booked" in result.response_message
+            assert gemini_service._model.generate_content.call_count == GEMINI_MAX_ATTEMPTS
+            # Exponential backoff, and no sleep after the final attempt.
+            assert [call.args[0] for call in mock_sleep.await_args_list] == [0.5, 1.0]
+
+    @pytest.mark.asyncio
+    async def test_non_transient_error_is_not_retried(self, gemini_service: GeminiService) -> None:
+        """A bad key or retired model fails identically every time - fail fast."""
+        with patch.object(gemini_service, "_model", MagicMock()):
+            gemini_service._model.generate_content = MagicMock(
+                side_effect=google_exceptions.PermissionDenied("API key not valid")
+            )
+
+            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+
+            assert result.intent == "unclear"
+            assert gemini_service._model.generate_content.call_count == 1
 
     def test_model_name_comes_from_settings(self, gemini_service: GeminiService) -> None:
         """The model is configurable so a retirement can be worked around by env."""

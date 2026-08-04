@@ -36,6 +36,68 @@ INTERRUPTED_ERROR_MESSAGE = (
     "please check the club website before rebooking."
 )
 
+# Replies that settle a pending booking confirmation without asking the LLM
+# what they mean. The bot just printed the bookings and said "Reply 'yes' to
+# confirm", so a bare "yes" needs no interpretation - and sending it to Gemini
+# anyway means a transient API failure can lose an already-parsed booking at
+# the one moment it costs the most.
+#
+# Matching is exact, on the normalized message, never substring: "yes" is
+# inside "yesterday" and "no" is inside "no, make it 5:30", and both of those
+# are real replies that still need parsing. Anything not listed here falls
+# through to the LLM unchanged, so this set is deliberately short - it holds
+# only replies with exactly one meaning in this state.
+AFFIRMATIVE_CONFIRMATIONS = frozenset(
+    {
+        "yes",
+        "y",
+        "ya",
+        "yah",
+        "yeah",
+        "yep",
+        "yup",
+        "yes please",
+        "ok",
+        "okay",
+        "k",
+        "sure",
+        "confirm",
+        "confirmed",
+        "do it",
+        "book it",
+        "go ahead",
+        "send it",
+        "sounds good",
+        "perfect",
+        "👍",
+    }
+)
+
+# "cancel" and "stop" are deliberately absent: they still go to the LLM,
+# because they may mean "cancel my existing bookings" rather than "don't book
+# this one", and that distinction is not ours to guess here.
+NEGATIVE_CONFIRMATIONS = frozenset(
+    {
+        "no",
+        "n",
+        "nope",
+        "nah",
+        "no thanks",
+        "no thank you",
+    }
+)
+
+
+def _normalize_reply(message: str) -> str:
+    """Reduce a message to a comparable form: lowercase, no edge punctuation.
+
+    Collapses internal whitespace so "yes  please" matches, and strips
+    surrounding punctuation so "Yes!" and "yes." do too. Punctuation *inside*
+    the message is left alone, so "yes, make it 5:30" stays unmatched and goes
+    to the LLM where it belongs.
+    """
+    return " ".join(message.strip().lower().strip(".,!?;:'\" ").split())
+
 
 class BookingService:
     """
@@ -107,6 +169,12 @@ class BookingService:
         session = await self.get_session(phone_number)
         if origin_channel_id:
             session.origin_channel_id = origin_channel_id
+
+        affirmative = self._confirmation_shortcut(session, message)
+        if affirmative is not None:
+            response = await self._handle_confirmation_shortcut(session, affirmative)
+            await self.update_session(session)
+            return response
 
         context = None
         if session.state != ConversationState.IDLE:
@@ -183,6 +251,46 @@ class BookingService:
             f"I'll book a tee time for {date_str} at {time_str} "
             f"for {request.num_players} players. Reply 'yes' to confirm."
         )
+
+    def _confirmation_shortcut(self, session: UserSession, message: str) -> bool | None:
+        """Decide whether this message settles a pending booking without the LLM.
+
+        Returns True for an unambiguous yes, False for an unambiguous no, and
+        None when the message needs parsing - which is every case except a bare
+        confirmation of a booking we have already parsed and echoed back.
+
+        A pending cancellation is excluded on purpose: "yes" there answers "are
+        you sure you want to cancel", and that path keeps its existing handling.
+        """
+        if session.state != ConversationState.AWAITING_CONFIRMATION:
+            return None
+        if session.pending_cancellation_id:
+            return None
+        if not session.pending_request and not session.pending_requests:
+            return None
+
+        normalized = _normalize_reply(message)
+        if normalized in AFFIRMATIVE_CONFIRMATIONS:
+            return True
+        if normalized in NEGATIVE_CONFIRMATIONS:
+            return False
+        return None
+
+    async def _handle_confirmation_shortcut(self, session: UserSession, affirmative: bool) -> str:
+        """Act on a yes/no that was understood without calling the LLM."""
+        logger.info(
+            "Settled pending confirmation for %s without an LLM call (affirmative=%s)",
+            session.phone_number,
+            affirmative,
+        )
+
+        if affirmative:
+            return await self._handle_confirm_intent(session)
+
+        session.pending_request = None
+        session.pending_requests = None
+        session.state = ConversationState.IDLE
+        return "Okay, I won't book that. Let me know if you'd like a different date or time."
 
     async def _handle_confirm_intent(self, session: UserSession) -> str:
         if session.state != ConversationState.AWAITING_CONFIRMATION:
