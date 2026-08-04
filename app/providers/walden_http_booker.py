@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 # chain there is no fixed inter-click delay to pay here.
 _MAX_PLAYERS = 4
 
+# Marks a chain result as this path's. The provider handles both this and the JS
+# chain's results through the same branches, but only this one leaves the browser
+# DOM untouched, so only this one needs the outcome resolved against the site.
+DIRECT_HTTP_PATH = "direct-http"
+
 # Chain phases. These are a cross-module contract: the provider decides whether
 # a Selenium retry is safe by looking at which phase the chain stopped in, so
 # the names live here and are imported there rather than duplicated.
@@ -91,6 +96,7 @@ class DirectBookingResult:
             "error": self.error,
             "timing": self.timing,
             "finalMarkup": self.final_markup,
+            "path": DIRECT_HTTP_PATH,
         }
 
 

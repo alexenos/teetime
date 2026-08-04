@@ -8,14 +8,17 @@ against the actual Walden Golf website structure.
 import os
 from datetime import date, time, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 
 from app.config import settings
+from app.providers.base import BookingResult
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import DirectHttpError
+from app.providers.walden_http_booker import DIRECT_HTTP_PATH, PHASE_RESERVE_STAGED
 from app.providers.walden_provider import WaldenGolfProvider
 from app.utils.timezone import CTDateTime
 
@@ -2948,6 +2951,296 @@ class TestDirectHttpBookingWiring:
         assert result.success is True
         timed_chain.assert_not_called()
         fast_chain.assert_not_called()
+
+
+class TestUnconfirmedBookingResolution:
+    """What happens when the direct-HTTP response does not say either way.
+
+    Book Now returns a PrimeFaces partial update, not a confirmation page, and
+    the browser never sees it - so a response with no recognizable wording is
+    routine rather than evidence of a lost slot. The member's reservations page
+    is the only thing that can settle it, and reporting a tee time we hold as
+    failed is the expensive mistake.
+    """
+
+    SLOT = dict(TestDirectHttpBookingWiring.SLOT)
+    TARGET_DATE = date(2026, 8, 8)
+    # No success or failure wording anywhere - the tee sheet re-render case.
+    SILENT_MARKUP = "<div><p>Northgate tee sheet</p></div>"
+
+    def _book(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        chain_result: dict[str, object],
+        reservation_exists: bool | None,
+    ) -> tuple[BookingResult, MagicMock]:
+        """Run one booking whose direct chain returned ``chain_result``."""
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        monkeypatch.setattr(
+            provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_try_direct_http_booking", MagicMock(return_value=chain_result)
+        )
+        monkeypatch.setattr(provider, "_capture_diagnostic_info", MagicMock())
+        monkeypatch.setattr(provider, "_capture_response_artifact", MagicMock())
+        reservation_check = MagicMock(return_value=reservation_exists)
+        monkeypatch.setattr(provider, "_reservation_exists", reservation_check)
+
+        result = provider._find_and_book_time_slot_sync(
+            MagicMock(),
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            target_date=self.TARGET_DATE,
+        )
+        return result, reservation_check
+
+    def _completed_chain(self, markup: str) -> dict[str, object]:
+        return {
+            "success": True,
+            "blocked": False,
+            "phase": "complete",
+            "error": None,
+            "timing": {},
+            "finalMarkup": markup,
+            "path": DIRECT_HTTP_PATH,
+        }
+
+    def test_silent_response_with_the_reservation_on_file_is_a_success(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression: a booked tee time reported as lost."""
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain(self.SILENT_MARKUP),
+            reservation_exists=True,
+        )
+
+        assert result.success is True
+        assert result.booked_time == time(8, 42)
+        reservation_check.assert_called_once_with(ANY, self.TARGET_DATE, time(8, 42))
+
+    def test_silent_response_with_no_reservation_says_where_it_looked(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure the member can act on names what was checked."""
+        result, _ = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain(self.SILENT_MARKUP),
+            reservation_exists=False,
+        )
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "did not confirm" in result.error_message
+        assert "not on the member's reservations page" in result.error_message
+
+    def test_unreachable_reservations_page_is_not_read_as_a_no(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unchecked page is reported as unchecked, not as an empty one."""
+        result, _ = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain(self.SILENT_MARKUP),
+            reservation_exists=None,
+        )
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "could not be checked" in result.error_message
+
+    def test_refusal_wording_is_carried_into_the_error(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """What the site said is worth more than that it said no."""
+        result, _ = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain("<div><p>Unable to complete this reservation.</p></div>"),
+            reservation_exists=False,
+        )
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "unable to" in result.error_message
+
+    def test_a_confirmed_response_never_reaches_the_reservations_page(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The check costs the tee sheet, so it only runs when it is needed."""
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain("<div><h2>Your tee time is booked</h2></div>"),
+            reservation_exists=False,
+        )
+
+        assert result.success is True
+        reservation_check.assert_not_called()
+
+    def test_failure_after_reserve_was_sent_checks_the_reservations_page(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The chain breaking mid-flight does not mean the booking did."""
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            {
+                "success": False,
+                "blocked": False,
+                "phase": "book_now",
+                "error": "Book Now button not found in response",
+                "timing": {},
+                "finalMarkup": self.SILENT_MARKUP,
+                "path": DIRECT_HTTP_PATH,
+            },
+            reservation_exists=True,
+        )
+
+        assert result.success is True
+        assert result.booked_time == time(8, 42)
+        reservation_check.assert_called_once()
+
+    def test_failure_before_reserve_was_sent_does_not_check(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing reached the server, so there is nothing to look up."""
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            {
+                "success": False,
+                "blocked": False,
+                "phase": PHASE_RESERVE_STAGED,
+                "error": "prepare() must be called before book()",
+                "timing": {},
+                "finalMarkup": "",
+                "path": DIRECT_HTTP_PATH,
+            },
+            reservation_exists=True,
+        )
+
+        assert result.success is False
+        reservation_check.assert_not_called()
+
+    def test_a_js_chain_failure_does_not_check(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The JS chain leaves the browser on its own response; the DOM answers."""
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            {
+                "success": False,
+                "blocked": False,
+                "phase": "book_now",
+                "error": "Book Now click failed",
+                "timing": {},
+            },
+            reservation_exists=True,
+        )
+
+        assert result.success is False
+        reservation_check.assert_not_called()
+
+
+class TestReservationLookup:
+    """Reading the member's reservations page as ground truth."""
+
+    def _driver_with_rows(self, rows: list[str]) -> MagicMock:
+        driver = MagicMock()
+        form = MagicMock()
+        form.find_elements.return_value = [SimpleNamespace(text=row_text) for row_text in rows]
+        driver.find_element.return_value = form
+        return driver
+
+    @pytest.fixture(autouse=True)
+    def _no_settle_sleep(self, provider: WaldenGolfProvider) -> None:
+        """The page-settle wait is a real sleep; tests do not need to serve it."""
+        provider.wait_strategy = MagicMock()
+
+    def test_matching_reservation_is_found(self, provider: WaldenGolfProvider) -> None:
+        """The row the site renders for a booking we hold."""
+        driver = self._driver_with_rows(["08/08/2026 - Tee Time - 5:08 PM - Northgate - 4 players"])
+
+        assert provider._reservation_exists(driver, date(2026, 8, 8), time(17, 8)) is True
+
+    def test_reservation_for_another_time_is_not_ours(self, provider: WaldenGolfProvider) -> None:
+        """The first booking of a batch must not vouch for the second."""
+        driver = self._driver_with_rows(["08/08/2026 - Tee Time - 5:00 PM - Northgate"])
+
+        assert provider._reservation_exists(driver, date(2026, 8, 8), time(17, 8)) is False
+
+    def test_reservation_on_another_date_is_not_ours(self, provider: WaldenGolfProvider) -> None:
+        """Same time, different day - a standing weekly booking would match."""
+        driver = self._driver_with_rows(["08/15/2026 - Tee Time - 5:08 PM - Northgate"])
+
+        assert provider._reservation_exists(driver, date(2026, 8, 8), time(17, 8)) is False
+
+    def test_two_digit_year_and_24_hour_rows_still_match(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """The page has been seen rendering both; neither is a miss."""
+        driver = self._driver_with_rows(["08/08/26 Tee Time 17:08 Northgate"])
+
+        assert provider._reservation_exists(driver, date(2026, 8, 8), time(17, 8)) is True
+
+    def test_non_tee_time_rows_are_ignored(self, provider: WaldenGolfProvider) -> None:
+        """Dining and event rows share the table."""
+        driver = self._driver_with_rows(["08/08/2026 - Dining Reservation - 5:08 PM"])
+
+        assert provider._reservation_exists(driver, date(2026, 8, 8), time(17, 8)) is False
+
+    def test_an_unreadable_page_answers_unknown(self, provider: WaldenGolfProvider) -> None:
+        """False would mean 'not booked', which is more than the page said."""
+        driver = MagicMock()
+        driver.get.side_effect = WebDriverException("session died")
+
+        assert provider._reservation_exists(driver, date(2026, 8, 8), time(17, 8)) is None
+
+    def test_without_a_date_there_is_nothing_to_match_on(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """A time alone would match the same slot on any day."""
+        driver = MagicMock()
+
+        assert provider._reservation_exists(driver, None, time(17, 8)) is None
+        driver.get.assert_not_called()
+
+
+class TestBookingTextVerdict:
+    """Three answers, because silence and refusal are not the same thing."""
+
+    def test_confirmation_wording_is_a_yes(self, provider: WaldenGolfProvider) -> None:
+        confirmed, detail = provider._booking_text_verdict("Your tee time is booked", "test")
+
+        assert confirmed is True
+        assert "booked" in detail
+
+    def test_refusal_wording_is_a_no(self, provider: WaldenGolfProvider) -> None:
+        confirmed, detail = provider._booking_text_verdict("Unable to reserve", "test")
+
+        assert confirmed is False
+        assert "unable to" in detail
+
+    def test_neither_is_neither(self, provider: WaldenGolfProvider) -> None:
+        """The case the reservations-page check exists for."""
+        confirmed, detail = provider._booking_text_verdict("Northgate tee sheet", "test")
+
+        assert confirmed is None
+        assert "no success or failure wording" in detail
+
+    def test_the_boolean_wrapper_still_fails_closed(self, provider: WaldenGolfProvider) -> None:
+        """Callers reading the browser DOM keep the pessimistic answer."""
+        assert provider._verify_booking_success_text("Northgate tee sheet", "test") is False
+        assert provider._verify_booking_success_text("Booking confirmed", "test") is True
 
 
 class TestBookingPathDefaults:

@@ -892,6 +892,20 @@ class TestFinalMarkup:
 
         assert "Booking confirmed" in chain_result["finalMarkup"]
 
+    def test_chain_result_identifies_the_path_it_came_from(self) -> None:
+        """The provider resolves only this path's outcomes against the site.
+
+        A JS-chain result leaves the browser sitting on the booking's own
+        response, so the DOM answers for it. Nothing in the shape of the dict
+        says which chain produced it, so the path is named in it.
+        """
+        from app.providers.walden_http_booker import DIRECT_HTTP_PATH
+
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        chain_result = make_booker(recorder).book(1).as_chain_result()
+
+        assert chain_result["path"] == DIRECT_HTTP_PATH
+
 
 class TestPrepare:
     """Staging the Reserve request off the real tee sheet."""
