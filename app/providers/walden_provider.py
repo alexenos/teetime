@@ -38,7 +38,11 @@ from app.providers.base import (
 from app.providers.wait_helper import WaitStrategy
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import PrimeFacesSession, visible_text
-from app.providers.walden_http_booker import PRE_SUBMIT_PHASES, DirectHttpBooker
+from app.providers.walden_http_booker import (
+    DIRECT_HTTP_PATH,
+    PRE_SUBMIT_PHASES,
+    DirectHttpBooker,
+)
 from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
@@ -857,6 +861,7 @@ class WaldenGolfProvider(ReservationProvider):
                 fallback_window_minutes,
                 tee_time_interval_minutes=tee_time_interval_minutes,
                 use_fast_js=use_fast_js,
+                target_date=target_date,
             )
 
             logger.info(
@@ -1211,6 +1216,7 @@ class WaldenGolfProvider(ReservationProvider):
                         use_fast_js=use_fast_booking,
                         prelocated_slot=prelocated_slots.get(req.booking_id),
                         execute_at_timestamp_ms=use_timed_for_this_booking,
+                        target_date=target_date,
                     )
 
                     results.append(
@@ -2746,6 +2752,7 @@ class WaldenGolfProvider(ReservationProvider):
         use_fast_js: bool = False,
         prelocated_slot: dict[str, Any] | None = None,
         execute_at_timestamp_ms: int | None = None,
+        target_date: date | None = None,
     ) -> BookingResult:
         """
         Find an available time slot and book it.
@@ -2786,6 +2793,9 @@ class WaldenGolfProvider(ReservationProvider):
                             When provided, uses _stage_timed_booking_chain_js which busy-waits
                             in JavaScript until the exact timestamp before clicking Reserve.
                             This eliminates Python→Selenium→JS handoff latency at 6:30 AM.
+            target_date: The date being booked. Only needed to resolve a
+                            direct-HTTP outcome against the member's reservations
+                            page; without it an unreadable response stays unresolved.
 
         Returns:
             BookingResult with booking outcome
@@ -2913,10 +2923,57 @@ class WaldenGolfProvider(ReservationProvider):
             if not chain_result.get("success"):
                 phase = chain_result.get("phase", "unknown")
                 error = chain_result.get("error", "Unknown error in fast booking chain")
-                self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+                held: bool | None = None
+                if chain_result.get("path") == DIRECT_HTTP_PATH:
+                    partial_markup = chain_result.get("finalMarkup")
+                    if partial_markup:
+                        self._capture_response_artifact(
+                            f"direct_http_failed_{phase}", partial_markup
+                        )
+                    # Before the reservations check, not after: that check
+                    # navigates to the dashboard, and a screenshot taken on the
+                    # way out would show that page instead of the state that
+                    # failed.
+                    self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+                    # Past the Reserve POST the chain's own failure says nothing
+                    # about the reservation: the browser never saw the booking,
+                    # and the step that would have confirmed it is the one that
+                    # broke. Ask the reservations page before writing the tee
+                    # time off - reporting a booking we hold as failed sends the
+                    # member to a course thinking they have no slot.
+                    if phase not in PRE_SUBMIT_PHASES:
+                        held = self._reservation_exists(driver, target_date, booked_time)
+                    if held:
+                        logger.warning(
+                            "DIRECT_HTTP: Chain failed at %s but the reservation is on the "
+                            "member's reservations page; reporting success",
+                            phase,
+                        )
+                        return BookingResult(
+                            success=True,
+                            booked_time=booked_time,
+                            fallback_reason=fallback_reason,
+                            course_name=self.NORTHGATE_COURSE_NAME,
+                        )
+                else:
+                    self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+
+                message = f"Fast booking failed at {phase}: {error}"
+                site_message = chain_result.get("responseMessage")
+                if site_message:
+                    message += f" (the site said: {site_message})"
+                # "Could not check" is not "not booked". Saying so keeps this
+                # message honest in the same way the verification branch below is.
+                if (
+                    held is None
+                    and chain_result.get("path") == DIRECT_HTTP_PATH
+                    and phase not in PRE_SUBMIT_PHASES
+                ):
+                    message += "; the member's reservations page could not be checked"
+
                 return BookingResult(
                     success=False,
-                    error_message=f"Fast booking failed at {phase}: {error}",
+                    error_message=message,
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
@@ -2929,7 +2986,10 @@ class WaldenGolfProvider(ReservationProvider):
             if direct_markup:
                 page_text = visible_text(direct_markup)
                 confirmation_number = self._extract_confirmation_number_from_text(page_text)
-                if self._verify_booking_success_text(page_text, "direct HTTP response"):
+                confirmed, verdict_detail = self._booking_text_verdict(
+                    page_text, "direct HTTP response"
+                )
+                if confirmed:
                     return BookingResult(
                         success=True,
                         booked_time=booked_time,
@@ -2937,12 +2997,44 @@ class WaldenGolfProvider(ReservationProvider):
                         fallback_reason=fallback_reason,
                         course_name=self.NORTHGATE_COURSE_NAME,
                     )
+
+                # The Book Now response is a PrimeFaces partial update, not a
+                # confirmation page: it can carry the reservation without saying
+                # so in words the phrase check recognizes. Treating that silence
+                # as a failure is how a booked tee time gets reported as lost, so
+                # the response is kept for diagnosis and the outcome is settled
+                # against the member's reservations page instead.
+                self._capture_response_artifact("direct_http_verify_failed", direct_markup)
+                held = self._reservation_exists(driver, target_date, booked_time)
+                if held:
+                    logger.info(
+                        "DIRECT_HTTP: Response was unreadable (%s) but the reservation is on "
+                        "the member's reservations page; reporting success",
+                        verdict_detail,
+                    )
+                    return BookingResult(
+                        success=True,
+                        booked_time=booked_time,
+                        confirmation_number=confirmation_number,
+                        fallback_reason=fallback_reason,
+                        course_name=self.NORTHGATE_COURSE_NAME,
+                    )
+
                 self._capture_diagnostic_info(driver, "direct_http_verify_failed")
+                whereabouts = (
+                    "and the tee time is not on the member's reservations page"
+                    if held is False
+                    else "and the member's reservations page could not be checked"
+                )
+                # The response's own message containers are the only place a
+                # refusal we have no phrase for can still be read from.
+                site_message = chain_result.get("responseMessage")
                 return BookingResult(
                     success=False,
                     error_message=(
                         "Direct-HTTP booking chain completed but the response did not "
-                        "confirm the reservation"
+                        f"confirm the reservation ({verdict_detail}) {whereabouts}"
+                        f"{f'. The site said: {site_message}' if site_message else ''}"
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -4934,6 +5026,39 @@ class WaldenGolfProvider(ReservationProvider):
         except Exception as e:
             logger.warning(f"Failed to capture diagnostic info: {e}")
 
+    def _capture_response_artifact(self, context: str, markup: str) -> None:
+        """Record a direct-HTTP response body for diagnosis.
+
+        _capture_diagnostic_info photographs the browser, which on this path is
+        still showing the pre-booking tee sheet - it cannot explain a response
+        the browser never received. The response is the only account of what the
+        server did, so it is logged as a text excerpt and stored on its own.
+        """
+        if not markup:
+            return
+
+        try:
+            excerpt = visible_text(markup)[:1000]
+        except Exception as e:  # noqa: BLE001 - diagnostics must not fail a booking
+            excerpt = f"<unparseable: {e}>"
+        logger.error("DIRECT_HTTP: %s - response text: %r", context, excerpt)
+
+        bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
+        if not bucket_name:
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            uri = self._upload_bytes_to_gcs(
+                bucket_name=bucket_name,
+                object_name=f"walden/{context}/{timestamp}/direct_http_response.html",
+                content_type="text/html; charset=utf-8",
+                data=markup.encode("utf-8", errors="replace"),
+            )
+            logger.info(f"Saved direct-HTTP response to {uri}")
+        except Exception as e:  # noqa: BLE001 - see above
+            logger.warning(f"Failed to upload direct-HTTP response artifact: {e}")
+
     def _upload_bytes_to_gcs(
         self, *, bucket_name: str, object_name: str, content_type: str, data: bytes
     ) -> str:
@@ -5336,6 +5461,23 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             True only on positive confirmation; ambiguity is treated as failure.
         """
+        confirmed, _detail = self._booking_text_verdict(text, context)
+        return bool(confirmed)
+
+    def _booking_text_verdict(self, text: str, context: str) -> tuple[bool | None, str]:
+        """Classify booking text as confirmed, refused, or silent.
+
+        The three-way answer is what separates "the site said no" from "the site
+        said nothing we recognize". Both are failures when the browser DOM is the
+        source - the DOM would be showing a confirmation if there were one - but
+        on the direct-HTTP path silence is routine, and the caller resolves it
+        against the reservations page rather than reporting a loss.
+
+        Returns:
+            (True, matched success phrases) on confirmation, (False, matched
+            failure phrases) on refusal, (None, reason) when neither appears.
+            The detail is phrased for a user-facing error message.
+        """
         try:
             logger.info(f"BOOKING_DEBUG: Verifying booking success. Source: {context}")
             page_text = text.lower()
@@ -5367,7 +5509,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             if found_failures:
                 logger.error(f"BOOKING_DEBUG: Found failure indicator(s): {found_failures}")
-                return False
+                return False, f"the response reported: {', '.join(found_failures)}"
 
             # Check for success indicators
             found_successes = []
@@ -5377,17 +5519,17 @@ class WaldenGolfProvider(ReservationProvider):
 
             if found_successes:
                 logger.debug(f"BOOKING_DEBUG: Found success indicator(s): {found_successes}")
-                return True
+                return True, f"confirmed by: {', '.join(found_successes)}"
 
             logger.warning(
                 f"BOOKING_DEBUG: No clear success or failure indicators found - treating as failure. "
                 f"Source: {context}"
             )
-            return False
+            return None, "no success or failure wording in the response"
 
         except Exception as e:
             logger.error(f"BOOKING_DEBUG: Error verifying booking: {e}")
-            return False
+            return False, f"the response could not be read: {e}"
 
     async def get_available_times(self, target_date: date) -> list[time]:
         """
@@ -5560,53 +5702,12 @@ class WaldenGolfProvider(ReservationProvider):
             return False
 
         try:
-            reservations_form = None
-            try:
-                reservations_form = driver.find_element(
-                    By.CSS_SELECTOR, DOM.CANCELLATION.reservations_form
-                )
-                logger.info("Found reservations form, scoping search to it")
-            except NoSuchElementException:
-                logger.warning("Reservations form not found, searching entire page")
-
-            if reservations_form:
-                reservation_rows = reservations_form.find_elements(
-                    By.CSS_SELECTOR, "table tbody tr"
-                )
-            else:
-                reservation_rows = driver.find_elements(By.CSS_SELECTOR, "table tbody tr")
-
+            reservation_rows = self._find_reservation_rows(driver)
             logger.info(f"Found {len(reservation_rows)} potential reservation rows")
 
             for row in reservation_rows:
                 try:
-                    row_text = row.text.lower()
-
-                    if "tee time" not in row_text:
-                        continue
-
-                    date_match = False
-                    time_match = False
-
-                    if display_date in row.text:
-                        date_match = True
-                    else:
-                        alt_date = target_date.strftime("%m/%d/%y")
-                        if alt_date in row.text:
-                            date_match = True
-
-                    time_variations = [
-                        display_time_12h,
-                        target_time.strftime("%H:%M"),
-                        target_time.strftime("%I:%M%p").lstrip("0"),
-                        target_time.strftime("%I:%M %p"),
-                    ]
-                    for time_var in time_variations:
-                        if time_var.lower() in row_text or time_var in row.text:
-                            time_match = True
-                            break
-
-                    if date_match and time_match:
+                    if self._reservation_row_matches(row, target_date, target_time):
                         logger.info(f"Found matching reservation row: {row.text[:100]}...")
 
                         cancel_link = None
@@ -5646,6 +5747,119 @@ class WaldenGolfProvider(ReservationProvider):
         except Exception as e:
             logger.error(f"Error finding reservation: {e}")
             return False
+
+    def _find_reservation_rows(self, driver: webdriver.Chrome) -> list[Any]:
+        """Return the rows of the member's reservations table.
+
+        Scoped to the reservations form when it is present; the whole page is
+        the fallback, since a missed row reads as "no reservation".
+        """
+        try:
+            reservations_form = driver.find_element(
+                By.CSS_SELECTOR, DOM.CANCELLATION.reservations_form
+            )
+            logger.info("Found reservations form, scoping search to it")
+            return list(
+                reservations_form.find_elements(By.CSS_SELECTOR, DOM.CANCELLATION.reservation_rows)
+            )
+        except NoSuchElementException:
+            logger.warning("Reservations form not found, searching entire page")
+            return list(driver.find_elements(By.CSS_SELECTOR, DOM.CANCELLATION.reservation_rows))
+
+    def _reservation_row_matches(self, row: Any, target_date: date, target_time: time) -> bool:
+        """Report whether a reservations-table row is this tee time.
+
+        Both the date and the time have to match, in any of the formats the page
+        has been seen to render them in.
+        """
+        row_text = row.text
+        lowered = row_text.lower()
+
+        if "tee time" not in lowered:
+            return False
+
+        date_variations = (
+            target_date.strftime("%m/%d/%Y"),
+            target_date.strftime("%m/%d/%y"),
+        )
+        if not any(variation in row_text for variation in date_variations):
+            return False
+
+        time_variations = (
+            target_time.strftime("%I:%M %p").lstrip("0"),
+            target_time.strftime("%H:%M"),
+            target_time.strftime("%I:%M%p").lstrip("0"),
+            target_time.strftime("%I:%M %p"),
+        )
+        # The hour must not be preceded by another digit. A bare substring test
+        # lets a row rendering "12:08 PM" satisfy a search for "2:08 PM", which
+        # would report a tee time the member never booked as held - the exact
+        # false confirmation this whole check exists to rule out.
+        return any(
+            re.search(rf"(?<!\d){re.escape(variation)}", row_text, re.IGNORECASE)
+            for variation in time_variations
+        )
+
+    def _reservation_exists(
+        self,
+        driver: webdriver.Chrome,
+        target_date: date | None,
+        booked_time: time,
+    ) -> bool | None:
+        """Ask the member's reservations page whether a tee time was actually booked.
+
+        The direct-HTTP path leaves the browser on the pre-booking tee sheet, so
+        when its final response is unreadable there is nothing local left to
+        consult. The reservations page is the site's own answer, and it is the
+        only one that can tell a booking that landed from one that did not.
+
+        Navigating away costs the tee sheet, so this runs only on the paths that
+        are already about to return - the batch loop reloads and re-selects
+        course and date before the next booking either way.
+
+        Returns:
+            True when the reservation is listed, False when the page was read and
+            it is not there, None when the page could not be read at all.
+        """
+        if target_date is None:
+            logger.warning(
+                "RESERVATION_CHECK: No target date available; cannot check the "
+                "reservations page for %s",
+                booked_time.strftime("%I:%M %p"),
+            )
+            return None
+
+        try:
+            logger.info(
+                "RESERVATION_CHECK: Looking for %s at %s on the member's reservations page",
+                target_date.strftime("%m/%d/%Y"),
+                booked_time.strftime("%I:%M %p"),
+            )
+            driver.get(self.DASHBOARD_URL)
+            WebDriverWait(driver, 15).until(
+                expected_conditions.presence_of_element_located(
+                    (By.CSS_SELECTOR, DOM.CANCELLATION.dashboard_presence)
+                )
+            )
+            self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
+
+            for row in self._find_reservation_rows(driver):
+                try:
+                    if self._reservation_row_matches(row, target_date, booked_time):
+                        logger.info("RESERVATION_CHECK: Reservation found - %s", row.text[:100])
+                        return True
+                except StaleElementReferenceException:
+                    continue
+
+            logger.info("RESERVATION_CHECK: No reservation listed for this tee time")
+            return False
+
+        except Exception as e:
+            # Unknown is its own answer here: reporting "not booked" because the
+            # page would not load could send the member to a slot they hold, or
+            # away from one they do.
+            logger.warning(f"RESERVATION_CHECK: Could not read the reservations page: {e}")
+            return None
 
     def _confirm_cancellation_sync(
         self,

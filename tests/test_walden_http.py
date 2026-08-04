@@ -27,9 +27,11 @@ from app.providers.walden_http import (
     visible_text,
 )
 from app.providers.walden_http_booker import (
+    PHASE_BOOK_NOW,
     PHASE_RESERVE_SENT,
     PRE_SUBMIT_PHASES,
     DirectHttpBooker,
+    find_response_message,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -599,6 +601,106 @@ BLOCKED_PAGE = (
     "This slot is blocked by another user</div></form>"
 )
 
+# What a refusal we have no phrase for looks like: the response says no in a
+# message container, using none of the words the phrase check knows.
+REFUSED_PAGE = (
+    f'<form id="{FORM_ID}" action="/post">'
+    '<div class="ui-messages-error">'
+    "Members are limited to one tee time per day.</div></form>"
+)
+
+# The same refusal raised through the blocked popup at Book Now rather than at
+# Reserve - the step whose response nothing used to examine.
+BLOCKED_AT_BOOK_NOW = (
+    f'<form id="{FORM_ID}" action="/post">'
+    '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
+    "That time is already reserved</div></form>"
+)
+
+
+class TestFindResponseMessage:
+    """Reading the site's own message containers out of a partial response."""
+
+    def test_reads_a_primefaces_error_message(self) -> None:
+        """The container class the site uses for validation errors."""
+        message = find_response_message(
+            '<div class="ui-messages-error">Members are limited to one per day.</div>'
+        )
+
+        assert message == "Members are limited to one per day."
+
+    def test_reads_role_alert_and_aria_live(self) -> None:
+        """Not every message container is spelled with a class."""
+        assert find_response_message('<div role="alert">Slot unavailable</div>') == (
+            "Slot unavailable"
+        )
+        assert find_response_message('<span aria-live="assertive">Try again</span>') == (
+            "Try again"
+        )
+
+    def test_skips_hidden_template_containers(self) -> None:
+        """PrimeFaces renders empty message templates on every page."""
+        markup = (
+            '<div class="ui-messages-error" aria-hidden="true">Stale template text</div>'
+            '<div class="ui-messages-error">Real message</div>'
+        )
+
+        assert find_response_message(markup) == "Real message"
+
+    def test_hidden_child_template_inside_a_visible_wrapper_is_pruned(self) -> None:
+        """A visible wrapper must not carry its hidden template's text.
+
+        The hidden text would be reported as the site's message, and because a
+        message already contained in a collected one is dropped as nested, it
+        would take the real child message down with it.
+        """
+        markup = (
+            '<div class="ui-messages">'
+            '<div class="ui-message-error" aria-hidden="true">Stale template text</div>'
+            '<div class="ui-message-error">Members are limited to one per day.</div>'
+            "</div>"
+        )
+
+        assert find_response_message(markup) == "Members are limited to one per day."
+
+    def test_container_inside_a_hidden_dialog_is_skipped(self) -> None:
+        """A visible container the member cannot see is still not a message."""
+        markup = (
+            '<div class="ui-dialog" aria-hidden="true">'
+            '<div class="ui-messages-error">Hidden dialog text</div></div>'
+        )
+
+        assert find_response_message(markup) is None
+
+    def test_empty_containers_report_nothing(self) -> None:
+        """An unfilled message container is not a message."""
+        assert find_response_message('<div class="ui-messages-error"></div>') is None
+
+    def test_nested_containers_are_not_repeated(self) -> None:
+        """A wrapper and its child would otherwise both carry the same text."""
+        markup = (
+            '<div class="ui-messages"><div class="ui-messages-error">'
+            "Only one per day</div></div>"
+        )
+
+        assert find_response_message(markup) == "Only one per day"
+
+    def test_long_text_is_truncated(self) -> None:
+        """A re-rendered tee sheet must not be pasted into an SMS reply."""
+        message = find_response_message(f'<div role="alert">{"x" * 900}</div>')
+
+        assert message is not None
+        assert len(message) <= 503
+        assert message.endswith("...")
+
+    def test_a_clean_tee_sheet_yields_nothing(self) -> None:
+        """The real page carries no message text to mistake for a refusal.
+
+        This is what makes the extraction safe to report alongside every
+        failure: the routine response has nothing in it.
+        """
+        assert find_response_message(TEE_SHEET) is None
+
 
 class ChainRecorder:
     """Serves canned responses in order, recording each request's source."""
@@ -709,6 +811,59 @@ class TestDirectHttpBooker:
 
         assert result.success, result.error
         assert bodies[1]["players"] == "1"
+
+    def test_blocked_slot_is_detected_at_book_now(self) -> None:
+        """The submit step's response is examined like every other step's.
+
+        Regression: the chain went straight from Book Now to COMPLETE, so a
+        booking refused at the last step was reported the same as one accepted.
+        """
+        recorder = ChainRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, ROWS_PAGE, ROWS_PAGE, ROWS_PAGE, BLOCKED_AT_BOOK_NOW]
+        )
+        result = make_booker(recorder).book(4)
+
+        assert not result.success
+        assert result.blocked
+        assert result.phase == PHASE_BOOK_NOW
+        assert result.error is not None and "already reserved" in result.error
+
+    def test_book_now_refusal_text_is_carried_off_the_chain(self) -> None:
+        """A refusal with no known phrase still reaches the caller as words.
+
+        The chain completes - every step found what it needed - but the site
+        said no in a message container, and that is the only readable record of
+        why no reservation exists.
+        """
+        recorder = ChainRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, ROWS_PAGE, ROWS_PAGE, ROWS_PAGE, REFUSED_PAGE]
+        )
+        result = make_booker(recorder).book(4)
+
+        assert result.phase == "complete"
+        assert result.response_message is not None
+        assert "one tee time per day" in result.response_message
+        assert result.as_chain_result()["responseMessage"] == result.response_message
+
+    def test_confirmed_response_carries_no_message(self) -> None:
+        """A clean confirmation has nothing to report."""
+        recorder = ChainRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, ROWS_PAGE, ROWS_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        )
+        result = make_booker(recorder).book(4)
+
+        assert result.success, result.error
+        assert result.response_message is None
+
+    def test_failed_step_carries_the_message_it_was_reading(self) -> None:
+        """A step that cannot find its element reports what the site said."""
+        recorder = ChainRecorder([REFUSED_PAGE])
+        result = make_booker(recorder).book(4)
+
+        assert not result.success
+        assert result.phase == "player_count"
+        assert result.response_message is not None
+        assert "one tee time per day" in result.response_message
 
     def test_missing_player_selector_fails_in_that_phase(self) -> None:
         """A response without the selector fails in player_count."""
@@ -891,6 +1046,20 @@ class TestFinalMarkup:
         chain_result = make_booker(recorder).book(1).as_chain_result()
 
         assert "Booking confirmed" in chain_result["finalMarkup"]
+
+    def test_chain_result_identifies_the_path_it_came_from(self) -> None:
+        """The provider resolves only this path's outcomes against the site.
+
+        A JS-chain result leaves the browser sitting on the booking's own
+        response, so the DOM answers for it. Nothing in the shape of the dict
+        says which chain produced it, so the path is named in it.
+        """
+        from app.providers.walden_http_booker import DIRECT_HTTP_PATH
+
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        chain_result = make_booker(recorder).book(1).as_chain_result()
+
+        assert chain_result["path"] == DIRECT_HTTP_PATH
 
 
 class TestPrepare:
