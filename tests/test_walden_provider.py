@@ -3181,7 +3181,7 @@ class TestReservationLookup:
     def test_shorter_time_does_not_match_inside_a_longer_one(
         self, provider: WaldenGolfProvider
     ) -> None:
-        """"2:08 PM" must not be found inside a row rendering "12:08 PM".
+        """A 2:08 PM search must not be satisfied by a row rendering 12:08 PM.
 
         A member can hold both on one date, and a substring match would vouch
         for a 2:08 PM tee time that was never booked - the false confirmation
@@ -3191,9 +3191,7 @@ class TestReservationLookup:
 
         assert provider._reservation_exists(driver, date(2026, 8, 8), time(14, 8)) is False
 
-    def test_am_hour_does_not_match_inside_a_longer_one(
-        self, provider: WaldenGolfProvider
-    ) -> None:
+    def test_am_hour_does_not_match_inside_a_longer_one(self, provider: WaldenGolfProvider) -> None:
         """The same trap on the morning side: "1:08 AM" inside "11:08 AM"."""
         driver = self._driver_with_rows(["08/08/2026 - Tee Time - 11:08 AM - Northgate"])
 
