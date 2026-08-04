@@ -2923,21 +2923,27 @@ class WaldenGolfProvider(ReservationProvider):
             if not chain_result.get("success"):
                 phase = chain_result.get("phase", "unknown")
                 error = chain_result.get("error", "Unknown error in fast booking chain")
+                held: bool | None = None
                 if chain_result.get("path") == DIRECT_HTTP_PATH:
                     partial_markup = chain_result.get("finalMarkup")
                     if partial_markup:
                         self._capture_response_artifact(
                             f"direct_http_failed_{phase}", partial_markup
                         )
+                    # Before the reservations check, not after: that check
+                    # navigates to the dashboard, and a screenshot taken on the
+                    # way out would show that page instead of the state that
+                    # failed.
+                    self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
                     # Past the Reserve POST the chain's own failure says nothing
                     # about the reservation: the browser never saw the booking,
                     # and the step that would have confirmed it is the one that
                     # broke. Ask the reservations page before writing the tee
                     # time off - reporting a booking we hold as failed sends the
                     # member to a course thinking they have no slot.
-                    if phase not in PRE_SUBMIT_PHASES and self._reservation_exists(
-                        driver, target_date, booked_time
-                    ):
+                    if phase not in PRE_SUBMIT_PHASES:
+                        held = self._reservation_exists(driver, target_date, booked_time)
+                    if held:
                         logger.warning(
                             "DIRECT_HTTP: Chain failed at %s but the reservation is on the "
                             "member's reservations page; reporting success",
@@ -2949,14 +2955,25 @@ class WaldenGolfProvider(ReservationProvider):
                             fallback_reason=fallback_reason,
                             course_name=self.NORTHGATE_COURSE_NAME,
                         )
-                self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+                else:
+                    self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+
+                message = f"Fast booking failed at {phase}: {error}"
                 site_message = chain_result.get("responseMessage")
+                if site_message:
+                    message += f" (the site said: {site_message})"
+                # "Could not check" is not "not booked". Saying so keeps this
+                # message honest in the same way the verification branch below is.
+                if (
+                    held is None
+                    and chain_result.get("path") == DIRECT_HTTP_PATH
+                    and phase not in PRE_SUBMIT_PHASES
+                ):
+                    message += "; the member's reservations page could not be checked"
+
                 return BookingResult(
                     success=False,
-                    error_message=(
-                        f"Fast booking failed at {phase}: {error}"
-                        f"{f' (the site said: {site_message})' if site_message else ''}"
-                    ),
+                    error_message=message,
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
@@ -5774,8 +5791,13 @@ class WaldenGolfProvider(ReservationProvider):
             target_time.strftime("%I:%M%p").lstrip("0"),
             target_time.strftime("%I:%M %p"),
         )
+        # The hour must not be preceded by another digit. A bare substring test
+        # lets a row rendering "12:08 PM" satisfy a search for "2:08 PM", which
+        # would report a tee time the member never booked as held - the exact
+        # false confirmation this whole check exists to rule out.
         return any(
-            variation.lower() in lowered or variation in row_text for variation in time_variations
+            re.search(rf"(?<!\d){re.escape(variation)}", row_text, re.IGNORECASE)
+            for variation in time_variations
         )
 
     def _reservation_exists(

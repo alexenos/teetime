@@ -647,6 +647,31 @@ class TestFindResponseMessage:
 
         assert find_response_message(markup) == "Real message"
 
+    def test_hidden_child_template_inside_a_visible_wrapper_is_pruned(self) -> None:
+        """A visible wrapper must not carry its hidden template's text.
+
+        The hidden text would be reported as the site's message, and because a
+        message already contained in a collected one is dropped as nested, it
+        would take the real child message down with it.
+        """
+        markup = (
+            '<div class="ui-messages">'
+            '<div class="ui-message-error" aria-hidden="true">Stale template text</div>'
+            '<div class="ui-message-error">Members are limited to one per day.</div>'
+            "</div>"
+        )
+
+        assert find_response_message(markup) == "Members are limited to one per day."
+
+    def test_container_inside_a_hidden_dialog_is_skipped(self) -> None:
+        """A visible container the member cannot see is still not a message."""
+        markup = (
+            '<div class="ui-dialog" aria-hidden="true">'
+            '<div class="ui-messages-error">Hidden dialog text</div></div>'
+        )
+
+        assert find_response_message(markup) is None
+
     def test_empty_containers_report_nothing(self) -> None:
         """An unfilled message container is not a message."""
         assert find_response_message('<div class="ui-messages-error"></div>') is None

@@ -501,10 +501,11 @@ def find_response_message(markup: str) -> str | None:
         if not _is_message_container(node):
             continue
         # Hidden containers are templates PrimeFaces renders on every page, not
-        # something the member was shown.
-        if node.attrs.get("aria-hidden", "").lower() == "true":
+        # something the member was shown - and a container inside a hidden
+        # dialog is just as unseen as one hidden itself.
+        if _is_hidden(node) or _has_hidden_ancestor(node):
             continue
-        text = " ".join(node.text_content().split())
+        text = _visible_message_text(node)
         if not text or text.lower() in seen:
             continue
         # A container nested inside one already collected would repeat its text.
@@ -518,6 +519,41 @@ def find_response_message(markup: str) -> str | None:
 
     joined = "; ".join(messages)
     return joined[:_MAX_MESSAGE_CHARS] + "..." if len(joined) > _MAX_MESSAGE_CHARS else joined
+
+
+def _is_hidden(node: Node) -> bool:
+    """Report whether a node is explicitly hidden from the member."""
+    return node.attrs.get("aria-hidden", "").lower() == "true"
+
+
+def _has_hidden_ancestor(node: Node) -> bool:
+    """Report whether any ancestor hides this node."""
+    current = node.parent
+    while current is not None:
+        if _is_hidden(current):
+            return True
+        current = current.parent
+    return False
+
+
+def _visible_message_text(node: Node) -> str:
+    """Text of a node's subtree with hidden branches pruned.
+
+    ``text_content()`` would sweep in an ``aria-hidden`` child template sitting
+    inside a visible wrapper, which reports stale text and - because the nesting
+    check drops a message already contained in a collected one - can hide the
+    real message behind it.
+    """
+    parts: list[str] = []
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if _is_hidden(current):
+            continue
+        if current.text:
+            parts.append(current.text)
+        stack.extend(reversed(current.children))
+    return " ".join(" ".join(parts).split())
 
 
 def _is_message_container(node: Node) -> bool:
