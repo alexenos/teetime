@@ -1182,7 +1182,9 @@ class TestBookingServiceExecuteBooking:
                 mock_sms.send_booking_failure.assert_called_once()
                 call_kwargs = mock_sms.send_booking_failure.call_args
                 args, kwargs = call_kwargs
-                booking_details = kwargs.get("booking_details")
+                booking_details = kwargs.get("booking_details") or (
+                    args[3] if len(args) > 3 else None
+                )
                 assert booking_details is not None
                 assert "4 players" in booking_details
 
@@ -1210,7 +1212,9 @@ class TestBookingServiceExecuteBooking:
                 mock_sms.send_booking_failure.assert_called_once()
                 call_kwargs = mock_sms.send_booking_failure.call_args
                 args, kwargs = call_kwargs
-                booking_details = kwargs.get("booking_details")
+                booking_details = kwargs.get("booking_details") or (
+                    args[3] if len(args) > 3 else None
+                )
                 assert booking_details is not None
                 assert "4 players" in booking_details
 
@@ -1653,7 +1657,10 @@ class TestMultipleBookings:
         )
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+            phone_number: str,
+            request: TeeTimeRequest,
+            origin_channel_id: str | None = None,
+            defer_execution: bool = False,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test123",
@@ -1699,7 +1706,10 @@ class TestMultipleBookings:
         call_count = 0
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+            phone_number: str,
+            request: TeeTimeRequest,
+            origin_channel_id: str | None = None,
+            defer_execution: bool = False,
         ) -> TeeTimeBooking:
             nonlocal call_count
             call_count += 1
@@ -1768,7 +1778,10 @@ class TestMultipleBookings:
         )
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+            phone_number: str,
+            request: TeeTimeRequest,
+            origin_channel_id: str | None = None,
+            defer_execution: bool = False,
         ) -> TeeTimeBooking:
             raise ValueError("Multi-player bookings within 48 hours")
 
@@ -1931,7 +1944,10 @@ class TestOriginChannelRouting:
         )
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+            phone_number: str,
+            request: TeeTimeRequest,
+            origin_channel_id: str | None = None,
+            defer_execution: bool = False,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test1234",
@@ -1971,7 +1987,10 @@ class TestOriginChannelRouting:
         )
 
         async def create_booking_side_effect(
-            phone_number: str, request: TeeTimeRequest, origin_channel_id: str | None = None
+            phone_number: str,
+            request: TeeTimeRequest,
+            origin_channel_id: str | None = None,
+            defer_execution: bool = False,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test1234",
@@ -2035,6 +2054,274 @@ class TestOriginChannelRouting:
                 await booking_service.execute_booking(sample_booking.id)
 
         assert mock_sms.send_booking_failure.await_args.args[4] == "778899"
+
+
+class TestImmediateMultiBookingRunsAsOneBatch:
+    """Several already-open bookings share one browser session.
+
+    Each booking used to spawn its own background task, so confirming two
+    ad-hoc bookings drove two headless Chromes onto the club's login form
+    ~80ms apart. The portal let one through and left the other sitting on the
+    login page, failing that booking outright. They now run as a single batch:
+    one driver, one login, attempts made in sequence.
+    """
+
+    REQUESTED_DATE = date(2025, 12, 29)
+    # 6:30am CT on the 22nd is when the window for the 29th opens, so a "now"
+    # later that morning puts both bookings past their execution time.
+    NOW_CT = datetime(2025, 12, 22, 10, 0)
+
+    @staticmethod
+    def _session() -> UserSession:
+        return UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            origin_channel_id="778899",
+            pending_requests=[
+                TeeTimeRequest(
+                    requested_date=TestImmediateMultiBookingRunsAsOneBatch.REQUESTED_DATE,
+                    requested_time=time(17, 0),
+                    num_players=4,
+                ),
+                TeeTimeRequest(
+                    requested_date=TestImmediateMultiBookingRunsAsOneBatch.REQUESTED_DATE,
+                    requested_time=time(17, 8),
+                    num_players=4,
+                ),
+            ],
+        )
+
+    @staticmethod
+    def _fake_database(mock_db: MagicMock) -> dict[str, TeeTimeBooking]:
+        """Back the mocked database_service with a dict keyed by booking id.
+
+        Rows are copied in and out so that what `stored` holds is only what was
+        actually written. Handing back the service's own instance would let an
+        in-place mutation satisfy a status assertion that no write ever made.
+        """
+        stored: dict[str, TeeTimeBooking] = {}
+
+        async def save(booking: TeeTimeBooking) -> TeeTimeBooking:
+            if booking.id is not None:
+                stored[booking.id] = booking.model_copy(deep=True)
+            return booking
+
+        async def load(booking_id: str) -> TeeTimeBooking | None:
+            found = stored.get(booking_id)
+            return found.model_copy(deep=True) if found is not None else None
+
+        mock_db.create_booking = AsyncMock(side_effect=save)
+        mock_db.update_booking = AsyncMock(side_effect=save)
+        mock_db.get_booking = AsyncMock(side_effect=load)
+        return stored
+
+    @pytest.mark.asyncio
+    async def test_both_bookings_run_in_a_single_batched_attempt(
+        self, booking_service: BookingService
+    ) -> None:
+        """One background task, one batch call carrying both tee times."""
+        import pytz
+
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        session = self._session()
+
+        async def book_multiple(
+            target_date: date, requests: list, execute_at: datetime | None = None
+        ) -> BatchBookingResult:
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=item.booking_id,
+                        result=BookingResult(success=True, booked_time=item.target_time),
+                    )
+                    for item in requests
+                ],
+                total_succeeded=len(requests),
+            )
+
+        provider = MagicMock()
+        provider.book_tee_time = AsyncMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
+        booking_service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            self._fake_database(mock_db)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+                mock_sms.send_booking_failure = AsyncMock()
+
+                with patch.object(CTDateTime, "now") as mock_ct_now:
+                    mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                        self.NOW_CT
+                    )
+
+                    await booking_service._handle_confirm_intent(session)
+
+                    # The regression: two bookings, one task. Checked before
+                    # awaiting, while the task set is still populated.
+                    assert len(booking_service._background_tasks) == 1
+
+                    await booking_service.wait_for_background_bookings()
+
+        # One session, not one per booking.
+        provider.book_tee_time.assert_not_called()
+        assert provider.book_multiple_tee_times.await_count == 1
+
+        batch_requests = provider.book_multiple_tee_times.await_args.kwargs["requests"]
+        assert [item.target_time for item in batch_requests] == [time(17, 0), time(17, 8)]
+        # Off-race, so nothing to wait for before firing.
+        assert provider.book_multiple_tee_times.await_args.kwargs["execute_at"] is None
+
+        # Both outcomes still reach the user, in the channel they asked from.
+        assert mock_sms.send_booking_confirmation.await_count == 2
+        assert all(
+            call.args[2] == "778899" for call in mock_sms.send_booking_confirmation.await_args_list
+        )
+        mock_sms.send_booking_failure.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_one_undeliverable_message_does_not_strand_the_other_booking(
+        self, booking_service: BookingService
+    ) -> None:
+        """A send that raises must not cut the reporting loop short."""
+        import pytz
+
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        session = self._session()
+
+        async def book_multiple(
+            target_date: date, requests: list, execute_at: datetime | None = None
+        ) -> BatchBookingResult:
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=item.booking_id,
+                        result=BookingResult(success=True, booked_time=item.target_time),
+                    )
+                    for item in requests
+                ],
+                total_succeeded=len(requests),
+            )
+
+        provider = MagicMock()
+        provider.book_tee_time = AsyncMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
+        booking_service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            self._fake_database(mock_db)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock(
+                    side_effect=RuntimeError("Discord is down")
+                )
+                mock_sms.send_booking_failure = AsyncMock()
+
+                with patch.object(CTDateTime, "now") as mock_ct_now:
+                    mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                        self.NOW_CT
+                    )
+
+                    await booking_service._handle_confirm_intent(session)
+                    await booking_service.wait_for_background_bookings()
+
+        # The second booking was still attempted even though the first raised.
+        assert mock_sms.send_booking_confirmation.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_batch_that_raises_still_reports_every_booking(
+        self, booking_service: BookingService
+    ) -> None:
+        """Both bookings were acknowledged, so both must get an answer."""
+        import pytz
+
+        session = self._session()
+
+        provider = MagicMock()
+        provider.book_tee_time = AsyncMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=RuntimeError("driver died"))
+        booking_service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            stored = self._fake_database(mock_db)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+                mock_sms.send_booking_failure = AsyncMock()
+
+                with patch.object(CTDateTime, "now") as mock_ct_now:
+                    mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                        self.NOW_CT
+                    )
+
+                    await booking_service._handle_confirm_intent(session)
+                    await booking_service.wait_for_background_bookings()
+
+        assert mock_sms.send_booking_failure.await_count == 2
+        assert all(
+            call.args[4] == "778899" for call in mock_sms.send_booking_failure.await_args_list
+        )
+        mock_sms.send_booking_confirmation.assert_not_called()
+
+        # Nothing is left claiming to still be running.
+        assert len(stored) == 2
+        assert all(b.status == BookingStatus.FAILED for b in stored.values())
+        assert all("driver died" in (b.error_message or "") for b in stored.values())
+
+    @pytest.mark.asyncio
+    async def test_a_booking_missing_from_the_batch_result_is_still_answered(
+        self, booking_service: BookingService
+    ) -> None:
+        """A result the provider never reported must not become silence."""
+        import pytz
+
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        session = self._session()
+
+        async def book_only_the_first(
+            target_date: date, requests: list, execute_at: datetime | None = None
+        ) -> BatchBookingResult:
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=requests[0].booking_id,
+                        result=BookingResult(success=True, booked_time=requests[0].target_time),
+                    )
+                ],
+                total_succeeded=1,
+            )
+
+        provider = MagicMock()
+        provider.book_tee_time = AsyncMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_only_the_first)
+        booking_service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            stored = self._fake_database(mock_db)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+                mock_sms.send_booking_failure = AsyncMock()
+
+                with patch.object(CTDateTime, "now") as mock_ct_now:
+                    mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                        self.NOW_CT
+                    )
+
+                    await booking_service._handle_confirm_intent(session)
+                    await booking_service.wait_for_background_bookings()
+
+        assert mock_sms.send_booking_confirmation.await_count == 1
+        assert mock_sms.send_booking_failure.await_count == 1
+
+        # The omitted booking is written off as failed, not left mid-attempt.
+        assert sorted(booking.status for booking in stored.values()) == sorted(
+            [BookingStatus.FAILED, BookingStatus.SUCCESS]
+        )
 
 
 class TestStatusIntentVisibility:

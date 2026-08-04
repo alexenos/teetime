@@ -261,7 +261,10 @@ class BookingService:
         for request in session.pending_requests:
             try:
                 booking = await self.create_booking(
-                    session.phone_number, request, session.origin_channel_id
+                    session.phone_number,
+                    request,
+                    session.origin_channel_id,
+                    defer_execution=True,
                 )
                 successful_bookings.append(booking)
             except ValueError as e:
@@ -270,6 +273,19 @@ class BookingService:
         session.pending_requests = None
         session.pending_request = None
         session.state = ConversationState.IDLE
+
+        # Bookings whose window is already open run as ONE batch: a single
+        # driver, a single login, attempts made in sequence. Letting
+        # create_booking spawn its own task per booking put two headless Chromes
+        # on the club's login form ~80ms apart; the portal accepted one and left
+        # the other sitting on the login page, failing that booking outright.
+        immediate_booking_ids = [
+            booking.id
+            for booking in successful_bookings
+            if booking.status != BookingStatus.SCHEDULED and booking.id is not None
+        ]
+        if immediate_booking_ids:
+            self._spawn_bookings_batch_execution(immediate_booking_ids)
 
         response_parts = []
 
@@ -676,6 +692,7 @@ class BookingService:
         phone_number: str,
         request: TeeTimeRequest,
         origin_channel_id: str | None = None,
+        defer_execution: bool = False,
     ) -> TeeTimeBooking:
         """
         Create a new booking record and schedule it for execution.
@@ -699,6 +716,11 @@ class BookingService:
             origin_channel_id: Discord channel this booking was requested in, so
                 the success/failure notification replies there. None for SMS and
                 REST API callers.
+            defer_execution: Create the record and mark it IN_PROGRESS, but do
+                not start the attempt. Callers creating several bookings at once
+                set this so they can run the whole set as one batch instead of
+                one concurrent attempt per booking; they then own both starting
+                the work and reporting the outcome.
 
         Returns:
             The created TeeTimeBooking record.
@@ -759,7 +781,8 @@ class BookingService:
                 # it lands.
                 created_booking.status = BookingStatus.IN_PROGRESS
                 await database_service.update_booking(created_booking)
-                self._spawn_booking_execution(booking_id_opt)
+                if not defer_execution:
+                    self._spawn_booking_execution(booking_id_opt)
 
         return created_booking
 
@@ -783,6 +806,121 @@ class BookingService:
             await self.execute_booking(booking_id)
         except Exception:
             logger.exception("Background booking execution failed for %s", booking_id)
+
+    def _spawn_bookings_batch_execution(self, booking_ids: list[str]) -> None:
+        """Run several already-open bookings as one tracked background task."""
+        task = asyncio.create_task(
+            self._execute_bookings_batch_in_background(booking_ids),
+            name=f"execute-bookings-batch-{len(booking_ids)}-from-{booking_ids[0]}",
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _execute_bookings_batch_in_background(self, booking_ids: list[str]) -> None:
+        """Attempt a set of bookings in one session, ensuring failures are logged.
+
+        Mirrors _execute_booking_in_background: the work itself reports its own
+        outcomes, and this wrapper only stops an exception from escaping into an
+        unretrieved task result, where it would vanish silently.
+        """
+        try:
+            await self._run_bookings_batch(booking_ids)
+        except Exception:
+            logger.exception("Background batch booking execution failed for %s", booking_ids)
+
+    async def _run_bookings_batch(self, booking_ids: list[str]) -> None:
+        """Book a set of tee times in one session and report each outcome.
+
+        execute_bookings_batch deliberately leaves notification to its caller,
+        so this reports every booking itself. Each of these bookings has already
+        been acknowledged to the user, so every path out of here has to end in a
+        message per booking - silence would leave them waiting on a reply that
+        never comes. That is also why each notification is isolated: one booking
+        whose message fails to send must not strand the rest of the batch.
+        """
+        bookings = [
+            booking
+            for booking in [await self.get_booking(booking_id) for booking_id in booking_ids]
+            if booking is not None
+        ]
+        if not bookings:
+            logger.error("Batch booking execution found no records for %s", booking_ids)
+            return
+
+        try:
+            results = await self.execute_bookings_batch(bookings, execute_at=None)
+        except Exception as e:
+            logger.exception("Batch booking attempt failed for %s", booking_ids)
+            for booking in bookings:
+                await self._try_notify_unreported_booking(booking, str(e))
+            return
+
+        reported: set[str] = set()
+        for booking_id, result in results:
+            attempted = await self.get_booking(booking_id)
+            if attempted is None:
+                continue
+            reported.add(booking_id)
+            await self._try_notify_booking_result(attempted, result)
+
+        # execute_bookings_batch appends a result per request on every path it
+        # returns from, so this is a backstop against a booking silently going
+        # unanswered rather than an expected branch.
+        for booking in bookings:
+            if booking.id is not None and booking.id not in reported:
+                await self._try_notify_unreported_booking(
+                    booking, "The booking attempt ended without reporting a result."
+                )
+
+    async def _try_notify_booking_result(
+        self, booking: TeeTimeBooking, result: BookingResult
+    ) -> None:
+        """Report one outcome, keeping a send failure from stranding the batch."""
+        try:
+            await self._notify_booking_result(booking, result)
+        except Exception:
+            logger.exception("Could not report the outcome of booking %s", booking.id)
+
+    async def _try_notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
+        """Same, for a booking the batch never accounted for."""
+        try:
+            await self._notify_unreported_booking(booking, error)
+        except Exception:
+            logger.exception("Could not report unaccounted booking %s", booking.id)
+
+    async def _notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
+        """Report a booking the batch left unaccounted for.
+
+        The batch may have resolved and persisted the row before failing, so
+        this reports what was actually recorded and only invents a failure for
+        rows still sitting in IN_PROGRESS.
+        """
+        persisted = await self.get_booking(booking.id) if booking.id is not None else None
+        current = persisted or booking
+
+        if current.status == BookingStatus.SUCCESS:
+            await self._notify_booking_result(
+                current,
+                BookingResult(
+                    success=True,
+                    booked_time=current.actual_booked_time,
+                    confirmation_number=current.confirmation_number,
+                ),
+            )
+            return
+
+        # Only write back a row that is still there to write to; update_booking
+        # raises on a missing record, and the message matters more than the row.
+        if current.status != BookingStatus.FAILED:
+            current.status = BookingStatus.FAILED
+            current.error_message = error
+            if persisted is not None:
+                await database_service.update_booking(current)
+
+        await self._notify_booking_result(
+            current,
+            BookingResult(success=False, error_message=current.error_message or error),
+        )
 
     async def wait_for_background_bookings(self, timeout: float | None = None) -> None:
         """Wait for all in-flight background booking attempts to finish.
@@ -936,16 +1074,9 @@ class BookingService:
             booking.error_message = "Reservation provider not configured"
             await database_service.update_booking(booking)
 
-            # Build booking details string for the failure message
-            date_str = booking.request.requested_date.strftime("%A, %B %d")
-            time_str = booking.request.requested_time.strftime("%I:%M %p")
-            booking_details = f"{date_str} at {time_str} for {booking.request.num_players} players"
-
-            await sms_service.send_booking_failure(
-                booking.phone_number,
-                "System not configured for booking",
-                booking_details=booking_details,
-                origin_channel_id=booking.origin_channel_id,
+            await self._notify_booking_result(
+                booking,
+                BookingResult(success=False, error_message="System not configured for booking"),
             )
             return False
 
@@ -966,40 +1097,14 @@ class BookingService:
                 booking.confirmation_number = result.confirmation_number
                 await database_service.update_booking(booking)
 
-                date_str = booking.request.requested_date.strftime("%A, %B %d")
-                time_str = (result.booked_time or booking.request.requested_time).strftime(
-                    "%I:%M %p"
-                )
-                details = f"{date_str} at {time_str} for {booking.request.num_players} players"
-                if result.confirmation_number:
-                    details += f" (Confirmation: {result.confirmation_number})"
-
-                if result.fallback_reason:
-                    details += f"\n\nNote: {result.fallback_reason}"
-
-                await sms_service.send_booking_confirmation(
-                    booking.phone_number, details, booking.origin_channel_id
-                )
+                await self._notify_booking_result(booking, result)
                 return True
             else:
                 booking.status = BookingStatus.FAILED
                 booking.error_message = result.error_message
                 await database_service.update_booking(booking)
 
-                # Build booking details string for the failure message
-                date_str = booking.request.requested_date.strftime("%A, %B %d")
-                time_str = booking.request.requested_time.strftime("%I:%M %p")
-                booking_details = (
-                    f"{date_str} at {time_str} for {booking.request.num_players} players"
-                )
-
-                await sms_service.send_booking_failure(
-                    booking.phone_number,
-                    result.error_message or "Unknown error",
-                    result.alternatives,
-                    booking_details,
-                    booking.origin_channel_id,
-                )
+                await self._notify_booking_result(booking, result)
                 return False
 
         except Exception as e:
@@ -1007,18 +1112,44 @@ class BookingService:
             booking.error_message = str(e)
             await database_service.update_booking(booking)
 
-            # Build booking details string for the failure message
-            date_str = booking.request.requested_date.strftime("%A, %B %d")
-            time_str = booking.request.requested_time.strftime("%I:%M %p")
-            booking_details = f"{date_str} at {time_str} for {booking.request.num_players} players"
-
-            await sms_service.send_booking_failure(
-                booking.phone_number,
-                str(e),
-                booking_details=booking_details,
-                origin_channel_id=booking.origin_channel_id,
+            await self._notify_booking_result(
+                booking, BookingResult(success=False, error_message=str(e))
             )
             return False
+
+    async def _notify_booking_result(self, booking: TeeTimeBooking, result: BookingResult) -> None:
+        """Tell the user how a finished booking attempt turned out.
+
+        Shared by every path that runs an attempt, so an ad-hoc booking reads
+        the same to the user whether it ran alone or as part of a batch.
+        """
+        date_str = booking.request.requested_date.strftime("%A, %B %d")
+        num_players = booking.request.num_players
+
+        if result.success:
+            time_str = (result.booked_time or booking.request.requested_time).strftime("%I:%M %p")
+            details = f"{date_str} at {time_str} for {num_players} players"
+            if result.confirmation_number:
+                details += f" (Confirmation: {result.confirmation_number})"
+
+            if result.fallback_reason:
+                details += f"\n\nNote: {result.fallback_reason}"
+
+            await sms_service.send_booking_confirmation(
+                booking.phone_number, details, booking.origin_channel_id
+            )
+            return
+
+        time_str = booking.request.requested_time.strftime("%I:%M %p")
+        booking_details = f"{date_str} at {time_str} for {num_players} players"
+
+        await sms_service.send_booking_failure(
+            booking.phone_number,
+            result.error_message or "Unknown error",
+            result.alternatives,
+            booking_details,
+            booking.origin_channel_id,
+        )
 
     async def get_pending_bookings(self) -> list[TeeTimeBooking]:
         return await database_service.get_bookings(status=BookingStatus.SCHEDULED)
