@@ -811,19 +811,32 @@ class BookingService:
         """Run several already-open bookings as one tracked background task."""
         task = asyncio.create_task(
             self._execute_bookings_batch_in_background(booking_ids),
-            name=f"execute-bookings-batch-{'-'.join(booking_ids)}",
+            name=f"execute-bookings-batch-{len(booking_ids)}-from-{booking_ids[0]}",
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
     async def _execute_bookings_batch_in_background(self, booking_ids: list[str]) -> None:
-        """Attempt a set of bookings in one session and report each outcome.
+        """Attempt a set of bookings in one session, ensuring failures are logged.
+
+        Mirrors _execute_booking_in_background: the work itself reports its own
+        outcomes, and this wrapper only stops an exception from escaping into an
+        unretrieved task result, where it would vanish silently.
+        """
+        try:
+            await self._run_bookings_batch(booking_ids)
+        except Exception:
+            logger.exception("Background batch booking execution failed for %s", booking_ids)
+
+    async def _run_bookings_batch(self, booking_ids: list[str]) -> None:
+        """Book a set of tee times in one session and report each outcome.
 
         execute_bookings_batch deliberately leaves notification to its caller,
         so this reports every booking itself. Each of these bookings has already
         been acknowledged to the user, so every path out of here has to end in a
         message per booking - silence would leave them waiting on a reply that
-        never comes.
+        never comes. That is also why each notification is isolated: one booking
+        whose message fails to send must not strand the rest of the batch.
         """
         bookings = [
             booking
@@ -837,9 +850,9 @@ class BookingService:
         try:
             results = await self.execute_bookings_batch(bookings, execute_at=None)
         except Exception as e:
-            logger.exception("Background batch booking execution failed for %s", booking_ids)
+            logger.exception("Batch booking attempt failed for %s", booking_ids)
             for booking in bookings:
-                await self._notify_unreported_booking(booking, str(e))
+                await self._try_notify_unreported_booking(booking, str(e))
             return
 
         reported: set[str] = set()
@@ -848,16 +861,32 @@ class BookingService:
             if attempted is None:
                 continue
             reported.add(booking_id)
-            await self._notify_booking_result(attempted, result)
+            await self._try_notify_booking_result(attempted, result)
 
         # execute_bookings_batch appends a result per request on every path it
         # returns from, so this is a backstop against a booking silently going
         # unanswered rather than an expected branch.
         for booking in bookings:
             if booking.id is not None and booking.id not in reported:
-                await self._notify_unreported_booking(
+                await self._try_notify_unreported_booking(
                     booking, "The booking attempt ended without reporting a result."
                 )
+
+    async def _try_notify_booking_result(
+        self, booking: TeeTimeBooking, result: BookingResult
+    ) -> None:
+        """Report one outcome, keeping a send failure from stranding the batch."""
+        try:
+            await self._notify_booking_result(booking, result)
+        except Exception:
+            logger.exception("Could not report the outcome of booking %s", booking.id)
+
+    async def _try_notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
+        """Same, for a booking the batch never accounted for."""
+        try:
+            await self._notify_unreported_booking(booking, error)
+        except Exception:
+            logger.exception("Could not report unaccounted booking %s", booking.id)
 
     async def _notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
         """Report a booking the batch left unaccounted for.
@@ -880,10 +909,13 @@ class BookingService:
             )
             return
 
+        # Only write back a row that is still there to write to; update_booking
+        # raises on a missing record, and the message matters more than the row.
         if current.status != BookingStatus.FAILED:
             current.status = BookingStatus.FAILED
             current.error_message = error
-            await database_service.update_booking(current)
+            if persisted is not None:
+                await database_service.update_booking(current)
 
         await self._notify_booking_result(
             current,

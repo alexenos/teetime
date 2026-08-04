@@ -2093,16 +2093,22 @@ class TestImmediateMultiBookingRunsAsOneBatch:
 
     @staticmethod
     def _fake_database(mock_db: MagicMock) -> dict[str, TeeTimeBooking]:
-        """Back the mocked database_service with a dict keyed by booking id."""
+        """Back the mocked database_service with a dict keyed by booking id.
+
+        Rows are copied in and out so that what `stored` holds is only what was
+        actually written. Handing back the service's own instance would let an
+        in-place mutation satisfy a status assertion that no write ever made.
+        """
         stored: dict[str, TeeTimeBooking] = {}
 
         async def save(booking: TeeTimeBooking) -> TeeTimeBooking:
             if booking.id is not None:
-                stored[booking.id] = booking
+                stored[booking.id] = booking.model_copy(deep=True)
             return booking
 
         async def load(booking_id: str) -> TeeTimeBooking | None:
-            return stored.get(booking_id)
+            found = stored.get(booking_id)
+            return found.model_copy(deep=True) if found is not None else None
 
         mock_db.create_booking = AsyncMock(side_effect=save)
         mock_db.update_booking = AsyncMock(side_effect=save)
@@ -2176,6 +2182,56 @@ class TestImmediateMultiBookingRunsAsOneBatch:
         mock_sms.send_booking_failure.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_one_undeliverable_message_does_not_strand_the_other_booking(
+        self, booking_service: BookingService
+    ) -> None:
+        """A send that raises must not cut the reporting loop short."""
+        import pytz
+
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        session = self._session()
+
+        async def book_multiple(
+            target_date: date, requests: list, execute_at: datetime | None = None
+        ) -> BatchBookingResult:
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=item.booking_id,
+                        result=BookingResult(success=True, booked_time=item.target_time),
+                    )
+                    for item in requests
+                ],
+                total_succeeded=len(requests),
+            )
+
+        provider = MagicMock()
+        provider.book_tee_time = AsyncMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
+        booking_service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            self._fake_database(mock_db)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock(
+                    side_effect=RuntimeError("Discord is down")
+                )
+                mock_sms.send_booking_failure = AsyncMock()
+
+                with patch.object(CTDateTime, "now") as mock_ct_now:
+                    mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                        self.NOW_CT
+                    )
+
+                    await booking_service._handle_confirm_intent(session)
+                    await booking_service.wait_for_background_bookings()
+
+        # The second booking was still attempted even though the first raised.
+        assert mock_sms.send_booking_confirmation.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_a_batch_that_raises_still_reports_every_booking(
         self, booking_service: BookingService
     ) -> None:
@@ -2245,7 +2301,7 @@ class TestImmediateMultiBookingRunsAsOneBatch:
         booking_service.set_reservation_provider(provider)
 
         with patch("app.services.booking_service.database_service") as mock_db:
-            self._fake_database(mock_db)
+            stored = self._fake_database(mock_db)
 
             with patch("app.services.booking_service.sms_service") as mock_sms:
                 mock_sms.send_booking_confirmation = AsyncMock()
@@ -2261,6 +2317,11 @@ class TestImmediateMultiBookingRunsAsOneBatch:
 
         assert mock_sms.send_booking_confirmation.await_count == 1
         assert mock_sms.send_booking_failure.await_count == 1
+
+        # The omitted booking is written off as failed, not left mid-attempt.
+        assert sorted(booking.status for booking in stored.values()) == sorted(
+            [BookingStatus.FAILED, BookingStatus.SUCCESS]
+        )
 
 
 class TestStatusIntentVisibility:
