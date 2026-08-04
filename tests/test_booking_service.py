@@ -1302,6 +1302,7 @@ class TestConfirmationShortcut:
 
     @staticmethod
     def _session_awaiting_confirmation() -> UserSession:
+        """Build a session parked on a single pending booking, awaiting yes/no."""
         return UserSession(
             phone_number="+15551234567",
             state=ConversationState.AWAITING_CONFIRMATION,
@@ -1393,6 +1394,7 @@ class TestConfirmationShortcut:
     def test_affirmative_variants_are_recognized(
         self, booking_service: BookingService, message: str
     ) -> None:
+        """Casing, trailing punctuation and a thumbs-up all read as yes."""
         session = self._session_awaiting_confirmation()
         assert booking_service._confirmation_shortcut(session, message) is True
 
@@ -1400,6 +1402,7 @@ class TestConfirmationShortcut:
     def test_negative_variants_are_recognized(
         self, booking_service: BookingService, message: str
     ) -> None:
+        """The same normalization applies to an unambiguous no."""
         session = self._session_awaiting_confirmation()
         assert booking_service._confirmation_shortcut(session, message) is False
 
@@ -1426,6 +1429,7 @@ class TestConfirmationShortcut:
     def test_shortcut_skipped_outside_awaiting_confirmation(
         self, booking_service: BookingService
     ) -> None:
+        """A stray 'yes' with no question pending still needs interpreting."""
         session = self._session_awaiting_confirmation()
         session.state = ConversationState.IDLE
         assert booking_service._confirmation_shortcut(session, "yes") is None
@@ -1433,6 +1437,7 @@ class TestConfirmationShortcut:
     def test_shortcut_skipped_without_a_pending_request(
         self, booking_service: BookingService
     ) -> None:
+        """Confirming state with nothing pending is not ours to shortcut."""
         session = self._session_awaiting_confirmation()
         session.pending_request = None
         assert booking_service._confirmation_shortcut(session, "yes") is None
@@ -1447,6 +1452,7 @@ class TestConfirmationShortcut:
 
     @pytest.mark.asyncio
     async def test_no_clears_the_pending_booking(self, booking_service: BookingService) -> None:
+        """Declining drops the pending booking and returns the session to idle."""
         session = self._session_awaiting_confirmation()
 
         with patch("app.services.booking_service.database_service") as mock_db:
