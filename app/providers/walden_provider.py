@@ -2950,9 +2950,13 @@ class WaldenGolfProvider(ReservationProvider):
                             course_name=self.NORTHGATE_COURSE_NAME,
                         )
                 self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
+                site_message = chain_result.get("responseMessage")
                 return BookingResult(
                     success=False,
-                    error_message=f"Fast booking failed at {phase}: {error}",
+                    error_message=(
+                        f"Fast booking failed at {phase}: {error}"
+                        f"{f' (the site said: {site_message})' if site_message else ''}"
+                    ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
@@ -3005,11 +3009,15 @@ class WaldenGolfProvider(ReservationProvider):
                     if held is False
                     else "and the member's reservations page could not be checked"
                 )
+                # The response's own message containers are the only place a
+                # refusal we have no phrase for can still be read from.
+                site_message = chain_result.get("responseMessage")
                 return BookingResult(
                     success=False,
                     error_message=(
                         "Direct-HTTP booking chain completed but the response did not "
                         f"confirm the reservation ({verdict_detail}) {whereabouts}"
+                        f"{f'. The site said: {site_message}' if site_message else ''}"
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,

@@ -44,6 +44,17 @@ logger = logging.getLogger(__name__)
 # chain there is no fixed inter-click delay to pay here.
 _MAX_PLAYERS = 4
 
+# Class-name substrings marking a message/alert container, the tree-matching
+# equivalent of the CSS selectors in DOM.ERROR_MESSAGES.containers. "error"
+# covers ui-messages-error, ui-message-error, ui-growl-message-error and plain
+# .error/.errors; the PrimeFaces widget classes catch a validation message
+# rendered without an -error suffix.
+_MESSAGE_CLASS_MARKERS = ("error", "alert", "ui-messages", "ui-growl")
+
+# Enough to carry a validation sentence or two into an SMS/Discord reply without
+# pasting a re-rendered tee sheet into it.
+_MAX_MESSAGE_CHARS = 500
+
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
 # DOM untouched, so only this one needs the outcome resolved against the site.
@@ -78,6 +89,12 @@ class DirectBookingResult:
     branch on both identically, plus ``final_markup`` - the last response body,
     which is the only record of the booking outcome, since the browser DOM is
     untouched by this path.
+
+    ``success`` here means every step of the chain ran without erroring - the
+    four POSTs went out and each response yielded the element the next step
+    needed. It is not evidence that a reservation exists: a completed chain
+    whose tee time never appeared on the member's reservations page is exactly
+    what prompted this field's documentation. The provider verifies separately.
     """
 
     success: bool = False
@@ -86,6 +103,10 @@ class DirectBookingResult:
     error: str | None = None
     timing: dict[str, Any] = field(default_factory=dict)
     final_markup: str = ""
+    # Visible validation/message text found in the final response, if any. The
+    # direct path's counterpart to _extract_booking_error_message, which reads
+    # the browser DOM this path never touches.
+    response_message: str | None = None
 
     def as_chain_result(self) -> dict[str, Any]:
         """Render as the dict shape ``_run_booking_chain_js`` returns."""
@@ -96,6 +117,7 @@ class DirectBookingResult:
             "error": self.error,
             "timing": self.timing,
             "finalMarkup": self.final_markup,
+            "responseMessage": self.response_message,
             "path": DIRECT_HTTP_PATH,
         }
 
@@ -180,7 +202,16 @@ class DirectHttpBooker:
             return self._run_chain(num_players, target_timestamp_ms, result)
         except DirectHttpError as exc:
             result.error = str(exc)
-            logger.warning("DIRECT_HTTP: Chain failed in phase %s: %s", result.phase, exc)
+            # A step that could not find the element it needed is often a step
+            # the site refused; the reason, if it gave one, is in the response
+            # that step was reading.
+            result.response_message = find_response_message(result.final_markup)
+            logger.warning(
+                "DIRECT_HTTP: Chain failed in phase %s: %s%s",
+                result.phase,
+                exc,
+                f" (site message: {result.response_message})" if result.response_message else "",
+            )
             return result
         except Exception as exc:  # noqa: BLE001 - this path must never abort a booking run
             # An unexpected error here is a bug in this module, not a booking
@@ -244,10 +275,32 @@ class DirectHttpBooker:
             result.final_markup = response.markup
             result.timing["tbdGuestsMs"] = elapsed_ms()
 
+            blocked_reason = _find_blocked_message(response)
+            if blocked_reason is not None:
+                result.blocked = True
+                result.error = blocked_reason
+                return result
+
         result.phase = PHASE_BOOK_NOW
         response = self._click_book_now(response)
         result.final_markup = response.markup
         result.timing["bookNowMs"] = elapsed_ms()
+
+        # The submit step can be refused like any other, and until now this was
+        # the one step whose response nobody examined: the chain went straight
+        # to COMPLETE. A booking the club turned down at Book Now was therefore
+        # indistinguishable from one it accepted, because neither says anything
+        # the phrase check recognizes.
+        blocked_reason = _find_blocked_message(response)
+        if blocked_reason is not None:
+            result.blocked = True
+            result.error = blocked_reason
+            return result
+
+        # Whatever the site rendered in its message containers rides along, so a
+        # refusal for a reason we have no pattern for still reaches the member
+        # instead of being reported as an unexplained non-confirmation.
+        result.response_message = find_response_message(response.markup)
 
         result.phase = PHASE_COMPLETE
         result.success = True
@@ -422,6 +475,66 @@ def _find_book_now(document: Node) -> Node | None:
         if node.text_content().strip().lower() in ("book now", "book"):
             return node
     return None
+
+
+def find_response_message(markup: str) -> str | None:
+    """Extract visible validation/message text from a partial response.
+
+    The direct-HTTP counterpart of ``_extract_booking_error_message``, which
+    reads the same kind of containers off the browser DOM. This path has no DOM,
+    so a refusal the phrase check has no pattern for used to reach the member as
+    an unexplained "did not confirm the reservation" - true, but useless.
+
+    This is diagnostic text only: nothing branches on it. That is deliberate.
+    A full tee sheet re-render carries hidden message templates, so treating a
+    match as a refusal would fail bookings that succeeded. Reporting the text
+    alongside an outcome decided elsewhere costs nothing if it is noise.
+
+    Returns:
+        The collected message text, or None when the response carries none.
+    """
+    document = parse_html(markup)
+    seen: set[str] = set()
+    messages: list[str] = []
+
+    for node in document.descendants():
+        if not _is_message_container(node):
+            continue
+        # Hidden containers are templates PrimeFaces renders on every page, not
+        # something the member was shown.
+        if node.attrs.get("aria-hidden", "").lower() == "true":
+            continue
+        text = " ".join(node.text_content().split())
+        if not text or text.lower() in seen:
+            continue
+        # A container nested inside one already collected would repeat its text.
+        if any(text in collected for collected in messages):
+            continue
+        seen.add(text.lower())
+        messages.append(text)
+
+    if not messages:
+        return None
+
+    joined = "; ".join(messages)
+    return joined[:_MAX_MESSAGE_CHARS] + "..." if len(joined) > _MAX_MESSAGE_CHARS else joined
+
+
+def _is_message_container(node: Node) -> bool:
+    """Report whether a node is one of the site's message/alert containers.
+
+    Mirrors ``DOM.ERROR_MESSAGES.containers`` - which is a CSS selector list,
+    and this tree matches by class substring rather than selectors.
+    """
+    if node.attrs.get("role", "").lower() == "alert":
+        return True
+    if node.attrs.get("aria-live", "").lower() in ("assertive", "polite"):
+        return True
+    return any(
+        marker in css_class.lower()
+        for css_class in node.classes
+        for marker in _MESSAGE_CLASS_MARKERS
+    )
 
 
 def _find_blocked_message(response: PartialResponse) -> str | None:
