@@ -405,6 +405,13 @@ class ErrorMessageSelectors:
         "[role='alert']",
         "[aria-live='assertive']",
         "[aria-live='polite']",
+        # The site's own refusal popups, which carry no error class: a booking
+        # the club will not allow comes back as a plain ui-dialog headed
+        # "Restriction:". Rendered empty until there is something to say, so
+        # matching the wrapper by id costs nothing on a clean page.
+        "[id*='restrictionPopup']",
+        "[id*='warningPopup']",
+        "[id*='resourceNotAvailablePopup']",
     )
 
 

@@ -51,6 +51,21 @@ _MAX_PLAYERS = 4
 # rendered without an -error suffix.
 _MESSAGE_CLASS_MARKERS = ("error", "alert", "ui-messages", "ui-growl")
 
+# Id substrings marking one of the site's own popup wrappers. These carry no
+# error class at all - a refused booking comes back as a `ui-dialog` headed
+# "Restriction:" - so the class markers above never saw them, and a real refusal
+# reached the member as an unexplained "did not confirm the reservation".
+#
+# Matching by id is safe because the site renders these wrappers empty until it
+# has something to put in them: the same response that carried the restriction
+# had `warningPopup` and `resourceNotAvailablePopup` beside it as empty spans.
+# `useLastPlayPopup` is left out on purpose - it prompts, it does not refuse.
+_MESSAGE_ID_MARKERS = ("restrictionpopup", "warningpopup", "resourcenotavailablepopup")
+
+# Tags whose text is not message text: a dialog's own buttons ("Ok", "Close")
+# and the PrimeFaces widget-init scripts rendered inside it.
+_NON_MESSAGE_TAGS = frozenset({"a", "button", "script", "style"})
+
 # Enough to carry a validation sentence or two into an SMS/Discord reply without
 # pasting a re-rendered tee sheet into it.
 _MAX_MESSAGE_CHARS = 500
@@ -521,6 +536,21 @@ def find_response_message(markup: str) -> str | None:
     return joined[:_MAX_MESSAGE_CHARS] + "..." if len(joined) > _MAX_MESSAGE_CHARS else joined
 
 
+def container_message_text(markup: str) -> str:
+    """Message text of one already-matched container's markup.
+
+    The browser path selects its containers with CSS and then has to read them,
+    and ``WebElement.text`` sweeps in whatever the container holds - a refusal
+    dialog reaches the member as "... per Day Ok". Handing the element's
+    ``outerHTML`` here keeps one definition of message text for both paths,
+    rather than a second pruner that can drift from this one.
+
+    Returns:
+        The pruned text, or "" when the container holds none.
+    """
+    return _visible_message_text(parse_html(markup))
+
+
 def _is_hidden(node: Node) -> bool:
     """Report whether a node is explicitly hidden from the member."""
     return node.attrs.get("aria-hidden", "").lower() == "true"
@@ -542,13 +572,15 @@ def _visible_message_text(node: Node) -> str:
     ``text_content()`` would sweep in an ``aria-hidden`` child template sitting
     inside a visible wrapper, which reports stale text and - because the nesting
     check drops a message already contained in a collected one - can hide the
-    real message behind it.
+    real message behind it. A popup's own controls and widget-init script are
+    pruned for the same reason: quoting "Ok" or a ``PrimeFaces.cw`` call back to
+    the member buries the sentence they need.
     """
     parts: list[str] = []
     stack = [node]
     while stack:
         current = stack.pop()
-        if _is_hidden(current):
+        if _is_hidden(current) or current.tag.lower() in _NON_MESSAGE_TAGS:
             continue
         if current.text:
             parts.append(current.text)
@@ -560,11 +592,14 @@ def _is_message_container(node: Node) -> bool:
     """Report whether a node is one of the site's message/alert containers.
 
     Mirrors ``DOM.ERROR_MESSAGES.containers`` - which is a CSS selector list,
-    and this tree matches by class substring rather than selectors.
+    and this tree matches by class or id substring rather than selectors.
     """
     if node.attrs.get("role", "").lower() == "alert":
         return True
     if node.attrs.get("aria-live", "").lower() in ("assertive", "polite"):
+        return True
+    node_id = node.id.lower()
+    if any(marker in node_id for marker in _MESSAGE_ID_MARKERS):
         return True
     return any(
         marker in css_class.lower()

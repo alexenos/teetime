@@ -7,6 +7,7 @@ against the actual Walden Golf website structure.
 
 import os
 from datetime import date, time, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -18,7 +19,11 @@ from app.config import settings
 from app.providers.base import BookingResult
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import DirectHttpError
-from app.providers.walden_http_booker import DIRECT_HTTP_PATH, PHASE_RESERVE_STAGED
+from app.providers.walden_http_booker import (
+    DIRECT_HTTP_PATH,
+    PHASE_RESERVE_STAGED,
+    find_response_message,
+)
 from app.providers.walden_provider import WaldenGolfProvider
 from app.utils.timezone import CTDateTime
 
@@ -2967,6 +2972,11 @@ class TestUnconfirmedBookingResolution:
     TARGET_DATE = date(2026, 8, 8)
     # No success or failure wording anywhere - the tee sheet re-render case.
     SILENT_MARKUP = "<div><p>Northgate tee sheet</p></div>"
+    # A real refusal, captured from the site: also silent to the phrase check,
+    # because the reason is in a dialog rather than in wording it knows.
+    RESTRICTION_MARKUP = (
+        Path(__file__).parent / "fixtures" / "walden_restriction_popup.html"
+    ).read_text(encoding="utf-8")
 
     def _book(
         self,
@@ -3071,6 +3081,42 @@ class TestUnconfirmedBookingResolution:
         assert result.error_message is not None
         assert "unable to" in result.error_message
 
+    def test_the_clubs_restriction_reaches_the_member_in_its_own_words(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal the member needs, not a report that nothing was said.
+
+        The club allows one round per member per day, so the second half of a
+        two-tee-time batch comes back like this. ``responseMessage`` is filled
+        the way the booker fills it, from the response itself.
+        """
+        chain = self._completed_chain(self.RESTRICTION_MARKUP)
+        chain["responseMessage"] = find_response_message(self.RESTRICTION_MARKUP)
+
+        result, _ = self._book(provider, monkeypatch, chain, reservation_exists=False)
+
+        assert result.success is False
+        # Nothing about chains, phases or phrase checks: the member gets the
+        # club's sentence and nothing else. The rest is in the log.
+        assert result.error_message == (
+            "Restriction: Member: Sample, Member is restricted for 1 round(s) "
+            "on Northgate per Day"
+        )
+
+    def test_an_unreadable_reservations_page_is_still_admitted(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A member who might be holding the tee time has to hear that."""
+        chain = self._completed_chain(self.RESTRICTION_MARKUP)
+        chain["responseMessage"] = find_response_message(self.RESTRICTION_MARKUP)
+
+        result, _ = self._book(provider, monkeypatch, chain, reservation_exists=None)
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert result.error_message.startswith("Restriction: Member: Sample, Member")
+        assert "could not be checked" in result.error_message
+
     def test_a_confirmed_response_never_reaches_the_reservations_page(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3149,6 +3195,54 @@ class TestUnconfirmedBookingResolution:
 
         assert result.success is False
         reservation_check.assert_not_called()
+
+
+class TestBrowserErrorMessageExtraction:
+    """Reading a refusal off the browser DOM, for the JS-chain fallback path."""
+
+    RESTRICTION_MARKUP = TestUnconfirmedBookingResolution.RESTRICTION_MARKUP
+
+    def _driver_showing(self, markup: str) -> MagicMock:
+        """A driver whose first selector match is a container holding ``markup``."""
+        element = MagicMock()
+        element.get_attribute.side_effect = lambda name: (markup if name == "outerHTML" else None)
+        element.is_displayed.return_value = True
+        element.text = "unused - the markup is what gets read"
+
+        driver = MagicMock()
+        driver.find_elements.side_effect = lambda by, sel: (
+            [element] if "restrictionPopup" in sel else []
+        )
+        return driver
+
+    def test_the_restriction_dialog_is_read_without_its_buttons(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """WebElement.text would carry the dialog's "Ok" into the member's reply."""
+        message = provider._extract_booking_error_message(
+            self._driver_showing(self.RESTRICTION_MARKUP)
+        )
+
+        assert message == (
+            "Restriction: Member: Sample, Member is restricted for 1 round(s) "
+            "on Northgate per Day"
+        )
+
+    def test_unreadable_markup_falls_back_to_the_rendered_text(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """A message with a stray button label beats no message at all."""
+        element = MagicMock()
+        element.get_attribute.side_effect = WebDriverException("stale element")
+        element.is_displayed.return_value = True
+        element.text = "Members are limited to one per day"
+
+        driver = MagicMock()
+        driver.find_elements.side_effect = lambda by, sel: [element] if ".alert" == sel else []
+
+        assert (
+            provider._extract_booking_error_message(driver) == "Members are limited to one per day"
+        )
 
 
 class TestReservationLookup:

@@ -42,6 +42,7 @@ from app.providers.walden_http_booker import (
     DIRECT_HTTP_PATH,
     PRE_SUBMIT_PHASES,
     DirectHttpBooker,
+    container_message_text,
 )
 from app.utils.timezone import CTDateTime
 
@@ -1582,6 +1583,30 @@ class WaldenGolfProvider(ReservationProvider):
         page_source = getattr(driver, "page_source", "")
         return page_source if isinstance(page_source, str) else ""
 
+    def _container_message_text(self, element: Any) -> str:
+        """Read one message container the way the direct-HTTP path reads one.
+
+        ``WebElement.text`` returns everything the container renders, including
+        its own controls, so the club's refusal dialog would reach the member as
+        "... restricted for 1 round(s) on Northgate per Day Ok". The markup goes
+        through the same pruner the HTTP path uses instead - one definition of
+        message text for both paths, and the one already tested against a real
+        captured response.
+
+        Falls back to ``.text`` if the markup cannot be read: a message with a
+        stray button label in it beats no message at all.
+        """
+        try:
+            markup = element.get_attribute("outerHTML")
+            if isinstance(markup, str) and markup:
+                pruned = container_message_text(markup)
+                if pruned:
+                    return pruned
+        except Exception as e:  # noqa: BLE001 - diagnostics must not raise
+            logger.debug(f"Could not read container markup, falling back to .text: {e}")
+
+        return (getattr(element, "text", "") or "").strip()
+
     def _extract_booking_error_message(self, driver: webdriver.Chrome) -> str | None:
         """Extract user-visible booking error text from common alert/message containers."""
         selectors = DOM.ERROR_MESSAGES.containers
@@ -1603,7 +1628,7 @@ class WaldenGolfProvider(ReservationProvider):
                         except Exception:
                             pass
 
-                        text = (getattr(el, "text", "") or "").strip()
+                        text = self._container_message_text(el)
                         if text:
                             messages.append(text)
                 except Exception:
@@ -2958,22 +2983,23 @@ class WaldenGolfProvider(ReservationProvider):
                 else:
                     self._capture_diagnostic_info(driver, f"fast_chain_failed_{phase}")
 
-                message = f"Fast booking failed at {phase}: {error}"
+                technical = f"Fast booking failed at {phase}: {error}"
                 site_message = chain_result.get("responseMessage")
-                if site_message:
-                    message += f" (the site said: {site_message})"
                 # "Could not check" is not "not booked". Saying so keeps this
                 # message honest in the same way the verification branch below is.
-                if (
+                unchecked = (
                     held is None
                     and chain_result.get("path") == DIRECT_HTTP_PATH
                     and phase not in PRE_SUBMIT_PHASES
-                ):
-                    message += "; the member's reservations page could not be checked"
+                )
 
                 return BookingResult(
                     success=False,
-                    error_message=message,
+                    error_message=self._member_facing_failure(
+                        site_message=site_message,
+                        technical=technical,
+                        unchecked=unchecked,
+                    ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
@@ -3021,20 +3047,21 @@ class WaldenGolfProvider(ReservationProvider):
                     )
 
                 self._capture_diagnostic_info(driver, "direct_http_verify_failed")
-                whereabouts = (
-                    "and the tee time is not on the member's reservations page"
-                    if held is False
-                    else "and the member's reservations page could not be checked"
+                technical = (
+                    "Direct-HTTP booking chain completed but the response did not "
+                    f"confirm the reservation ({verdict_detail})"
                 )
+                if held is False:
+                    technical += " and the tee time is not on the member's reservations page"
                 # The response's own message containers are the only place a
                 # refusal we have no phrase for can still be read from.
                 site_message = chain_result.get("responseMessage")
                 return BookingResult(
                     success=False,
-                    error_message=(
-                        "Direct-HTTP booking chain completed but the response did not "
-                        f"confirm the reservation ({verdict_detail}) {whereabouts}"
-                        f"{f'. The site said: {site_message}' if site_message else ''}"
+                    error_message=self._member_facing_failure(
+                        site_message=site_message,
+                        technical=technical,
+                        unchecked=held is None,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -5463,6 +5490,34 @@ class WaldenGolfProvider(ReservationProvider):
         """
         confirmed, _detail = self._booking_text_verdict(text, context)
         return bool(confirmed)
+
+    def _member_facing_failure(
+        self, *, site_message: str | None, technical: str, unchecked: bool
+    ) -> str:
+        """Phrase a failed direct-HTTP booking for the member who asked for it.
+
+        When the site said why - "Member: ... is restricted for 1 round(s) on
+        Northgate per Day" - that sentence is the whole answer, and the chain's
+        own vocabulary (phases, partial responses, phrase checks) only buries it.
+        So the site's words go to the member and the technical account goes to
+        the log, where the response body and screenshots already are.
+
+        Args:
+            site_message: What the response's own message containers said, if
+                anything.
+            technical: The chain's account of the failure, used when the site
+                said nothing.
+            unchecked: True when the reservations page could not be read. The
+                caveat rides along either way: "could not check" is not "not
+                booked", and a member who might be holding a tee time needs to
+                hear that whatever else went wrong.
+        """
+        if site_message:
+            logger.error("DIRECT_HTTP: %s; the site said: %s", technical, site_message)
+        message = site_message or technical
+        if unchecked:
+            message += " (the member's reservations page could not be checked)"
+        return message
 
     def _booking_text_verdict(self, text: str, context: str) -> tuple[bool | None, str]:
         """Classify booking text as confirmed, refused, or silent.
