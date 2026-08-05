@@ -7,6 +7,7 @@ against the actual Walden Golf website structure.
 
 import os
 from datetime import date, time, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -18,7 +19,11 @@ from app.config import settings
 from app.providers.base import BookingResult
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import DirectHttpError
-from app.providers.walden_http_booker import DIRECT_HTTP_PATH, PHASE_RESERVE_STAGED
+from app.providers.walden_http_booker import (
+    DIRECT_HTTP_PATH,
+    PHASE_RESERVE_STAGED,
+    find_response_message,
+)
 from app.providers.walden_provider import WaldenGolfProvider
 from app.utils.timezone import CTDateTime
 
@@ -2967,6 +2972,11 @@ class TestUnconfirmedBookingResolution:
     TARGET_DATE = date(2026, 8, 8)
     # No success or failure wording anywhere - the tee sheet re-render case.
     SILENT_MARKUP = "<div><p>Northgate tee sheet</p></div>"
+    # A real refusal, captured from the site: also silent to the phrase check,
+    # because the reason is in a dialog rather than in wording it knows.
+    RESTRICTION_MARKUP = (
+        Path(__file__).parent / "fixtures" / "walden_restriction_popup.html"
+    ).read_text(encoding="utf-8")
 
     def _book(
         self,
@@ -3070,6 +3080,42 @@ class TestUnconfirmedBookingResolution:
         assert result.success is False
         assert result.error_message is not None
         assert "unable to" in result.error_message
+
+    def test_the_clubs_restriction_reaches_the_member_in_its_own_words(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal the member needs, not a report that nothing was said.
+
+        The club allows one round per member per day, so the second half of a
+        two-tee-time batch comes back like this. ``responseMessage`` is filled
+        the way the booker fills it, from the response itself.
+        """
+        chain = self._completed_chain(self.RESTRICTION_MARKUP)
+        chain["responseMessage"] = find_response_message(self.RESTRICTION_MARKUP)
+
+        result, _ = self._book(provider, monkeypatch, chain, reservation_exists=False)
+
+        assert result.success is False
+        # Nothing about chains, phases or phrase checks: the member gets the
+        # club's sentence and nothing else. The rest is in the log.
+        assert result.error_message == (
+            "Restriction: Member: Sample, Member is restricted for 1 round(s) "
+            "on Northgate per Day"
+        )
+
+    def test_an_unreadable_reservations_page_is_still_admitted(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A member who might be holding the tee time has to hear that."""
+        chain = self._completed_chain(self.RESTRICTION_MARKUP)
+        chain["responseMessage"] = find_response_message(self.RESTRICTION_MARKUP)
+
+        result, _ = self._book(provider, monkeypatch, chain, reservation_exists=None)
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert result.error_message.startswith("Restriction: Member: Sample, Member")
+        assert "could not be checked" in result.error_message
 
     def test_a_confirmed_response_never_reaches_the_reservations_page(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch

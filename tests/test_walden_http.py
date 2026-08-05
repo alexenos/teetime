@@ -36,6 +36,10 @@ from app.providers.walden_http_booker import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TEE_SHEET = (FIXTURES / "walden_tee_time_loaded.html").read_text(encoding="utf-8", errors="replace")
+# The refusal the site returned for a second same-day booking on 08/08/2026,
+# lifted verbatim from the captured Book Now response with the member's name
+# replaced. This is what a routine refusal looks like: no error class anywhere.
+RESTRICTION_POPUP = (FIXTURES / "walden_restriction_popup.html").read_text(encoding="utf-8")
 
 FORM_ID = "_teeTimePortlet_WAR_northstarportlet_:teeTimeForm"
 RESERVE_ID = f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:67:slotTee:0:reserve_button"
@@ -700,6 +704,40 @@ class TestFindResponseMessage:
         failure: the routine response has nothing in it.
         """
         assert find_response_message(TEE_SHEET) is None
+
+    def test_reads_the_restriction_popup(self) -> None:
+        """The club's refusal, which carries no error class at all.
+
+        Booking 08/08 at 5:00 and 5:08 PM as one batch got the first and was
+        refused the second; the response said so in a ui-dialog the class
+        markers could not see, so the member was told only that the reservation
+        was not confirmed.
+        """
+        assert find_response_message(RESTRICTION_POPUP) == (
+            "Restriction: Member: Sample, Member is restricted for 1 round(s) "
+            "on Northgate per Day"
+        )
+
+    def test_popup_buttons_and_widget_scripts_are_not_message_text(self) -> None:
+        """The sentence is the message; the dialog's own furniture is not."""
+        message = find_response_message(RESTRICTION_POPUP)
+
+        assert message is not None
+        assert "Ok" not in message
+        assert "PrimeFaces.cw" not in message
+
+    def test_an_unfilled_popup_wrapper_is_not_a_message(self) -> None:
+        """The site renders these wrappers empty until it has something to say.
+
+        The same response that carried the restriction had these two beside it,
+        empty - which is why matching the wrapper by id is safe.
+        """
+        markup = (
+            '<span id="teeTimeForm:warningPopup"></span>'
+            '<span id="teeTimeForm:resourceNotAvailablePopup"></span>'
+        )
+
+        assert find_response_message(markup) is None
 
 
 class ChainRecorder:
