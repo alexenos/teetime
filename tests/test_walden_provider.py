@@ -21,6 +21,7 @@ from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import DirectHttpError
 from app.providers.walden_http_booker import (
     DIRECT_HTTP_PATH,
+    PHASE_RESERVE_SENT,
     PHASE_RESERVE_STAGED,
     find_response_message,
 )
@@ -3195,6 +3196,157 @@ class TestUnconfirmedBookingResolution:
 
         assert result.success is False
         reservation_check.assert_not_called()
+
+
+class TestBlockedSlotResolution:
+    """What a blocked verdict on the direct-HTTP path is allowed to conclude.
+
+    The verdict is read out of a response the browser never received, and it is
+    reached with the Reserve request already accepted. So the browser photograph
+    cannot show the popup that produced it - only the response can - and the
+    chain's own account says nothing about whether the tee time is ours. Both
+    gaps put a member in front of a starter with no slot, or send them away from
+    one they hold.
+    """
+
+    SLOT = dict(TestDirectHttpBookingWiring.SLOT)
+    TARGET_DATE = date(2026, 8, 12)
+    BLOCKED_MARKUP = (
+        '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
+        "This slot is blocked by another user</div>"
+    )
+
+    def _book(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        chain_result: dict[str, object],
+        reservation_exists: bool | None,
+    ) -> tuple[BookingResult, MagicMock, MagicMock]:
+        """Run one booking whose chain came back blocked."""
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        monkeypatch.setattr(
+            provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_try_direct_http_booking", MagicMock(return_value=chain_result)
+        )
+        monkeypatch.setattr(provider, "_capture_diagnostic_info", MagicMock())
+        artifact_capture = MagicMock()
+        monkeypatch.setattr(provider, "_capture_response_artifact", artifact_capture)
+        reservation_check = MagicMock(return_value=reservation_exists)
+        monkeypatch.setattr(provider, "_reservation_exists", reservation_check)
+
+        result = provider._find_and_book_time_slot_sync(
+            MagicMock(),
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            target_date=self.TARGET_DATE,
+        )
+        return result, reservation_check, artifact_capture
+
+    def _blocked_chain(self, **overrides: object) -> dict[str, object]:
+        """A direct-HTTP chain that stopped on the blocked popup."""
+        chain: dict[str, object] = {
+            "success": False,
+            "blocked": True,
+            "phase": PHASE_RESERVE_SENT,
+            "error": "Slot blocked by another user (blocked by another user)",
+            "timing": {},
+            "finalMarkup": self.BLOCKED_MARKUP,
+            "path": DIRECT_HTTP_PATH,
+        }
+        chain.update(overrides)
+        return chain
+
+    def test_the_response_that_produced_the_verdict_is_kept(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regression: the one artifact that can explain the block, discarded.
+
+        The browser is still on the pre-booking tee sheet, so its photograph
+        shows the slot sitting there available - which is what a member reading
+        it afterwards sees, and it answers nothing.
+        """
+        _, _, artifact_capture = self._book(
+            provider, monkeypatch, self._blocked_chain(), reservation_exists=False
+        )
+
+        artifact_capture.assert_called_once_with(
+            f"direct_http_blocked_{PHASE_RESERVE_SENT}", self.BLOCKED_MARKUP
+        )
+        provider._capture_diagnostic_info.assert_called_once_with(ANY, "slot_blocked_by_other_user")
+
+    def test_a_tee_time_we_hold_is_not_reported_as_blocked(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reserve was accepted before the popup was read, so ask the site."""
+        result, reservation_check, _ = self._book(
+            provider, monkeypatch, self._blocked_chain(), reservation_exists=True
+        )
+
+        assert result.success is True
+        assert result.booked_time == time(8, 42)
+        reservation_check.assert_called_once_with(ANY, self.TARGET_DATE, time(8, 42))
+
+    def test_a_confirmed_block_still_reaches_the_member_as_one(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Checking the page does not change what a real block is called."""
+        result, _, _ = self._book(
+            provider, monkeypatch, self._blocked_chain(), reservation_exists=False
+        )
+
+        assert result.success is False
+        assert result.error_message == "Slot blocked by another user"
+
+    def test_an_unreadable_reservations_page_is_admitted(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A member who might be holding the tee time has to hear that."""
+        result, _, _ = self._book(
+            provider, monkeypatch, self._blocked_chain(), reservation_exists=None
+        )
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert result.error_message.startswith("Slot blocked by another user")
+        assert "could not be checked" in result.error_message
+
+    def test_a_block_before_reserve_was_sent_does_not_check(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing reached the server, so there is nothing to look up."""
+        result, reservation_check, _ = self._book(
+            provider,
+            monkeypatch,
+            self._blocked_chain(phase=PHASE_RESERVE_STAGED),
+            reservation_exists=True,
+        )
+
+        assert result.success is False
+        assert result.error_message == "Slot blocked by another user"
+        reservation_check.assert_not_called()
+
+    def test_a_js_chain_block_answers_from_the_browser(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The JS chain saw the popup itself; there is no response to keep."""
+        chain = self._blocked_chain(phase="blocked_check")
+        del chain["path"]
+        del chain["finalMarkup"]
+
+        result, reservation_check, artifact_capture = self._book(
+            provider, monkeypatch, chain, reservation_exists=True
+        )
+
+        assert result.success is False
+        assert result.error_message == "Slot blocked by another user"
+        reservation_check.assert_not_called()
+        artifact_capture.assert_not_called()
 
 
 class TestBrowserErrorMessageExtraction:
