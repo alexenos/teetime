@@ -2936,11 +2936,53 @@ class WaldenGolfProvider(ReservationProvider):
                     )
 
             if chain_result.get("blocked"):
-                # Slot was grabbed by another user at the same moment
+                # Another member took the slot at the same moment - or the chain
+                # read a popup as saying so. On the direct-HTTP path the verdict
+                # comes from a response the browser never received, so the
+                # browser photograph below cannot show the popup that produced
+                # it: the response is the only account of it there is.
+                blocked_phase = chain_result.get("phase", "unknown")
+                blocked_direct = chain_result.get("path") == DIRECT_HTTP_PATH
+                blocked_held: bool | None = None
+                if blocked_direct:
+                    blocked_markup = chain_result.get("finalMarkup")
+                    if blocked_markup:
+                        self._capture_response_artifact(
+                            f"direct_http_blocked_{blocked_phase}", blocked_markup
+                        )
+                # Before the reservations check, not after: that check navigates
+                # to the dashboard, and a screenshot taken on the way out would
+                # show that page instead of the state that failed.
                 self._capture_diagnostic_info(driver, "slot_blocked_by_other_user")
+                # A blocked verdict past the Reserve POST is a post-submit
+                # failure like any other - the request was accepted and the
+                # browser never saw what became of it. Ask the reservations page
+                # before writing the tee time off, or a member holding a slot is
+                # told they have none.
+                if blocked_direct and blocked_phase not in PRE_SUBMIT_PHASES:
+                    blocked_held = self._reservation_exists(driver, target_date, booked_time)
+                if blocked_held:
+                    logger.warning(
+                        "DIRECT_HTTP: Chain reported the slot blocked at %s but the "
+                        "reservation is on the member's reservations page; reporting success",
+                        blocked_phase,
+                    )
+                    return BookingResult(
+                        success=True,
+                        booked_time=booked_time,
+                        fallback_reason=fallback_reason,
+                        course_name=self.NORTHGATE_COURSE_NAME,
+                    )
+
                 return BookingResult(
                     success=False,
-                    error_message="Slot blocked by another user",
+                    error_message=self._member_facing_failure(
+                        site_message=None,
+                        technical="Slot blocked by another user",
+                        unchecked=blocked_held is None
+                        and blocked_direct
+                        and blocked_phase not in PRE_SUBMIT_PHASES,
+                    ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
                 )
