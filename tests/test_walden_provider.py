@@ -3197,6 +3197,54 @@ class TestUnconfirmedBookingResolution:
         reservation_check.assert_not_called()
 
 
+class TestBrowserErrorMessageExtraction:
+    """Reading a refusal off the browser DOM, for the JS-chain fallback path."""
+
+    RESTRICTION_MARKUP = TestUnconfirmedBookingResolution.RESTRICTION_MARKUP
+
+    def _driver_showing(self, markup: str) -> MagicMock:
+        """A driver whose first selector match is a container holding ``markup``."""
+        element = MagicMock()
+        element.get_attribute.side_effect = lambda name: (markup if name == "outerHTML" else None)
+        element.is_displayed.return_value = True
+        element.text = "unused - the markup is what gets read"
+
+        driver = MagicMock()
+        driver.find_elements.side_effect = lambda by, sel: (
+            [element] if "restrictionPopup" in sel else []
+        )
+        return driver
+
+    def test_the_restriction_dialog_is_read_without_its_buttons(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """WebElement.text would carry the dialog's "Ok" into the member's reply."""
+        message = provider._extract_booking_error_message(
+            self._driver_showing(self.RESTRICTION_MARKUP)
+        )
+
+        assert message == (
+            "Restriction: Member: Sample, Member is restricted for 1 round(s) "
+            "on Northgate per Day"
+        )
+
+    def test_unreadable_markup_falls_back_to_the_rendered_text(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """A message with a stray button label beats no message at all."""
+        element = MagicMock()
+        element.get_attribute.side_effect = WebDriverException("stale element")
+        element.is_displayed.return_value = True
+        element.text = "Members are limited to one per day"
+
+        driver = MagicMock()
+        driver.find_elements.side_effect = lambda by, sel: [element] if ".alert" == sel else []
+
+        assert (
+            provider._extract_booking_error_message(driver) == "Members are limited to one per day"
+        )
+
+
 class TestReservationLookup:
     """Reading the member's reservations page as ground truth."""
 

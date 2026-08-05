@@ -42,6 +42,7 @@ from app.providers.walden_http_booker import (
     DIRECT_HTTP_PATH,
     PRE_SUBMIT_PHASES,
     DirectHttpBooker,
+    container_message_text,
 )
 from app.utils.timezone import CTDateTime
 
@@ -1582,6 +1583,30 @@ class WaldenGolfProvider(ReservationProvider):
         page_source = getattr(driver, "page_source", "")
         return page_source if isinstance(page_source, str) else ""
 
+    def _container_message_text(self, element: Any) -> str:
+        """Read one message container the way the direct-HTTP path reads one.
+
+        ``WebElement.text`` returns everything the container renders, including
+        its own controls, so the club's refusal dialog would reach the member as
+        "... restricted for 1 round(s) on Northgate per Day Ok". The markup goes
+        through the same pruner the HTTP path uses instead - one definition of
+        message text for both paths, and the one already tested against a real
+        captured response.
+
+        Falls back to ``.text`` if the markup cannot be read: a message with a
+        stray button label in it beats no message at all.
+        """
+        try:
+            markup = element.get_attribute("outerHTML")
+            if isinstance(markup, str) and markup:
+                pruned = container_message_text(markup)
+                if pruned:
+                    return pruned
+        except Exception as e:  # noqa: BLE001 - diagnostics must not raise
+            logger.debug(f"Could not read container markup, falling back to .text: {e}")
+
+        return (getattr(element, "text", "") or "").strip()
+
     def _extract_booking_error_message(self, driver: webdriver.Chrome) -> str | None:
         """Extract user-visible booking error text from common alert/message containers."""
         selectors = DOM.ERROR_MESSAGES.containers
@@ -1603,7 +1628,7 @@ class WaldenGolfProvider(ReservationProvider):
                         except Exception:
                             pass
 
-                        text = (getattr(el, "text", "") or "").strip()
+                        text = self._container_message_text(el)
                         if text:
                             messages.append(text)
                 except Exception:

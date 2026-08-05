@@ -536,6 +536,21 @@ def find_response_message(markup: str) -> str | None:
     return joined[:_MAX_MESSAGE_CHARS] + "..." if len(joined) > _MAX_MESSAGE_CHARS else joined
 
 
+def container_message_text(markup: str) -> str:
+    """Message text of one already-matched container's markup.
+
+    The browser path selects its containers with CSS and then has to read them,
+    and ``WebElement.text`` sweeps in whatever the container holds - a refusal
+    dialog reaches the member as "... per Day Ok". Handing the element's
+    ``outerHTML`` here keeps one definition of message text for both paths,
+    rather than a second pruner that can drift from this one.
+
+    Returns:
+        The pruned text, or "" when the container holds none.
+    """
+    return _visible_message_text(parse_html(markup))
+
+
 def _is_hidden(node: Node) -> bool:
     """Report whether a node is explicitly hidden from the member."""
     return node.attrs.get("aria-hidden", "").lower() == "true"
