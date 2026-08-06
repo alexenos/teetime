@@ -51,5 +51,6 @@ log_level = "DEBUG"
 # region, container_image and log_level. Everything else comes from the
 # defaults in variables.tf, which is where to change this for production.
 walden_direct_http_booking    = true
+walden_refresh_view_at_window = true
 walden_fast_booking_batch     = true
 walden_fast_booking_immediate = true

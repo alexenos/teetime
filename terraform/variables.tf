@@ -157,6 +157,23 @@ variable "walden_direct_http_booking" {
   default     = true
 }
 
+variable "walden_refresh_view_at_window" {
+  description = <<-EOT
+    Re-render the tee sheet at 6:30:00 and fire Reserve against that render,
+    instead of against the one the request was staged from ~60s earlier.
+
+    The staged view is a sheet on which nothing is reservable yet, and the club
+    refuses a Reserve against it with "This slot is blocked by another user" -
+    the same message it uses when a human genuinely beat us. Costs ~200ms off
+    the front of the race (round trip plus re-parsing the sheet), and only
+    applies to timed bookings.
+
+    On. Turn off to go back to firing the pre-staged request untouched.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "walden_fast_booking_batch" {
   description = <<-EOT
     Whether the scheduled 6:30 batch runs the fast chain (JS, or direct HTTP

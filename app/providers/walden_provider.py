@@ -3915,7 +3915,15 @@ class WaldenGolfProvider(ReservationProvider):
         try:
             session = PrimeFacesSession.from_selenium(driver)
             booker = DirectHttpBooker(session)
-            booker.prepare(reserve_id, driver.page_source)
+            booker.prepare(
+                reserve_id,
+                driver.page_source,
+                # Only a timed booking is staged against a view built before the
+                # window; an immediate one already holds a live sheet.
+                refresh_at_window=(
+                    settings.walden_refresh_view_at_window and execute_at_timestamp_ms is not None
+                ),
+            )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
             # almost anything. Nothing has reached the server yet, so every
@@ -3950,11 +3958,16 @@ class WaldenGolfProvider(ReservationProvider):
 
         logger.info(
             "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
-            "clickDrift=%sms, totalMs=%s, error=%s",
+            "clickDrift=%sms, viewRefresh=%sms, totalMs=%s, error=%s",
             result.phase,
             result.success,
             result.blocked,
             result.timing.get("clickDriftMs", "N/A"),
+            # "N/A" means no refresh ran at all; "failed" means it ran and did
+            # not land, which is the case worth telling apart in the morning.
+            "failed"
+            if result.timing.get("viewRefreshFailed")
+            else result.timing.get("viewRefreshMs", "N/A"),
             result.timing.get("totalMs", "N/A"),
             result.error,
         )

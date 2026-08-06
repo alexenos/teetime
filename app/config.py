@@ -54,6 +54,21 @@ class Settings(BaseSettings):
     # afternoon costs nothing, a lost 6:30 race costs the tee time.
     walden_direct_http_booking: bool = True
 
+    # Re-render the tee sheet at 6:30:00 and fire Reserve against that render,
+    # instead of against the one the request was staged from ~60s earlier.
+    #
+    # The staged view is a sheet on which nothing is reservable yet, and the
+    # club refuses a Reserve against it with "This slot is blocked by another
+    # user" - the same message it uses when a human genuinely beat us. Two
+    # mornings were read as lost races before the captured response showed the
+    # slot still free and the club's own countdown still running in it.
+    #
+    # Costs ~200ms off the front of the race: ~115ms round trip measured
+    # against the site, plus ~85ms to parse the re-rendered sheet and find the
+    # slot in it. On, because losing 200ms to a sheet the club will act on
+    # beats winning the race to one it will not. Timed bookings only.
+    walden_refresh_view_at_window: bool = True
+
     # Whether a booking uses the fast chain (JS, or direct HTTP when the flag
     # above is on) instead of the original Selenium flow. This is deliberately
     # NOT derived from whether the booking is timed: waiting for 6:30 and going

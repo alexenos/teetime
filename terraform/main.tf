@@ -229,6 +229,11 @@ resource "google_cloud_run_v2_service" "teetime" {
       }
 
       env {
+        name  = "WALDEN_REFRESH_VIEW_AT_WINDOW"
+        value = tostring(var.walden_refresh_view_at_window)
+      }
+
+      env {
         name  = "WALDEN_FAST_BOOKING_BATCH"
         value = tostring(var.walden_fast_booking_batch)
       }
