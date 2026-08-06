@@ -687,17 +687,35 @@ class PrimeFacesSession:
         )
         return rtt_ms
 
-    def post(self, config: AbConfig, *, body: bytes | None = None) -> PartialResponse:
+    def post(
+        self,
+        config: AbConfig,
+        *,
+        body: bytes | None = None,
+        timeout_s: float | None = None,
+    ) -> PartialResponse:
         """Send one PrimeFaces AJAX request and fold the response into state.
 
         Args:
             config: The request to send.
             body: Pre-built body from :meth:`build_body`, for the timed path
                 where serialization must not happen on the critical path.
+            timeout_s: Per-request budget, overriding the session's. The
+                session default is sized for a chain step that must not be
+                abandoned; a request made *during* the race needs to give up
+                far sooner than that and try something else.
         """
         payload = body if body is not None else self.build_body(config)
+        # httpx distinguishes "no timeout argument" (use the client's) from any
+        # explicit value via a sentinel, so the two calls cannot be collapsed
+        # into one with a computed keyword.
         try:
-            http_response = self._client.post(self.form_state.action_url, content=payload)
+            if timeout_s is None:
+                http_response = self._client.post(self.form_state.action_url, content=payload)
+            else:
+                http_response = self._client.post(
+                    self.form_state.action_url, content=payload, timeout=timeout_s
+                )
         except httpx.HTTPError as exc:
             raise DirectHttpError(f"POST for {config.source} failed: {exc}") from exc
 

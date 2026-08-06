@@ -3958,16 +3958,27 @@ class WaldenGolfProvider(ReservationProvider):
 
         logger.info(
             "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
-            "clickDrift=%sms, viewRefresh=%sms, totalMs=%s, error=%s",
+            "clickDrift=%sms, viewRefresh=%sms/%sx%s, totalMs=%s, error=%s",
             result.phase,
             result.success,
             result.blocked,
             result.timing.get("clickDriftMs", "N/A"),
-            # "N/A" means no refresh ran at all; "failed" means it ran and did
-            # not land, which is the case worth telling apart in the morning.
-            "failed"
-            if result.timing.get("viewRefreshFailed")
-            else result.timing.get("viewRefreshMs", "N/A"),
+            # "N/A" attempts means no refresh ran at all. The suffix carries why
+            # it did not land, and any countdown the club was still showing -
+            # which is the reading that says whether the premise still holds.
+            result.timing.get("viewRefreshMs", "N/A"),
+            result.timing.get("viewRefreshAttempts", "N/A"),
+            "".join(
+                part
+                for part in (
+                    f" {result.timing['viewRefreshFailed']}"
+                    if result.timing.get("viewRefreshFailed")
+                    else "",
+                    f" countdown={result.timing['viewRefreshCountdownS']}s"
+                    if result.timing.get("viewRefreshCountdownS")
+                    else "",
+                )
+            ),
             result.timing.get("totalMs", "N/A"),
             result.error,
         )

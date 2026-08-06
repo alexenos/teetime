@@ -26,6 +26,14 @@ two mornings' bookings before the response body was captured and read. So when
 trip at the target instant re-rendering the sheet, then fires Reserve against
 that render instead. See :meth:`DirectHttpBooker._refresh_view`.
 
+Which makes the refresh part of the critical path, and its failure modes worth
+distinguishing rather than collapsing into "send the staged request anyway".
+Sending that request is not free: it advances the chain past
+:data:`PRE_SUBMIT_PHASES`, spending the browser retry the caller would
+otherwise still have. So a refresh that cannot land retries, a session the
+server has disowned sends nothing at all, and only a run that exhausts its
+attempts with the session still alive falls back to the stale request.
+
 Failures raise :class:`~app.providers.walden_http.DirectHttpError`, which the
 caller treats as "fall back to the Selenium chain". Nothing here is trusted
 enough to be the only path to a booking.
@@ -45,6 +53,7 @@ from app.providers.walden_http import (
     Node,
     PartialResponse,
     PrimeFacesSession,
+    ViewExpiredError,
     find_ab_for_element,
     parse_html,
     sleep_until,
@@ -104,6 +113,30 @@ _SLOT_LABEL_MAX_DEPTH = 6
 
 # "08:00 AM", tolerating the spacing and punctuation variants the site has used.
 _SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*([AP])\.?M\.?", re.IGNORECASE)
+
+# The club's own "Booking Starts In : 00:01:05" counter. The sheet carries it
+# while the window is shut and drops the element once it opens, which makes its
+# presence the club stating that a Reserve right now would be premature - the
+# one authority on that question that is not our clock.
+_COUNTDOWN_CLASS = "booking-starts-in"
+_COUNTDOWN_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})")
+
+# Budget for a single refresh POST. Way under the chain's timeout: a refresh
+# that has not answered in this long has already cost more than it can win back,
+# and the remaining time is better spent on another attempt.
+_REFRESH_TIMEOUT_S = 1.5
+
+# How long past the target to keep trying before giving up on a fresh view.
+# Generous next to a race decided in the first second, because every option
+# after this point is a bad one - the ceiling exists to bound the damage when
+# the site is down, not to pace a healthy run.
+_REFRESH_DEADLINE_MS = 4000
+
+# Attempts allowed inside that deadline, and the pause between them. The pause
+# matters most for the window-still-shut case: hammering a server that has told
+# us the time is not yet is pointless, and the counter ticks in seconds.
+_REFRESH_MAX_ATTEMPTS = 4
+_REFRESH_RETRY_PAUSE_S = 0.2
 
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
@@ -361,7 +394,12 @@ class DirectHttpBooker:
             # is still shut is the very thing being refreshed away from.
             if self._refresh_config is not None:
                 result.phase = PHASE_VIEW_REFRESH
-                config, body = self._refresh_view(config, body, result)
+                refreshed = self._refresh_view(config, body, result)
+                if refreshed is None:
+                    # Deliberately nothing sent. Staying in this phase is what
+                    # tells the caller a browser retry is still safe to make.
+                    return result
+                config, body = refreshed
 
         start = time_module.perf_counter()
 
@@ -438,7 +476,7 @@ class DirectHttpBooker:
         staged_config: AbConfig,
         staged_body: bytes,
         result: DirectBookingResult,
-    ) -> tuple[AbConfig, bytes]:
+    ) -> tuple[AbConfig, bytes] | None:
         """Re-render the tee sheet now the window is open, and restage Reserve.
 
         Replays the selected day tab, which re-renders the whole form without
@@ -446,31 +484,82 @@ class DirectHttpBooker:
         opened - one the club will act on - carrying a fresh ViewState and the
         slot rows as they now stand.
 
-        Best-effort by design: on any failure the request staged before the
-        window still goes out, because a stale Reserve beats no Reserve.
+        Retries within :data:`_REFRESH_DEADLINE_MS`, because the two things that
+        go wrong here are both worth a second try: a transport blip, and a sheet
+        that still carries the club's countdown, which is the club saying the
+        window is not open on *its* clock yet. Firing into either is how the
+        mornings this exists to fix were lost.
 
         Returns:
-            The Reserve request to fire, as ``(config, body)``.
+            The Reserve request to fire as ``(config, body)``, or None when the
+            chain should send nothing at all and let the caller fall back.
         """
         # Staging sets both or neither, so a configured refresh always knows
         # which tee time it is restaging.
         assert self._refresh_config is not None and self._slot_time is not None
         started = time_module.perf_counter()
+        deadline = started + _REFRESH_DEADLINE_MS / 1000
+        response: PartialResponse | None = None
+        last_error: str | None = None
 
-        try:
-            response = self.session.post(self._refresh_config)
-        except DirectHttpError as exc:
-            # Nothing was applied to the session, so the staged body's ViewState
-            # is still the current one and the request remains sendable as-is.
+        for attempt in range(1, _REFRESH_MAX_ATTEMPTS + 1):
+            result.timing["viewRefreshAttempts"] = attempt
+            try:
+                candidate = self.session.post(self._refresh_config, timeout_s=_REFRESH_TIMEOUT_S)
+            except ViewExpiredError as exc:
+                # The session itself is gone, and the staged Reserve carries the
+                # very ViewState just rejected. Sending it could only fail, and
+                # would spend the one retry the caller still has.
+                logger.error(
+                    "DIRECT_HTTP: View refresh rejected the adopted session (%s); "
+                    "sending no Reserve so the browser chain can still try",
+                    exc,
+                )
+                result.timing["viewRefreshFailed"] = "session-expired"
+                result.error = f"Adopted session expired at the window: {exc}"
+                return None
+            except DirectHttpError as exc:
+                # Nothing was applied to the session, so the staged request is
+                # still sendable - but it is also still stale, so try again
+                # before settling for it.
+                last_error = str(exc)
+                logger.warning("DIRECT_HTTP: View refresh attempt %d failed (%s)", attempt, exc)
+            else:
+                countdown_s = _window_countdown_s(candidate.markup)
+                response = candidate
+                if countdown_s is None:
+                    break
+                # The refresh worked and the club still says "not yet". Reserving
+                # now is the exact failure this method exists to avoid.
+                result.timing["viewRefreshCountdownS"] = countdown_s
+                logger.warning(
+                    "DIRECT_HTTP: Refreshed sheet still counting down %ds to the "
+                    "window on attempt %d; the club has not opened booking yet",
+                    countdown_s,
+                    attempt,
+                )
+
+            if time_module.perf_counter() + _REFRESH_RETRY_PAUSE_S >= deadline:
+                break
+            time_module.sleep(_REFRESH_RETRY_PAUSE_S)
+
+        result.timing["viewRefreshMs"] = int((time_module.perf_counter() - started) * 1000)
+
+        if response is None:
+            # Every attempt failed in transport. The staged request is untouched
+            # and remains the only thing left to try: the browser chain the
+            # caller would fall back to holds the same pre-window view, so
+            # declining to send costs the booking outright rather than saving it.
             logger.warning(
-                "DIRECT_HTTP: View refresh failed (%s); firing the request staged "
-                "before the window",
-                exc,
+                "DIRECT_HTTP: No view refresh landed in %dms (%s); firing the "
+                "request staged before the window as a last resort",
+                _REFRESH_DEADLINE_MS,
+                last_error,
             )
-            result.timing["viewRefreshFailed"] = True
+            result.timing["viewRefreshFailed"] = "no-response"
             return staged_config, staged_body
 
-        # Past here the refresh has been folded into the session, so the staged
+        # Past here a refresh has been folded into the session, so the staged
         # body carries a superseded ViewState and has to be rebuilt either way.
         config = _relocate_reserve(response.markup, self._slot_time)
         if config is None:
@@ -490,7 +579,6 @@ class DirectHttpBooker:
                 config.source,
             )
 
-        result.timing["viewRefreshMs"] = int((time_module.perf_counter() - started) * 1000)
         return config, self.session.build_body(config)
 
     # -- individual steps -------------------------------------------------
@@ -613,6 +701,30 @@ def _slot_time_of(button: Node) -> time | None:
             if parsed is not None:
                 return parsed
         node = node.parent
+    return None
+
+
+def _window_countdown_s(markup: str) -> int | None:
+    """Seconds the club says remain before booking opens, if it still says any.
+
+    The tee sheet carries a ``booking-starts-in`` counter while the window is
+    shut and drops the element once it opens, so this answers "is the window
+    open on the *server's* clock" - the question our own clock got wrong.
+
+    Returns:
+        Seconds remaining, or None when the sheet no longer claims a wait.
+    """
+    document = parse_html(markup)
+    for node in document.descendants():
+        if _COUNTDOWN_CLASS not in node.classes:
+            continue
+        match = _COUNTDOWN_RE.search(node.text_content())
+        if match is None:
+            continue
+        hours, minutes, seconds = (int(group) for group in match.groups())
+        remaining = hours * 3600 + minutes * 60 + seconds
+        if remaining > 0:
+            return remaining
     return None
 
 

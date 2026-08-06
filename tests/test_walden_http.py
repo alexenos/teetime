@@ -1179,6 +1179,24 @@ MOVED_SHEET = refreshed_sheet(
 )
 
 
+def countdown_sheet(remaining: str) -> str:
+    """A re-rendered sheet still carrying the club's pre-window counter."""
+    return refreshed_sheet(
+        f'<div class="booking-starts-in">Booking Starts In : {remaining}</div>',
+        slot_block(MOVED_RESERVE_ID, "04:34 PM"),
+    )
+
+
+def booker_over(handler: Callable[[httpx.Request], httpx.Response]) -> DirectHttpBooker:
+    """A booker with Reserve pre-staged against a hand-written handler."""
+    session = make_session(FormState.from_html(TEE_SHEET), handler)
+    booker = DirectHttpBooker(session)
+    config = AbConfig(source=RESERVE_ID, form=FORM_ID, update=FORM_ID)
+    booker._reserve_config = config
+    booker._reserve_body = session.build_body(config)
+    return booker
+
+
 def stage_refresh(booker: DirectHttpBooker) -> DirectHttpBooker:
     """Add a staged day-tab refresh to a booker from make_booker."""
     booker._refresh_config = AbConfig(source=DAY_TAB_ID, form=FORM_ID, update=FORM_ID)
@@ -1275,29 +1293,87 @@ class TestViewRefresh:
         assert result.success, result.error
         assert recorder.sources[0] == RESERVE_ID
 
-    def test_failed_refresh_still_fires_the_staged_request(self) -> None:
-        """A stale Reserve beats no Reserve."""
-        pages = [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+    def test_transient_refresh_failure_is_retried(self) -> None:
+        """One bad round trip is not a reason to reserve against a stale view."""
+        pages = [MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
         served: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(urllib.parse.parse_qsl(request.content.decode()))
             served.append(params.get("javax.faces.source", ""))
             if len(served) == 1:
-                return httpx.Response(500)  # the refresh
+                return httpx.Response(500)  # first refresh attempt
             page = pages[min(len(served) - 2, len(pages) - 1)]
             return httpx.Response(200, text=partial_response(page))
 
-        session = make_session(FormState.from_html(TEE_SHEET), handler)
-        booker = DirectHttpBooker(session)
-        config = AbConfig(source=RESERVE_ID, form=FORM_ID, update=FORM_ID)
-        booker._reserve_config = config
-        booker._reserve_body = session.build_body(config)
-        result = stage_refresh(booker).book(1, target_timestamp_ms=just_past())
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
 
         assert result.success, result.error
-        assert served == [DAY_TAB_ID, RESERVE_ID, "playerGroup", "bookTeeTimeAction"]
-        assert result.timing["viewRefreshFailed"] is True
+        # Refresh, refresh again, then Reserve at the relocated slot.
+        assert served[:3] == [DAY_TAB_ID, DAY_TAB_ID, MOVED_RESERVE_ID]
+        assert result.timing["viewRefreshAttempts"] == 2
+        assert "viewRefreshFailed" not in result.timing
+
+    def test_exhausted_refresh_falls_back_to_the_staged_request(self) -> None:
+        """Once every attempt is spent, a stale Reserve beats no Reserve.
+
+        The browser chain the caller would fall back to holds the same
+        pre-window view, so declining to send loses the booking outright.
+        """
+        served: list[str] = []
+        pages = [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            source = params.get("javax.faces.source", "")
+            served.append(source)
+            if source == DAY_TAB_ID:
+                return httpx.Response(500)
+            page = pages[min(served.count(RESERVE_ID) + served.count("playerGroup") - 1, 2)]
+            return httpx.Response(200, text=partial_response(page))
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert served.count(DAY_TAB_ID) == 4  # _REFRESH_MAX_ATTEMPTS
+        assert served[4] == RESERVE_ID
+        assert result.timing["viewRefreshFailed"] == "no-response"
+
+    def test_expired_session_sends_no_reserve_at_all(self) -> None:
+        """The staged request carries the ViewState the server just rejected."""
+        served: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            served.append(params.get("javax.faces.source", ""))
+            return httpx.Response(
+                200,
+                text=(
+                    "<?xml version='1.0'?><partial-response><error>"
+                    "<error-name>class javax.faces.application.ViewExpiredException"
+                    "</error-name><error-message>view expired</error-message>"
+                    "</error></partial-response>"
+                ),
+            )
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert not result.success
+        assert served == [DAY_TAB_ID]  # nothing else went out
+        assert result.timing["viewRefreshFailed"] == "session-expired"
+        # Still a pre-submit phase, so the caller may hand this to the browser.
+        assert result.phase in PRE_SUBMIT_PHASES
+
+    def test_sheet_still_counting_down_is_retried(self) -> None:
+        """The club's own counter outranks our clock on whether booking is open."""
+        pages = [countdown_sheet("00:00:03"), MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        recorder = ChainRecorder(pages)
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        # Refreshed, was told 3s remained, refreshed again, then reserved.
+        assert recorder.sources[:3] == [DAY_TAB_ID, DAY_TAB_ID, MOVED_RESERVE_ID]
+        assert result.timing["viewRefreshCountdownS"] == 3
 
     def test_slot_missing_from_the_refresh_replays_the_staged_id(self) -> None:
         """Losing the slot in the re-render is not a reason to send nothing."""
