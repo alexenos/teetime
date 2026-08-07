@@ -39,6 +39,7 @@ caller treats as "fall back to the Selenium chain". Nothing here is trusted
 enough to be the only path to a booking.
 """
 
+import hashlib
 import logging
 import re
 import time as time_module
@@ -199,6 +200,11 @@ class DirectBookingResult:
     # direct path's counterpart to _extract_booking_error_message, which reads
     # the browser DOM this path never touches.
     response_message: str | None = None
+    # The tee sheet the refresh returned, kept solely so a failed booking can be
+    # diagnosed. A blocked verdict raises exactly two questions about it - was
+    # the club still counting down, and was the slot open - and neither can be
+    # answered from the Reserve response alone. Empty when no refresh landed.
+    refresh_markup: str = ""
 
     def as_chain_result(self) -> dict[str, Any]:
         """Render as the dict shape ``_run_booking_chain_js`` returns."""
@@ -210,6 +216,7 @@ class DirectBookingResult:
             "timing": self.timing,
             "finalMarkup": self.final_markup,
             "responseMessage": self.response_message,
+            "refreshMarkup": self.refresh_markup,
             "path": DIRECT_HTTP_PATH,
         }
 
@@ -264,9 +271,13 @@ class DirectHttpBooker:
         self._reserve_config = config
         self._reserve_body = self.session.build_body(config)
         logger.info(
-            "DIRECT_HTTP: Reserve request staged - source=%s, %d body bytes",
+            "DIRECT_HTTP: Reserve request staged - source=%s, %d body bytes, viewState=%s",
             config.source,
             len(self._reserve_body),
+            # Fingerprinted rather than logged: this is a live session token,
+            # and all a post-mortem needs is whether the one that fired differs
+            # from the one staged here.
+            _view_state_fingerprint(self.session),
         )
         if refresh_at_window:
             self._stage_view_refresh(document, page_html, button)
@@ -407,6 +418,19 @@ class DirectHttpBooker:
             """Milliseconds since the Reserve request went out."""
             return int((time_module.perf_counter() - start) * 1000)
 
+        # The one line that says what actually went on the wire. Every branch
+        # above can change the component id or leave it alone, and only some of
+        # them say so; without this, reading back which slot was reserved means
+        # replaying those branches from the surrounding warnings.
+        if target_timestamp_ms is not None:
+            result.timing["reserveSentAtMs"] = int(time_module.time() * 1000) - target_timestamp_ms
+        logger.info(
+            "DIRECT_HTTP: Firing Reserve - source=%s, viewState=%s, %sms past the window",
+            config.source,
+            _view_state_fingerprint(self.session),
+            result.timing.get("reserveSentAtMs", "n/a - untimed"),
+        )
+
         # Advance before the call, not after. Once the request is handed to the
         # socket we cannot tell "never sent" from "sent, response lost", and a
         # browser retry in the second case races our own reservation.
@@ -527,7 +551,20 @@ class DirectHttpBooker:
             else:
                 countdown_s = _window_countdown_s(candidate.markup)
                 response = candidate
+                result.refresh_markup = candidate.markup
                 if countdown_s is None:
+                    # Logged on the way through, not inferred later from the
+                    # absence of the warning below: "the club confirmed booking
+                    # was open" is the single most load-bearing fact in a
+                    # post-mortem, and silence is not a record of it.
+                    logger.info(
+                        "DIRECT_HTTP: View refreshed on attempt %d after %dms - "
+                        "no countdown in the sheet, so the club has booking open; "
+                        "viewState=%s",
+                        attempt,
+                        int((time_module.perf_counter() - started) * 1000),
+                        _view_state_fingerprint(self.session),
+                    )
                     break
                 # The refresh worked and the club still says "not yet". Reserving
                 # now is the exact failure this method exists to avoid.
@@ -702,6 +739,20 @@ def _slot_time_of(button: Node) -> time | None:
                 return parsed
         node = node.parent
     return None
+
+
+def _view_state_fingerprint(session: PrimeFacesSession) -> str:
+    """A short, stable stand-in for the session's current ViewState.
+
+    The token itself is live session state and does not belong in a log. What a
+    post-mortem actually needs is only whether the ViewState that fired Reserve
+    is the one staged before the window or the one the refresh returned, and
+    eight hex characters answer that.
+    """
+    view_state = session.form_state.view_state
+    if not view_state:
+        return "MISSING"
+    return hashlib.sha256(view_state.encode("utf-8", errors="replace")).hexdigest()[:8]
 
 
 def _window_countdown_s(markup: str) -> int | None:

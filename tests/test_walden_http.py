@@ -1385,6 +1385,46 @@ class TestViewRefresh:
         # Still rebuilt against the view the refresh established.
         assert recorder.requests[1]["javax.faces.ViewState"] == "vs-1"
 
+    def test_refreshed_sheet_is_kept_for_diagnosis(self) -> None:
+        """A blocked verdict is only readable next to the view that produced it."""
+        recorder = ChainRecorder([MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert MOVED_RESERVE_ID in result.refresh_markup
+        # And it has to survive the hand-off to the provider, which is what
+        # uploads it beside the Reserve response.
+        assert result.as_chain_result()["refreshMarkup"] == result.refresh_markup
+
+    def test_countdown_sheet_is_kept_even_though_it_was_rejected(self) -> None:
+        """The sheet that was still counting down is the whole diagnosis."""
+        recorder = ChainRecorder([countdown_sheet("00:01:05")] * 4 + [PLAYER_PAGE, ROWS_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert "Booking Starts In" in result.refresh_markup
+        assert result.timing["viewRefreshCountdownS"] == 65
+
+    def test_no_refreshed_sheet_when_none_landed(self) -> None:
+        """Nothing to capture, and the provider says so rather than staying quiet."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            if params.get("javax.faces.source") == DAY_TAB_ID:
+                return httpx.Response(500)
+            return httpx.Response(200, text=partial_response(PLAYER_PAGE))
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert result.refresh_markup == ""
+
+    def test_reserve_records_how_late_it_went_out(self) -> None:
+        """Drift plus refresh cost is what actually decides the race."""
+        recorder = ChainRecorder([MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        # just_past() backdates the target by a second, so the Reserve is at
+        # least that late; the point is that the number is recorded at all.
+        assert result.timing["reserveSentAtMs"] >= 1000
+
     def test_refresh_is_a_pre_submit_phase(self) -> None:
         """Nothing is reserved by a re-render, so a browser retry stays safe."""
         assert PHASE_VIEW_REFRESH in PRE_SUBMIT_PHASES
