@@ -299,20 +299,28 @@ class DirectHttpBooker:
             )
             return
 
-        tab = next((n for n in document.descendants() if _SELECTED_DATE_CLASS in n.classes), None)
-        if tab is None:
+        tabs = [n for n in document.descendants() if _SELECTED_DATE_CLASS in n.classes]
+        if not tabs:
             logger.warning(
                 "DIRECT_HTTP: No .%s day tab in the tee sheet; skipping the view refresh",
                 _SELECTED_DATE_CLASS,
             )
             return
 
-        config = find_ab_for_element(tab, page_html)
+        # Every candidate, not just the first. The captured sheets each carry
+        # exactly one, but the class is a styling hook - if the site ever marks
+        # a wrapper with it too, taking the first and finding no handler would
+        # abandon a refresh that the element beside it could have performed.
+        config = next(
+            (c for c in (find_ab_for_element(tab, page_html) for tab in tabs) if c is not None),
+            None,
+        )
         if config is None:
             logger.warning(
-                "DIRECT_HTTP: Day tab %s has no PrimeFaces.ab handler to replay; "
-                "skipping the view refresh",
-                tab.id,
+                "DIRECT_HTTP: None of the %d .%s day tab(s) has a PrimeFaces.ab handler "
+                "to replay; skipping the view refresh",
+                len(tabs),
+                _SELECTED_DATE_CLASS,
             )
             return
 
@@ -524,6 +532,8 @@ class DirectHttpBooker:
         started = time_module.perf_counter()
         deadline = started + _REFRESH_DEADLINE_MS / 1000
         response: PartialResponse | None = None
+        document: Node | None = None
+        countdown_s: int | None = None
         last_error: str | None = None
 
         for attempt in range(1, _REFRESH_MAX_ATTEMPTS + 1):
@@ -549,7 +559,11 @@ class DirectHttpBooker:
                 last_error = str(exc)
                 logger.warning("DIRECT_HTTP: View refresh attempt %d failed (%s)", attempt, exc)
             else:
-                countdown_s = _window_countdown_s(candidate.markup)
+                # Parsed once and carried: the relocation below needs the same
+                # tree, and this is a ~50ms parse of a 500KB sheet sitting on
+                # the critical path, not a cheap lookup to repeat.
+                document = parse_html(candidate.markup)
+                countdown_s = _countdown_in(document)
                 response = candidate
                 result.refresh_markup = candidate.markup
                 if countdown_s is None:
@@ -567,8 +581,10 @@ class DirectHttpBooker:
                     )
                     break
                 # The refresh worked and the club still says "not yet". Reserving
-                # now is the exact failure this method exists to avoid.
-                result.timing["viewRefreshCountdownS"] = countdown_s
+                # now is the exact failure this method exists to avoid. Recorded
+                # after the loop rather than here, so a run that counts down once
+                # and then comes back clean does not leave the marker behind and
+                # report a countdown that no longer applied.
                 logger.warning(
                     "DIRECT_HTTP: Refreshed sheet still counting down %ds to the "
                     "window on attempt %d; the club has not opened booking yet",
@@ -596,9 +612,24 @@ class DirectHttpBooker:
             result.timing["viewRefreshFailed"] = "no-response"
             return staged_config, staged_body
 
+        # Recorded only now, describing the sheet actually being reserved
+        # against - the loop ran out with the club still saying the window was
+        # shut. Marked as a failure too: a countdown alone reads like colour
+        # next to a healthy refresh, when it is the one outcome that says the
+        # Reserve about to go out is the same doomed one as yesterday's.
+        if countdown_s is not None:
+            result.timing["viewRefreshCountdownS"] = countdown_s
+            result.timing["viewRefreshFailed"] = "still-counting-down"
+            logger.error(
+                "DIRECT_HTTP: Out of refresh attempts with the club still counting "
+                "down %ds; reserving into a window it says is shut",
+                countdown_s,
+            )
+
         # Past here a refresh has been folded into the session, so the staged
         # body carries a superseded ViewState and has to be rebuilt either way.
-        config = _relocate_reserve(response.markup, self._slot_time)
+        assert document is not None  # set with `response`, on the same branch
+        config = _relocate_reserve_in(document, response.markup, self._slot_time)
         if config is None:
             logger.warning(
                 "DIRECT_HTTP: No Reserve button for %s in the refreshed tee sheet; "
@@ -765,7 +796,15 @@ def _window_countdown_s(markup: str) -> int | None:
     Returns:
         Seconds remaining, or None when the sheet no longer claims a wait.
     """
-    document = parse_html(markup)
+    return _countdown_in(parse_html(markup))
+
+
+def _countdown_in(document: Node) -> int | None:
+    """Read the countdown from an already-parsed sheet.
+
+    Split from :func:`_window_countdown_s` so the refresh can parse the sheet
+    once and use the tree for both this and the slot lookup.
+    """
     for node in document.descendants():
         if _COUNTDOWN_CLASS not in node.classes:
             continue
@@ -789,7 +828,15 @@ def _relocate_reserve(markup: str, slot_time: time) -> AbConfig | None:
         The request a click on that slot's Reserve link would produce, or None
         when the refreshed sheet offers no such slot.
     """
-    document = parse_html(markup)
+    return _relocate_reserve_in(parse_html(markup), markup, slot_time)
+
+
+def _relocate_reserve_in(document: Node, markup: str, slot_time: time) -> AbConfig | None:
+    """Find the Reserve request for ``slot_time`` in an already-parsed sheet.
+
+    Takes both the tree and its source because resolving a handler may have to
+    fall back to scanning the document text for a widget-init script.
+    """
     for node in document.descendants():
         if "reserve_button" not in node.id:
             continue

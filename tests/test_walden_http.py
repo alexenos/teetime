@@ -542,11 +542,14 @@ class TestSleepUntil:
         target = int(time_module.time() * 1000) + 40
         drift = sleep_until(target)
 
-        # The invariant is that it never returns early. The drift bound is
-        # deliberately loose: it is bounded by OS scheduler latency, so a tight
-        # assertion just makes this flaky on a loaded CI runner.
+        # The invariant is that it never returns early - that one is ours to
+        # keep. The upper bound is not: past the coarse sleep it is OS scheduler
+        # latency, and a shared CI runner overshot the old 250ms bound by 64ms
+        # on a green build. Kept only wide enough to catch a real regression
+        # (waiting on the wrong clock, or not waking at all), which would be off
+        # by seconds, not by scheduler jitter.
         assert int(time_module.time() * 1000) >= target
-        assert 0 <= drift < 250
+        assert 0 <= drift < 2000
 
 
 # ---------------------------------------------------------------------------
@@ -1008,8 +1011,9 @@ class TestDirectHttpBooker:
         assert result.success, result.error
         assert int(time_module.time() * 1000) >= target
         assert "clickDriftMs" in result.timing
-        # Loose for the same reason as test_waits_until_the_target.
-        assert 0 <= result.timing["clickDriftMs"] < 250
+        # Loose for the same reason as test_waits_until_the_target: this bound
+        # measures the CI runner's scheduler, not the code under test.
+        assert 0 <= result.timing["clickDriftMs"] < 2000
 
 
 class TestBlockedDetectionScope:
@@ -1373,7 +1377,9 @@ class TestViewRefresh:
         assert result.success, result.error
         # Refreshed, was told 3s remained, refreshed again, then reserved.
         assert recorder.sources[:3] == [DAY_TAB_ID, DAY_TAB_ID, MOVED_RESERVE_ID]
-        assert result.timing["viewRefreshCountdownS"] == 3
+        assert result.timing["viewRefreshAttempts"] == 2
+        # What the countdown leaves behind once it clears is
+        # test_countdown_that_clears_leaves_no_marker_behind's business.
 
     def test_slot_missing_from_the_refresh_replays_the_staged_id(self) -> None:
         """Losing the slot in the re-render is not a reason to send nothing."""
@@ -1402,6 +1408,27 @@ class TestViewRefresh:
 
         assert "Booking Starts In" in result.refresh_markup
         assert result.timing["viewRefreshCountdownS"] == 65
+        # Every attempt was spent on the refresh, and the Reserve went out
+        # against the counting-down sheet rather than being silently skipped.
+        assert recorder.sources[:5] == [DAY_TAB_ID] * 4 + [MOVED_RESERVE_ID]
+        # Named as a failed outcome, not just annotated with a countdown.
+        assert result.timing["viewRefreshFailed"] == "still-counting-down"
+
+    def test_countdown_that_clears_leaves_no_marker_behind(self) -> None:
+        """A run that counts down once then comes back clean is a clean run.
+
+        Reporting the stale countdown here would send a post-mortem after the
+        wrong cause - the sheet reserved against was open.
+        """
+        recorder = ChainRecorder(
+            [countdown_sheet("00:00:02"), MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        )
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert result.timing["viewRefreshAttempts"] == 2
+        assert "viewRefreshCountdownS" not in result.timing
+        assert "viewRefreshFailed" not in result.timing
 
     def test_no_refreshed_sheet_when_none_landed(self) -> None:
         """Nothing to capture, and the provider says so rather than staying quiet."""
