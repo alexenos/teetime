@@ -47,8 +47,12 @@ session is adopted *from* a live, already-navigated WebDriver
 (:meth:`PrimeFacesSession.from_selenium`), inheriting its cookies and the exact
 form state the browser had built up.
 
-The booking window itself is unchanged: the reserve POST is fired at the same
-target timestamp the JS chain would have clicked at, never earlier.
+The booking window itself is timed by *arrival*, not by departure. The reserve
+POST leaves early by the club's measured clock offset plus the outbound flight
+time, so that it lands as the window opens rather than however long after it
+those two happen to add up to. See :meth:`PrimeFacesSession.measure_clock_skew`.
+(This is a change: it used to fire at our own target and never earlier, which
+put it on the club's desk around half a second late.)
 
 Every step after Reserve is derived from the markup the server just returned, by
 parsing the same ``PrimeFaces.ab({...})`` handler the browser would have
@@ -56,6 +60,8 @@ executed. Nothing about the request sequence is hardcoded, so a component id
 churning from ``j_idt1076`` to ``j_idt1082`` does not break the chain.
 """
 
+import datetime
+import email.utils
 import logging
 import re
 import time as time_module
@@ -97,6 +103,71 @@ DEFAULT_TIMEOUT_S = 10.0
 # Final busy-wait before the target timestamp, mirroring the JS chain's 25 ms
 # spin. Python only needs a couple of ms since there is no DOM work left to do.
 _SPIN_WINDOW_MS = 3
+
+# Clock-skew probing. The `Date` header is the club's own clock, but at one
+# second of resolution, so a single sample says nothing better than "somewhere
+# in this second". What is readable is the *transition*: probe faster than the
+# second ticks, and the local time at which the header increments is a server
+# second boundary observed directly. Spacing bounds the error (+-40 ms here);
+# the count has to span more than a second so at least one transition is
+# guaranteed to fall inside the run.
+_SKEW_PROBE_COUNT = 16
+_SKEW_PROBE_SPACING_S = 0.08
+# A probe is only usable if its own round trip is short enough that the header
+# was stamped near the midpoint we ascribe to it. A stalled probe is dropped
+# rather than allowed to drag the estimate.
+_SKEW_MAX_PROBE_RTT_S = 1.0
+
+
+@dataclass(frozen=True)
+class ClockSkew:
+    """How far the club's clock and the network sit between us and the window.
+
+    ``offset_ms`` is the club's clock minus ours: positive means the club gets
+    to 06:30:00 before we do. ``one_way_ms`` is the outbound flight time. Their
+    sum is how early a request has to leave to arrive as the window opens.
+    """
+
+    offset_ms: float
+    one_way_ms: float
+    probes: int
+    transitions: int
+
+    @property
+    def lead_ms(self) -> float:
+        """How far ahead of our own target a request should be sent."""
+        return self.offset_ms + self.one_way_ms
+
+
+def _median(values: list[float]) -> float:
+    """Median of a non-empty list, without pulling in a dependency for it."""
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _parse_http_date(header: str | None) -> int | None:
+    """Read an HTTP ``Date`` header as whole epoch seconds, or None.
+
+    A ``-0000`` offset comes back from :mod:`email.utils` as a *naive* datetime,
+    and ``timestamp()`` would then read it in whatever timezone the process
+    happens to run in. The header is UTC either way, so say so: read in local
+    time it would put the club's clock hours out, and the skew that produced
+    would still look like an ordinary number in the log.
+    """
+    if not header:
+        return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(header)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
+    return int(parsed.timestamp())
 
 
 class DirectHttpError(RuntimeError):
@@ -573,6 +644,11 @@ class PrimeFacesSession:
         """
         self.form_state = form_state
         self.base_url = base_url
+        # Filled in by warm_up/measure_clock_skew during staging. None means not
+        # measured, which the booker treats as "do not lead" rather than
+        # guessing - a wrong lead fires into a window the club has not opened.
+        self.warm_up_rtt_ms: float | None = None
+        self.clock_skew: ClockSkew | None = None
         headers = {
             "User-Agent": user_agent,
             # PrimeFaces sets these on every AJAX request; the bridge uses
@@ -685,7 +761,104 @@ class PrimeFacesSession:
             response.status_code,
             rtt_ms,
         )
+        self.warm_up_rtt_ms = rtt_ms
         return rtt_ms
+
+    def measure_clock_skew(self) -> ClockSkew | None:
+        """Measure the club's clock against ours, and how long a request takes.
+
+        Both halves of the same question: at what local instant should a request
+        leave so that it *arrives* as the window opens. Firing at our own
+        06:30:00.000 answers a different question, and answers it late twice
+        over - once for the offset between the two clocks, once for the flight
+        time.
+
+        Sampling is NTP-shaped but built around a one-second header. Each probe
+        pairs a local midpoint with the second the server stamped; where two
+        adjacent probes straddle an increment, the boundary between them is a
+        server second boundary, and the local time of that boundary is the
+        offset. Several transitions are usually visible, and the median of them
+        is what survives one slow probe.
+
+        Returns:
+            The measurement, or None when it could not be taken - a header the
+            site does not send, a clock frozen by a cache, every probe failing.
+            None means "do not lead", not "lead by zero on purpose"; the caller
+            distinguishes them.
+        """
+        samples: list[tuple[float, int]] = []
+        round_trips: list[float] = []
+        for probe in range(_SKEW_PROBE_COUNT):
+            if probe:
+                time_module.sleep(_SKEW_PROBE_SPACING_S)
+            sent = time_module.time()
+            try:
+                response = self._client.head(self.base_url)
+            except httpx.HTTPError as exc:
+                # One failed probe is not worth abandoning the measurement, and
+                # is not worth a warning each: the summary below reports how
+                # many landed, which is the number that matters.
+                logger.debug("DIRECT_HTTP: Clock probe %d failed (%s)", probe, exc)
+                continue
+            received = time_module.time()
+
+            round_trip = received - sent
+            if round_trip > _SKEW_MAX_PROBE_RTT_S:
+                continue
+            server_second = _parse_http_date(response.headers.get("Date"))
+            if server_second is None:
+                continue
+            round_trips.append(round_trip)
+            samples.append(((sent + received) / 2, server_second))
+
+        if len(samples) < 2:
+            logger.warning(
+                "DIRECT_HTTP: Clock skew unmeasurable - %d usable probe(s) of %d",
+                len(samples),
+                _SKEW_PROBE_COUNT,
+            )
+            return None
+
+        offsets = [
+            # The increment happened between these two probes, so the server's
+            # own second boundary sits at their midpoint by our clock. Its
+            # distance from the whole second the server reported is the offset.
+            later_second - (earlier_mid + later_mid) / 2
+            for (earlier_mid, earlier_second), (later_mid, later_second) in zip(
+                samples, samples[1:]
+            )
+            # Exactly one tick. A wider jump means the probes fell too far apart
+            # to say where inside it the boundary was.
+            if later_second - earlier_second == 1
+        ]
+        if not offsets:
+            logger.warning(
+                "DIRECT_HTTP: Clock skew unmeasurable - the Date header never advanced "
+                "across %d probes spanning %.1fs (cached?)",
+                len(samples),
+                _SKEW_PROBE_COUNT * _SKEW_PROBE_SPACING_S,
+            )
+            return None
+
+        skew = ClockSkew(
+            offset_ms=_median(offsets) * 1000,
+            # Halved on the usual assumption that the two legs are symmetric.
+            # Only the outbound leg is on the critical path: the response's
+            # journey back happens after the club has already acted.
+            one_way_ms=_median(round_trips) * 1000 / 2,
+            probes=len(samples),
+            transitions=len(offsets),
+        )
+        logger.info(
+            "DIRECT_HTTP: Clock skew measured - club is %+.0fms from us, one-way %.0fms "
+            "(%d probes, %d transitions)",
+            skew.offset_ms,
+            skew.one_way_ms,
+            skew.probes,
+            skew.transitions,
+        )
+        self.clock_skew = skew
+        return skew
 
     def post(
         self,

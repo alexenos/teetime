@@ -162,13 +162,32 @@ variable "walden_refresh_view_at_window" {
     Re-render the tee sheet at 6:30:00 and fire Reserve against that render,
     instead of against the one the request was staged from ~60s earlier.
 
-    The staged view is a sheet on which nothing is reservable yet, and the club
-    refuses a Reserve against it with "This slot is blocked by another user" -
-    the same message it uses when a human genuinely beat us. Costs ~200ms off
-    the front of the race (round trip plus re-parsing the sheet), and only
-    applies to timed bookings.
+    Off, having been tried. It was built on the reading that the club refuses a
+    Reserve staged before the window for being stale. On 2026-08-07 it worked
+    exactly as designed - fresh sheet, countdown gone, 86 of 87 rows offering a
+    Reserve - and the club refused anyway, with the same ViewState and component
+    id the staged request already carried. It cost 730ms of a race decided in
+    the first second and changed no byte of the request.
 
-    On. Turn off to go back to firing the pre-staged request untouched.
+    Turn on only if a morning shows a genuine stale-view refusal.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "walden_measure_clock_skew" {
+  description = <<-EOT
+    Probe the club's clock while staging, and send the Reserve early enough to
+    *arrive* as the booking window opens rather than to leave then.
+
+    Two things sit between us and the window and both run against us: the club's
+    clock reaches 06:30:00 before ours does, and the request still has to fly
+    there. Firing at our own 06:30:00.000 has been landing something like half a
+    second into a window members have been clicking into since it opened.
+
+    On. The lead is measured rather than assumed and clamped in the booker, and
+    a failed measurement sends unled, so the downside is bounded at the old
+    behaviour. Timed bookings only. Turn off to go back to firing at our clock.
   EOT
   type        = bool
   default     = true

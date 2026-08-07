@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import time as time_module
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from typing import Any, TypeVar
 
@@ -2900,6 +2900,37 @@ class WaldenGolfProvider(ReservationProvider):
                     f"using {booked_time.strftime('%I:%M %p')}"
                 )
 
+            # Ranked now, while there is time to spend on a DOM scan, and only
+            # for the timed race. The slot picked above is a guess about a sheet
+            # that renders held slots as free; these are the tee times the chain
+            # is allowed to fall back to when the club refuses that guess.
+            fallback_times: list[time] = []
+            if execute_at_timestamp_ms is not None:
+                try:
+                    fallback_times = [
+                        candidate_time
+                        for candidate in self._rank_candidate_slots_js(
+                            driver,
+                            target_time,
+                            num_players,
+                            fallback_window_minutes,
+                            tee_time_interval_minutes,
+                            times_to_exclude,
+                        )
+                        if (candidate_time := time(candidate["hours"], candidate["minutes"]))
+                        != booked_time
+                    ]
+                except Exception as e:  # noqa: BLE001 - a bonus must not cost the booking
+                    # Fallbacks improve a losing morning; they are not what makes
+                    # a winning one work. A scan that cannot be read leaves the
+                    # chain firing one Reserve, which is what it did before.
+                    logger.warning(
+                        "BOOKING_DEBUG: Could not rank fallback tee times (%s: %s); "
+                        "the chain will get one Reserve attempt",
+                        type(e).__name__,
+                        e,
+                    )
+
             # === ULTRA-FAST PATH: Execute entire booking flow in rapid JS sequence ===
             # This replaces: _click_slot_by_index_js + _complete_booking_sync
             # with a single JS execution that does Reserve → player count → TBD → Book Now
@@ -2918,6 +2949,7 @@ class WaldenGolfProvider(ReservationProvider):
                 slot_info,
                 num_players,
                 execute_at_timestamp_ms,
+                fallback_times=fallback_times,
             )
 
             if chain_result is None:
@@ -2934,6 +2966,33 @@ class WaldenGolfProvider(ReservationProvider):
                         slot_info["index"],
                         num_players,
                     )
+
+            # The chain may have settled on a tee time other than the one picked
+            # by row index above: a refused slot sends it down the fallback
+            # list. Everything after this names the slot actually held - the
+            # reservations check that decides whether the booking is real, and
+            # the time the member is told they have.
+            held_time = chain_result.get("bookedSlotTime")
+            if held_time is not None and held_time != booked_time:
+                logger.info(
+                    "DIRECT_HTTP: Booked %s rather than %s after %d refusal(s) - tried %s",
+                    held_time.strftime("%I:%M %p"),
+                    booked_time.strftime("%I:%M %p"),
+                    len(chain_result.get("attemptedTimes", [])) - 1,
+                    ", ".join(
+                        t.strftime("%I:%M %p") for t in chain_result.get("attemptedTimes", [])
+                    ),
+                )
+                booked_time = held_time
+                is_exact = held_time == target_time
+                fallback_reason = (
+                    None
+                    if is_exact
+                    else (
+                        f"Exact time {target_time.strftime('%I:%M %p')} was taken, "
+                        f"booked {held_time.strftime('%I:%M %p')}"
+                    )
+                )
 
             if chain_result.get("blocked"):
                 # Another member took the slot at the same moment - or the chain
@@ -3498,10 +3557,42 @@ class WaldenGolfProvider(ReservationProvider):
         times_to_exclude: set[time] | None = None,
     ) -> dict[str, Any] | None:
         """
-        Find the best available slot using a single JavaScript execution.
+        Find the single best available slot. See _rank_candidate_slots_js.
+
+        Returns:
+            The best slot dict, or None if nothing in the window suits.
+        """
+        candidates = self._rank_candidate_slots_js(
+            driver,
+            target_time,
+            num_players,
+            fallback_window_minutes,
+            tee_time_interval_minutes,
+            times_to_exclude,
+        )
+        return candidates[0] if candidates else None
+
+    def _rank_candidate_slots_js(
+        self,
+        driver: webdriver.Chrome,
+        target_time: time,
+        num_players: int,
+        fallback_window_minutes: int,
+        tee_time_interval_minutes: int = 8,
+        times_to_exclude: set[time] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Rank every bookable slot in the fallback window, best first.
 
         This replaces the Python-based _find_empty_slots + _is_northgate_slot pipeline
         with a single browser-side DOM traversal, reducing slot finding from ~17s to ~100ms.
+
+        The whole ranking is returned, not just the winner, because at 6:30 the
+        winner is a guess: the sheet renders a slot another member is holding as
+        Available, so the only way to learn a slot is gone is to be refused it.
+        The direct-HTTP chain walks this list on refusal (see
+        DirectHttpBooker._reserve_with_fallbacks); the browser chain still takes
+        the head of it and stops there.
 
         The JavaScript iterates all slot items in the browser, checking:
         - Course membership via element ID patterns (teeTimeCourses:0 for Northgate)
@@ -3518,8 +3609,9 @@ class WaldenGolfProvider(ReservationProvider):
             times_to_exclude: Times to skip when selecting fallback slots
 
         Returns:
-            Dict with slot info {index, hours, minutes, timeStr, diff, available, isExact}
-            or None if no suitable slot found
+            Slot dicts {index, hours, minutes, timeStr, diff, available, isExact,
+            reserveId}, nearest the requested time first and the earlier tee time
+            breaking a tie. Empty when nothing in the window suits.
         """
         if times_to_exclude is None:
             times_to_exclude = set()
@@ -3538,9 +3630,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         var targetMinutes = targetHour * 60 + targetMinute;
         var items = document.querySelectorAll('li.ui-datascroller-item');
-        var bestSlot = null;
-        var exactMatch = null;
-        var bestDiff = Infinity;
+        var candidates = [];
 
         // Build exclude set for O(1) lookup
         var excludeSet = {};
@@ -3622,40 +3712,47 @@ class WaldenGolfProvider(ReservationProvider):
                 reserveId: reserveEl ? reserveEl.id : null
             };
 
-            if (diff === 0) {
-                exactMatch = slotInfo;
-            }
-
-            // For fallback slots, skip excluded times
+            // For fallback slots, skip excluded times. Never for the exact time
+            // asked for: that one is the booking, not a stand-in chosen for it.
             if (diff !== 0 && excludeSet[slotMinutes]) continue;
 
-            if (diff < bestDiff) {
-                bestDiff = diff;
-                bestSlot = slotInfo;
-            }
+            candidates.push(slotInfo);
         }
 
-        return exactMatch || bestSlot;
+        // Nearest to the requested time first, and on a tie the earlier tee
+        // time - the same order the single-slot search reached by scanning rows
+        // in time order and keeping the first strictly-closer one.
+        candidates.sort(function (a, b) {
+            if (a.diff !== b.diff) return a.diff - b.diff;
+            return (a.hours * 60 + a.minutes) - (b.hours * 60 + b.minutes);
+        });
+
+        return candidates;
         """
 
-        result: dict[str, Any] | None = driver.execute_script(
-            js_code,
-            target_time.hour,
-            target_time.minute,
-            num_players,
-            fallback_window_minutes,
-            tee_time_interval_minutes,
-            exclude_list,
-            self.NORTHGATE_COURSE_INDEX,
-            self.MAX_PLAYERS,
+        candidates: list[dict[str, Any]] = (
+            driver.execute_script(
+                js_code,
+                target_time.hour,
+                target_time.minute,
+                num_players,
+                fallback_window_minutes,
+                tee_time_interval_minutes,
+                exclude_list,
+                self.NORTHGATE_COURSE_INDEX,
+                self.MAX_PLAYERS,
+            )
+            or []
         )
 
-        if result:
+        if candidates:
+            best = candidates[0]
             logger.info(
                 f"BOOKING_DEBUG: JS slot finder found slot at "
-                f"{result['hours']:02d}:{result['minutes']:02d} "
-                f"(index={result['index']}, exact={result['isExact']}, "
-                f"available={result['available']})"
+                f"{best['hours']:02d}:{best['minutes']:02d} "
+                f"(index={best['index']}, exact={best['isExact']}, "
+                f"available={best['available']}), "
+                f"{len(candidates) - 1} fallback(s) behind it"
             )
         else:
             logger.warning(
@@ -3664,7 +3761,7 @@ class WaldenGolfProvider(ReservationProvider):
                 f"for {num_players} players"
             )
 
-        return result
+        return candidates
 
     def _click_slot_by_index_js(self, driver: webdriver.Chrome, slot_index: int) -> bool:
         """
@@ -3887,6 +3984,7 @@ class WaldenGolfProvider(ReservationProvider):
         slot_info: dict[str, Any],
         num_players: int,
         execute_at_timestamp_ms: int | None,
+        fallback_times: Sequence[time] = (),
     ) -> dict[str, Any] | None:
         """
         Attempt the booking chain over direct HTTP instead of browser clicks.
@@ -3901,6 +3999,8 @@ class WaldenGolfProvider(ReservationProvider):
             slot_info: Slot dict from _find_target_slot_js; needs 'reserveId'
             num_players: Number of players (1-4)
             execute_at_timestamp_ms: Epoch ms to fire Reserve at, or None for now
+            fallback_times: Tee times to try, best first, when the club refuses
+                the slot above as held by another member
 
         Returns:
             A chain-result dict (same shape as _run_booking_chain_js) when the
@@ -3926,8 +4026,13 @@ class WaldenGolfProvider(ReservationProvider):
             booker.prepare(
                 reserve_id,
                 driver.page_source,
-                # Only a timed booking is staged against a view built before the
-                # window; an immediate one already holds a live sheet.
+                fallback_times=fallback_times,
+                # Both are for the race and only the race: an immediate booking
+                # has no instant to arrive at, and is already working off a live
+                # sheet rather than one staged before the window.
+                measure_skew=(
+                    settings.walden_measure_clock_skew and execute_at_timestamp_ms is not None
+                ),
                 refresh_at_window=(
                     settings.walden_refresh_view_at_window and execute_at_timestamp_ms is not None
                 ),
@@ -3964,28 +4069,41 @@ class WaldenGolfProvider(ReservationProvider):
         finally:
             session.close()
 
+        # The one line a post-mortem starts from, so everything that decides a
+        # morning has to be readable in it without going back through the run.
         logger.info(
             "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
-            "clickDrift=%sms, viewRefresh=%sms/%sx%s, totalMs=%s, error=%s",
+            "clickDrift=%sms, %s, attempts=%s%s, booked=%s, tried=[%s]%s, "
+            "totalMs=%s, error=%s",
             result.phase,
             result.success,
             result.blocked,
             result.timing.get("clickDriftMs", "N/A"),
-            # "N/A" attempts means no refresh ran at all. The suffix carries why
-            # it did not land, and any countdown the club was still showing -
-            # which is the reading that says whether the premise still holds.
-            result.timing.get("viewRefreshMs", "N/A"),
-            result.timing.get("viewRefreshAttempts", "N/A"),
-            "".join(
-                part
-                for part in (
-                    f" {result.timing['viewRefreshFailed']}"
-                    if result.timing.get("viewRefreshFailed")
-                    else "",
-                    f" countdown={result.timing['viewRefreshCountdownS']}s"
-                    if result.timing.get("viewRefreshCountdownS")
-                    else "",
-                )
+            # The number that says whether we were on time. Negative means the
+            # Reserve left before our own 06:30:00, which is the whole point of
+            # the lead - so an untimed booking says so rather than printing one.
+            (
+                f"lead={result.timing['arrivalLeadMs']}ms, "
+                f"sent={result.timing.get('reserveSentAtMs', '?')}ms vs window"
+                if "arrivalLeadMs" in result.timing
+                else "untimed (no window to lead)"
+            ),
+            result.timing.get("reserveAttempts", "N/A"),
+            f" (+{result.timing['prematureRetries']} early re-fires)"
+            if result.timing.get("prematureRetries")
+            else "",
+            result.booked_slot_time.strftime("%I:%M %p") if result.booked_slot_time else "nothing",
+            ", ".join(t.strftime("%I:%M %p") for t in result.attempted_times),
+            # Absent unless a refresh ran, since it is off by default now. The
+            # suffix carries why it did not land, and any countdown the club was
+            # still showing.
+            (
+                f", viewRefresh={result.timing['viewRefreshMs']}ms/"
+                f"{result.timing.get('viewRefreshAttempts', '?')}x"
+                f"{' ' + result.timing['viewRefreshFailed'] if result.timing.get('viewRefreshFailed') else ''}"
+                f"{' countdown=' + str(result.timing['viewRefreshCountdownS']) + 's' if result.timing.get('viewRefreshCountdownS') else ''}"
+                if result.timing.get("viewRefreshMs") is not None
+                else ""
             ),
             result.timing.get("totalMs", "N/A"),
             result.error,

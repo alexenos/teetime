@@ -234,6 +234,11 @@ resource "google_cloud_run_v2_service" "teetime" {
       }
 
       env {
+        name  = "WALDEN_MEASURE_CLOCK_SKEW"
+        value = tostring(var.walden_measure_clock_skew)
+      }
+
+      env {
         name  = "WALDEN_FAST_BOOKING_BATCH"
         value = tostring(var.walden_fast_booking_batch)
       }

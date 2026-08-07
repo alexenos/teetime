@@ -16,23 +16,27 @@ left to do but write bytes to an already-open socket:
 * The TLS connection is established during ``prepare`` too.
 * :meth:`DirectHttpBooker.book` waits out the remaining time and posts.
 
-With one deliberate exception. Staging the Reserve request also freezes the JSF
-view it was built against, and that view is the tee sheet as it looked ~60s
-before the window opened - a sheet on which nothing is reservable yet. The club
-answers a Reserve against it with "This slot is blocked by another user" even
-when the slot is free, which is indistinguishable from losing the race and cost
-two mornings' bookings before the response body was captured and read. So when
-``refresh_at_window`` is set, :meth:`DirectHttpBooker.book` spends one round
-trip at the target instant re-rendering the sheet, then fires Reserve against
-that render instead. See :meth:`DirectHttpBooker._refresh_view`.
+Two things sit on top of that, both from mornings this path lost.
 
-Which makes the refresh part of the critical path, and its failure modes worth
-distinguishing rather than collapsing into "send the staged request anyway".
-Sending that request is not free: it advances the chain past
-:data:`PRE_SUBMIT_PHASES`, spending the browser retry the caller would
-otherwise still have. So a refresh that cannot land retries, a session the
-server has disowned sends nothing at all, and only a run that exhausts its
-attempts with the session still alive falls back to the stale request.
+**It is timed to arrive, not to leave.** The club's clock runs ahead of ours and
+the request still has to fly there, so sending at our own 06:30:00.000 puts the
+Reserve on the club's desk something like half a second into a window members
+have been clicking into since it opened. :meth:`DirectHttpBooker.prepare`
+measures both quantities against the site and sends that much early. See
+:meth:`DirectHttpBooker._stage_arrival_lead`.
+
+**One Reserve is one guess.** A hold is not a booking: the club refuses a
+Reserve on a slot another member is holding while the tee sheet goes on
+rendering that slot as Available, so the refusal is the *only* evidence a slot
+is gone. Firing once and reporting "blocked" therefore threw away a morning on
+one contested tee time while eighty-odd others sat open. Reserve now walks a
+ranked fallback list until one is accepted, and because a refusal comes back
+with the whole re-rendered sheet, each step down that list costs a parse rather
+than a round trip. See :meth:`DirectHttpBooker._reserve_with_fallbacks`.
+
+The refusals are told apart before either applies:
+:func:`_classify_reserve_response` separates a held slot from a window the club
+has not opened yet, because the recovery for one is the opposite of the other.
 
 Failures raise :class:`~app.providers.walden_http.DirectHttpError`, which the
 caller treats as "fall back to the Selenium chain". Nothing here is trusted
@@ -43,6 +47,7 @@ import hashlib
 import logging
 import re
 import time as time_module
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import time
 from typing import Any
@@ -139,6 +144,60 @@ _REFRESH_DEADLINE_MS = 4000
 _REFRESH_MAX_ATTEMPTS = 4
 _REFRESH_RETRY_PAUSE_S = 0.2
 
+# Ceiling on how early the Reserve may be sent. The lead is measured, not
+# assumed, and a measurement can be wrong without limit; this bounds what a bad
+# one can cost. Comfortably above the ~500ms the club's clock and the flight
+# time have actually come to, and well under the countdown's one-second tick, so
+# an over-lead is still recoverable by asking again.
+_MAX_ARRIVAL_LEAD_MS = 900.0
+
+# Past this, the measurement is not believable and is discarded rather than
+# clamped. Two internet-facing servers do not sit seconds apart; a reading that
+# says they do is far likelier to be a parse fault than a real clock, and
+# clamping one silently converts it into a plausible-looking 900ms lead that
+# fires into a shut window every morning without ever looking wrong. Bounded
+# ignorance beats a confident guess, so this sends unled and says why.
+_MAX_PLAUSIBLE_OFFSET_MS = 5000.0
+
+# Reserve attempts allowed across all candidate tee times. Each costs one round
+# trip plus the parse of the sheet that comes back with it - call it 450ms - so
+# this is about as far down the fallback list as the first two seconds of the
+# race reach. Past that the morning is decided and more requests are noise.
+_RESERVE_MAX_ATTEMPTS = 6
+
+# Re-fires of the *same* tee time after the club said the window is still shut.
+# Distinct from the blocked count on purpose: arriving early is our own timing
+# error and the slot is presumably still there, so the right answer is to ask
+# again rather than to give the slot up and walk down the fallback list.
+_PREMATURE_MAX_RETRIES = 4
+_PREMATURE_PAUSE_S = 0.05
+
+# Stop *starting* attempts once the race is this far gone. An attempt already in
+# flight is allowed to finish - abandoning it would not un-send it.
+_RESERVE_DEADLINE_MS = 6000
+
+# Budget for a single Reserve POST, well under the session default. The deadline
+# above cannot cancel a request already handed to the socket, so without this a
+# single stalled Reserve spends the entire race and the fallback list - the
+# thing that exists to survive exactly this - is never walked. Round trips have
+# run 230-535ms; one that has not answered in this long has lost anyway.
+#
+# A timeout is deliberately left terminal rather than advancing to the next tee
+# time. The request may well have reached the club, and reserving a second slot
+# on top of a hold we cannot see would collide with the one-round-per-day rule -
+# trading a lost morning for a booking mess.
+_RESERVE_TIMEOUT_S = 2.0
+
+# What the club's answer to a Reserve amounts to. The distinction that matters
+# is between the two refusals: "blocked" is another member holding the slot, and
+# the only useful response is a different tee time; a countdown still in the
+# sheet is the club saying nobody can hold anything yet, and the only useful
+# response is to ask again for the same one. Reading the second as the first
+# walks the whole fallback list into a window that has not opened.
+_VERDICT_ACCEPTED = "accepted"
+_VERDICT_PREMATURE = "premature"
+_VERDICT_BLOCKED = "blocked"
+
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
 # DOM untouched, so only this one needs the outcome resolved against the site.
@@ -205,6 +264,15 @@ class DirectBookingResult:
     # the club still counting down, and was the slot open - and neither can be
     # answered from the Reserve response alone. Empty when no refresh landed.
     refresh_markup: str = ""
+    # The tee time the club actually accepted, which is not always the one asked
+    # for: a blocked slot sends the chain down the fallback list. The caller
+    # booked a slot by index long before this point and would otherwise report
+    # and verify the wrong one.
+    booked_slot_time: time | None = None
+    # Every tee time a Reserve went out for, in order. The record of how hard the
+    # morning was fought - one entry is a clean win, five is a sheet being taken
+    # apart around us - and the only place a fallback booking's reason comes from.
+    attempted_times: list[time] = field(default_factory=list)
 
     def as_chain_result(self) -> dict[str, Any]:
         """Render as the dict shape ``_run_booking_chain_js`` returns."""
@@ -217,6 +285,8 @@ class DirectBookingResult:
             "finalMarkup": self.final_markup,
             "responseMessage": self.response_message,
             "refreshMarkup": self.refresh_markup,
+            "bookedSlotTime": self.booked_slot_time,
+            "attemptedTimes": list(self.attempted_times),
             "path": DIRECT_HTTP_PATH,
         }
 
@@ -231,6 +301,8 @@ class DirectHttpBooker:
         self._reserve_body: bytes | None = None
         self._refresh_config: AbConfig | None = None
         self._slot_time: time | None = None
+        self._fallback_times: tuple[time, ...] = ()
+        self._lead_ms: float = 0.0
 
     # -- staging ----------------------------------------------------------
 
@@ -239,23 +311,32 @@ class DirectHttpBooker:
         reserve_button_id: str,
         page_html: str,
         *,
+        fallback_times: Sequence[time] = (),
+        measure_skew: bool = False,
         refresh_at_window: bool = False,
     ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
         Everything expensive happens here, before the booking window opens:
         parsing the tee sheet, resolving the button's AJAX config, urlencoding
-        the body, DNS/TCP/TLS. What remains for the target instant is a socket
-        write - plus, when ``refresh_at_window`` is set, one round trip to
-        re-render the sheet first.
+        the body, DNS/TCP/TLS, and measuring how early to send. What remains for
+        the target instant is a socket write.
 
         Args:
             reserve_button_id: Component id of the slot's Reserve link, e.g.
                 ``..._:teeTimeForm:teeTimeCourses:0:teeTimeSlots:67:slotTee:0:reserve_button``.
             page_html: Current tee sheet source, used to resolve the handler.
+            fallback_times: Tee times to fall back to, best first, when the club
+                refuses the one above as held by another member. Ranked by the
+                caller, which is the side that knows the fallback window and
+                which times are spoken for by the rest of the batch.
+            measure_skew: Probe the club's clock so the Reserve can be timed to
+                *arrive* as the window opens rather than to leave then. Timed
+                bookings only - it costs ~1.3s of probing, and an immediate
+                booking has no instant to hit.
             refresh_at_window: Re-render the tee sheet at the target instant and
-                fire Reserve against that render. Only meaningful for a timed
-                booking; an immediate one is already working off a live view.
+                fire Reserve against that render. Off by default; see
+                :meth:`_refresh_view` for why it is no longer the way in.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -270,18 +351,76 @@ class DirectHttpBooker:
 
         self._reserve_config = config
         self._reserve_body = self.session.build_body(config)
+        # Read now, while the button is in hand. The chain reports which tee
+        # time it ended up holding, and after a fallback that is no longer the
+        # one the caller picked by row index.
+        self._slot_time = _slot_time_of(button)
+        # Anything already held, and the slot itself, are not fallbacks.
+        self._fallback_times = tuple(
+            dict.fromkeys(t for t in fallback_times if t != self._slot_time)
+        )
         logger.info(
-            "DIRECT_HTTP: Reserve request staged - source=%s, %d body bytes, viewState=%s",
+            "DIRECT_HTTP: Reserve request staged - source=%s, slot=%s, %d body bytes, "
+            "viewState=%s, fallbacks=%s",
             config.source,
+            self._slot_time.strftime("%I:%M %p") if self._slot_time else "unreadable",
             len(self._reserve_body),
             # Fingerprinted rather than logged: this is a live session token,
             # and all a post-mortem needs is whether the one that fired differs
             # from the one staged here.
             _view_state_fingerprint(self.session),
+            ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
         )
         if refresh_at_window:
             self._stage_view_refresh(document, page_html, button)
         self.session.warm_up()
+        if measure_skew:
+            self._stage_arrival_lead()
+
+    def _stage_arrival_lead(self) -> None:
+        """Work out how far ahead of the target the Reserve should be sent.
+
+        Two clocks and a network sit between deciding to reserve and the club
+        acting on it, and both of them run against us: the club reaches 06:30:00
+        before we do, and the request still has to fly there. Sending at our own
+        06:30:00.000 therefore lands well inside a window other members have
+        already been clicking into.
+
+        A measurement that fails leaves the lead at zero - the behaviour before
+        this existed. Guessing would be worse than being late: too much lead
+        fires into a window the club has not opened, and while
+        :data:`_VERDICT_PREMATURE` recovers from that, it spends attempts on it.
+        """
+        try:
+            skew = self.session.measure_clock_skew()
+        except Exception as exc:  # noqa: BLE001 - staging must never lose a booking
+            logger.warning("DIRECT_HTTP: Clock skew probing failed (%s); sending unled", exc)
+            return
+        if skew is None:
+            return
+
+        if abs(skew.offset_ms) > _MAX_PLAUSIBLE_OFFSET_MS:
+            logger.error(
+                "DIRECT_HTTP: Measured clock offset of %+.0fms is not believable "
+                "(over %.0fms); discarding it and sending unled",
+                skew.offset_ms,
+                _MAX_PLAUSIBLE_OFFSET_MS,
+            )
+            return
+
+        # Clamped because the lead is derived from a measurement, and a wrong
+        # one is unbounded in the direction that hurts. Half a second of skew is
+        # already more than anything observed; past the ceiling the likelier
+        # explanation is a bad probe than a club running that far ahead.
+        self._lead_ms = max(0.0, min(skew.lead_ms, _MAX_ARRIVAL_LEAD_MS))
+        logger.info(
+            "DIRECT_HTTP: Reserve will be sent %.0fms early so it arrives as the window "
+            "opens (offset %+.0fms, one-way %.0fms%s)",
+            self._lead_ms,
+            skew.offset_ms,
+            skew.one_way_ms,
+            f", clamped from {skew.lead_ms:.0f}ms" if skew.lead_ms > _MAX_ARRIVAL_LEAD_MS else "",
+        )
 
     def _stage_view_refresh(self, document: Node, page_html: str, button: Node) -> None:
         """Resolve what to re-render the tee sheet with once the window opens.
@@ -407,7 +546,13 @@ class DirectHttpBooker:
         if target_timestamp_ms is not None:
             result.phase = PHASE_PRECISION_WAIT
             result.timing["msUntilTarget"] = target_timestamp_ms - int(time_module.time() * 1000)
-            result.timing["clickDriftMs"] = sleep_until(target_timestamp_ms)
+            result.timing["arrivalLeadMs"] = round(self._lead_ms)
+            # Led, so that the request *arrives* as the window opens. The drift
+            # is still reported against the lead-adjusted instant, which is the
+            # one the wait was actually aiming at.
+            result.timing["clickDriftMs"] = sleep_until(
+                target_timestamp_ms - int(round(self._lead_ms))
+            )
 
             # After the wait, not before: a sheet re-rendered while the window
             # is still shut is the very thing being refreshed away from.
@@ -423,34 +568,12 @@ class DirectHttpBooker:
         start = time_module.perf_counter()
 
         def elapsed_ms() -> int:
-            """Milliseconds since the Reserve request went out."""
+            """Milliseconds since the first Reserve request went out."""
             return int((time_module.perf_counter() - start) * 1000)
 
-        # The one line that says what actually went on the wire. Every branch
-        # above can change the component id or leave it alone, and only some of
-        # them say so; without this, reading back which slot was reserved means
-        # replaying those branches from the surrounding warnings.
-        if target_timestamp_ms is not None:
-            result.timing["reserveSentAtMs"] = int(time_module.time() * 1000) - target_timestamp_ms
-        logger.info(
-            "DIRECT_HTTP: Firing Reserve - source=%s, viewState=%s, %sms past the window",
-            config.source,
-            _view_state_fingerprint(self.session),
-            result.timing.get("reserveSentAtMs", "n/a - untimed"),
-        )
-
-        # Advance before the call, not after. Once the request is handed to the
-        # socket we cannot tell "never sent" from "sent, response lost", and a
-        # browser retry in the second case races our own reservation.
-        result.phase = PHASE_RESERVE_SENT
-        response = self.session.post(config, body=body)
-        result.final_markup = response.markup
+        response = self._reserve_with_fallbacks(config, body, target_timestamp_ms, result)
         result.timing["reserveMs"] = elapsed_ms()
-
-        blocked_reason = _find_blocked_message(response)
-        if blocked_reason is not None:
-            result.blocked = True
-            result.error = blocked_reason
+        if response is None:
             result.timing["blockedDetectedMs"] = elapsed_ms()
             return result
 
@@ -503,6 +626,173 @@ class DirectHttpBooker:
         result.timing["totalMs"] = elapsed_ms()
         return result
 
+    def _reserve_with_fallbacks(
+        self,
+        config: AbConfig,
+        body: bytes,
+        target_timestamp_ms: int | None,
+        result: DirectBookingResult,
+    ) -> PartialResponse | None:
+        """Fire Reserve, and keep firing until one is accepted or the list runs out.
+
+        The club answers a Reserve on a slot another member is holding with
+        "This slot is blocked by another user" while still rendering that slot
+        as Available - a hold is not a booking, and the sheet only shows the
+        second. So the refusal is the only signal that a slot is gone, and one
+        Reserve per morning means one guess at which slot was not.
+
+        The response to a refusal carries the whole re-rendered tee sheet, every
+        row's Reserve handler included, so walking to the next candidate costs a
+        parse rather than a round trip.
+
+        Returns:
+            The response that accepted a Reserve, or None with ``result``
+            describing the refusal that ended it.
+        """
+        started = time_module.perf_counter()
+        slot_time = self._slot_time
+        remaining = list(self._fallback_times)
+        premature_retries = 0
+        premature_exhausted = False
+        last_reason: str | None = None
+
+        for attempt in range(1, _RESERVE_MAX_ATTEMPTS + 1):
+            result.timing["reserveAttempts"] = attempt
+            if slot_time is not None:
+                result.attempted_times.append(slot_time)
+
+            if target_timestamp_ms is not None and attempt == 1:
+                # First attempt only. Later ones are paced by the club's
+                # answers, not by the clock, and reporting each against the
+                # window would bury the number that says whether we were on time.
+                result.timing["reserveSentAtMs"] = (
+                    int(time_module.time() * 1000) - target_timestamp_ms
+                )
+            logger.info(
+                "DIRECT_HTTP: Firing Reserve %d/%d for %s - source=%s, viewState=%s, "
+                "%sms past the window",
+                attempt,
+                _RESERVE_MAX_ATTEMPTS,
+                slot_time.strftime("%I:%M %p") if slot_time else "an unreadable slot",
+                config.source,
+                _view_state_fingerprint(self.session),
+                result.timing.get("reserveSentAtMs", "n/a - untimed")
+                if attempt == 1
+                else int((time_module.perf_counter() - started) * 1000),
+            )
+
+            # Advance before the call, not after. Once the request is handed to
+            # the socket we cannot tell "never sent" from "sent, response lost",
+            # and a browser retry in the second case races our own reservation.
+            result.phase = PHASE_RESERVE_SENT
+            response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+            result.final_markup = response.markup
+
+            # One parse, two questions. At ~190ms for a 500KB sheet this is the
+            # largest single cost in the retry loop, and both the verdict and
+            # the next candidate's handler come out of the same tree.
+            document = parse_html(response.markup)
+            verdict, reason = _classify_reserve_response(document)
+            if verdict == _VERDICT_ACCEPTED:
+                result.booked_slot_time = slot_time
+                if attempt > 1:
+                    logger.info(
+                        "DIRECT_HTTP: Reserve accepted for %s on attempt %d after %dms",
+                        slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                        attempt,
+                        int((time_module.perf_counter() - started) * 1000),
+                    )
+                return response
+
+            last_reason = reason
+            spent_ms = (time_module.perf_counter() - started) * 1000
+            if spent_ms >= _RESERVE_DEADLINE_MS:
+                logger.warning(
+                    "DIRECT_HTTP: %dms spent on Reserve attempts; the race is over, stopping",
+                    int(spent_ms),
+                )
+                break
+
+            if verdict == _VERDICT_PREMATURE:
+                if premature_retries >= _PREMATURE_MAX_RETRIES:
+                    logger.error(
+                        "DIRECT_HTTP: The club is still counting down after %d re-fires; "
+                        "the window is not opening when we think it is",
+                        premature_retries,
+                    )
+                    premature_exhausted = True
+                    break
+                premature_retries += 1
+                result.timing["prematureRetries"] = premature_retries
+                logger.warning(
+                    "DIRECT_HTTP: Reserve was early (%s); asking again for %s in %dms",
+                    reason,
+                    slot_time.strftime("%I:%M %p") if slot_time else "the same slot",
+                    int(_PREMATURE_PAUSE_S * 1000),
+                )
+                time_module.sleep(_PREMATURE_PAUSE_S)
+                # Rebuilt against the sheet just returned rather than re-sent:
+                # the row may have moved, and the ViewState may have advanced.
+                if slot_time is not None:
+                    relocated = _relocate_reserve_in(document, response.markup, slot_time)
+                    if relocated is not None:
+                        config = relocated
+                body = self.session.build_body(config)
+                continue
+
+            # Blocked: the slot is held. Nothing about asking again for it will
+            # change that, so the only move left is a different tee time.
+            next_candidate = self._next_candidate(document, response.markup, remaining)
+            if next_candidate is None:
+                logger.warning("DIRECT_HTTP: %s and no fallback tee time left to try", reason)
+                break
+            config, slot_time = next_candidate
+            body = self.session.build_body(config)
+            logger.info(
+                "DIRECT_HTTP: %s; falling back to %s",
+                reason,
+                slot_time.strftime("%I:%M %p"),
+            )
+
+        # A window that never opened is not a slot someone else is holding, and
+        # only the blocked branch of the caller hard-codes the member's message
+        # to say it is. Reported as an ordinary post-submit failure instead: it
+        # captures the same artifacts and checks the same reservations page, but
+        # carries `error` through to the member, so the one distinction this
+        # whole classification exists to draw survives past the log.
+        result.blocked = not premature_exhausted
+        result.error = last_reason or "Slot blocked by another user"
+        logger.warning(
+            "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s",
+            result.timing.get("reserveAttempts", 0),
+            int((time_module.perf_counter() - started) * 1000),
+            ", ".join(t.strftime("%I:%M %p") for t in result.attempted_times) or "nothing",
+        )
+        return None
+
+    def _next_candidate(
+        self,
+        document: Node,
+        markup: str,
+        remaining: list[time],
+    ) -> tuple[AbConfig, time] | None:
+        """Pop the best fallback tee time still reservable in ``document``.
+
+        Consumes ``remaining`` as it goes, so a candidate the sheet no longer
+        offers a Reserve for is dropped rather than retried against the next
+        response - if it has no button now it is gone, not late.
+        """
+        while remaining:
+            candidate = remaining.pop(0)
+            config = _relocate_reserve_in(document, markup, candidate)
+            if config is not None:
+                return config, candidate
+            logger.info(
+                "DIRECT_HTTP: Fallback %s has no Reserve in the returned sheet; skipping it",
+                candidate.strftime("%I:%M %p"),
+            )
+        return None
+
     def _refresh_view(
         self,
         staged_config: AbConfig,
@@ -510,6 +800,13 @@ class DirectHttpBooker:
         result: DirectBookingResult,
     ) -> tuple[AbConfig, bytes] | None:
         """Re-render the tee sheet now the window is open, and restage Reserve.
+
+        Off by default, and kept only as a way back. It was built on the reading
+        that a Reserve staged before the window is refused for being stale; on
+        2026-08-07 the refresh ran exactly as designed - fresh sheet, countdown
+        gone, 86 of 87 rows offering a Reserve - and the club refused anyway,
+        with the *same* ViewState and component id the staged request already
+        carried. It cost 730ms of the race and changed no byte of the request.
 
         Replays the selected day tab, which re-renders the whole form without
         changing the date. What comes back is a view built after the window
@@ -1057,7 +1354,42 @@ def _find_blocked_message(response: PartialResponse) -> str | None:
     Returns the matched reason, or None when the response carries no blocked
     indication.
     """
-    document = parse_html(response.markup)
+    return _find_blocked_message_in(parse_html(response.markup))
+
+
+def _classify_reserve_response(document: Node) -> tuple[str, str | None]:
+    """Decide what the club's answer to a Reserve was.
+
+    The two refusals look alike and mean opposite things. "This slot is blocked
+    by another user" is a member holding it, and the answer is a different tee
+    time. The same message beside a live countdown is not about that slot at
+    all - the club is saying nothing is holdable yet - and the answer is to ask
+    again for the same one.
+
+    The countdown is checked first for that reason. A sheet that still carries
+    it cannot be evidence about who holds what, whatever else it says.
+
+    Returns:
+        One of the ``_VERDICT_*`` constants, with the club's own wording when it
+        gave any.
+    """
+    countdown_s = _countdown_in(document)
+    if countdown_s is not None:
+        return _VERDICT_PREMATURE, f"the club is still counting down {countdown_s}s to the window"
+
+    blocked_reason = _find_blocked_message_in(document)
+    if blocked_reason is not None:
+        return _VERDICT_BLOCKED, blocked_reason
+
+    return _VERDICT_ACCEPTED, None
+
+
+def _find_blocked_message_in(document: Node) -> str | None:
+    """The blocked-popup check, against a sheet already parsed.
+
+    Split out so the retry loop can ask this and :func:`_countdown_in` of one
+    parse: the sheet is ~500KB and the parse is the loop's largest single cost.
+    """
     for node in document.descendants():
         if "teesheetvalidationerrorpopup" not in node.id.lower():
             continue
