@@ -4069,28 +4069,41 @@ class WaldenGolfProvider(ReservationProvider):
         finally:
             session.close()
 
+        # The one line a post-mortem starts from, so everything that decides a
+        # morning has to be readable in it without going back through the run.
         logger.info(
             "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
-            "clickDrift=%sms, viewRefresh=%sms/%sx%s, totalMs=%s, error=%s",
+            "clickDrift=%sms, %s, attempts=%s%s, booked=%s, tried=[%s]%s, "
+            "totalMs=%s, error=%s",
             result.phase,
             result.success,
             result.blocked,
             result.timing.get("clickDriftMs", "N/A"),
-            # "N/A" attempts means no refresh ran at all. The suffix carries why
-            # it did not land, and any countdown the club was still showing -
-            # which is the reading that says whether the premise still holds.
-            result.timing.get("viewRefreshMs", "N/A"),
-            result.timing.get("viewRefreshAttempts", "N/A"),
-            "".join(
-                part
-                for part in (
-                    f" {result.timing['viewRefreshFailed']}"
-                    if result.timing.get("viewRefreshFailed")
-                    else "",
-                    f" countdown={result.timing['viewRefreshCountdownS']}s"
-                    if result.timing.get("viewRefreshCountdownS")
-                    else "",
-                )
+            # The number that says whether we were on time. Negative means the
+            # Reserve left before our own 06:30:00, which is the whole point of
+            # the lead - so an untimed booking says so rather than printing one.
+            (
+                f"lead={result.timing['arrivalLeadMs']}ms, "
+                f"sent={result.timing.get('reserveSentAtMs', '?')}ms vs window"
+                if "arrivalLeadMs" in result.timing
+                else "untimed (no window to lead)"
+            ),
+            result.timing.get("reserveAttempts", "N/A"),
+            f" (+{result.timing['prematureRetries']} early re-fires)"
+            if result.timing.get("prematureRetries")
+            else "",
+            result.booked_slot_time.strftime("%I:%M %p") if result.booked_slot_time else "nothing",
+            ", ".join(t.strftime("%I:%M %p") for t in result.attempted_times),
+            # Absent unless a refresh ran, since it is off by default now. The
+            # suffix carries why it did not land, and any countdown the club was
+            # still showing.
+            (
+                f", viewRefresh={result.timing['viewRefreshMs']}ms/"
+                f"{result.timing.get('viewRefreshAttempts', '?')}x"
+                f"{' ' + result.timing['viewRefreshFailed'] if result.timing.get('viewRefreshFailed') else ''}"
+                f"{' countdown=' + str(result.timing['viewRefreshCountdownS']) + 's' if result.timing.get('viewRefreshCountdownS') else ''}"
+                if result.timing.get("viewRefreshMs") is not None
+                else ""
             ),
             result.timing.get("totalMs", "N/A"),
             result.error,

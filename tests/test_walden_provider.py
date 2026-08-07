@@ -5,6 +5,7 @@ These tests verify the DOM parsing and time extraction logic works correctly
 against the actual Walden Golf website structure.
 """
 
+import logging
 import os
 from datetime import date, time, timedelta
 from pathlib import Path
@@ -3985,3 +3986,224 @@ class TestFallbackTeeTimeReporting:
 
         assert result.success is True
         assert result.booked_time == time(8, 42)
+
+
+class TestChainSummaryLogging:
+    """The one line a 6:30 post-mortem starts from.
+
+    A morning is debugged from Cloud Logging, hours later, with no way to
+    re-run it. If a number that decided the outcome is not in this line it is
+    not anywhere, and a format error here would take the line out entirely.
+    """
+
+    SLOT = {
+        "timeStr": "8:42",
+        "hours": 8,
+        "minutes": 42,
+        "index": 5,
+        "diff": 0,
+        "available": 4,
+        "isExact": True,
+        "reserveId": "form:teeTimeCourses:0:teeTimeSlots:5:slotTee:0:reserve_button",
+    }
+
+    def _summary(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        result: object,
+    ) -> str:
+        """Run the direct path with a canned result and return the summary line."""
+        from unittest.mock import MagicMock as _MagicMock
+
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        monkeypatch.setattr(
+            "app.providers.walden_provider.PrimeFacesSession.from_selenium",
+            _MagicMock(return_value=_MagicMock()),
+        )
+        booker = _MagicMock()
+        booker.book.return_value = result
+        monkeypatch.setattr(
+            "app.providers.walden_provider.DirectHttpBooker", _MagicMock(return_value=booker)
+        )
+
+        with caplog.at_level(logging.INFO, logger="app.providers.walden_provider"):
+            provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, 1770000000000)
+
+        lines = [r.getMessage() for r in caplog.records if "Chain finished" in r.getMessage()]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_a_won_race_reports_lead_send_and_slot(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Everything needed to say why we won, without re-reading the run."""
+        from app.providers.walden_http_booker import DirectBookingResult
+
+        line = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(
+                success=True,
+                phase="complete",
+                booked_slot_time=time(8, 42),
+                attempted_times=[time(8, 42)],
+                timing={
+                    "clickDriftMs": 1,
+                    "arrivalLeadMs": 470,
+                    "reserveSentAtMs": -468,
+                    "reserveAttempts": 1,
+                    "totalMs": 1500,
+                },
+            ),
+        )
+
+        assert "lead=470ms" in line
+        # Negative: the request left before our own 06:30:00, which is the point.
+        assert "sent=-468ms vs window" in line
+        assert "attempts=1" in line
+        assert "booked=08:42 AM" in line
+
+    def test_a_fallback_win_names_every_tee_time_tried(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """How hard the sheet was fought is the finding, not a detail."""
+        from app.providers.walden_http_booker import DirectBookingResult
+
+        line = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(
+                success=True,
+                phase="complete",
+                booked_slot_time=time(8, 58),
+                attempted_times=[time(8, 42), time(8, 50), time(8, 58)],
+                timing={"reserveAttempts": 3, "arrivalLeadMs": 470, "reserveSentAtMs": -468},
+            ),
+        )
+
+        assert "attempts=3" in line
+        assert "tried=[08:42 AM, 08:50 AM, 08:58 AM]" in line
+        assert "booked=08:58 AM" in line
+
+    def test_an_early_send_is_visible_as_re_fires(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Overshooting the lead has to be readable, or it gets tuned blind."""
+        from app.providers.walden_http_booker import DirectBookingResult
+
+        line = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(
+                success=True,
+                phase="complete",
+                booked_slot_time=time(8, 42),
+                attempted_times=[time(8, 42), time(8, 42)],
+                timing={"reserveAttempts": 2, "prematureRetries": 1, "arrivalLeadMs": 880},
+            ),
+        )
+
+        assert "(+1 early re-fires)" in line
+        assert "lead=880ms" in line
+
+    def test_a_lost_race_reports_nothing_booked(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A blocked run still has to say what it tried."""
+        from app.providers.walden_http_booker import DirectBookingResult
+
+        line = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(
+                blocked=True,
+                phase="reserve_sent",
+                error="Slot blocked by another user (blocked by another user)",
+                attempted_times=[time(8, 42), time(8, 50)],
+                timing={"reserveAttempts": 2, "arrivalLeadMs": 470, "reserveSentAtMs": -468},
+            ),
+        )
+
+        assert "blocked=True" in line
+        assert "booked=nothing" in line
+        assert "tried=[08:42 AM, 08:50 AM]" in line
+
+    def test_the_refresh_figures_appear_only_when_it_ran(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """It is off by default; its absence must not clutter every line."""
+        from app.providers.walden_http_booker import DirectBookingResult
+
+        without = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(success=True, phase="complete", timing={"reserveAttempts": 1}),
+        )
+        assert "viewRefresh" not in without
+
+        caplog.clear()
+        with_refresh = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(
+                success=True,
+                phase="complete",
+                timing={
+                    "reserveAttempts": 1,
+                    "viewRefreshMs": 729,
+                    "viewRefreshAttempts": 1,
+                    "viewRefreshFailed": "still-counting-down",
+                    "viewRefreshCountdownS": 65,
+                },
+            ),
+        )
+        assert "viewRefresh=729ms/1x still-counting-down countdown=65s" in with_refresh
+
+    def test_an_untimed_booking_says_so_rather_than_printing_a_drift(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Ad-hoc bookings have no window; a number there would be a lie."""
+        from app.providers.walden_http_booker import DirectBookingResult
+
+        line = self._summary(
+            provider,
+            monkeypatch,
+            caplog,
+            DirectBookingResult(
+                success=True,
+                phase="complete",
+                booked_slot_time=time(17, 0),
+                attempted_times=[time(17, 0)],
+                timing={"reserveAttempts": 1},
+            ),
+        )
+
+        assert "untimed (no window to lead)" in line
+        assert "sent=" not in line
+        assert "booked=05:00 PM" in line
