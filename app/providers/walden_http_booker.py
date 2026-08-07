@@ -16,14 +16,35 @@ left to do but write bytes to an already-open socket:
 * The TLS connection is established during ``prepare`` too.
 * :meth:`DirectHttpBooker.book` waits out the remaining time and posts.
 
+With one deliberate exception. Staging the Reserve request also freezes the JSF
+view it was built against, and that view is the tee sheet as it looked ~60s
+before the window opened - a sheet on which nothing is reservable yet. The club
+answers a Reserve against it with "This slot is blocked by another user" even
+when the slot is free, which is indistinguishable from losing the race and cost
+two mornings' bookings before the response body was captured and read. So when
+``refresh_at_window`` is set, :meth:`DirectHttpBooker.book` spends one round
+trip at the target instant re-rendering the sheet, then fires Reserve against
+that render instead. See :meth:`DirectHttpBooker._refresh_view`.
+
+Which makes the refresh part of the critical path, and its failure modes worth
+distinguishing rather than collapsing into "send the staged request anyway".
+Sending that request is not free: it advances the chain past
+:data:`PRE_SUBMIT_PHASES`, spending the browser retry the caller would
+otherwise still have. So a refresh that cannot land retries, a session the
+server has disowned sends nothing at all, and only a run that exhausts its
+attempts with the session still alive falls back to the stale request.
+
 Failures raise :class:`~app.providers.walden_http.DirectHttpError`, which the
 caller treats as "fall back to the Selenium chain". Nothing here is trusted
 enough to be the only path to a booking.
 """
 
+import hashlib
 import logging
+import re
 import time as time_module
 from dataclasses import dataclass, field
+from datetime import time
 from typing import Any
 
 from app.providers.walden_dom_schema import DOM
@@ -33,6 +54,7 @@ from app.providers.walden_http import (
     Node,
     PartialResponse,
     PrimeFacesSession,
+    ViewExpiredError,
     find_ab_for_element,
     parse_html,
     sleep_until,
@@ -70,6 +92,53 @@ _NON_MESSAGE_TAGS = frozenset({"a", "button", "script", "style"})
 # pasting a re-rendered tee sheet into it.
 _MAX_MESSAGE_CHARS = 500
 
+# The day tab for the date already showing. Replaying its handler re-renders the
+# whole form without changing what is selected, which is what makes it usable as
+# a no-op refresh. Chosen over the ALL/MORNING/AFTERNOON filter because that one
+# is a PrimeFaces widget whose behavior lives in an init script the browser
+# executes and discards - by the time we read `driver.page_source` it is gone,
+# while a day tab's handler is an inline `onclick` that survives.
+_SELECTED_DATE_CLASS = "selected-date"
+
+# Class on the label holding a slot's tee time ("08:00 AM") - the same element
+# DOM.DISABLED_SLOT.time_label selects on the browser side.
+_SLOT_TIME_LABEL_CLASS = "custom-time-label"
+
+# How far to walk out from a Reserve button looking for its slot's time label.
+# The label is a sibling subtree (the button sits in the slot's action cell, the
+# label in its time cell), so the search has to go up and back down - four
+# levels in the captured sheets. The cap is what keeps a button whose slot has
+# no label from walking to the document root and scanning the whole tee sheet,
+# once per button.
+_SLOT_LABEL_MAX_DEPTH = 6
+
+# "08:00 AM", tolerating the spacing and punctuation variants the site has used.
+_SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*([AP])\.?M\.?", re.IGNORECASE)
+
+# The club's own "Booking Starts In : 00:01:05" counter. The sheet carries it
+# while the window is shut and drops the element once it opens, which makes its
+# presence the club stating that a Reserve right now would be premature - the
+# one authority on that question that is not our clock.
+_COUNTDOWN_CLASS = "booking-starts-in"
+_COUNTDOWN_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})")
+
+# Budget for a single refresh POST. Way under the chain's timeout: a refresh
+# that has not answered in this long has already cost more than it can win back,
+# and the remaining time is better spent on another attempt.
+_REFRESH_TIMEOUT_S = 1.5
+
+# How long past the target to keep trying before giving up on a fresh view.
+# Generous next to a race decided in the first second, because every option
+# after this point is a bad one - the ceiling exists to bound the damage when
+# the site is down, not to pace a healthy run.
+_REFRESH_DEADLINE_MS = 4000
+
+# Attempts allowed inside that deadline, and the pause between them. The pause
+# matters most for the window-still-shut case: hammering a server that has told
+# us the time is not yet is pointless, and the counter ticks in seconds.
+_REFRESH_MAX_ATTEMPTS = 4
+_REFRESH_RETRY_PAUSE_S = 0.2
+
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
 # DOM untouched, so only this one needs the outcome resolved against the site.
@@ -85,6 +154,7 @@ DIRECT_HTTP_PATH = "direct-http"
 PHASE_INIT = "init"
 PHASE_PRECISION_WAIT = "precision_wait"
 PHASE_RESERVE_STAGED = "reserve_staged"  # request built, nothing sent yet
+PHASE_VIEW_REFRESH = "view_refresh"  # re-rendering the sheet the window opened on
 PHASE_RESERVE_SENT = "reserve_sent"  # written to the socket, outcome unknown
 PHASE_PLAYER_COUNT = "player_count"
 PHASE_TBD_GUESTS = "tbd_guests"
@@ -93,7 +163,15 @@ PHASE_COMPLETE = "complete"
 
 # The only phases in which nothing can have reached the server, and therefore
 # the only ones after which a browser retry is safe.
-PRE_SUBMIT_PHASES = frozenset({PHASE_INIT, PHASE_PRECISION_WAIT, PHASE_RESERVE_STAGED})
+#
+# PHASE_VIEW_REFRESH belongs here even though it does send a request: that
+# request re-renders a tee sheet and holds nothing, so a browser retry cannot
+# race a reservation of ours. It does advance the JSF view the browser is also
+# holding, so the retry may find its own ViewState a token behind - which costs
+# a booking that was already lost, rather than risking a double one.
+PRE_SUBMIT_PHASES = frozenset(
+    {PHASE_INIT, PHASE_PRECISION_WAIT, PHASE_RESERVE_STAGED, PHASE_VIEW_REFRESH}
+)
 
 
 @dataclass
@@ -122,6 +200,11 @@ class DirectBookingResult:
     # direct path's counterpart to _extract_booking_error_message, which reads
     # the browser DOM this path never touches.
     response_message: str | None = None
+    # The tee sheet the refresh returned, kept solely so a failed booking can be
+    # diagnosed. A blocked verdict raises exactly two questions about it - was
+    # the club still counting down, and was the slot open - and neither can be
+    # answered from the Reserve response alone. Empty when no refresh landed.
+    refresh_markup: str = ""
 
     def as_chain_result(self) -> dict[str, Any]:
         """Render as the dict shape ``_run_booking_chain_js`` returns."""
@@ -133,6 +216,7 @@ class DirectBookingResult:
             "timing": self.timing,
             "finalMarkup": self.final_markup,
             "responseMessage": self.response_message,
+            "refreshMarkup": self.refresh_markup,
             "path": DIRECT_HTTP_PATH,
         }
 
@@ -145,21 +229,33 @@ class DirectHttpBooker:
         self.session = session
         self._reserve_config: AbConfig | None = None
         self._reserve_body: bytes | None = None
+        self._refresh_config: AbConfig | None = None
+        self._slot_time: time | None = None
 
     # -- staging ----------------------------------------------------------
 
-    def prepare(self, reserve_button_id: str, page_html: str) -> None:
+    def prepare(
+        self,
+        reserve_button_id: str,
+        page_html: str,
+        *,
+        refresh_at_window: bool = False,
+    ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
         Everything expensive happens here, before the booking window opens:
         parsing the tee sheet, resolving the button's AJAX config, urlencoding
         the body, DNS/TCP/TLS. What remains for the target instant is a socket
-        write.
+        write - plus, when ``refresh_at_window`` is set, one round trip to
+        re-render the sheet first.
 
         Args:
             reserve_button_id: Component id of the slot's Reserve link, e.g.
                 ``..._:teeTimeForm:teeTimeCourses:0:teeTimeSlots:67:slotTee:0:reserve_button``.
             page_html: Current tee sheet source, used to resolve the handler.
+            refresh_at_window: Re-render the tee sheet at the target instant and
+                fire Reserve against that render. Only meaningful for a timed
+                booking; an immediate one is already working off a live view.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -175,11 +271,66 @@ class DirectHttpBooker:
         self._reserve_config = config
         self._reserve_body = self.session.build_body(config)
         logger.info(
-            "DIRECT_HTTP: Reserve request staged - source=%s, %d body bytes",
+            "DIRECT_HTTP: Reserve request staged - source=%s, %d body bytes, viewState=%s",
             config.source,
             len(self._reserve_body),
+            # Fingerprinted rather than logged: this is a live session token,
+            # and all a post-mortem needs is whether the one that fired differs
+            # from the one staged here.
+            _view_state_fingerprint(self.session),
         )
+        if refresh_at_window:
+            self._stage_view_refresh(document, page_html, button)
         self.session.warm_up()
+
+    def _stage_view_refresh(self, document: Node, page_html: str, button: Node) -> None:
+        """Resolve what to re-render the tee sheet with once the window opens.
+
+        Best-effort: anything unresolvable leaves ``_refresh_config`` unset, and
+        :meth:`book` falls back to firing the staged request on its own - which
+        is what this path did before the refresh existed.
+        """
+        slot_time = _slot_time_of(button)
+        if slot_time is None:
+            logger.warning(
+                "DIRECT_HTTP: Reserve button %s has no readable tee time beside it; "
+                "skipping the view refresh",
+                button.id,
+            )
+            return
+
+        tabs = [n for n in document.descendants() if _SELECTED_DATE_CLASS in n.classes]
+        if not tabs:
+            logger.warning(
+                "DIRECT_HTTP: No .%s day tab in the tee sheet; skipping the view refresh",
+                _SELECTED_DATE_CLASS,
+            )
+            return
+
+        # Every candidate, not just the first. The captured sheets each carry
+        # exactly one, but the class is a styling hook - if the site ever marks
+        # a wrapper with it too, taking the first and finding no handler would
+        # abandon a refresh that the element beside it could have performed.
+        config = next(
+            (c for c in (find_ab_for_element(tab, page_html) for tab in tabs) if c is not None),
+            None,
+        )
+        if config is None:
+            logger.warning(
+                "DIRECT_HTTP: None of the %d .%s day tab(s) has a PrimeFaces.ab handler "
+                "to replay; skipping the view refresh",
+                len(tabs),
+                _SELECTED_DATE_CLASS,
+            )
+            return
+
+        self._refresh_config = config
+        self._slot_time = slot_time
+        logger.info(
+            "DIRECT_HTTP: View refresh staged - source=%s, slot=%s",
+            config.source,
+            slot_time.strftime("%I:%M %p"),
+        )
 
     # -- the race ---------------------------------------------------------
 
@@ -190,6 +341,11 @@ class DirectHttpBooker:
         target_timestamp_ms: int | None = None,
     ) -> DirectBookingResult:
         """Run the full chain, firing Reserve at ``target_timestamp_ms``.
+
+        When ``prepare`` staged a view refresh, a timed booking spends one round
+        trip re-rendering the tee sheet at the target instant and fires Reserve
+        against that render. An untimed one skips it: the window is already open
+        and the staged view was built against it.
 
         Args:
             num_players: 1-4. Guests beyond the member are added as TBD.
@@ -246,11 +402,23 @@ class DirectHttpBooker:
         assert self._reserve_config is not None and self._reserve_body is not None
 
         result.phase = PHASE_RESERVE_STAGED
+        config, body = self._reserve_config, self._reserve_body
 
         if target_timestamp_ms is not None:
             result.phase = PHASE_PRECISION_WAIT
             result.timing["msUntilTarget"] = target_timestamp_ms - int(time_module.time() * 1000)
             result.timing["clickDriftMs"] = sleep_until(target_timestamp_ms)
+
+            # After the wait, not before: a sheet re-rendered while the window
+            # is still shut is the very thing being refreshed away from.
+            if self._refresh_config is not None:
+                result.phase = PHASE_VIEW_REFRESH
+                refreshed = self._refresh_view(config, body, result)
+                if refreshed is None:
+                    # Deliberately nothing sent. Staying in this phase is what
+                    # tells the caller a browser retry is still safe to make.
+                    return result
+                config, body = refreshed
 
         start = time_module.perf_counter()
 
@@ -258,11 +426,24 @@ class DirectHttpBooker:
             """Milliseconds since the Reserve request went out."""
             return int((time_module.perf_counter() - start) * 1000)
 
+        # The one line that says what actually went on the wire. Every branch
+        # above can change the component id or leave it alone, and only some of
+        # them say so; without this, reading back which slot was reserved means
+        # replaying those branches from the surrounding warnings.
+        if target_timestamp_ms is not None:
+            result.timing["reserveSentAtMs"] = int(time_module.time() * 1000) - target_timestamp_ms
+        logger.info(
+            "DIRECT_HTTP: Firing Reserve - source=%s, viewState=%s, %sms past the window",
+            config.source,
+            _view_state_fingerprint(self.session),
+            result.timing.get("reserveSentAtMs", "n/a - untimed"),
+        )
+
         # Advance before the call, not after. Once the request is handed to the
         # socket we cannot tell "never sent" from "sent, response lost", and a
         # browser retry in the second case races our own reservation.
         result.phase = PHASE_RESERVE_SENT
-        response = self.session.post(self._reserve_config, body=self._reserve_body)
+        response = self.session.post(config, body=body)
         result.final_markup = response.markup
         result.timing["reserveMs"] = elapsed_ms()
 
@@ -321,6 +502,152 @@ class DirectHttpBooker:
         result.success = True
         result.timing["totalMs"] = elapsed_ms()
         return result
+
+    def _refresh_view(
+        self,
+        staged_config: AbConfig,
+        staged_body: bytes,
+        result: DirectBookingResult,
+    ) -> tuple[AbConfig, bytes] | None:
+        """Re-render the tee sheet now the window is open, and restage Reserve.
+
+        Replays the selected day tab, which re-renders the whole form without
+        changing the date. What comes back is a view built after the window
+        opened - one the club will act on - carrying a fresh ViewState and the
+        slot rows as they now stand.
+
+        Retries within :data:`_REFRESH_DEADLINE_MS`, because the two things that
+        go wrong here are both worth a second try: a transport blip, and a sheet
+        that still carries the club's countdown, which is the club saying the
+        window is not open on *its* clock yet. Firing into either is how the
+        mornings this exists to fix were lost.
+
+        Returns:
+            The Reserve request to fire as ``(config, body)``, or None when the
+            chain should send nothing at all and let the caller fall back.
+        """
+        # Staging sets both or neither, so a configured refresh always knows
+        # which tee time it is restaging.
+        assert self._refresh_config is not None and self._slot_time is not None
+        started = time_module.perf_counter()
+        deadline = started + _REFRESH_DEADLINE_MS / 1000
+        response: PartialResponse | None = None
+        document: Node | None = None
+        countdown_s: int | None = None
+        last_error: str | None = None
+
+        for attempt in range(1, _REFRESH_MAX_ATTEMPTS + 1):
+            result.timing["viewRefreshAttempts"] = attempt
+            try:
+                candidate = self.session.post(self._refresh_config, timeout_s=_REFRESH_TIMEOUT_S)
+            except ViewExpiredError as exc:
+                # The session itself is gone, and the staged Reserve carries the
+                # very ViewState just rejected. Sending it could only fail, and
+                # would spend the one retry the caller still has.
+                logger.error(
+                    "DIRECT_HTTP: View refresh rejected the adopted session (%s); "
+                    "sending no Reserve so the browser chain can still try",
+                    exc,
+                )
+                result.timing["viewRefreshFailed"] = "session-expired"
+                result.error = f"Adopted session expired at the window: {exc}"
+                return None
+            except DirectHttpError as exc:
+                # Nothing was applied to the session, so the staged request is
+                # still sendable - but it is also still stale, so try again
+                # before settling for it.
+                last_error = str(exc)
+                logger.warning("DIRECT_HTTP: View refresh attempt %d failed (%s)", attempt, exc)
+            else:
+                # Parsed once and carried: the relocation below needs the same
+                # tree, and this is a ~50ms parse of a 500KB sheet sitting on
+                # the critical path, not a cheap lookup to repeat.
+                document = parse_html(candidate.markup)
+                countdown_s = _countdown_in(document)
+                response = candidate
+                result.refresh_markup = candidate.markup
+                if countdown_s is None:
+                    # Logged on the way through, not inferred later from the
+                    # absence of the warning below: "the club confirmed booking
+                    # was open" is the single most load-bearing fact in a
+                    # post-mortem, and silence is not a record of it.
+                    logger.info(
+                        "DIRECT_HTTP: View refreshed on attempt %d after %dms - "
+                        "no countdown in the sheet, so the club has booking open; "
+                        "viewState=%s",
+                        attempt,
+                        int((time_module.perf_counter() - started) * 1000),
+                        _view_state_fingerprint(self.session),
+                    )
+                    break
+                # The refresh worked and the club still says "not yet". Reserving
+                # now is the exact failure this method exists to avoid. Recorded
+                # after the loop rather than here, so a run that counts down once
+                # and then comes back clean does not leave the marker behind and
+                # report a countdown that no longer applied.
+                logger.warning(
+                    "DIRECT_HTTP: Refreshed sheet still counting down %ds to the "
+                    "window on attempt %d; the club has not opened booking yet",
+                    countdown_s,
+                    attempt,
+                )
+
+            if time_module.perf_counter() + _REFRESH_RETRY_PAUSE_S >= deadline:
+                break
+            time_module.sleep(_REFRESH_RETRY_PAUSE_S)
+
+        result.timing["viewRefreshMs"] = int((time_module.perf_counter() - started) * 1000)
+
+        if response is None:
+            # Every attempt failed in transport. The staged request is untouched
+            # and remains the only thing left to try: the browser chain the
+            # caller would fall back to holds the same pre-window view, so
+            # declining to send costs the booking outright rather than saving it.
+            logger.warning(
+                "DIRECT_HTTP: No view refresh landed in %dms (%s); firing the "
+                "request staged before the window as a last resort",
+                _REFRESH_DEADLINE_MS,
+                last_error,
+            )
+            result.timing["viewRefreshFailed"] = "no-response"
+            return staged_config, staged_body
+
+        # Recorded only now, describing the sheet actually being reserved
+        # against - the loop ran out with the club still saying the window was
+        # shut. Marked as a failure too: a countdown alone reads like colour
+        # next to a healthy refresh, when it is the one outcome that says the
+        # Reserve about to go out is the same doomed one as yesterday's.
+        if countdown_s is not None:
+            result.timing["viewRefreshCountdownS"] = countdown_s
+            result.timing["viewRefreshFailed"] = "still-counting-down"
+            logger.error(
+                "DIRECT_HTTP: Out of refresh attempts with the club still counting "
+                "down %ds; reserving into a window it says is shut",
+                countdown_s,
+            )
+
+        # Past here a refresh has been folded into the session, so the staged
+        # body carries a superseded ViewState and has to be rebuilt either way.
+        assert document is not None  # set with `response`, on the same branch
+        config = _relocate_reserve_in(document, response.markup, self._slot_time)
+        if config is None:
+            logger.warning(
+                "DIRECT_HTTP: No Reserve button for %s in the refreshed tee sheet; "
+                "replaying the staged component id against the new view",
+                self._slot_time.strftime("%I:%M %p"),
+            )
+            config = staged_config
+        elif config.source != staged_config.source:
+            # The row index is baked into the component id, so this is routine
+            # rather than alarming - and it is exactly what firing the staged id
+            # blind would have got wrong.
+            logger.info(
+                "DIRECT_HTTP: Slot moved in the refreshed tee sheet - %s -> %s",
+                staged_config.source,
+                config.source,
+            )
+
+        return config, self.session.build_body(config)
 
     # -- individual steps -------------------------------------------------
 
@@ -407,6 +734,116 @@ class DirectHttpBooker:
 def _parent_classes(node: Node) -> frozenset[str]:
     """CSS classes of the node's parent, or an empty set at the root."""
     return node.parent.classes if node.parent is not None else frozenset()
+
+
+def _parse_slot_time(text: str) -> time | None:
+    """Read the first ``HH:MM AM/PM`` in some text, or None if it holds none."""
+    match = _SLOT_TIME_RE.search(text)
+    if match is None:
+        return None
+    # 12 AM is hour 0 and 12 PM is hour 12, which "% 12 then add" gets right
+    # where a plain "+ 12 if PM" does not.
+    hour = int(match.group(1)) % 12
+    if match.group(3).upper() == "P":
+        hour += 12
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return time(hour, minute)
+
+
+def _slot_time_of(button: Node) -> time | None:
+    """The tee time of the slot a Reserve button sits in.
+
+    Walks outward to the nearest ancestor holding a time label. The label is not
+    an ancestor of the button but a sibling subtree - the sheet puts the time in
+    one cell and the Reserve action in another - so the search has to go up and
+    back down, and the nearest such ancestor is the slot's own block.
+    """
+    node = button.parent
+    for _ in range(_SLOT_LABEL_MAX_DEPTH):
+        if node is None:
+            return None
+        for label in node.find_with_class(_SLOT_TIME_LABEL_CLASS):
+            parsed = _parse_slot_time(label.text_content())
+            if parsed is not None:
+                return parsed
+        node = node.parent
+    return None
+
+
+def _view_state_fingerprint(session: PrimeFacesSession) -> str:
+    """A short, stable stand-in for the session's current ViewState.
+
+    The token itself is live session state and does not belong in a log. What a
+    post-mortem actually needs is only whether the ViewState that fired Reserve
+    is the one staged before the window or the one the refresh returned, and
+    eight hex characters answer that.
+    """
+    view_state = session.form_state.view_state
+    if not view_state:
+        return "MISSING"
+    return hashlib.sha256(view_state.encode("utf-8", errors="replace")).hexdigest()[:8]
+
+
+def _window_countdown_s(markup: str) -> int | None:
+    """Seconds the club says remain before booking opens, if it still says any.
+
+    The tee sheet carries a ``booking-starts-in`` counter while the window is
+    shut and drops the element once it opens, so this answers "is the window
+    open on the *server's* clock" - the question our own clock got wrong.
+
+    Returns:
+        Seconds remaining, or None when the sheet no longer claims a wait.
+    """
+    return _countdown_in(parse_html(markup))
+
+
+def _countdown_in(document: Node) -> int | None:
+    """Read the countdown from an already-parsed sheet.
+
+    Split from :func:`_window_countdown_s` so the refresh can parse the sheet
+    once and use the tree for both this and the slot lookup.
+    """
+    for node in document.descendants():
+        if _COUNTDOWN_CLASS not in node.classes:
+            continue
+        match = _COUNTDOWN_RE.search(node.text_content())
+        if match is None:
+            continue
+        hours, minutes, seconds = (int(group) for group in match.groups())
+        remaining = hours * 3600 + minutes * 60 + seconds
+        if remaining > 0:
+            return remaining
+    return None
+
+
+def _relocate_reserve(markup: str, slot_time: time) -> AbConfig | None:
+    """Find the Reserve request for ``slot_time`` in a freshly rendered sheet.
+
+    Matched by tee time, never by the component id resolved earlier: the slot's
+    row index is part of that id, and a re-render is free to move it.
+
+    Returns:
+        The request a click on that slot's Reserve link would produce, or None
+        when the refreshed sheet offers no such slot.
+    """
+    return _relocate_reserve_in(parse_html(markup), markup, slot_time)
+
+
+def _relocate_reserve_in(document: Node, markup: str, slot_time: time) -> AbConfig | None:
+    """Find the Reserve request for ``slot_time`` in an already-parsed sheet.
+
+    Takes both the tree and its source because resolving a handler may have to
+    fall back to scanning the document text for a widget-init script.
+    """
+    for node in document.descendants():
+        if "reserve_button" not in node.id:
+            continue
+        if _slot_time_of(node) != slot_time:
+            continue
+        return find_ab_for_element(node, markup)
+    return None
 
 
 def _find_player_count_radio(document: Node, num_players: int) -> Node | None:

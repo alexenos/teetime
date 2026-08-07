@@ -2950,6 +2950,13 @@ class WaldenGolfProvider(ReservationProvider):
                         self._capture_response_artifact(
                             f"direct_http_blocked_{blocked_phase}", blocked_markup
                         )
+                    # And the sheet the Reserve was fired against. A blocked
+                    # verdict is only readable next to the view that produced
+                    # it: whether the club was still counting down in it, and
+                    # whether the slot was open, is what separates "a member
+                    # beat us" from "we reserved against a view the club had
+                    # not opened yet" - the two this path exists to tell apart.
+                    self._capture_refresh_artifact(chain_result, blocked_phase)
                 # Before the reservations check, not after: that check navigates
                 # to the dashboard, and a screenshot taken on the way out would
                 # show that page instead of the state that failed.
@@ -2997,6 +3004,7 @@ class WaldenGolfProvider(ReservationProvider):
                         self._capture_response_artifact(
                             f"direct_http_failed_{phase}", partial_markup
                         )
+                    self._capture_refresh_artifact(chain_result, phase)
                     # Before the reservations check, not after: that check
                     # navigates to the dashboard, and a screenshot taken on the
                     # way out would show that page instead of the state that
@@ -3915,7 +3923,15 @@ class WaldenGolfProvider(ReservationProvider):
         try:
             session = PrimeFacesSession.from_selenium(driver)
             booker = DirectHttpBooker(session)
-            booker.prepare(reserve_id, driver.page_source)
+            booker.prepare(
+                reserve_id,
+                driver.page_source,
+                # Only a timed booking is staged against a view built before the
+                # window; an immediate one already holds a live sheet.
+                refresh_at_window=(
+                    settings.walden_refresh_view_at_window and execute_at_timestamp_ms is not None
+                ),
+            )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
             # almost anything. Nothing has reached the server yet, so every
@@ -3950,11 +3966,27 @@ class WaldenGolfProvider(ReservationProvider):
 
         logger.info(
             "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
-            "clickDrift=%sms, totalMs=%s, error=%s",
+            "clickDrift=%sms, viewRefresh=%sms/%sx%s, totalMs=%s, error=%s",
             result.phase,
             result.success,
             result.blocked,
             result.timing.get("clickDriftMs", "N/A"),
+            # "N/A" attempts means no refresh ran at all. The suffix carries why
+            # it did not land, and any countdown the club was still showing -
+            # which is the reading that says whether the premise still holds.
+            result.timing.get("viewRefreshMs", "N/A"),
+            result.timing.get("viewRefreshAttempts", "N/A"),
+            "".join(
+                part
+                for part in (
+                    f" {result.timing['viewRefreshFailed']}"
+                    if result.timing.get("viewRefreshFailed")
+                    else "",
+                    f" countdown={result.timing['viewRefreshCountdownS']}s"
+                    if result.timing.get("viewRefreshCountdownS")
+                    else "",
+                )
+            ),
             result.timing.get("totalMs", "N/A"),
             result.error,
         )
@@ -5094,6 +5126,26 @@ class WaldenGolfProvider(ReservationProvider):
 
         except Exception as e:
             logger.warning(f"Failed to capture diagnostic info: {e}")
+
+    def _capture_refresh_artifact(self, chain_result: dict[str, Any], phase: str) -> None:
+        """Record the refreshed tee sheet a failed Reserve was fired against.
+
+        Only the direct path produces one, and only when a refresh landed. The
+        excerpt this logs is the useful half: the club's "Booking Starts In"
+        counter, if it was still running, sits near the top of the sheet's
+        visible text and is what says the window had not opened yet.
+        """
+        refresh_markup = chain_result.get("refreshMarkup")
+        if not refresh_markup:
+            # Says which of the two it was, because "no refresh ran" and "the
+            # refresh ran and returned nothing usable" call for opposite fixes.
+            logger.info(
+                "DIRECT_HTTP: No refreshed sheet to capture for %s - the Reserve "
+                "was fired against the view staged before the window",
+                phase,
+            )
+            return
+        self._capture_response_artifact(f"direct_http_refreshed_sheet_{phase}", refresh_markup)
 
     def _capture_response_artifact(self, context: str, markup: str) -> None:
         """Record a direct-HTTP response body for diagnosis.

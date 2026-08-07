@@ -6,8 +6,10 @@ tests/fixtures/, so the request this builds is the request the site actually
 expects - not one derived from a hand-written mock.
 """
 
+import time as time_module
 import urllib.parse
 from collections.abc import Callable
+from datetime import time
 from pathlib import Path
 
 import httpx
@@ -29,8 +31,11 @@ from app.providers.walden_http import (
 from app.providers.walden_http_booker import (
     PHASE_BOOK_NOW,
     PHASE_RESERVE_SENT,
+    PHASE_VIEW_REFRESH,
     PRE_SUBMIT_PHASES,
     DirectHttpBooker,
+    _parse_slot_time,
+    _relocate_reserve,
     find_response_message,
 )
 
@@ -43,6 +48,10 @@ RESTRICTION_POPUP = (FIXTURES / "walden_restriction_popup.html").read_text(encod
 
 FORM_ID = "_teeTimePortlet_WAR_northstarportlet_:teeTimeForm"
 RESERVE_ID = f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:67:slotTee:0:reserve_button"
+# The captured sheet's selected day tab, and the tee time of the slot RESERVE_ID
+# sits in - both read off the fixture, not invented.
+DAY_TAB_ID = f"{FORM_ID}:j_idt125:0:j_idt127"
+RESERVE_SLOT_TIME = time(16, 34)
 
 
 @pytest.fixture(scope="module")
@@ -533,11 +542,14 @@ class TestSleepUntil:
         target = int(time_module.time() * 1000) + 40
         drift = sleep_until(target)
 
-        # The invariant is that it never returns early. The drift bound is
-        # deliberately loose: it is bounded by OS scheduler latency, so a tight
-        # assertion just makes this flaky on a loaded CI runner.
+        # The invariant is that it never returns early - that one is ours to
+        # keep. The upper bound is not: past the coarse sleep it is OS scheduler
+        # latency, and a shared CI runner overshot the old 250ms bound by 64ms
+        # on a green build. Kept only wide enough to catch a real regression
+        # (waiting on the wrong clock, or not waking at all), which would be off
+        # by seconds, not by scheduler jitter.
         assert int(time_module.time() * 1000) >= target
-        assert 0 <= drift < 250
+        assert 0 <= drift < 2000
 
 
 # ---------------------------------------------------------------------------
@@ -747,10 +759,12 @@ class ChainRecorder:
         """Queue the pages this recorder will serve, in order."""
         self.pages = pages
         self.sources: list[str] = []
+        self.requests: list[dict[str, str]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         """Serve the next canned page and record the request's source."""
         params = dict(urllib.parse.parse_qsl(request.content.decode()))
+        self.requests.append(params)
         self.sources.append(params.get("javax.faces.source", ""))
         page = self.pages[min(len(self.sources) - 1, len(self.pages) - 1)]
         return httpx.Response(200, text=partial_response(page, f"vs-{len(self.sources)}"))
@@ -997,8 +1011,9 @@ class TestDirectHttpBooker:
         assert result.success, result.error
         assert int(time_module.time() * 1000) >= target
         assert "clickDriftMs" in result.timing
-        # Loose for the same reason as test_waits_until_the_target.
-        assert 0 <= result.timing["clickDriftMs"] < 250
+        # Loose for the same reason as test_waits_until_the_target: this bound
+        # measures the CI runner's scheduler, not the code under test.
+        assert 0 <= result.timing["clickDriftMs"] < 2000
 
 
 class TestBlockedDetectionScope:
@@ -1131,3 +1146,353 @@ class TestPrepare:
         session = make_session(FormState.from_html(html), lambda request: httpx.Response(200))
         with pytest.raises(DirectHttpError, match="no PrimeFaces.ab handler"):
             DirectHttpBooker(session).prepare("plain", html)
+
+
+def slot_block(button_id: str, label: str) -> str:
+    """One tee-sheet slot, shaped like the real one.
+
+    The time label and the Reserve link sit in *sibling* cells, which is the
+    whole reason the time lookup walks up and back down rather than reading an
+    ancestor's text.
+    """
+    handler = f'PrimeFaces.ab({{s:"{button_id}",f:"{FORM_ID}",u:"{FORM_ID}"}})'
+    return (
+        '<li class="ui-datascroller-item"><div class="Empty"><div class="ui-grid-a">'
+        '<div class="time-show"><div class="time-div">'
+        f'<label class="custom-time-label">{label}</label></div></div>'
+        f'<div class="slot-area"><a id="{button_id}" onmousedown="{handler}">Reserve</a></div>'
+        "</div></div></li>"
+    )
+
+
+def refreshed_sheet(*slots: str) -> str:
+    """A re-rendered tee sheet carrying the given slots."""
+    return (
+        f'<form id="{FORM_ID}" action="/post">'
+        '<input type="hidden" name="javax.faces.encodedURL" value="/post">'
+        f"{''.join(slots)}</form>"
+    )
+
+
+# The refresh re-renders the sheet and the slot lands on a different row - the
+# case that firing the pre-staged component id blind gets wrong.
+MOVED_RESERVE_ID = f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:12:slotTee:0:reserve_button"
+MOVED_SHEET = refreshed_sheet(
+    slot_block(f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:11:slotTee:0:reserve_button", "04:26 PM"),
+    slot_block(MOVED_RESERVE_ID, "04:34 PM"),
+)
+
+
+def countdown_sheet(remaining: str) -> str:
+    """A re-rendered sheet still carrying the club's pre-window counter."""
+    return refreshed_sheet(
+        f'<div class="booking-starts-in">Booking Starts In : {remaining}</div>',
+        slot_block(MOVED_RESERVE_ID, "04:34 PM"),
+    )
+
+
+def booker_over(handler: Callable[[httpx.Request], httpx.Response]) -> DirectHttpBooker:
+    """A booker with Reserve pre-staged against a hand-written handler."""
+    session = make_session(FormState.from_html(TEE_SHEET), handler)
+    booker = DirectHttpBooker(session)
+    config = AbConfig(source=RESERVE_ID, form=FORM_ID, update=FORM_ID)
+    booker._reserve_config = config
+    booker._reserve_body = session.build_body(config)
+    return booker
+
+
+def stage_refresh(booker: DirectHttpBooker) -> DirectHttpBooker:
+    """Add a staged day-tab refresh to a booker from make_booker."""
+    booker._refresh_config = AbConfig(source=DAY_TAB_ID, form=FORM_ID, update=FORM_ID)
+    booker._slot_time = RESERVE_SLOT_TIME
+    return booker
+
+
+def just_past() -> int:
+    """A target timestamp already gone, so the precision wait returns at once."""
+    return int(time_module.time() * 1000) - 1000
+
+
+class TestSlotTimeParsing:
+    """Reading a tee time off a slot's label."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("08:00 AM", time(8, 0)),
+            ("07:53 AM", time(7, 53)),
+            ("04:34 PM", time(16, 34)),
+            # Midnight and noon are where a plain "+12 if PM" goes wrong.
+            ("12:00 AM", time(0, 0)),
+            ("12:30 PM", time(12, 30)),
+            ("Available", None),
+            ("", None),
+        ],
+    )
+    def test_labels_parse(self, text: str, expected: time | None) -> None:
+        """Each label form the sheet uses reads back as the right time."""
+        assert _parse_slot_time(text) == expected
+
+
+class TestRelocateReserve:
+    """Finding a slot again in a freshly rendered sheet."""
+
+    def test_finds_the_slot_by_time_in_the_real_sheet(self) -> None:
+        """The captured sheet's 04:34 PM slot resolves to its Reserve request."""
+        config = _relocate_reserve(TEE_SHEET, RESERVE_SLOT_TIME)
+
+        assert config is not None
+        assert config.source == RESERVE_ID
+
+    def test_follows_the_slot_when_the_row_index_moves(self) -> None:
+        """Matching is by tee time, not by the id staged earlier."""
+        config = _relocate_reserve(MOVED_SHEET, RESERVE_SLOT_TIME)
+
+        assert config is not None
+        assert config.source == MOVED_RESERVE_ID
+
+    def test_absent_slot_is_reported_as_missing(self) -> None:
+        """A time the refreshed sheet no longer offers resolves to nothing."""
+        assert _relocate_reserve(MOVED_SHEET, time(9, 15)) is None
+
+
+class TestViewRefresh:
+    """Re-rendering the tee sheet at the window before firing Reserve."""
+
+    def test_timed_booking_refreshes_then_reserves_the_moved_slot(self) -> None:
+        """The day tab goes first, and Reserve follows the slot to its new row."""
+        recorder = ChainRecorder([MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert recorder.sources == [
+            DAY_TAB_ID,
+            MOVED_RESERVE_ID,
+            "playerGroup",
+            "bookTeeTimeAction",
+        ]
+
+    def test_reserve_carries_the_view_state_the_refresh_returned(self) -> None:
+        """The staged body's ViewState is dead once the refresh lands."""
+        recorder = ChainRecorder([MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        # The recorder hands out vs-1 for the refresh, so Reserve must post that
+        # rather than the ViewState baked in before the window.
+        assert recorder.requests[1]["javax.faces.ViewState"] == "vs-1"
+
+    def test_untimed_booking_does_not_refresh(self) -> None:
+        """An immediate booking already holds a live view; refreshing wastes it."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1)
+
+        assert result.success, result.error
+        assert recorder.sources[0] == RESERVE_ID
+
+    def test_unstaged_refresh_leaves_the_chain_alone(self) -> None:
+        """Without a staged refresh a timed booking fires straight away."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = make_booker(recorder).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert recorder.sources[0] == RESERVE_ID
+
+    def test_transient_refresh_failure_is_retried(self) -> None:
+        """One bad round trip is not a reason to reserve against a stale view."""
+        pages = [MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        served: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            served.append(params.get("javax.faces.source", ""))
+            if len(served) == 1:
+                return httpx.Response(500)  # first refresh attempt
+            page = pages[min(len(served) - 2, len(pages) - 1)]
+            return httpx.Response(200, text=partial_response(page))
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        # Refresh, refresh again, then Reserve at the relocated slot.
+        assert served[:3] == [DAY_TAB_ID, DAY_TAB_ID, MOVED_RESERVE_ID]
+        assert result.timing["viewRefreshAttempts"] == 2
+        assert "viewRefreshFailed" not in result.timing
+
+    def test_exhausted_refresh_falls_back_to_the_staged_request(self) -> None:
+        """Once every attempt is spent, a stale Reserve beats no Reserve.
+
+        The browser chain the caller would fall back to holds the same
+        pre-window view, so declining to send loses the booking outright.
+        """
+        served: list[str] = []
+        pages = [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            source = params.get("javax.faces.source", "")
+            served.append(source)
+            if source == DAY_TAB_ID:
+                return httpx.Response(500)
+            page = pages[min(served.count(RESERVE_ID) + served.count("playerGroup") - 1, 2)]
+            return httpx.Response(200, text=partial_response(page))
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert served.count(DAY_TAB_ID) == 4  # _REFRESH_MAX_ATTEMPTS
+        assert served[4] == RESERVE_ID
+        assert result.timing["viewRefreshFailed"] == "no-response"
+
+    def test_expired_session_sends_no_reserve_at_all(self) -> None:
+        """The staged request carries the ViewState the server just rejected."""
+        served: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            served.append(params.get("javax.faces.source", ""))
+            return httpx.Response(
+                200,
+                text=(
+                    "<?xml version='1.0'?><partial-response><error>"
+                    "<error-name>class javax.faces.application.ViewExpiredException"
+                    "</error-name><error-message>view expired</error-message>"
+                    "</error></partial-response>"
+                ),
+            )
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert not result.success
+        assert served == [DAY_TAB_ID]  # nothing else went out
+        assert result.timing["viewRefreshFailed"] == "session-expired"
+        # Still a pre-submit phase, so the caller may hand this to the browser.
+        assert result.phase in PRE_SUBMIT_PHASES
+
+    def test_sheet_still_counting_down_is_retried(self) -> None:
+        """The club's own counter outranks our clock on whether booking is open."""
+        pages = [countdown_sheet("00:00:03"), MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        recorder = ChainRecorder(pages)
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        # Refreshed, was told 3s remained, refreshed again, then reserved.
+        assert recorder.sources[:3] == [DAY_TAB_ID, DAY_TAB_ID, MOVED_RESERVE_ID]
+        assert result.timing["viewRefreshAttempts"] == 2
+        # What the countdown leaves behind once it clears is
+        # test_countdown_that_clears_leaves_no_marker_behind's business.
+
+    def test_slot_missing_from_the_refresh_replays_the_staged_id(self) -> None:
+        """Losing the slot in the re-render is not a reason to send nothing."""
+        recorder = ChainRecorder([refreshed_sheet(), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert recorder.sources[1] == RESERVE_ID
+        # Still rebuilt against the view the refresh established.
+        assert recorder.requests[1]["javax.faces.ViewState"] == "vs-1"
+
+    def test_refreshed_sheet_is_kept_for_diagnosis(self) -> None:
+        """A blocked verdict is only readable next to the view that produced it."""
+        recorder = ChainRecorder([MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert MOVED_RESERVE_ID in result.refresh_markup
+        # And it has to survive the hand-off to the provider, which is what
+        # uploads it beside the Reserve response.
+        assert result.as_chain_result()["refreshMarkup"] == result.refresh_markup
+
+    def test_countdown_sheet_is_kept_even_though_it_was_rejected(self) -> None:
+        """The sheet that was still counting down is the whole diagnosis."""
+        recorder = ChainRecorder([countdown_sheet("00:01:05")] * 4 + [PLAYER_PAGE, ROWS_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert "Booking Starts In" in result.refresh_markup
+        assert result.timing["viewRefreshCountdownS"] == 65
+        # Every attempt was spent on the refresh, and the Reserve went out
+        # against the counting-down sheet rather than being silently skipped.
+        assert recorder.sources[:5] == [DAY_TAB_ID] * 4 + [MOVED_RESERVE_ID]
+        # Named as a failed outcome, not just annotated with a countdown.
+        assert result.timing["viewRefreshFailed"] == "still-counting-down"
+
+    def test_countdown_that_clears_leaves_no_marker_behind(self) -> None:
+        """A run that counts down once then comes back clean is a clean run.
+
+        Reporting the stale countdown here would send a post-mortem after the
+        wrong cause - the sheet reserved against was open.
+        """
+        recorder = ChainRecorder(
+            [countdown_sheet("00:00:02"), MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        )
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        assert result.success, result.error
+        assert result.timing["viewRefreshAttempts"] == 2
+        assert "viewRefreshCountdownS" not in result.timing
+        assert "viewRefreshFailed" not in result.timing
+
+    def test_no_refreshed_sheet_when_none_landed(self) -> None:
+        """Nothing to capture, and the provider says so rather than staying quiet."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(urllib.parse.parse_qsl(request.content.decode()))
+            if params.get("javax.faces.source") == DAY_TAB_ID:
+                return httpx.Response(500)
+            return httpx.Response(200, text=partial_response(PLAYER_PAGE))
+
+        result = stage_refresh(booker_over(handler)).book(1, target_timestamp_ms=just_past())
+
+        assert result.refresh_markup == ""
+
+    def test_reserve_records_how_late_it_went_out(self) -> None:
+        """Drift plus refresh cost is what actually decides the race."""
+        recorder = ChainRecorder([MOVED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_refresh(make_booker(recorder)).book(1, target_timestamp_ms=just_past())
+
+        # just_past() backdates the target by a second, so the Reserve is at
+        # least that late; the point is that the number is recorded at all.
+        assert result.timing["reserveSentAtMs"] >= 1000
+
+    def test_refresh_is_a_pre_submit_phase(self) -> None:
+        """Nothing is reserved by a re-render, so a browser retry stays safe."""
+        assert PHASE_VIEW_REFRESH in PRE_SUBMIT_PHASES
+
+
+class TestStageViewRefresh:
+    """Resolving the refresh off the real tee sheet."""
+
+    def _booker(self) -> DirectHttpBooker:
+        """A booker over the captured sheet whose requests all succeed."""
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        return DirectHttpBooker(session)
+
+    def test_stages_the_selected_day_tab_and_the_slot_time(self) -> None:
+        """Staging reads both off the captured sheet."""
+        booker = self._booker()
+        booker.prepare(RESERVE_ID, TEE_SHEET, refresh_at_window=True)
+
+        assert booker._refresh_config is not None
+        assert booker._refresh_config.source == DAY_TAB_ID
+        # Re-rendering the whole form is what makes the tab usable as a refresh.
+        assert booker._refresh_config.update == FORM_ID
+        assert booker._slot_time == RESERVE_SLOT_TIME
+
+    def test_not_staged_unless_asked_for(self) -> None:
+        """The default leaves the path exactly as it was."""
+        booker = self._booker()
+        booker.prepare(RESERVE_ID, TEE_SHEET)
+
+        assert booker._refresh_config is None
+
+    def test_sheet_without_a_day_tab_stages_no_refresh(self) -> None:
+        """A sheet that cannot be refreshed still stages a bookable Reserve."""
+        html = (
+            f'<form id="{FORM_ID}" action="/post">'
+            '<input type="hidden" name="javax.faces.ViewState" value="v">'
+            f"{slot_block(RESERVE_ID, '04:34 PM')}</form>"
+        )
+        session = make_session(FormState.from_html(html), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        booker.prepare(RESERVE_ID, html, refresh_at_window=True)
+
+        assert booker._refresh_config is None
+        assert booker._reserve_config is not None
