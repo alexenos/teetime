@@ -6,6 +6,7 @@ tests/fixtures/, so the request this builds is the request the site actually
 expects - not one derived from a hand-written mock.
 """
 
+import email.utils
 import time as time_module
 import urllib.parse
 from collections.abc import Callable
@@ -1496,3 +1497,350 @@ class TestStageViewRefresh:
 
         assert booker._refresh_config is None
         assert booker._reserve_config is not None
+
+
+# ---------------------------------------------------------------------------
+# Walking the fallback list when the club refuses a slot
+# ---------------------------------------------------------------------------
+
+# Three consecutive tee times on the same sheet. The first is the one Reserve is
+# staged against; the others are what the chain may fall back to.
+SLOT_B_ID = f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:68:slotTee:0:reserve_button"
+SLOT_C_ID = f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:69:slotTee:0:reserve_button"
+SLOT_B_TIME = time(16, 42)
+SLOT_C_TIME = time(16, 50)
+
+
+def blocked_sheet(*slots: str) -> str:
+    """A refusal, carrying the whole re-rendered sheet the way the site does.
+
+    This shape is why the fallback loop needs no extra round trip: the response
+    that says "blocked" hands back every other row's Reserve handler with it.
+    """
+    return refreshed_sheet(
+        '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
+        "This slot is blocked by another user</div>",
+        *slots,
+    )
+
+
+ALL_THREE = (
+    slot_block(RESERVE_ID, "04:34 PM"),
+    slot_block(SLOT_B_ID, "04:42 PM"),
+    slot_block(SLOT_C_ID, "04:50 PM"),
+)
+
+
+def stage_fallbacks(booker: DirectHttpBooker, *times: time) -> DirectHttpBooker:
+    """Give a booker from make_booker a slot time and a ranked fallback list."""
+    booker._slot_time = RESERVE_SLOT_TIME
+    booker._fallback_times = times
+    return booker
+
+
+class TestReserveFallbacks:
+    """A refused Reserve moves to the next tee time instead of ending the run.
+
+    The club renders a slot another member is holding as Available, so the
+    refusal is the only evidence the slot is gone. One Reserve is therefore one
+    guess, and on 2026-08-07 the guess lost while 86 other rows stayed open.
+    """
+
+    def test_a_clean_reserve_spends_no_fallback(self) -> None:
+        """Winning the slot asked for must not cost an extra request."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME).book(1)
+
+        assert result.success, result.error
+        assert recorder.sources == [RESERVE_ID, "playerGroup", "bookTeeTimeAction"]
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        assert result.attempted_times == [RESERVE_SLOT_TIME]
+
+    def test_a_blocked_slot_falls_back_to_the_next_tee_time(self) -> None:
+        """The refusal's own markup is what the next Reserve is built from."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
+
+        assert result.success, result.error
+        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, "playerGroup", "bookTeeTimeAction"]
+        assert result.timing["reserveAttempts"] == 2
+
+    def test_the_booked_time_is_the_one_actually_held(self) -> None:
+        """The caller books by row index and would otherwise report the wrong slot."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
+
+        assert result.booked_slot_time == SLOT_B_TIME
+        assert result.attempted_times == [RESERVE_SLOT_TIME, SLOT_B_TIME]
+
+    def test_a_fallback_the_sheet_no_longer_offers_is_skipped(self) -> None:
+        """No Reserve button means the slot is gone, not that it is worth a request."""
+        recorder = ChainRecorder(
+            [
+                blocked_sheet(
+                    slot_block(RESERVE_ID, "04:34 PM"),
+                    slot_block(SLOT_C_ID, "04:50 PM"),
+                ),
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                BOOKED_PAGE,
+            ]
+        )
+        # SLOT_B ranks higher but is absent from the sheet that came back.
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
+
+        assert result.success, result.error
+        assert recorder.sources[1] == SLOT_C_ID
+        assert result.booked_slot_time == SLOT_C_TIME
+
+    def test_every_candidate_blocked_is_reported_as_blocked(self) -> None:
+        """Running out of tee times is still a lost race, not a crash."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE)])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
+
+        assert not result.success
+        assert result.blocked
+        assert result.phase == PHASE_RESERVE_SENT
+        assert result.attempted_times == [RESERVE_SLOT_TIME, SLOT_B_TIME, SLOT_C_TIME]
+        assert "blocked" in (result.error or "").lower()
+
+    def test_attempts_are_capped(self) -> None:
+        """A sheet being taken apart around us is not worth unbounded requests."""
+        from app.providers.walden_http_booker import _RESERVE_MAX_ATTEMPTS
+
+        spare = [
+            slot_block(
+                f"{FORM_ID}:teeTimeCourses:0:teeTimeSlots:{70 + i}:slotTee:0:reserve_button",
+                f"05:{i:02d} PM",
+            )
+            for i in range(_RESERVE_MAX_ATTEMPTS + 4)
+        ]
+        recorder = ChainRecorder([blocked_sheet(slot_block(RESERVE_ID, "04:34 PM"), *spare)])
+        result = stage_fallbacks(
+            make_booker(recorder), *[time(17, i) for i in range(_RESERVE_MAX_ATTEMPTS + 4)]
+        ).book(1)
+
+        assert result.blocked
+        assert result.timing["reserveAttempts"] == _RESERVE_MAX_ATTEMPTS
+        assert len(recorder.sources) == _RESERVE_MAX_ATTEMPTS
+
+    def test_no_fallbacks_behaves_as_a_single_shot(self) -> None:
+        """The old behaviour, for a booking with nothing ranked behind it."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE)])
+        result = stage_fallbacks(make_booker(recorder)).book(1)
+
+        assert result.blocked
+        assert recorder.sources == [RESERVE_ID]
+
+
+class TestPrematureVersusBlocked:
+    """The two refusals look alike and call for opposite responses.
+
+    A countdown still in the sheet is the club saying nothing is holdable yet.
+    Reading that as "someone holds this slot" walks the whole fallback list into
+    a window that has not opened and arrives at the end of it with nothing -
+    which is exactly what a measured lead makes possible when it overshoots.
+    """
+
+    def test_a_countdown_retries_the_same_slot(self) -> None:
+        """Arriving early costs one re-ask, not the fallback list."""
+        recorder = ChainRecorder([countdown_sheet("00:00:02"), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME).book(1)
+
+        assert result.success, result.error
+        # The same tee time, re-resolved against the sheet that came back.
+        assert recorder.sources == [
+            RESERVE_ID,
+            MOVED_RESERVE_ID,
+            "playerGroup",
+            "bookTeeTimeAction",
+        ]
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        assert result.timing["prematureRetries"] == 1
+
+    def test_a_countdown_beside_a_block_is_still_a_countdown(self) -> None:
+        """The response the club actually sent on 2026-08-06: both at once.
+
+        The countdown wins. A sheet the club has not opened cannot be evidence
+        about who is holding what inside it.
+        """
+        from app.providers.walden_http_booker import (
+            _VERDICT_BLOCKED,
+            _VERDICT_PREMATURE,
+            _classify_reserve_response,
+        )
+
+        both = refreshed_sheet(
+            '<div class="booking-starts-in">Booking Starts In : 00:01:05</div>',
+            '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
+            "This slot is blocked by another user</div>",
+        )
+        verdict, reason = _classify_reserve_response(parse_html(both))
+        assert verdict == _VERDICT_PREMATURE
+        assert "counting down" in (reason or "")
+
+        # The same markup without the countdown is a genuine refusal.
+        verdict, _ = _classify_reserve_response(parse_html(blocked_sheet(*ALL_THREE)))
+        assert verdict == _VERDICT_BLOCKED
+
+    def test_an_endless_countdown_gives_up_without_burning_the_list(self) -> None:
+        """If the window never opens, the fallbacks were never the problem."""
+        from app.providers.walden_http_booker import _PREMATURE_MAX_RETRIES
+
+        recorder = ChainRecorder([countdown_sheet("00:01:05")])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
+
+        assert result.blocked
+        assert result.timing["prematureRetries"] == _PREMATURE_MAX_RETRIES
+        # Every request went to the requested tee time; no fallback was spent.
+        assert SLOT_B_ID not in recorder.sources
+        assert result.attempted_times == [RESERVE_SLOT_TIME] * (_PREMATURE_MAX_RETRIES + 1)
+
+
+# ---------------------------------------------------------------------------
+# Timing the Reserve to arrive rather than to leave
+# ---------------------------------------------------------------------------
+
+
+def clock_handler(offset_s: float) -> Callable[[httpx.Request], httpx.Response]:
+    """A site whose clock runs ``offset_s`` ahead of ours.
+
+    The Date header is whole seconds, as a real one is - which is the point.
+    The offset is not readable from any single response; it is readable from
+    where the header ticks over relative to our clock.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Mock transport handler stamping the site's own clock."""
+        server_now = time_module.time() + offset_s
+        return httpx.Response(
+            200, headers={"Date": email.utils.formatdate(server_now, usegmt=True)}
+        )
+
+    return handler
+
+
+class TestClockSkew:
+    """Measuring how far ahead the club's clock is, and how far away it is."""
+
+    def test_offset_is_read_from_where_the_date_header_ticks(self) -> None:
+        """A one-second header still locates a boundary to within a probe gap."""
+        session = make_session(FormState.from_html(TEE_SHEET), clock_handler(0.4))
+
+        skew = session.measure_clock_skew()
+
+        assert skew is not None
+        # Loose enough for probe spacing and sleep jitter, tight enough that a
+        # sign error or a whole-second misread would fail it.
+        assert 250 < skew.offset_ms < 550
+        assert skew.transitions >= 1
+        assert session.clock_skew is skew
+
+    def test_a_clock_behind_ours_reads_negative(self) -> None:
+        """The lead must be able to come out smaller, not only larger."""
+        session = make_session(FormState.from_html(TEE_SHEET), clock_handler(-0.4))
+
+        skew = session.measure_clock_skew()
+
+        assert skew is not None
+        assert -550 < skew.offset_ms < -250
+
+    def test_a_frozen_date_header_is_not_a_measurement(self) -> None:
+        """A cache serving one Date says nothing about the origin's clock."""
+        frozen = email.utils.formatdate(time_module.time(), usegmt=True)
+        session = make_session(
+            FormState.from_html(TEE_SHEET),
+            lambda request: httpx.Response(200, headers={"Date": frozen}),
+        )
+
+        assert session.measure_clock_skew() is None
+
+    def test_a_missing_date_header_is_not_a_measurement(self) -> None:
+        """Nothing to read is reported as nothing, not as zero skew."""
+        session = make_session(
+            FormState.from_html(TEE_SHEET),
+            lambda request: httpx.Response(200, headers={}),
+        )
+
+        assert session.measure_clock_skew() is None
+
+    def test_the_lead_is_the_offset_plus_the_flight_out(self) -> None:
+        """Both halves run against us, so both are in the lead."""
+        from app.providers.walden_http import ClockSkew
+
+        assert ClockSkew(offset_ms=250, one_way_ms=200, probes=9, transitions=2).lead_ms == 450
+
+
+class TestArrivalLead:
+    """What the booker does with the measurement."""
+
+    def _booker(self, handler: Callable[[httpx.Request], httpx.Response]) -> DirectHttpBooker:
+        """A booker over a handler, with nothing staged - only the lead matters."""
+        return DirectHttpBooker(make_session(FormState.from_html(TEE_SHEET), handler))
+
+    def test_a_measured_skew_becomes_the_lead(self) -> None:
+        """The whole point: send early by what the measurement says."""
+        booker = self._booker(clock_handler(0.4))
+
+        booker._stage_arrival_lead()
+
+        assert 250 < booker._lead_ms < 560
+
+    def test_an_unmeasurable_clock_sends_unled(self) -> None:
+        """Being late is recoverable; guessing early is what is not."""
+        booker = self._booker(lambda request: httpx.Response(200, headers={}))
+
+        booker._stage_arrival_lead()
+
+        assert booker._lead_ms == 0.0
+
+    def test_a_probe_failure_does_not_break_staging(self) -> None:
+        """Staging must never be what loses a booking."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Mock transport handler that refuses every probe."""
+            raise httpx.ConnectError("no route")
+
+        booker = self._booker(handler)
+
+        booker._stage_arrival_lead()
+
+        assert booker._lead_ms == 0.0
+
+    def test_an_implausible_measurement_is_clamped(self) -> None:
+        """A bad measurement is unbounded in the direction that hurts."""
+        from app.providers.walden_http_booker import _MAX_ARRIVAL_LEAD_MS
+
+        booker = self._booker(clock_handler(5.0))
+
+        booker._stage_arrival_lead()
+
+        assert booker._lead_ms == _MAX_ARRIVAL_LEAD_MS
+
+    def test_the_reserve_goes_out_before_our_own_target(self) -> None:
+        """The behaviour all of the above exists to produce."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        booker = stage_fallbacks(make_booker(recorder))
+        booker._lead_ms = 400.0
+        # Far enough out that the lead lands the send before it, close enough
+        # that the test does not sit waiting.
+        target = int(time_module.time() * 1000) + 250
+
+        result = booker.book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        assert result.timing["arrivalLeadMs"] == 400
+        # Negative: the request left before our clock reached the window.
+        assert result.timing["reserveSentAtMs"] < 0
+
+    def test_no_lead_still_fires_at_the_target(self) -> None:
+        """An unmeasured clock leaves the old timing exactly as it was."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        booker = stage_fallbacks(make_booker(recorder))
+        target = int(time_module.time() * 1000) + 60
+
+        result = booker.book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        assert result.timing["arrivalLeadMs"] == 0
+        assert result.timing["reserveSentAtMs"] >= 0

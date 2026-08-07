@@ -1721,15 +1721,17 @@ class TestFindTargetSlotJS:
     def test_find_exact_match(self, provider: WaldenGolfProvider) -> None:
         """Test that JS finder returns exact match info."""
         mock_driver = MagicMock()
-        mock_driver.execute_script.return_value = {
-            "timeStr": "8:42",
-            "hours": 8,
-            "minutes": 42,
-            "index": 5,
-            "diff": 0,
-            "available": 4,
-            "isExact": True,
-        }
+        mock_driver.execute_script.return_value = [
+            {
+                "timeStr": "8:42",
+                "hours": 8,
+                "minutes": 42,
+                "index": 5,
+                "diff": 0,
+                "available": 4,
+                "isExact": True,
+            }
+        ]
 
         result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
@@ -1742,15 +1744,17 @@ class TestFindTargetSlotJS:
     def test_find_fallback_when_exact_unavailable(self, provider: WaldenGolfProvider) -> None:
         """Test that JS finder returns fallback slot."""
         mock_driver = MagicMock()
-        mock_driver.execute_script.return_value = {
-            "timeStr": "8:50",
-            "hours": 8,
-            "minutes": 50,
-            "index": 7,
-            "diff": 8,
-            "available": 4,
-            "isExact": False,
-        }
+        mock_driver.execute_script.return_value = [
+            {
+                "timeStr": "8:50",
+                "hours": 8,
+                "minutes": 50,
+                "index": 7,
+                "diff": 8,
+                "available": 4,
+                "isExact": False,
+            }
+        ]
 
         result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
@@ -1766,6 +1770,39 @@ class TestFindTargetSlotJS:
         result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
 
         assert result is None
+
+    def test_takes_the_head_of_the_ranking(self, provider: WaldenGolfProvider) -> None:
+        """The single-slot finder returns the best of a ranked list, not any of it."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = [
+            {"hours": 8, "minutes": 42, "index": 5, "diff": 0, "available": 4, "isExact": True},
+            {"hours": 8, "minutes": 50, "index": 6, "diff": 8, "available": 4, "isExact": False},
+            {"hours": 8, "minutes": 34, "index": 4, "diff": 8, "available": 4, "isExact": False},
+        ]
+
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        assert result is not None
+        assert (result["hours"], result["minutes"]) == (8, 42)
+
+    def test_ranking_exposes_every_candidate(self, provider: WaldenGolfProvider) -> None:
+        """The fallback list the direct chain walks is the whole ranking."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = [
+            {"hours": 8, "minutes": 42, "index": 5, "diff": 0, "available": 4, "isExact": True},
+            {"hours": 8, "minutes": 50, "index": 6, "diff": 8, "available": 4, "isExact": False},
+        ]
+
+        ranked = provider._rank_candidate_slots_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        assert [(c["hours"], c["minutes"]) for c in ranked] == [(8, 42), (8, 50)]
+
+    def test_ranking_is_empty_when_no_slots(self, provider: WaldenGolfProvider) -> None:
+        """A driver that returns nothing yields no candidates, not a None to unpack."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = None
+
+        assert provider._rank_candidate_slots_js(mock_driver, time(8, 42), 4, 32, 8) == []
 
     def test_passes_exclude_times_correctly(self, provider: WaldenGolfProvider) -> None:
         """Test that exclude times are passed as the correct argument."""
@@ -2794,6 +2831,9 @@ class TestDirectHttpBookingWiring:
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
         )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
         timed_chain = MagicMock(
             return_value={
                 "success": True,
@@ -2843,6 +2883,9 @@ class TestDirectHttpBookingWiring:
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
         )
         monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
+        monkeypatch.setattr(
             provider,
             "_try_direct_http_booking",
             MagicMock(
@@ -2885,6 +2928,9 @@ class TestDirectHttpBookingWiring:
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
         )
         monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
+        monkeypatch.setattr(
             provider,
             "_try_direct_http_booking",
             MagicMock(
@@ -2921,6 +2967,9 @@ class TestDirectHttpBookingWiring:
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
         )
         monkeypatch.setattr(
             provider,
@@ -2990,6 +3039,9 @@ class TestUnconfirmedBookingResolution:
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
         )
         monkeypatch.setattr(
             provider, "_try_direct_http_booking", MagicMock(return_value=chain_result)
@@ -3227,6 +3279,9 @@ class TestBlockedSlotResolution:
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
         )
         monkeypatch.setattr(
             provider, "_try_direct_http_booking", MagicMock(return_value=chain_result)
@@ -3649,6 +3704,9 @@ class TestImmediateBookingFastPath:
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
         )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
         session = MagicMock()
         monkeypatch.setattr(
             "app.providers.walden_provider.PrimeFacesSession.from_selenium",
@@ -3690,6 +3748,9 @@ class TestImmediateBookingFastPath:
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
         )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
         fast_chain = MagicMock(
             return_value={
                 "success": True,
@@ -3726,6 +3787,9 @@ class TestImmediateBookingFastPath:
 
         monkeypatch.setattr(
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
         )
         monkeypatch.setattr(
             "app.providers.walden_provider.PrimeFacesSession.from_selenium",
@@ -3770,6 +3834,9 @@ class TestImmediateBookingFastPath:
             provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
         )
         monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
+        monkeypatch.setattr(
             "app.providers.walden_provider.PrimeFacesSession.from_selenium",
             MagicMock(return_value=MagicMock()),
         )
@@ -3792,3 +3859,129 @@ class TestImmediateBookingFastPath:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestFallbackTeeTimeReporting:
+    """What the member is told, when the club gave us a different tee time.
+
+    The slot is chosen by row index before the window opens; the chain may end
+    up holding a different one, because a refused Reserve walks down the ranked
+    list. Everything after that has to name the slot actually held - the
+    reservations check that decides whether the booking is real, and the time
+    in the member's confirmation.
+    """
+
+    SLOT = {
+        "timeStr": "8:42",
+        "hours": 8,
+        "minutes": 42,
+        "index": 5,
+        "diff": 0,
+        "available": 4,
+        "isExact": True,
+        "reserveId": "form:teeTimeCourses:0:teeTimeSlots:5:slotTee:0:reserve_button",
+    }
+
+    def _run(
+        self,
+        provider: WaldenGolfProvider,
+        monkeypatch: pytest.MonkeyPatch,
+        chain_result: dict,
+    ):
+        """Drive the timed booking with a canned direct-HTTP chain result."""
+        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
+        driver = MagicMock()
+        driver.current_url = "https://www.waldengolf.com/group/pages/book-a-tee-time"
+        driver.page_source = "<html><body>Tee sheet</body></html>"
+        driver.find_element.side_effect = Exception("no body text")
+
+        monkeypatch.setattr(
+            provider, "_find_target_slot_js", MagicMock(return_value=dict(self.SLOT))
+        )
+        monkeypatch.setattr(
+            provider, "_rank_candidate_slots_js", MagicMock(return_value=[dict(self.SLOT)])
+        )
+        monkeypatch.setattr(
+            provider, "_try_direct_http_booking", MagicMock(return_value=chain_result)
+        )
+        monkeypatch.setattr(provider, "_stage_timed_booking_chain_js", MagicMock())
+
+        return provider._find_and_book_time_slot_sync(
+            driver,
+            target_time=time(8, 42),
+            num_players=4,
+            fallback_window_minutes=32,
+            skip_scroll=True,
+            use_fast_js=True,
+            execute_at_timestamp_ms=1770000000000,
+        )
+
+    def _booked(self, **extra: object) -> dict:
+        """A completed direct-HTTP chain result."""
+        return {
+            "success": True,
+            "blocked": False,
+            "phase": "complete",
+            "error": None,
+            "timing": {"totalMs": 250},
+            "finalMarkup": (
+                "<div><h2>Booking confirmed</h2>"
+                "<p>Confirmation #12345 - your tee time is booked.</p></div>"
+            ),
+            **extra,
+        }
+
+    def test_a_fallback_slot_is_reported_as_the_time_booked(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """08:42 was taken and 08:50 was held; the member has 08:50."""
+        result = self._run(
+            provider,
+            monkeypatch,
+            self._booked(
+                bookedSlotTime=time(8, 50),
+                attemptedTimes=[time(8, 42), time(8, 50)],
+            ),
+        )
+
+        assert result.success is True
+        assert result.booked_time == time(8, 50)
+
+    def test_a_fallback_slot_explains_itself(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Getting a different time than asked for is not silent."""
+        result = self._run(
+            provider,
+            monkeypatch,
+            self._booked(
+                bookedSlotTime=time(8, 50),
+                attemptedTimes=[time(8, 42), time(8, 50)],
+            ),
+        )
+
+        assert result.fallback_reason is not None
+        assert "08:50" in result.fallback_reason
+
+    def test_winning_the_requested_time_carries_no_fallback_reason(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The ordinary case must not grow an apology."""
+        result = self._run(
+            provider,
+            monkeypatch,
+            self._booked(bookedSlotTime=time(8, 42), attemptedTimes=[time(8, 42)]),
+        )
+
+        assert result.success is True
+        assert result.booked_time == time(8, 42)
+        assert result.fallback_reason is None
+
+    def test_a_chain_that_reports_no_slot_time_leaves_the_pick_alone(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The JS chain says nothing about tee times; its result must still work."""
+        result = self._run(provider, monkeypatch, self._booked())
+
+        assert result.success is True
+        assert result.booked_time == time(8, 42)

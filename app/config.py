@@ -57,17 +57,27 @@ class Settings(BaseSettings):
     # Re-render the tee sheet at 6:30:00 and fire Reserve against that render,
     # instead of against the one the request was staged from ~60s earlier.
     #
-    # The staged view is a sheet on which nothing is reservable yet, and the
-    # club refuses a Reserve against it with "This slot is blocked by another
-    # user" - the same message it uses when a human genuinely beat us. Two
-    # mornings were read as lost races before the captured response showed the
-    # slot still free and the club's own countdown still running in it.
+    # Off, having been tried and found to buy nothing. It was built on the
+    # reading that the club refuses a Reserve staged before the window for being
+    # stale. On 2026-08-07 it worked perfectly - fresh sheet, countdown gone, 86
+    # of 87 rows offering a Reserve - and the club refused anyway, returning the
+    # same ViewState and component id the staged request already held. It cost
+    # 730ms of a race decided in the first second and changed no byte of the
+    # request. Kept behind the flag rather than deleted, because it is the only
+    # way back if a future morning does show a stale-view refusal.
+    walden_refresh_view_at_window: bool = False
+
+    # Probe the club's clock during staging, and send the Reserve early enough
+    # to *arrive* as the booking window opens rather than to leave then.
     #
-    # Costs ~200ms off the front of the race: ~115ms round trip measured
-    # against the site, plus ~85ms to parse the re-rendered sheet and find the
-    # slot in it. On, because losing 200ms to a sheet the club will act on
-    # beats winning the race to one it will not. Timed bookings only.
-    walden_refresh_view_at_window: bool = True
+    # Two things sit between us and the window and both run against us: the
+    # club's clock reaches 06:30:00 before ours does, and the request still has
+    # to fly there. Firing at our own 06:30:00.000 has been putting the Reserve
+    # on the club's desk something like half a second into a window members have
+    # been clicking into since it opened. The lead is measured, never assumed,
+    # and is clamped in the booker; a failed measurement sends unled. Timed
+    # bookings only - an immediate one has no instant to hit.
+    walden_measure_clock_skew: bool = True
 
     # Whether a booking uses the fast chain (JS, or direct HTTP when the flag
     # above is on) instead of the original Selenium flow. This is deliberately
