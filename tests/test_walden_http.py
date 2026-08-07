@@ -1690,7 +1690,12 @@ class TestPrematureVersusBlocked:
         recorder = ChainRecorder([countdown_sheet("00:01:05")])
         result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
 
-        assert result.blocked
+        assert not result.success
+        # Not "blocked": the caller hard-codes that branch's message to "another
+        # member took the slot", which is the opposite of what happened. The
+        # countdown reason has to reach the member, not just the log.
+        assert not result.blocked
+        assert "counting down" in (result.error or "")
         assert result.timing["prematureRetries"] == _PREMATURE_MAX_RETRIES
         # Every request went to the requested tee time; no fallback was spent.
         assert SLOT_B_ID not in recorder.sources
@@ -1811,7 +1816,7 @@ class TestArrivalLead:
         """A bad measurement is unbounded in the direction that hurts."""
         from app.providers.walden_http_booker import _MAX_ARRIVAL_LEAD_MS
 
-        booker = self._booker(clock_handler(5.0))
+        booker = self._booker(clock_handler(2.0))
 
         booker._stage_arrival_lead()
 
@@ -1844,3 +1849,94 @@ class TestArrivalLead:
         assert result.success, result.error
         assert result.timing["arrivalLeadMs"] == 0
         assert result.timing["reserveSentAtMs"] >= 0
+
+
+class TestReviewFindings:
+    """Cases raised in review of #140, each one a way to lose a morning quietly."""
+
+    def test_a_naive_date_header_is_read_as_utc(self) -> None:
+        """A ``-0000`` offset parses naive, and local time would put it hours out.
+
+        The damage is not the wrong number; it is that a several-hour skew still
+        produces an ordinary-looking clamped lead, so the run fires into a shut
+        window every morning without anything in the log looking wrong.
+        """
+        from app.providers.walden_http import _parse_http_date
+
+        # Same instant, three spellings the header is allowed to use.
+        assert _parse_http_date("Mon, 01 Jan 2026 12:34:56 -0000") == _parse_http_date(
+            "Mon, 01 Jan 2026 12:34:56 +0000"
+        )
+        assert _parse_http_date("Mon, 01 Jan 2026 12:34:56 GMT") == _parse_http_date(
+            "Mon, 01 Jan 2026 12:34:56 -0000"
+        )
+
+    def test_an_unbelievable_offset_is_discarded_not_clamped(self) -> None:
+        """Clamping a nonsense reading turns it into a confident wrong answer.
+
+        Two internet-facing servers do not sit half a minute apart. Clamping
+        that to 900ms would send every Reserve of the morning early and look
+        entirely normal doing it; refusing to lead at all is recoverable.
+        """
+        booker = DirectHttpBooker(make_session(FormState.from_html(TEE_SHEET), clock_handler(30.0)))
+
+        booker._stage_arrival_lead()
+
+        assert booker._lead_ms == 0.0
+
+    def test_a_stalled_reserve_does_not_spend_the_whole_race(self) -> None:
+        """The attempt deadline cannot cancel a request already on the socket.
+
+        Without a per-attempt budget one hung POST holds the session open past
+        the window and the fallback list - which exists to survive exactly this
+        - is never walked.
+        """
+        from app.providers.walden_http import DEFAULT_TIMEOUT_S
+        from app.providers.walden_http_booker import _RESERVE_TIMEOUT_S
+
+        assert _RESERVE_TIMEOUT_S < DEFAULT_TIMEOUT_S
+
+        seen: list[float | None] = []
+        session = make_session(
+            FormState.from_html(TEE_SHEET),
+            lambda request: httpx.Response(200, text=partial_response(PLAYER_PAGE)),
+        )
+        original = session.post
+
+        def recording_post(config, *, body=None, timeout_s=None):
+            """Record the budget each request was given."""
+            seen.append(timeout_s)
+            return original(config, body=body, timeout_s=timeout_s)
+
+        booker = DirectHttpBooker(session)
+        config = AbConfig(source=RESERVE_ID, form=FORM_ID, update=FORM_ID)
+        booker._reserve_config = config
+        booker._reserve_body = session.build_body(config)
+        booker.session.post = recording_post  # type: ignore[method-assign]
+
+        booker.book(1)
+
+        assert seen[0] == _RESERVE_TIMEOUT_S
+
+    def test_a_timed_out_reserve_is_terminal_not_a_fallback(self) -> None:
+        """The request may have reached the club, and a second hold is worse.
+
+        Walking to the next tee time here could leave the member holding two
+        slots on a course that allows one round a day - trading a lost morning
+        for a booking to unpick.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Mock transport handler standing in for a request that never answers."""
+            raise httpx.ReadTimeout("timed out")
+
+        booker = stage_fallbacks(booker_over(handler), SLOT_B_TIME, SLOT_C_TIME)
+
+        result = booker.book(1)
+
+        assert not result.success
+        assert not result.blocked
+        # Past the Reserve POST, so the caller must not retry it in the browser.
+        assert result.phase == PHASE_RESERVE_SENT
+        assert result.phase not in PRE_SUBMIT_PHASES
+        assert result.attempted_times == [RESERVE_SLOT_TIME]

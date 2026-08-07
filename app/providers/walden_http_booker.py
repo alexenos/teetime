@@ -151,6 +151,14 @@ _REFRESH_RETRY_PAUSE_S = 0.2
 # an over-lead is still recoverable by asking again.
 _MAX_ARRIVAL_LEAD_MS = 900.0
 
+# Past this, the measurement is not believable and is discarded rather than
+# clamped. Two internet-facing servers do not sit seconds apart; a reading that
+# says they do is far likelier to be a parse fault than a real clock, and
+# clamping one silently converts it into a plausible-looking 900ms lead that
+# fires into a shut window every morning without ever looking wrong. Bounded
+# ignorance beats a confident guess, so this sends unled and says why.
+_MAX_PLAUSIBLE_OFFSET_MS = 5000.0
+
 # Reserve attempts allowed across all candidate tee times. Each costs one round
 # trip plus the parse of the sheet that comes back with it - call it 450ms - so
 # this is about as far down the fallback list as the first two seconds of the
@@ -167,6 +175,18 @@ _PREMATURE_PAUSE_S = 0.05
 # Stop *starting* attempts once the race is this far gone. An attempt already in
 # flight is allowed to finish - abandoning it would not un-send it.
 _RESERVE_DEADLINE_MS = 6000
+
+# Budget for a single Reserve POST, well under the session default. The deadline
+# above cannot cancel a request already handed to the socket, so without this a
+# single stalled Reserve spends the entire race and the fallback list - the
+# thing that exists to survive exactly this - is never walked. Round trips have
+# run 230-535ms; one that has not answered in this long has lost anyway.
+#
+# A timeout is deliberately left terminal rather than advancing to the next tee
+# time. The request may well have reached the club, and reserving a second slot
+# on top of a hold we cannot see would collide with the one-round-per-day rule -
+# trading a lost morning for a booking mess.
+_RESERVE_TIMEOUT_S = 2.0
 
 # What the club's answer to a Reserve amounts to. The distinction that matters
 # is between the two refusals: "blocked" is another member holding the slot, and
@@ -377,6 +397,15 @@ class DirectHttpBooker:
             logger.warning("DIRECT_HTTP: Clock skew probing failed (%s); sending unled", exc)
             return
         if skew is None:
+            return
+
+        if abs(skew.offset_ms) > _MAX_PLAUSIBLE_OFFSET_MS:
+            logger.error(
+                "DIRECT_HTTP: Measured clock offset of %+.0fms is not believable "
+                "(over %.0fms); discarding it and sending unled",
+                skew.offset_ms,
+                _MAX_PLAUSIBLE_OFFSET_MS,
+            )
             return
 
         # Clamped because the lead is derived from a measurement, and a wrong
@@ -624,6 +653,7 @@ class DirectHttpBooker:
         slot_time = self._slot_time
         remaining = list(self._fallback_times)
         premature_retries = 0
+        premature_exhausted = False
         last_reason: str | None = None
 
         for attempt in range(1, _RESERVE_MAX_ATTEMPTS + 1):
@@ -655,7 +685,7 @@ class DirectHttpBooker:
             # the socket we cannot tell "never sent" from "sent, response lost",
             # and a browser retry in the second case races our own reservation.
             result.phase = PHASE_RESERVE_SENT
-            response = self.session.post(config, body=body)
+            response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
             result.final_markup = response.markup
 
             # One parse, two questions. At ~190ms for a 500KB sheet this is the
@@ -690,6 +720,7 @@ class DirectHttpBooker:
                         "the window is not opening when we think it is",
                         premature_retries,
                     )
+                    premature_exhausted = True
                     break
                 premature_retries += 1
                 result.timing["prematureRetries"] = premature_retries
@@ -723,7 +754,13 @@ class DirectHttpBooker:
                 slot_time.strftime("%I:%M %p"),
             )
 
-        result.blocked = True
+        # A window that never opened is not a slot someone else is holding, and
+        # only the blocked branch of the caller hard-codes the member's message
+        # to say it is. Reported as an ordinary post-submit failure instead: it
+        # captures the same artifacts and checks the same reservations page, but
+        # carries `error` through to the member, so the one distinction this
+        # whole classification exists to draw survives past the log.
+        result.blocked = not premature_exhausted
         result.error = last_reason or "Slot blocked by another user"
         logger.warning(
             "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s",

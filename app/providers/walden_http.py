@@ -47,8 +47,12 @@ session is adopted *from* a live, already-navigated WebDriver
 (:meth:`PrimeFacesSession.from_selenium`), inheriting its cookies and the exact
 form state the browser had built up.
 
-The booking window itself is unchanged: the reserve POST is fired at the same
-target timestamp the JS chain would have clicked at, never earlier.
+The booking window itself is timed by *arrival*, not by departure. The reserve
+POST leaves early by the club's measured clock offset plus the outbound flight
+time, so that it lands as the window opens rather than however long after it
+those two happen to add up to. See :meth:`PrimeFacesSession.measure_clock_skew`.
+(This is a change: it used to fire at our own target and never earlier, which
+put it on the club's desk around half a second late.)
 
 Every step after Reserve is derived from the markup the server just returned, by
 parsing the same ``PrimeFaces.ab({...})`` handler the browser would have
@@ -56,6 +60,7 @@ executed. Nothing about the request sequence is hardcoded, so a component id
 churning from ``j_idt1076`` to ``j_idt1082`` does not break the chain.
 """
 
+import datetime
 import email.utils
 import logging
 import re
@@ -144,7 +149,14 @@ def _median(values: list[float]) -> float:
 
 
 def _parse_http_date(header: str | None) -> int | None:
-    """Read an HTTP ``Date`` header as whole epoch seconds, or None."""
+    """Read an HTTP ``Date`` header as whole epoch seconds, or None.
+
+    A ``-0000`` offset comes back from :mod:`email.utils` as a *naive* datetime,
+    and ``timestamp()`` would then read it in whatever timezone the process
+    happens to run in. The header is UTC either way, so say so: read in local
+    time it would put the club's clock hours out, and the skew that produced
+    would still look like an ordinary number in the log.
+    """
     if not header:
         return None
     try:
@@ -153,6 +165,8 @@ def _parse_http_date(header: str | None) -> int | None:
         return None
     if parsed is None:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
     return int(parsed.timestamp())
 
 
