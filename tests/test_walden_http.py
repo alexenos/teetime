@@ -1677,15 +1677,40 @@ class TestCountdownIsNotAVerdict:
         """No response makes the chain ask twice for one tee time.
 
         A countdown with no blocked popup is not a refusal at all, so the chain
-        carries on into the rest of the booking. Whatever it finds there, the
-        Reserve for this tee time was asked once.
+        carries on into the rest of the booking and completes it. The accepted
+        Reserve here answers with the player dialog *and* a stale counter beside
+        it - 2026-08-08's shape, where the re-rendered fragment still carried the
+        06:28:57 view's countdown. Asserting the booking completed is what keeps
+        the count below meaningful: a chain that died at the Reserve would
+        satisfy the count while proving nothing.
         """
-        recorder = ChainRecorder([countdown_sheet("00:00:02"), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        accepted_with_stale_countdown = PLAYER_PAGE.replace(
+            '<div class="ui-selectonebutton" id="timeFilter">',
+            '<div class="booking-starts-in">Booking Starts In : 00:00:02</div>\n'
+            '  <div class="ui-selectonebutton" id="timeFilter">',
+        )
+        recorder = ChainRecorder([accepted_with_stale_countdown, ROWS_PAGE, BOOKED_PAGE])
         result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME).book(1)
 
+        assert result.success, result.error
         assert recorder.sources.count(RESERVE_ID) == 1
         assert result.attempted_times == [RESERVE_SLOT_TIME]
         assert "prematureRetries" not in result.timing
+
+    def test_a_countdown_only_response_is_not_a_booking(self) -> None:
+        """Not classifying a countdown as a refusal is not calling it a booking.
+
+        Dropping the countdown branch means a countdown-only sheet is no longer
+        refused at the Reserve step - so the step after it has to be what stops
+        it. It is: the chain needs the player selector to go on, and a tee sheet
+        does not carry one, so the run fails in `player_count` and reports it.
+        """
+        recorder = ChainRecorder([countdown_sheet("00:01:05")])
+        result = make_booker(recorder).book(4)
+
+        assert not result.success
+        assert result.phase == "player_count"
+        assert result.error is not None and "Player count selector" in result.error
 
     def test_an_endless_countdown_still_walks_the_fallback_list(self) -> None:
         """A sheet that always counts down must not pin us to one slot.
@@ -1766,6 +1791,9 @@ class TestClockProbeTarget:
         session = make_session(FormState.from_html(TEE_SHEET), handler)
         session.measure_clock_skew()
 
+        # seen[0] pins the order: without it this passes even if resolution
+        # skipped the first candidate and started at the theme asset.
+        assert seen[0] == "/o/frontend-css-web/main.css"
         assert seen[1] == "/o/frontend-theme-font-awesome-web/css/main.css"
         assert set(seen[1:]) == {"/o/frontend-theme-font-awesome-web/css/main.css"}
 

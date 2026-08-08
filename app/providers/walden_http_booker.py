@@ -122,9 +122,14 @@ _SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*([AP])\.?M\.?", re.IGNORECASE
 
 # The club's own "Booking Starts In : 00:01:05" counter. A sheet carries it
 # while the window is shut and drops it once the window opens - but only as of
-# the moment that sheet was rendered, which is why it is read for the log and
-# never branched on. See :func:`_log_countdown_observation` for what it does and
-# does not say about a Reserve.
+# the moment that sheet was rendered, which is the whole distinction:
+#
+# * Against a *fresh* render it is authoritative, so :meth:`_refresh_view` does
+#   gate on it - a refreshed sheet still counting down means the club has not
+#   opened booking, and 2026-08-07's refreshed sheet confirmed the converse.
+# * Against a *Reserve response* it is not, because that is a re-render of an
+#   older view. There it is read for the log and never branched on. See
+#   :func:`_log_countdown_observation`.
 _COUNTDOWN_CLASS = "booking-starts-in"
 _COUNTDOWN_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})")
 

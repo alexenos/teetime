@@ -4111,8 +4111,10 @@ class TestChainSummaryLogging:
             DirectBookingResult(
                 success=True,
                 phase="complete",
-                booked_slot_time=time(8, 42),
-                attempted_times=[time(8, 42), time(8, 42)],
+                # Two attempts means a block and a fallback, never the same tee
+                # time twice: the chain no longer re-fires one slot.
+                booked_slot_time=time(8, 50),
+                attempted_times=[time(8, 42), time(8, 50)],
                 timing={"reserveAttempts": 2, "arrivalLeadMs": 880},
             ),
         )
