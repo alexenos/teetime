@@ -602,6 +602,12 @@ class WaldenGolfProvider(ReservationProvider):
         credentials are missing - operations will fail at login time.
         """
         self.wait_strategy = WaitStrategy()
+        # The tee sheet the slot finder judged from, kept from staging so a
+        # morning that ends with no fallbacks can be read against the sheet that
+        # produced them. Only the post-failure DOM was ever captured, and by then
+        # the window has opened and other members have taken slots - which is
+        # exactly the difference in question. Uploaded only if the booking fails.
+        self._pre_window_sheet: str | None = None
         if not settings.walden_member_number or not settings.walden_password:
             logger.warning(
                 "Walden Golf credentials not configured. "
@@ -1094,6 +1100,7 @@ class WaldenGolfProvider(ReservationProvider):
                     "BATCH_BOOKING: Step 6 - Pre-locating target slots via JavaScript "
                     f"for {len(sorted_requests)} request(s)"
                 )
+                self._capture_pre_window_sheet(driver)
                 for req in sorted_requests:
                     # Build a preliminary times_to_exclude using only the known
                     # target times of other requests (booked_times is empty here).
@@ -3016,6 +3023,10 @@ class WaldenGolfProvider(ReservationProvider):
                     # beat us" from "we reserved against a view the club had
                     # not opened yet" - the two this path exists to tell apart.
                     self._capture_refresh_artifact(chain_result, blocked_phase)
+                # The sheet the fallback list was built from. A blocked morning
+                # that walked no fallbacks is the case this exists for: it says
+                # whether the finder had anything to walk.
+                self._flush_pre_window_sheet(f"blocked_{blocked_phase}")
                 # Before the reservations check, not after: that check navigates
                 # to the dashboard, and a screenshot taken on the way out would
                 # show that page instead of the state that failed.
@@ -3064,6 +3075,7 @@ class WaldenGolfProvider(ReservationProvider):
                             f"direct_http_failed_{phase}", partial_markup
                         )
                     self._capture_refresh_artifact(chain_result, phase)
+                    self._flush_pre_window_sheet(f"failed_{phase}")
                     # Before the reservations check, not after: that check
                     # navigates to the dashboard, and a screenshot taken on the
                     # way out would show that page instead of the state that
@@ -3632,6 +3644,13 @@ class WaldenGolfProvider(ReservationProvider):
         var items = document.querySelectorAll('li.ui-datascroller-item');
         var candidates = [];
 
+        // Why slots were dropped, not just how many survived. "0 fallback(s)"
+        // on 2026-08-08 could not be read as "the sheet was full" or "we
+        // rejected bookable slots", and those call for opposite fixes.
+        var rejected = {
+            course: 0, unparsed: 0, window: 0, offGrid: 0, capacity: 0, excluded: 0
+        };
+
         // Build exclude set for O(1) lookup
         var excludeSet = {};
         for (var e = 0; e < excludeTimes.length; e++) {
@@ -3646,6 +3665,7 @@ class WaldenGolfProvider(ReservationProvider):
             // Northgate uses index "0", Walden uses index "1"
             var courseMatch = itemHtml.match(/teeTimeCourses:(\\d+)/);
             if (!courseMatch || courseMatch[1] !== northgateIndex) {
+                rejected.course++;
                 continue; // Skip slots without a course index or non-Northgate slots
             }
 
@@ -3659,11 +3679,11 @@ class WaldenGolfProvider(ReservationProvider):
                     timeText = timeMatch[0];
                 }
             }
-            if (!timeText) continue;
+            if (!timeText) { rejected.unparsed++; continue; }
 
             // Parse time
             var tmatch = timeText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/i);
-            if (!tmatch) continue;
+            if (!tmatch) { rejected.unparsed++; continue; }
             var h = parseInt(tmatch[1]);
             var m = parseInt(tmatch[2]);
             var ampm = tmatch[3].toUpperCase();
@@ -3674,10 +3694,17 @@ class WaldenGolfProvider(ReservationProvider):
             var diff = Math.abs(slotMinutes - targetMinutes);
 
             // Check fallback window
-            if (diff > fallbackMinutes) continue;
+            if (diff > fallbackMinutes) { rejected.window++; continue; }
 
-            // Check interval alignment
-            if (diff % intervalMinutes !== 0) continue;
+            // Grid alignment. This used to drop the slot, which assumes the
+            // requested time sits on the sheet's own grid - ask for 8:00 when
+            // the day runs 7:56/8:04 and every slot is a non-multiple of 8 away,
+            // so the whole list empties and the morning has no fallback at all.
+            // Kept as a ranking key instead: aligned slots sort first, so the
+            // slot actually reserved is the same one as before, and misaligned
+            // ones line up behind it rather than vanishing.
+            var aligned = (diff % intervalMinutes === 0);
+            if (!aligned) rejected.offGrid++;
 
             // Check availability
             var emptyDivs = item.querySelectorAll('div.Empty');
@@ -3693,7 +3720,7 @@ class WaldenGolfProvider(ReservationProvider):
                 isAvailable = true;
             }
 
-            if (!isAvailable) continue;
+            if (!isAvailable) { rejected.capacity++; continue; }
 
             // Component id of the slot's Reserve link. The direct-HTTP path
             // replays that component's PrimeFaces request, so it needs the id
@@ -3709,50 +3736,77 @@ class WaldenGolfProvider(ReservationProvider):
                 diff: diff,
                 available: availableCount,
                 isExact: (diff === 0),
+                aligned: aligned,
                 reserveId: reserveEl ? reserveEl.id : null
             };
 
             // For fallback slots, skip excluded times. Never for the exact time
             // asked for: that one is the booking, not a stand-in chosen for it.
-            if (diff !== 0 && excludeSet[slotMinutes]) continue;
+            if (diff !== 0 && excludeSet[slotMinutes]) { rejected.excluded++; continue; }
 
             candidates.push(slotInfo);
         }
 
-        // Nearest to the requested time first, and on a tie the earlier tee
-        // time - the same order the single-slot search reached by scanning rows
-        // in time order and keeping the first strictly-closer one.
+        // Grid-aligned first, so the slot reserved is the one this finder would
+        // have picked when alignment was a hard filter. Then nearest to the
+        // requested time, and on a tie the earlier tee time - the order the
+        // single-slot search reached by scanning rows in time order and keeping
+        // the first strictly-closer one.
         candidates.sort(function (a, b) {
+            if (a.aligned !== b.aligned) return a.aligned ? -1 : 1;
             if (a.diff !== b.diff) return a.diff - b.diff;
             return (a.hours * 60 + a.minutes) - (b.hours * 60 + b.minutes);
         });
 
-        return candidates;
+        return {candidates: candidates, rejected: rejected, scanned: items.length};
         """
 
-        candidates: list[dict[str, Any]] = (
-            driver.execute_script(
-                js_code,
-                target_time.hour,
-                target_time.minute,
-                num_players,
-                fallback_window_minutes,
-                tee_time_interval_minutes,
-                exclude_list,
-                self.NORTHGATE_COURSE_INDEX,
-                self.MAX_PLAYERS,
-            )
-            or []
+        found = driver.execute_script(
+            js_code,
+            target_time.hour,
+            target_time.minute,
+            num_players,
+            fallback_window_minutes,
+            tee_time_interval_minutes,
+            exclude_list,
+            self.NORTHGATE_COURSE_INDEX,
+            self.MAX_PLAYERS,
+        )
+        # A dict since the tally was added. Tolerating the old bare list keeps a
+        # stubbed driver in a test - or a browser that somehow ran an older
+        # script - from failing here instead of where it would say why.
+        if isinstance(found, dict):
+            candidates: list[dict[str, Any]] = found.get("candidates") or []
+            rejected: dict[str, Any] = found.get("rejected") or {}
+            scanned: Any = found.get("scanned", "?")
+        else:
+            candidates = found or []
+            rejected, scanned = {}, "?"
+
+        # Logged whether or not anything was found, and before the verdict: when
+        # a morning comes back with no fallbacks, this line is what separates a
+        # full sheet from a finder that threw bookable slots away.
+        logger.info(
+            "BOOKING_DEBUG: Slot scan of %s row(s) for %s, %d player(s), +/-%d min - "
+            "%d candidate(s); dropped %s",
+            scanned,
+            target_time.strftime("%I:%M %p"),
+            num_players,
+            fallback_window_minutes,
+            len(candidates),
+            ", ".join(f"{name}={count}" for name, count in rejected.items() if count) or "nothing",
         )
 
         if candidates:
             best = candidates[0]
+            off_grid = sum(1 for c in candidates if not c.get("aligned", True))
             logger.info(
                 f"BOOKING_DEBUG: JS slot finder found slot at "
                 f"{best['hours']:02d}:{best['minutes']:02d} "
                 f"(index={best['index']}, exact={best['isExact']}, "
                 f"available={best['available']}), "
                 f"{len(candidates) - 1} fallback(s) behind it"
+                f"{f' ({off_grid} off-grid)' if off_grid else ''}"
             )
         else:
             logger.warning(
@@ -5261,6 +5315,41 @@ class WaldenGolfProvider(ReservationProvider):
             )
             return
         self._capture_response_artifact(f"direct_http_refreshed_sheet_{phase}", refresh_markup)
+
+    def _capture_pre_window_sheet(self, driver: webdriver.Chrome) -> None:
+        """Keep the tee sheet the slot finder is about to judge.
+
+        Read once per staging run, minutes before the window, so the cost sits
+        nowhere near the race - and deliberately not on the 06:30 re-scan path,
+        where reading a ~600KB DOM would be spent against the clock.
+
+        Held rather than uploaded: most mornings end in a booking and the sheet
+        is worth nothing. :meth:`_flush_pre_window_sheet` sends it if one does
+        not.
+        """
+        try:
+            self._pre_window_sheet = driver.page_source
+            logger.info(
+                "BOOKING_DEBUG: Held the pre-window tee sheet (%d bytes) in case "
+                "this morning needs explaining",
+                len(self._pre_window_sheet or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not lose a booking
+            self._pre_window_sheet = None
+            logger.warning("BOOKING_DEBUG: Could not read the pre-window tee sheet (%s)", exc)
+
+    def _flush_pre_window_sheet(self, context: str) -> None:
+        """Upload the held sheet, if a failed morning made it worth having."""
+        sheet = self._pre_window_sheet
+        if not sheet:
+            logger.info(
+                "BOOKING_DEBUG: No pre-window tee sheet held for %s - staging never "
+                "reached slot pre-location",
+                context,
+            )
+            return
+        self._pre_window_sheet = None
+        self._capture_response_artifact(f"pre_window_sheet_{context}", sheet)
 
     def _capture_response_artifact(self, context: str, markup: str) -> None:
         """Record a direct-HTTP response body for diagnosis.

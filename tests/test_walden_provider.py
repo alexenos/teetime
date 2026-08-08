@@ -10,7 +10,7 @@ import os
 from datetime import date, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import pytest
 from selenium.common.exceptions import WebDriverException
@@ -1772,6 +1772,83 @@ class TestFindTargetSlotJS:
 
         assert result is None
 
+    def test_the_rejection_tally_is_logged(
+        self, provider: WaldenGolfProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A morning with no fallbacks has to say whether the sheet was full.
+
+        2026-08-08 logged "0 fallback(s) behind it" and nothing else, which is
+        the same line whether every slot was taken or the finder threw bookable
+        ones away. The tally is what tells those apart without the sheet.
+        """
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = {
+            "candidates": [],
+            "rejected": {"course": 40, "window": 12, "capacity": 9, "offGrid": 0, "excluded": 0},
+            "scanned": 61,
+        }
+
+        with caplog.at_level(logging.INFO):
+            provider._find_target_slot_js(mock_driver, time(8, 0), 4, 32, 8)
+
+        line = next(m for m in caplog.messages if "Slot scan of" in m)
+        assert "61 row(s)" in line
+        assert "0 candidate(s)" in line
+        # The counts that separate "full sheet" from "finder dropped them".
+        assert "capacity=9" in line
+        assert "course=40" in line
+        # Zeroed reasons stay out of the line rather than padding it.
+        assert "offGrid" not in line
+
+    def test_off_grid_fallbacks_are_flagged(
+        self, provider: WaldenGolfProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Slots the old interval filter would have dropped are called out."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = {
+            "candidates": [
+                {
+                    "hours": 8,
+                    "minutes": 8,
+                    "index": 2,
+                    "diff": 8,
+                    "available": 4,
+                    "isExact": False,
+                    "aligned": True,
+                },
+                {
+                    "hours": 8,
+                    "minutes": 2,
+                    "index": 1,
+                    "diff": 2,
+                    "available": 4,
+                    "isExact": False,
+                    "aligned": False,
+                },
+            ],
+            "rejected": {"offGrid": 1},
+            "scanned": 12,
+        }
+
+        with caplog.at_level(logging.INFO):
+            result = provider._find_target_slot_js(mock_driver, time(8, 0), 4, 32, 8)
+
+        # The aligned slot still wins, so the slot reserved is unchanged.
+        assert result is not None and (result["hours"], result["minutes"]) == (8, 8)
+        assert any("1 fallback(s) behind it (1 off-grid)" in m for m in caplog.messages)
+
+    def test_a_bare_list_is_still_understood(self, provider: WaldenGolfProvider) -> None:
+        """The finder predates the tally, and a plain list must still work."""
+        mock_driver = MagicMock()
+        mock_driver.execute_script.return_value = [
+            {"hours": 8, "minutes": 42, "index": 5, "diff": 0, "available": 4, "isExact": True}
+        ]
+
+        result = provider._find_target_slot_js(mock_driver, time(8, 42), 4, 32, 8)
+
+        assert result is not None
+        assert (result["hours"], result["minutes"]) == (8, 42)
+
     def test_takes_the_head_of_the_ranking(self, provider: WaldenGolfProvider) -> None:
         """The single-slot finder returns the best of a ranked list, not any of it."""
         mock_driver = MagicMock()
@@ -1838,6 +1915,68 @@ class TestFindTargetSlotJS:
         # The northgate index is the 7th positional argument (index 6 after js_code)
         northgate_index = call_args[0][7]
         assert northgate_index == "0"
+
+
+class TestPreWindowSheetCapture:
+    """The sheet the fallback list was built from, kept until it is needed.
+
+    Only the post-failure DOM was ever captured, and by then the window has
+    opened and other members have taken slots - so it cannot answer whether the
+    finder had fallbacks to walk when it made the list.
+    """
+
+    def test_the_sheet_is_held_not_uploaded(self, provider: WaldenGolfProvider) -> None:
+        """Staging keeps it; a booked morning never pays to store it."""
+        mock_driver = MagicMock()
+        mock_driver.page_source = "<html>tee sheet</html>"
+
+        with patch.object(provider, "_capture_response_artifact") as upload:
+            provider._capture_pre_window_sheet(mock_driver)
+
+        assert provider._pre_window_sheet == "<html>tee sheet</html>"
+        upload.assert_not_called()
+
+    def test_a_failed_morning_flushes_it(self, provider: WaldenGolfProvider) -> None:
+        """The upload happens once the morning turns out to need explaining."""
+        provider._pre_window_sheet = "<html>tee sheet</html>"
+
+        with patch.object(provider, "_capture_response_artifact") as upload:
+            provider._flush_pre_window_sheet("blocked_reserve_sent")
+
+        upload.assert_called_once_with(
+            "pre_window_sheet_blocked_reserve_sent", "<html>tee sheet</html>"
+        )
+        # Cleared, so a second failure in the same run cannot re-upload a sheet
+        # that no longer describes it.
+        assert provider._pre_window_sheet is None
+
+    def test_no_sheet_says_so_rather_than_going_quiet(
+        self, provider: WaldenGolfProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """ "Never staged" and "staged and lost" call for different fixes."""
+        provider._pre_window_sheet = None
+
+        with (
+            caplog.at_level(logging.INFO),
+            patch.object(provider, "_capture_response_artifact") as upload,
+        ):
+            provider._flush_pre_window_sheet("failed_player_count")
+
+        upload.assert_not_called()
+        assert any("No pre-window tee sheet held" in m for m in caplog.messages)
+
+    def test_an_unreadable_dom_does_not_break_staging(
+        self, provider: WaldenGolfProvider, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Diagnostics must never be what loses a booking."""
+        mock_driver = MagicMock()
+        type(mock_driver).page_source = PropertyMock(side_effect=WebDriverException("gone"))
+
+        with caplog.at_level(logging.WARNING):
+            provider._capture_pre_window_sheet(mock_driver)
+
+        assert provider._pre_window_sheet is None
+        assert any("Could not read the pre-window tee sheet" in m for m in caplog.messages)
 
 
 class TestClickSlotByIndexJS:
