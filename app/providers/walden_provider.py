@@ -559,6 +559,144 @@ _SLOT_RESCAN_FINAL_INTERVAL_S = 0.1
 _SLOT_RESCAN_GRACE_MS = _CHAIN_ENABLED_MAX_WAIT_MS
 
 
+# The slot scan, as a module constant so a test can run the exact string the
+# browser is handed. Its ranking is load-bearing - grid-aligned first, then
+# nearest the requested time - and a test that re-sorts its own fixture proves
+# nothing about the comparator below.
+_SLOT_FINDER_JS = """
+var targetHour = arguments[0];
+var targetMinute = arguments[1];
+var minPlayers = arguments[2];
+var fallbackMinutes = arguments[3];
+var intervalMinutes = arguments[4];
+var excludeTimes = arguments[5];
+var northgateIndex = arguments[6];
+var maxPlayers = arguments[7];
+
+var targetMinutes = targetHour * 60 + targetMinute;
+var items = document.querySelectorAll('li.ui-datascroller-item');
+var candidates = [];
+
+// Why slots were dropped, not just how many survived. "0 fallback(s)"
+// on 2026-08-08 could not be read as "the sheet was full" or "we
+// rejected bookable slots", and those call for opposite fixes.
+var rejected = {course: 0, unparsed: 0, window: 0, capacity: 0, excluded: 0};
+
+// Build exclude set for O(1) lookup
+var excludeSet = {};
+for (var e = 0; e < excludeTimes.length; e++) {
+    excludeSet[excludeTimes[e].h * 60 + excludeTimes[e].m] = true;
+}
+
+for (var i = 0; i < items.length; i++) {
+    var item = items[i];
+    var itemHtml = item.innerHTML;
+
+    // Check course via element ID pattern: teeTimeCourses:X
+    // Northgate uses index "0", Walden uses index "1"
+    var courseMatch = itemHtml.match(/teeTimeCourses:(\\d+)/);
+    if (!courseMatch || courseMatch[1] !== northgateIndex) {
+        rejected.course++;
+        continue; // Skip slots without a course index or non-Northgate slots
+    }
+
+    // Extract time from label or text content
+    var label = item.querySelector('label');
+    var timeText = label ? label.textContent.trim() : '';
+    if (!timeText) {
+        var allText = item.textContent;
+        var timeMatch = allText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/);
+        if (timeMatch) {
+            timeText = timeMatch[0];
+        }
+    }
+    if (!timeText) { rejected.unparsed++; continue; }
+
+    // Parse time
+    var tmatch = timeText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/i);
+    if (!tmatch) { rejected.unparsed++; continue; }
+    var h = parseInt(tmatch[1]);
+    var m = parseInt(tmatch[2]);
+    var ampm = tmatch[3].toUpperCase();
+    if (ampm === 'PM' && h !== 12) h += 12;
+    if (ampm === 'AM' && h === 12) h = 0;
+
+    var slotMinutes = h * 60 + m;
+    var diff = Math.abs(slotMinutes - targetMinutes);
+
+    // Check fallback window
+    if (diff > fallbackMinutes) { rejected.window++; continue; }
+
+    // Grid alignment. This used to drop the slot, which assumes the
+    // requested time sits on the sheet's own grid - ask for 8:00 when
+    // the day runs 7:56/8:04 and every slot is a non-multiple of 8 away,
+    // so the whole list empties and the morning has no fallback at all.
+    // Kept as a ranking key instead: aligned slots sort first, so the
+    // slot actually reserved is the same one as before, and misaligned
+    // ones line up behind it rather than vanishing.
+    // Not counted as a rejection: the slot is still a candidate, and a
+    // tally that called a fallback we went on to reserve "dropped" would
+    // be the same kind of misleading line this whole scan exists to fix.
+    // Retained off-grid slots are counted off the candidate list; ones
+    // that do get dropped are counted by whichever check drops them.
+    var aligned = (diff % intervalMinutes === 0);
+
+    // Check availability
+    var emptyDivs = item.querySelectorAll('div.Empty');
+    var availableSpans = item.querySelectorAll('span.custom-free-slot-span');
+    var isAvailable = false;
+    var availableCount = 0;
+
+    if (emptyDivs.length > 0) {
+        availableCount = maxPlayers;
+        isAvailable = (minPlayers <= maxPlayers);
+    } else if (availableSpans.length >= minPlayers) {
+        availableCount = availableSpans.length;
+        isAvailable = true;
+    }
+
+    if (!isAvailable) { rejected.capacity++; continue; }
+
+    // Component id of the slot's Reserve link. The direct-HTTP path
+    // replays that component's PrimeFaces request, so it needs the id
+    // rather than the NodeList index the JS chain clicks by.
+    var reserveEl = item.querySelector("a[id*='reserve_button']") ||
+        item.querySelector('a.slot-link');
+
+    var slotInfo = {
+        timeStr: h + ':' + (m < 10 ? '0' : '') + m,
+        hours: h,
+        minutes: m,
+        index: i,
+        diff: diff,
+        available: availableCount,
+        isExact: (diff === 0),
+        aligned: aligned,
+        reserveId: reserveEl ? reserveEl.id : null
+    };
+
+    // For fallback slots, skip excluded times. Never for the exact time
+    // asked for: that one is the booking, not a stand-in chosen for it.
+    if (diff !== 0 && excludeSet[slotMinutes]) { rejected.excluded++; continue; }
+
+    candidates.push(slotInfo);
+}
+
+// Grid-aligned first, so the slot reserved is the one this finder would
+// have picked when alignment was a hard filter. Then nearest to the
+// requested time, and on a tie the earlier tee time - the order the
+// single-slot search reached by scanning rows in time order and keeping
+// the first strictly-closer one.
+candidates.sort(function (a, b) {
+    if (a.aligned !== b.aligned) return a.aligned ? -1 : 1;
+    if (a.diff !== b.diff) return a.diff - b.diff;
+    return (a.hours * 60 + a.minutes) - (b.hours * 60 + b.minutes);
+});
+
+return {candidates: candidates, rejected: rejected, scanned: items.length};
+"""
+
+
 class WaldenGolfProvider(ReservationProvider):
     """
     Selenium-based provider for booking tee times at Walden Golf / Northgate Country Club.
@@ -945,6 +1083,14 @@ class WaldenGolfProvider(ReservationProvider):
         avoid conflicts where a fallback slot for an earlier booking takes a slot needed
         by a later booking.
         """
+        # Dropped at the door, before the early return below, so a run can never
+        # flush the *previous* run's sheet. A batch that fails before it reaches
+        # slot pre-location would otherwise upload whatever the last one staged
+        # and label it with this morning's failure - a diagnostic describing the
+        # wrong day is worse than none. Also releases the last run's member data
+        # when the provider is reused.
+        self._pre_window_sheet = None
+
         if not requests:
             return BatchBookingResult()
 
@@ -2891,6 +3037,10 @@ class WaldenGolfProvider(ReservationProvider):
                 )
                 if detail:
                     error_message += f". {detail}"
+                # The case the sheet was staged for. "Nothing was bookable" is
+                # the finder's account of a sheet nobody else can see, and this
+                # is the one path where the sheet is the whole answer.
+                self._flush_pre_window_sheet("no_candidate")
                 return BookingResult(
                     success=False,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -3068,6 +3218,11 @@ class WaldenGolfProvider(ReservationProvider):
                 phase = chain_result.get("phase", "unknown")
                 error = chain_result.get("error", "Unknown error in fast booking chain")
                 held: bool | None = None
+                # Outside the path check below on purpose. A chain that raised
+                # builds its result by hand and carries no `path`, so anything
+                # gated on the direct-HTTP branch would skip the very failure
+                # nobody has an account of.
+                self._flush_pre_window_sheet(f"failed_{phase}")
                 if chain_result.get("path") == DIRECT_HTTP_PATH:
                     partial_markup = chain_result.get("finalMarkup")
                     if partial_markup:
@@ -3075,7 +3230,6 @@ class WaldenGolfProvider(ReservationProvider):
                             f"direct_http_failed_{phase}", partial_markup
                         )
                     self._capture_refresh_artifact(chain_result, phase)
-                    self._flush_pre_window_sheet(f"failed_{phase}")
                     # Before the reservations check, not after: that check
                     # navigates to the dashboard, and a screenshot taken on the
                     # way out would show that page instead of the state that
@@ -3177,6 +3331,7 @@ class WaldenGolfProvider(ReservationProvider):
                 # The response's own message containers are the only place a
                 # refusal we have no phrase for can still be read from.
                 site_message = chain_result.get("responseMessage")
+                self._flush_pre_window_sheet("unverified")
                 return BookingResult(
                     success=False,
                     error_message=self._member_facing_failure(
@@ -3630,136 +3785,7 @@ class WaldenGolfProvider(ReservationProvider):
 
         exclude_list = [{"h": t.hour, "m": t.minute} for t in times_to_exclude]
 
-        js_code = """
-        var targetHour = arguments[0];
-        var targetMinute = arguments[1];
-        var minPlayers = arguments[2];
-        var fallbackMinutes = arguments[3];
-        var intervalMinutes = arguments[4];
-        var excludeTimes = arguments[5];
-        var northgateIndex = arguments[6];
-        var maxPlayers = arguments[7];
-
-        var targetMinutes = targetHour * 60 + targetMinute;
-        var items = document.querySelectorAll('li.ui-datascroller-item');
-        var candidates = [];
-
-        // Why slots were dropped, not just how many survived. "0 fallback(s)"
-        // on 2026-08-08 could not be read as "the sheet was full" or "we
-        // rejected bookable slots", and those call for opposite fixes.
-        var rejected = {
-            course: 0, unparsed: 0, window: 0, offGrid: 0, capacity: 0, excluded: 0
-        };
-
-        // Build exclude set for O(1) lookup
-        var excludeSet = {};
-        for (var e = 0; e < excludeTimes.length; e++) {
-            excludeSet[excludeTimes[e].h * 60 + excludeTimes[e].m] = true;
-        }
-
-        for (var i = 0; i < items.length; i++) {
-            var item = items[i];
-            var itemHtml = item.innerHTML;
-
-            // Check course via element ID pattern: teeTimeCourses:X
-            // Northgate uses index "0", Walden uses index "1"
-            var courseMatch = itemHtml.match(/teeTimeCourses:(\\d+)/);
-            if (!courseMatch || courseMatch[1] !== northgateIndex) {
-                rejected.course++;
-                continue; // Skip slots without a course index or non-Northgate slots
-            }
-
-            // Extract time from label or text content
-            var label = item.querySelector('label');
-            var timeText = label ? label.textContent.trim() : '';
-            if (!timeText) {
-                var allText = item.textContent;
-                var timeMatch = allText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/);
-                if (timeMatch) {
-                    timeText = timeMatch[0];
-                }
-            }
-            if (!timeText) { rejected.unparsed++; continue; }
-
-            // Parse time
-            var tmatch = timeText.match(/(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])/i);
-            if (!tmatch) { rejected.unparsed++; continue; }
-            var h = parseInt(tmatch[1]);
-            var m = parseInt(tmatch[2]);
-            var ampm = tmatch[3].toUpperCase();
-            if (ampm === 'PM' && h !== 12) h += 12;
-            if (ampm === 'AM' && h === 12) h = 0;
-
-            var slotMinutes = h * 60 + m;
-            var diff = Math.abs(slotMinutes - targetMinutes);
-
-            // Check fallback window
-            if (diff > fallbackMinutes) { rejected.window++; continue; }
-
-            // Grid alignment. This used to drop the slot, which assumes the
-            // requested time sits on the sheet's own grid - ask for 8:00 when
-            // the day runs 7:56/8:04 and every slot is a non-multiple of 8 away,
-            // so the whole list empties and the morning has no fallback at all.
-            // Kept as a ranking key instead: aligned slots sort first, so the
-            // slot actually reserved is the same one as before, and misaligned
-            // ones line up behind it rather than vanishing.
-            var aligned = (diff % intervalMinutes === 0);
-            if (!aligned) rejected.offGrid++;
-
-            // Check availability
-            var emptyDivs = item.querySelectorAll('div.Empty');
-            var availableSpans = item.querySelectorAll('span.custom-free-slot-span');
-            var isAvailable = false;
-            var availableCount = 0;
-
-            if (emptyDivs.length > 0) {
-                availableCount = maxPlayers;
-                isAvailable = (minPlayers <= maxPlayers);
-            } else if (availableSpans.length >= minPlayers) {
-                availableCount = availableSpans.length;
-                isAvailable = true;
-            }
-
-            if (!isAvailable) { rejected.capacity++; continue; }
-
-            // Component id of the slot's Reserve link. The direct-HTTP path
-            // replays that component's PrimeFaces request, so it needs the id
-            // rather than the NodeList index the JS chain clicks by.
-            var reserveEl = item.querySelector("a[id*='reserve_button']") ||
-                item.querySelector('a.slot-link');
-
-            var slotInfo = {
-                timeStr: h + ':' + (m < 10 ? '0' : '') + m,
-                hours: h,
-                minutes: m,
-                index: i,
-                diff: diff,
-                available: availableCount,
-                isExact: (diff === 0),
-                aligned: aligned,
-                reserveId: reserveEl ? reserveEl.id : null
-            };
-
-            // For fallback slots, skip excluded times. Never for the exact time
-            // asked for: that one is the booking, not a stand-in chosen for it.
-            if (diff !== 0 && excludeSet[slotMinutes]) { rejected.excluded++; continue; }
-
-            candidates.push(slotInfo);
-        }
-
-        // Grid-aligned first, so the slot reserved is the one this finder would
-        // have picked when alignment was a hard filter. Then nearest to the
-        // requested time, and on a tie the earlier tee time - the order the
-        // single-slot search reached by scanning rows in time order and keeping
-        // the first strictly-closer one.
-        candidates.sort(function (a, b) {
-            if (a.aligned !== b.aligned) return a.aligned ? -1 : 1;
-            if (a.diff !== b.diff) return a.diff - b.diff;
-            return (a.hours * 60 + a.minutes) - (b.hours * 60 + b.minutes);
-        });
-
-        return {candidates: candidates, rejected: rejected, scanned: items.length};
-        """
+        js_code = _SLOT_FINDER_JS
 
         found = driver.execute_script(
             js_code,
@@ -5339,7 +5365,15 @@ class WaldenGolfProvider(ReservationProvider):
             logger.warning("BOOKING_DEBUG: Could not read the pre-window tee sheet (%s)", exc)
 
     def _flush_pre_window_sheet(self, context: str) -> None:
-        """Upload the held sheet, if a failed morning made it worth having."""
+        """Upload the held sheet, if a failed morning made it worth having.
+
+        Stored but never echoed. :meth:`_capture_response_artifact` logs the
+        first 1000 characters of its markup's visible text, which on a tee sheet
+        is other members' names - the same ones
+        :meth:`_extract_bookers_from_slot` reads deliberately. Application logs
+        are a far wider audience than the artifact bucket, so this path logs the
+        size and the URI and puts the sheet itself only in storage.
+        """
         sheet = self._pre_window_sheet
         if not sheet:
             logger.info(
@@ -5349,7 +5383,33 @@ class WaldenGolfProvider(ReservationProvider):
             )
             return
         self._pre_window_sheet = None
-        self._capture_response_artifact(f"pre_window_sheet_{context}", sheet)
+
+        bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
+        if not bucket_name:
+            logger.info(
+                "BOOKING_DEBUG: Pre-window tee sheet for %s is %d bytes, but "
+                "DEBUG_ARTIFACTS_BUCKET is unset so there is nowhere to put it",
+                context,
+                len(sheet),
+            )
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            uri = self._upload_bytes_to_gcs(
+                bucket_name=bucket_name,
+                object_name=f"walden/pre_window_sheet_{context}/{timestamp}/tee_sheet.html",
+                content_type="text/html; charset=utf-8",
+                data=sheet.encode("utf-8", errors="replace"),
+            )
+            logger.info(
+                "BOOKING_DEBUG: Saved the pre-window tee sheet for %s (%d bytes) to %s",
+                context,
+                len(sheet),
+                uri,
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not fail a booking
+            logger.warning("BOOKING_DEBUG: Failed to upload the pre-window tee sheet: %s", exc)
 
     def _capture_response_artifact(self, context: str, markup: str) -> None:
         """Record a direct-HTTP response body for diagnosis.
