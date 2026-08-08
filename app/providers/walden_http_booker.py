@@ -120,10 +120,11 @@ _SLOT_LABEL_MAX_DEPTH = 6
 # "08:00 AM", tolerating the spacing and punctuation variants the site has used.
 _SLOT_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*([AP])\.?M\.?", re.IGNORECASE)
 
-# The club's own "Booking Starts In : 00:01:05" counter. The sheet carries it
-# while the window is shut and drops the element once it opens, which makes its
-# presence the club stating that a Reserve right now would be premature - the
-# one authority on that question that is not our clock.
+# The club's own "Booking Starts In : 00:01:05" counter. A sheet carries it
+# while the window is shut and drops it once the window opens - but only as of
+# the moment that sheet was rendered, which is why it is read for the log and
+# never branched on. See :func:`_log_countdown_observation` for what it does and
+# does not say about a Reserve.
 _COUNTDOWN_CLASS = "booking-starts-in"
 _COUNTDOWN_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})")
 
@@ -370,9 +371,10 @@ class DirectHttpBooker:
         already been clicking into.
 
         A measurement that fails leaves the lead at zero - the behaviour before
-        this existed. Guessing would be worse than being late: too much lead
-        fires into a window the club has not opened, and while
-        :data:`_VERDICT_PREMATURE` recovers from that, it spends attempts on it.
+        this existed. Guessing would be worse than being late: nothing in the
+        response distinguishes a Reserve that arrived early from one that lost
+        the slot, so an over-led request spends an attempt and reports the loss
+        as a block. Being a little late is at least legible.
         """
         try:
             skew = self.session.measure_clock_skew()
