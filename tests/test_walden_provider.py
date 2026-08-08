@@ -4095,13 +4095,13 @@ class TestChainSummaryLogging:
         assert "tried=[08:42 AM, 08:50 AM, 08:58 AM]" in line
         assert "booked=08:58 AM" in line
 
-    def test_an_early_send_is_visible_as_re_fires(
+    def test_the_measured_lead_is_visible(
         self,
         provider: WaldenGolfProvider,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Overshooting the lead has to be readable, or it gets tuned blind."""
+        """The lead has to be readable, or it gets tuned blind."""
         from app.providers.walden_http_booker import DirectBookingResult
 
         line = self._summary(
@@ -4113,12 +4113,12 @@ class TestChainSummaryLogging:
                 phase="complete",
                 booked_slot_time=time(8, 42),
                 attempted_times=[time(8, 42), time(8, 42)],
-                timing={"reserveAttempts": 2, "prematureRetries": 1, "arrivalLeadMs": 880},
+                timing={"reserveAttempts": 2, "arrivalLeadMs": 880},
             ),
         )
 
-        assert "(+1 early re-fires)" in line
         assert "lead=880ms" in line
+        assert "attempts=2" in line
 
     def test_a_lost_race_reports_nothing_booked(
         self,

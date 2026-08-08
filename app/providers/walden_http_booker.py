@@ -165,13 +165,6 @@ _MAX_PLAUSIBLE_OFFSET_MS = 5000.0
 # race reach. Past that the morning is decided and more requests are noise.
 _RESERVE_MAX_ATTEMPTS = 6
 
-# Re-fires of the *same* tee time after the club said the window is still shut.
-# Distinct from the blocked count on purpose: arriving early is our own timing
-# error and the slot is presumably still there, so the right answer is to ask
-# again rather than to give the slot up and walk down the fallback list.
-_PREMATURE_MAX_RETRIES = 4
-_PREMATURE_PAUSE_S = 0.05
-
 # Stop *starting* attempts once the race is this far gone. An attempt already in
 # flight is allowed to finish - abandoning it would not un-send it.
 _RESERVE_DEADLINE_MS = 6000
@@ -187,16 +180,6 @@ _RESERVE_DEADLINE_MS = 6000
 # on top of a hold we cannot see would collide with the one-round-per-day rule -
 # trading a lost morning for a booking mess.
 _RESERVE_TIMEOUT_S = 2.0
-
-# What the club's answer to a Reserve amounts to. The distinction that matters
-# is between the two refusals: "blocked" is another member holding the slot, and
-# the only useful response is a different tee time; a countdown still in the
-# sheet is the club saying nobody can hold anything yet, and the only useful
-# response is to ask again for the same one. Reading the second as the first
-# walks the whole fallback list into a window that has not opened.
-_VERDICT_ACCEPTED = "accepted"
-_VERDICT_PREMATURE = "premature"
-_VERDICT_BLOCKED = "blocked"
 
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
@@ -652,8 +635,6 @@ class DirectHttpBooker:
         started = time_module.perf_counter()
         slot_time = self._slot_time
         remaining = list(self._fallback_times)
-        premature_retries = 0
-        premature_exhausted = False
         last_reason: str | None = None
 
         for attempt in range(1, _RESERVE_MAX_ATTEMPTS + 1):
@@ -692,8 +673,9 @@ class DirectHttpBooker:
             # largest single cost in the retry loop, and both the verdict and
             # the next candidate's handler come out of the same tree.
             document = parse_html(response.markup)
-            verdict, reason = _classify_reserve_response(document)
-            if verdict == _VERDICT_ACCEPTED:
+            _log_countdown_observation(document, attempt)
+            reason = _find_blocked_message_in(document)
+            if reason is None:
                 result.booked_slot_time = slot_time
                 if attempt > 1:
                     logger.info(
@@ -713,33 +695,6 @@ class DirectHttpBooker:
                 )
                 break
 
-            if verdict == _VERDICT_PREMATURE:
-                if premature_retries >= _PREMATURE_MAX_RETRIES:
-                    logger.error(
-                        "DIRECT_HTTP: The club is still counting down after %d re-fires; "
-                        "the window is not opening when we think it is",
-                        premature_retries,
-                    )
-                    premature_exhausted = True
-                    break
-                premature_retries += 1
-                result.timing["prematureRetries"] = premature_retries
-                logger.warning(
-                    "DIRECT_HTTP: Reserve was early (%s); asking again for %s in %dms",
-                    reason,
-                    slot_time.strftime("%I:%M %p") if slot_time else "the same slot",
-                    int(_PREMATURE_PAUSE_S * 1000),
-                )
-                time_module.sleep(_PREMATURE_PAUSE_S)
-                # Rebuilt against the sheet just returned rather than re-sent:
-                # the row may have moved, and the ViewState may have advanced.
-                if slot_time is not None:
-                    relocated = _relocate_reserve_in(document, response.markup, slot_time)
-                    if relocated is not None:
-                        config = relocated
-                body = self.session.build_body(config)
-                continue
-
             # Blocked: the slot is held. Nothing about asking again for it will
             # change that, so the only move left is a different tee time.
             next_candidate = self._next_candidate(document, response.markup, remaining)
@@ -754,13 +709,7 @@ class DirectHttpBooker:
                 slot_time.strftime("%I:%M %p"),
             )
 
-        # A window that never opened is not a slot someone else is holding, and
-        # only the blocked branch of the caller hard-codes the member's message
-        # to say it is. Reported as an ordinary post-submit failure instead: it
-        # captures the same artifacts and checks the same reservations page, but
-        # carries `error` through to the member, so the one distinction this
-        # whole classification exists to draw survives past the log.
-        result.blocked = not premature_exhausted
+        result.blocked = True
         result.error = last_reason or "Slot blocked by another user"
         logger.warning(
             "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s",
@@ -1357,31 +1306,33 @@ def _find_blocked_message(response: PartialResponse) -> str | None:
     return _find_blocked_message_in(parse_html(response.markup))
 
 
-def _classify_reserve_response(document: Node) -> tuple[str, str | None]:
-    """Decide what the club's answer to a Reserve was.
+def _log_countdown_observation(document: Node, attempt: int) -> None:
+    """Note the club's countdown, if the response carried the sheet holding it.
 
-    The two refusals look alike and mean opposite things. "This slot is blocked
-    by another user" is a member holding it, and the answer is a different tee
-    time. The same message beside a live countdown is not about that slot at
-    all - the club is saying nothing is holdable yet - and the answer is to ask
-    again for the same one.
+    Recorded and never branched on. It was briefly used to decide that a Reserve
+    had been sent early, and it cannot answer that question in either direction:
 
-    The countdown is checked first for that reason. A sheet that still carries
-    it cannot be evidence about who holds what, whatever else it says.
+    * Present does not mean the window is shut. It tracks the age of the *view*
+      being re-rendered. On 2026-08-08 the Reserve re-rendered the view built at
+      06:28:57, which carried "00:01:04" while members were already booking; the
+      re-fires that reading triggered cost 1.3s of the race.
+    * Absent does not mean the window is open. The third Reserve that morning
+      answered with 81KB of booking dialog and no tee sheet at all - no slots,
+      no Reserve buttons, and so no countdown either. The verdict flipped on
+      which fragment the server re-rendered, 50ms after the previous one.
 
-    Returns:
-        One of the ``_VERDICT_*`` constants, with the club's own wording when it
-        gave any.
+    A fresh render does settle it - 2026-08-07's refreshed sheet, built at
+    06:30:00.5, had 151 slots and no countdown - but the Reserve response is not
+    a fresh render, so this stays a log line.
     """
     countdown_s = _countdown_in(document)
     if countdown_s is not None:
-        return _VERDICT_PREMATURE, f"the club is still counting down {countdown_s}s to the window"
-
-    blocked_reason = _find_blocked_message_in(document)
-    if blocked_reason is not None:
-        return _VERDICT_BLOCKED, blocked_reason
-
-    return _VERDICT_ACCEPTED, None
+        logger.info(
+            "DIRECT_HTTP: Response to Reserve attempt %d still carries a %ds countdown; "
+            "that dates the view it re-rendered, not the state of the window",
+            attempt,
+            countdown_s,
+        )
 
 
 def _find_blocked_message_in(document: Node) -> str | None:
