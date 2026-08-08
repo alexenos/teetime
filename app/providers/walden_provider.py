@@ -4073,7 +4073,7 @@ class WaldenGolfProvider(ReservationProvider):
         # morning has to be readable in it without going back through the run.
         logger.info(
             "DIRECT_HTTP: Chain finished - phase=%s, success=%s, blocked=%s, "
-            "clickDrift=%sms, %s, attempts=%s%s, booked=%s, tried=[%s]%s, "
+            "clickDrift=%sms, %s, attempts=%s, booked=%s, tried=[%s]%s, "
             "totalMs=%s, error=%s",
             result.phase,
             result.success,
@@ -4089,9 +4089,6 @@ class WaldenGolfProvider(ReservationProvider):
                 else "untimed (no window to lead)"
             ),
             result.timing.get("reserveAttempts", "N/A"),
-            f" (+{result.timing['prematureRetries']} early re-fires)"
-            if result.timing.get("prematureRetries")
-            else "",
             result.booked_slot_time.strftime("%I:%M %p") if result.booked_slot_time else "nothing",
             ", ".join(t.strftime("%I:%M %p") for t in result.attempted_times),
             # Absent unless a refresh ran, since it is off by default now. The

@@ -65,3 +65,7 @@ Thumbs.db
 playwright-report/
 test-results/
 scripts/captures/
+
+# Claude Code per-machine settings (absolute paths, personal permission allowlist).
+# .claude/launch.json is shared; this one is not.
+.claude/settings.local.json

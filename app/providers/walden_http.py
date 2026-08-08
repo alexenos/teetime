@@ -118,6 +118,26 @@ _SKEW_PROBE_SPACING_S = 0.08
 # rather than allowed to drag the estimate.
 _SKEW_MAX_PROBE_RTT_S = 1.0
 
+# Where to send the clock probes. Not the tee sheet: a HEAD on that page is
+# authenticated and makes Liferay render the whole portlet, which measured
+# 1613ms, 1615ms and 1640ms on three consecutive mornings - every probe over the
+# ceiling above, so 2026-08-08 threw away all 16 and led by nothing.
+#
+# Two things go wrong with that target and a static asset on the same host fixes
+# both. The header is stamped somewhere inside a 1.5s round trip, so the midpoint
+# we ascribe it to is worth +-750ms - far coarser than the offset being measured.
+# And `one_way_ms` takes half the round trip as flight time, when nearly all of
+# that 1.5s is Liferay rendering, not the network.
+#
+# These answer in 84-131ms from the same server and clock. Tried in order; a
+# cached asset serving a frozen Date is caught by the transition check below,
+# which is the same guard that already covered the page.
+_SKEW_PROBE_PATHS = (
+    "/o/frontend-css-web/main.css",
+    "/o/frontend-theme-font-awesome-web/css/main.css",
+    "/favicon.ico",
+)
+
 
 @dataclass(frozen=True)
 class ClockSkew:
@@ -764,6 +784,44 @@ class PrimeFacesSession:
         self.warm_up_rtt_ms = rtt_ms
         return rtt_ms
 
+    def _resolve_probe_url(self) -> str:
+        """Pick the cheapest same-origin URL that reports a usable ``Date``.
+
+        Runs during staging, minutes before the window, so the cost of finding
+        one does not touch the race. Falls back to the tee sheet itself when no
+        candidate answers - a bad probe target still beats no measurement, and
+        the callers own guards report it either way.
+        """
+        origin = urllib.parse.urlsplit(self.base_url)
+        for path in _SKEW_PROBE_PATHS:
+            candidate = urllib.parse.urlunsplit((origin.scheme, origin.netloc, path, "", ""))
+            started = time_module.perf_counter()
+            try:
+                response = self._client.head(candidate)
+            except httpx.HTTPError as exc:
+                logger.debug("DIRECT_HTTP: Clock probe target %s unusable (%s)", candidate, exc)
+                continue
+            rtt_ms = (time_module.perf_counter() - started) * 1000
+            # The body is irrelevant - a redirect off the same server carries
+            # the same clock - so the only requirement is a readable Date.
+            if _parse_http_date(response.headers.get("Date")) is None:
+                continue
+            logger.info(
+                "DIRECT_HTTP: Clock probe target %s - HTTP %d in %.0fms",
+                candidate,
+                response.status_code,
+                rtt_ms,
+            )
+            return candidate
+
+        logger.warning(
+            "DIRECT_HTTP: No cheap clock probe target answered; falling back to %s, "
+            "whose round trip may exceed the %.1fs ceiling",
+            self.base_url,
+            _SKEW_MAX_PROBE_RTT_S,
+        )
+        return self.base_url
+
     def measure_clock_skew(self) -> ClockSkew | None:
         """Measure the club's clock against ours, and how long a request takes.
 
@@ -786,6 +844,7 @@ class PrimeFacesSession:
             None means "do not lead", not "lead by zero on purpose"; the caller
             distinguishes them.
         """
+        probe_url = self._resolve_probe_url()
         samples: list[tuple[float, int]] = []
         round_trips: list[float] = []
         for probe in range(_SKEW_PROBE_COUNT):
@@ -793,7 +852,7 @@ class PrimeFacesSession:
                 time_module.sleep(_SKEW_PROBE_SPACING_S)
             sent = time_module.time()
             try:
-                response = self._client.head(self.base_url)
+                response = self._client.head(probe_url)
             except httpx.HTTPError as exc:
                 # One failed probe is not worth abandoning the measurement, and
                 # is not worth a warning each: the summary below reports how
@@ -813,9 +872,12 @@ class PrimeFacesSession:
 
         if len(samples) < 2:
             logger.warning(
-                "DIRECT_HTTP: Clock skew unmeasurable - %d usable probe(s) of %d",
+                "DIRECT_HTTP: Clock skew unmeasurable - %d usable probe(s) of %d against %s "
+                "(round trips over %.1fs are dropped)",
                 len(samples),
                 _SKEW_PROBE_COUNT,
+                probe_url,
+                _SKEW_MAX_PROBE_RTT_S,
             )
             return None
 

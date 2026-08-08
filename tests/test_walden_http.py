@@ -1511,13 +1511,21 @@ SLOT_B_TIME = time(16, 42)
 SLOT_C_TIME = time(16, 50)
 
 
-def blocked_sheet(*slots: str) -> str:
+def blocked_sheet(*slots: str, countdown: str | None = None) -> str:
     """A refusal, carrying the whole re-rendered sheet the way the site does.
 
     This shape is why the fallback loop needs no extra round trip: the response
     that says "blocked" hands back every other row's Reserve handler with it.
+
+    ``countdown`` reproduces what the club actually returns when the Reserve
+    re-renders a view built before the window - a refusal and a counter in the
+    same body, which is the pairing that used to be misread as "too early".
     """
+    banner = (
+        f'<div class="booking-starts-in">Booking Starts In : {countdown}</div>' if countdown else ""
+    )
     return refreshed_sheet(
+        banner,
         '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
         "This slot is blocked by another user</div>",
         *slots,
@@ -1633,73 +1641,90 @@ class TestReserveFallbacks:
         assert recorder.sources == [RESERVE_ID]
 
 
-class TestPrematureVersusBlocked:
-    """The two refusals look alike and call for opposite responses.
+class TestCountdownIsNotAVerdict:
+    """The countdown is logged and never branched on.
 
-    A countdown still in the sheet is the club saying nothing is holdable yet.
-    Reading that as "someone holds this slot" walks the whole fallback list into
-    a window that has not opened and arrives at the end of it with nothing -
-    which is exactly what a measured lead makes possible when it overshoots.
+    It was briefly read as "this Reserve went out early", and it cannot answer
+    that in either direction. Present tracks the age of the view being
+    re-rendered, not the state of the window; absent can simply mean the
+    response carried no tee sheet to hold one.
     """
 
-    def test_a_countdown_retries_the_same_slot(self) -> None:
-        """Arriving early costs one re-ask, not the fallback list."""
-        recorder = ChainRecorder([countdown_sheet("00:00:02"), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+    def test_a_countdown_beside_a_block_is_a_block(self) -> None:
+        """The response the club actually sent on 2026-08-06: both at once.
+
+        Reading the countdown as "too early" cost 1.3s of re-fires on 08-08
+        while members were already booking. The block is the part that is about
+        this slot, so it decides, and the fallback list gets walked.
+        """
+        recorder = ChainRecorder(
+            [
+                blocked_sheet(*ALL_THREE, countdown="00:01:05"),
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                BOOKED_PAGE,
+            ]
+        )
         result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME).book(1)
 
         assert result.success, result.error
-        # The same tee time, re-resolved against the sheet that came back.
-        assert recorder.sources == [
-            RESERVE_ID,
-            MOVED_RESERVE_ID,
-            "playerGroup",
-            "bookTeeTimeAction",
-        ]
-        assert result.booked_slot_time == RESERVE_SLOT_TIME
-        assert result.timing["prematureRetries"] == 1
+        # Moved to the fallback rather than re-asking for the blocked slot.
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+        assert result.booked_slot_time == SLOT_B_TIME
+        assert "prematureRetries" not in result.timing
 
-    def test_a_countdown_beside_a_block_is_still_a_countdown(self) -> None:
-        """The response the club actually sent on 2026-08-06: both at once.
+    def test_a_countdown_never_re_fires_the_same_slot(self) -> None:
+        """No response makes the chain ask twice for one tee time.
 
-        The countdown wins. A sheet the club has not opened cannot be evidence
-        about who is holding what inside it.
+        A countdown with no blocked popup is not a refusal at all, so the chain
+        carries on into the rest of the booking and completes it. The accepted
+        Reserve here answers with the player dialog *and* a stale counter beside
+        it - 2026-08-08's shape, where the re-rendered fragment still carried the
+        06:28:57 view's countdown. Asserting the booking completed is what keeps
+        the count below meaningful: a chain that died at the Reserve would
+        satisfy the count while proving nothing.
         """
-        from app.providers.walden_http_booker import (
-            _VERDICT_BLOCKED,
-            _VERDICT_PREMATURE,
-            _classify_reserve_response,
+        accepted_with_stale_countdown = PLAYER_PAGE.replace(
+            '<div class="ui-selectonebutton" id="timeFilter">',
+            '<div class="booking-starts-in">Booking Starts In : 00:00:02</div>\n'
+            '  <div class="ui-selectonebutton" id="timeFilter">',
         )
+        recorder = ChainRecorder([accepted_with_stale_countdown, ROWS_PAGE, BOOKED_PAGE])
+        result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME).book(1)
 
-        both = refreshed_sheet(
-            '<div class="booking-starts-in">Booking Starts In : 00:01:05</div>',
-            '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
-            "This slot is blocked by another user</div>",
-        )
-        verdict, reason = _classify_reserve_response(parse_html(both))
-        assert verdict == _VERDICT_PREMATURE
-        assert "counting down" in (reason or "")
+        assert result.success, result.error
+        assert recorder.sources.count(RESERVE_ID) == 1
+        assert result.attempted_times == [RESERVE_SLOT_TIME]
+        assert "prematureRetries" not in result.timing
 
-        # The same markup without the countdown is a genuine refusal.
-        verdict, _ = _classify_reserve_response(parse_html(blocked_sheet(*ALL_THREE)))
-        assert verdict == _VERDICT_BLOCKED
+    def test_a_countdown_only_response_is_not_a_booking(self) -> None:
+        """Not classifying a countdown as a refusal is not calling it a booking.
 
-    def test_an_endless_countdown_gives_up_without_burning_the_list(self) -> None:
-        """If the window never opens, the fallbacks were never the problem."""
-        from app.providers.walden_http_booker import _PREMATURE_MAX_RETRIES
-
+        Dropping the countdown branch means a countdown-only sheet is no longer
+        refused at the Reserve step - so the step after it has to be what stops
+        it. It is: the chain needs the player selector to go on, and a tee sheet
+        does not carry one, so the run fails in `player_count` and reports it.
+        """
         recorder = ChainRecorder([countdown_sheet("00:01:05")])
+        result = make_booker(recorder).book(4)
+
+        assert not result.success
+        assert result.phase == "player_count"
+        assert result.error is not None and "Player count selector" in result.error
+
+    def test_an_endless_countdown_still_walks_the_fallback_list(self) -> None:
+        """A sheet that always counts down must not pin us to one slot.
+
+        2026-08-08 stayed on 12:08 PM for three attempts on this reading, and
+        the fallback list - the thing that survives a lost race - went unused.
+        """
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE, countdown="00:01:05")])
         result = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME).book(1)
 
         assert not result.success
-        # Not "blocked": the caller hard-codes that branch's message to "another
-        # member took the slot", which is the opposite of what happened. The
-        # countdown reason has to reach the member, not just the log.
-        assert not result.blocked
-        assert "counting down" in (result.error or "")
-        assert result.timing["prematureRetries"] == _PREMATURE_MAX_RETRIES
-        # Every request went to the requested tee time; no fallback was spent.
-        assert SLOT_B_ID not in recorder.sources
-        assert result.attempted_times == [RESERVE_SLOT_TIME] * (_PREMATURE_MAX_RETRIES + 1)
+        assert result.blocked
+        assert result.attempted_times == [RESERVE_SLOT_TIME, SLOT_B_TIME, SLOT_C_TIME]
+        assert SLOT_B_ID in recorder.sources
 
 
 # ---------------------------------------------------------------------------
@@ -1723,6 +1748,68 @@ def clock_handler(offset_s: float) -> Callable[[httpx.Request], httpx.Response]:
         )
 
     return handler
+
+
+class TestClockProbeTarget:
+    """Where the probes are sent, which is what decided 2026-08-08.
+
+    A HEAD on the tee sheet is authenticated and makes Liferay render the whole
+    portlet - 1.6s on three consecutive mornings, over the per-probe ceiling, so
+    all 16 samples were dropped and the Reserve went out with no lead at all.
+    """
+
+    def test_a_cheap_static_asset_is_preferred_over_the_tee_sheet(self) -> None:
+        """The probes must not land on the page that takes 1.6s to render."""
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(
+                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+            )
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+        session.measure_clock_skew()
+
+        assert seen, "no probe was sent"
+        assert set(seen) == {"/o/frontend-css-web/main.css"}
+        assert "/group/pages/book-a-tee-time" not in seen
+
+    def test_an_unusable_asset_falls_through_to_the_next(self) -> None:
+        """One missing asset must not put the probes back on the tee sheet."""
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            # The first candidate answers without a Date, which is unusable.
+            if request.url.path == "/o/frontend-css-web/main.css":
+                return httpx.Response(200)
+            return httpx.Response(
+                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+            )
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+        session.measure_clock_skew()
+
+        # seen[0] pins the order: without it this passes even if resolution
+        # skipped the first candidate and started at the theme asset.
+        assert seen[0] == "/o/frontend-css-web/main.css"
+        assert seen[1] == "/o/frontend-theme-font-awesome-web/css/main.css"
+        assert set(seen[1:]) == {"/o/frontend-theme-font-awesome-web/css/main.css"}
+
+    def test_no_usable_asset_falls_back_to_the_page(self) -> None:
+        """A bad probe target still beats abandoning the measurement."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.startswith(("/o/", "/favicon")):
+                return httpx.Response(404)
+            return httpx.Response(
+                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+            )
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+
+        assert session._resolve_probe_url().endswith("/group/pages/book-a-tee-time")
 
 
 class TestClockSkew:
