@@ -175,6 +175,48 @@ variable "walden_refresh_view_at_window" {
   default     = false
 }
 
+variable "walden_adhoc_execute_delay_s" {
+  description = <<-EOT
+    Seconds an ad-hoc booking waits before firing Reserve, instead of firing as
+    soon as the tee sheet is staged.
+
+    The wait is the point. Every timed-path behaviour - slot pre-location,
+    clock-skew probing, the precision wait, and a session left to age before
+    Reserve goes out - is gated on execute_at being set, not on the hour being
+    06:30. Firing ad-hoc immediately left the machinery that decides the only
+    booking that matters exercised once a day, unobserved, against slots a
+    dozen members were racing us for.
+
+    With a delay, a Tuesday-afternoon booking nobody wants runs the whole race
+    path, where a refusal cannot be another member and so is one we caused.
+
+    90s brackets the ~68s the 6:30 job stages ahead. Sweep it (15/60/120/300)
+    to find out whether refusals track the length of the wait. 0 restores the
+    old fire-immediately behaviour.
+  EOT
+  type        = number
+  default     = 90
+}
+
+variable "walden_adhoc_untimed_retry" {
+  description = <<-EOT
+    After an ad-hoc booking is refused on the timed path, re-attempt it on the
+    untimed one - a fresh session firing Reserve at once, which is what ad-hoc
+    bookings did before the delay existed.
+
+    Keeps ad-hoc bookings working while the timed path is under suspicion, and
+    turns each one into a controlled pair: same tee time, same day, same code,
+    minutes apart, differing only in the wait. A timed refusal that clears on
+    the untimed retry is the comparison that says what the club's "blocked by
+    another user" actually means.
+
+    Only results known to have reserved nothing are retried, so a Reserve whose
+    outcome could not be established is never sent twice.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "walden_measure_clock_skew" {
   description = <<-EOT
     Probe the club's clock while staging, and send the Reserve early enough to

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import settings
 from app.models.schemas import (
     BookingStatus,
     ConversationState,
@@ -2344,8 +2345,12 @@ class TestImmediateMultiBookingRunsAsOneBatch:
 
         batch_requests = provider.book_multiple_tee_times.await_args.kwargs["requests"]
         assert [item.target_time for item in batch_requests] == [time(17, 0), time(17, 8)]
-        # Off-race, so nothing to wait for before firing.
-        assert provider.book_multiple_tee_times.await_args.kwargs["execute_at"] is None
+        # Off-race, but deliberately not fired at once: ad-hoc bookings run the
+        # same timed path as the 6:30 job so that path gets exercised somewhere
+        # a refusal is readable. `now` is pinned above, so this is exact.
+        assert provider.book_multiple_tee_times.await_args.kwargs["execute_at"] == self.NOW_CT + (
+            timedelta(seconds=settings.walden_adhoc_execute_delay_s)
+        )
 
         # Both outcomes still reach the user, in the channel they asked from.
         assert mock_sms.send_booking_confirmation.await_count == 2
@@ -2899,3 +2904,180 @@ class TestImmediateBookingDoesNotBlockReply:
             await booking_service.wait_for_background_bookings()
 
         assert not booking_service._background_tasks
+
+
+class TestAdhocBookingsRunTheTimedPath:
+    """Ad-hoc bookings fire Reserve on a delay, the way the 6:30 race does.
+
+    Every behaviour that decides the 6:30 booking - slot pre-location, clock
+    probing, the precision wait, and a session left to age before Reserve goes
+    out - is gated on `execute_at` being set rather than on the hour. Firing
+    ad-hoc bookings immediately meant that machinery ran once a day, unobserved,
+    against slots other members were racing us for, and five straight lost
+    mornings could not say whether the club's "blocked by another user" was a
+    member or something we did to ourselves.
+
+    Routing ad-hoc bookings through the same path makes that answerable: a
+    refusal on a Tuesday afternoon nobody is competing for cannot be a member.
+    """
+
+    @staticmethod
+    def _booking(booking_id: str) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id=booking_id,
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(14, 0),
+                num_players=4,
+            ),
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 20, 6, 30),
+        )
+
+    @staticmethod
+    def _blocked(*, verified: bool) -> BookingResult:
+        return BookingResult(
+            success=False,
+            error_message="Slot blocked by another user",
+            verified_not_reserved=verified,
+        )
+
+    async def _run(
+        self,
+        service: BookingService,
+        results: list[list[tuple[str, BookingResult]]],
+        *,
+        delay_s: int = 90,
+        retry: bool = True,
+    ) -> list[tuple[datetime | None, list[str]]]:
+        """Drive _run_bookings_batch, recording each batch call's execute_at.
+
+        Returns one (execute_at, booking_ids) per call, which is what the
+        timed-then-untimed pairing is asserted on.
+        """
+        booking = self._booking("adhoc1")
+        calls: list[tuple[datetime | None, list[str]]] = []
+        pending = list(results)
+
+        async def fake_batch(
+            bookings: list[TeeTimeBooking], execute_at: datetime | None = None
+        ) -> list[tuple[str, BookingResult]]:
+            calls.append((execute_at, [b.id or "" for b in bookings]))
+            return pending.pop(0)
+
+        service.execute_bookings_batch = AsyncMock(side_effect=fake_batch)  # type: ignore[method-assign]
+        service.get_booking = AsyncMock(return_value=booking)  # type: ignore[method-assign]
+        service._try_notify_booking_result = AsyncMock()  # type: ignore[method-assign]
+        service._try_notify_unreported_booking = AsyncMock()  # type: ignore[method-assign]
+
+        with patch("app.services.booking_service.settings") as mock_settings:
+            mock_settings.walden_adhoc_execute_delay_s = delay_s
+            mock_settings.walden_adhoc_untimed_retry = retry
+            await service._run_bookings_batch(["adhoc1"])
+
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_adhoc_booking_is_scheduled_rather_than_fired_at_once(
+        self, booking_service: BookingService
+    ) -> None:
+        """The first attempt carries a future execute_at, not None."""
+        calls = await self._run(
+            booking_service,
+            [[("adhoc1", BookingResult(success=True, booked_time=time(14, 0)))]],
+        )
+
+        assert len(calls) == 1
+        execute_at, _ = calls[0]
+        assert execute_at is not None
+        # Roughly the configured wait; the exact instant depends on when the
+        # call was made, so only the ballpark is meaningful.
+        delta = (execute_at - CTDateTime.to_naive_ct(CTDateTime.now())).total_seconds()
+        assert 80 <= delta <= 90
+
+    @pytest.mark.asyncio
+    async def test_zero_delay_restores_firing_immediately(
+        self, booking_service: BookingService
+    ) -> None:
+        """A delay of 0 is the way back to the old ad-hoc behaviour."""
+        calls = await self._run(
+            booking_service,
+            [[("adhoc1", BookingResult(success=True, booked_time=time(14, 0)))]],
+            delay_s=0,
+        )
+
+        assert calls == [(None, ["adhoc1"])]
+
+    @pytest.mark.asyncio
+    async def test_a_verified_refusal_is_retried_without_the_wait(
+        self, booking_service: BookingService
+    ) -> None:
+        """The retry is the control: same booking, same code, no delay."""
+        calls = await self._run(
+            booking_service,
+            [
+                [("adhoc1", self._blocked(verified=True))],
+                [("adhoc1", BookingResult(success=True, booked_time=time(14, 0)))],
+            ],
+        )
+
+        assert len(calls) == 2
+        assert calls[0][0] is not None, "first attempt should be the timed one"
+        assert calls[1] == (None, ["adhoc1"]), "retry should fire immediately"
+
+    @pytest.mark.asyncio
+    async def test_the_retry_result_is_the_one_reported(
+        self, booking_service: BookingService
+    ) -> None:
+        """A booking rescued by the retry is reported as the success it is."""
+        booked = BookingResult(success=True, booked_time=time(14, 0))
+        booking_service._try_notify_booking_result = AsyncMock()  # type: ignore[method-assign]
+        await self._run(
+            booking_service,
+            [[("adhoc1", self._blocked(verified=True))], [("adhoc1", booked)]],
+        )
+
+        reported = booking_service._try_notify_booking_result.await_args_list  # type: ignore[attr-defined]
+        assert len(reported) == 1
+        assert reported[0].args[1] is booked
+
+    @pytest.mark.asyncio
+    async def test_an_unverified_refusal_is_never_sent_twice(
+        self, booking_service: BookingService
+    ) -> None:
+        """The safety property: an unknown outcome is not re-attempted.
+
+        A Reserve on the wire whose response was lost is indistinguishable from
+        one never sent. Retrying that would risk a second reservation, which the
+        club counts against the one-round-per-day rule.
+        """
+        calls = await self._run(
+            booking_service,
+            [[("adhoc1", self._blocked(verified=False))]],
+        )
+
+        assert len(calls) == 1, "an unverified refusal must not be retried"
+
+    @pytest.mark.asyncio
+    async def test_a_successful_booking_is_not_retried(
+        self, booking_service: BookingService
+    ) -> None:
+        """Nothing to isolate when the timed path worked."""
+        calls = await self._run(
+            booking_service,
+            [[("adhoc1", BookingResult(success=True, booked_time=time(14, 0)))]],
+        )
+
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_can_be_switched_off(self, booking_service: BookingService) -> None:
+        """With the retry off, a refusal stands - the raw timed-path behaviour."""
+        calls = await self._run(
+            booking_service,
+            [[("adhoc1", self._blocked(verified=True))]],
+            retry=False,
+        )
+
+        assert len(calls) == 1

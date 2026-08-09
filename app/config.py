@@ -93,6 +93,40 @@ class Settings(BaseSettings):
     # ad-hoc bookings back on the original Selenium flow.
     walden_fast_booking_immediate: bool = True
 
+    # Seconds an ad-hoc booking waits before firing Reserve, instead of firing
+    # as soon as the sheet is staged.
+    #
+    # This exists to make ad-hoc bookings run the *same* code as the 6:30 race.
+    # Every timed-path behaviour - slot pre-location, clock-skew probing, the
+    # precision wait, and above all a session that has sat idle since it was
+    # staged - is gated on `execute_at` being set, not on the hour being 06:30.
+    # Firing ad-hoc immediately meant the machinery that decides the only
+    # booking that matters was exercised once a day, unobserved, against slots
+    # a dozen members were racing us for.
+    #
+    # With a delay set, a Tuesday-afternoon booking nobody is competing for
+    # runs the whole race path. A refusal there cannot be another member, so it
+    # is a refusal we caused - which is the thing five straight lost mornings
+    # could not distinguish. 90s brackets the ~68s the 6:30 job stages ahead;
+    # sweep it (15/60/120/300) to find out whether failures track the wait.
+    #
+    # 0 restores the old fire-immediately behaviour.
+    walden_adhoc_execute_delay_s: int = 90
+
+    # After an ad-hoc booking is refused on the timed path above, re-attempt it
+    # on the untimed one - a fresh session firing Reserve straight away, which
+    # is exactly what ad-hoc bookings did before the delay existed.
+    #
+    # Two jobs. It keeps ad-hoc bookings working while the timed path is under
+    # suspicion, and it turns every one of them into a controlled pair: same
+    # tee time, same day, same code, minutes apart, differing only in the wait.
+    # A timed refusal followed by an untimed success is the comparison that
+    # settles what the club's "blocked by another user" actually means.
+    #
+    # Only ever attempted for a result that carries `verified_not_reserved`, so
+    # a Reserve whose outcome is unknown is never sent twice.
+    walden_adhoc_untimed_retry: bool = True
+
     user_phone_number: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./teetime.db"

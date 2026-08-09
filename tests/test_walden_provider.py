@@ -3722,6 +3722,49 @@ class TestBlockedSlotResolution:
         assert result.error_message == "Slot blocked by another user"
         reservation_check.assert_not_called()
 
+    def test_a_refusal_with_the_page_read_empty_is_safe_to_re_attempt(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reserve went out, the club refused it, and no reservation exists.
+
+        This is what lets the ad-hoc path retry the same tee time untimed and
+        turn a lost booking into the timed/untimed pair that says whether the
+        wait caused the refusal.
+        """
+        result, _, _ = self._book(
+            provider, monkeypatch, self._blocked_chain(), reservation_exists=False
+        )
+
+        assert result.verified_not_reserved is True
+
+    def test_a_refusal_before_reserve_was_sent_is_safe_to_re_attempt(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing reached the server, so nothing can have been held."""
+        result, _, _ = self._book(
+            provider,
+            monkeypatch,
+            self._blocked_chain(phase=PHASE_RESERVE_STAGED),
+            reservation_exists=None,
+        )
+
+        assert result.verified_not_reserved is True
+
+    def test_an_unreadable_reservations_page_is_not_safe_to_re_attempt(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The safety property behind the ad-hoc retry.
+
+        A Reserve on the wire whose outcome could not be established looks
+        exactly like one never sent. Re-attempting it risks a second
+        reservation, which the club counts against one round per member per day.
+        """
+        result, _, _ = self._book(
+            provider, monkeypatch, self._blocked_chain(), reservation_exists=None
+        )
+
+        assert result.verified_not_reserved is False
+
     def test_a_js_chain_block_answers_from_the_browser(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:

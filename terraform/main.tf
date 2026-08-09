@@ -244,6 +244,16 @@ resource "google_cloud_run_v2_service" "teetime" {
       }
 
       env {
+        name  = "WALDEN_ADHOC_EXECUTE_DELAY_S"
+        value = tostring(var.walden_adhoc_execute_delay_s)
+      }
+
+      env {
+        name  = "WALDEN_ADHOC_UNTIMED_RETRY"
+        value = tostring(var.walden_adhoc_untimed_retry)
+      }
+
+      env {
         name  = "WALDEN_FAST_BOOKING_IMMEDIATE"
         value = tostring(var.walden_fast_booking_immediate)
       }
