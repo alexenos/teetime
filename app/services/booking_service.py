@@ -1018,6 +1018,12 @@ class BookingService:
         Only results carrying ``verified_not_reserved`` are retried - a Reserve
         whose outcome could not be established is never sent twice, because a
         second reservation would collide with the club's one-round-per-day rule.
+
+        Never raises. This is a diagnostic control bolted onto a booking that
+        has already run and already has an outcome; letting a second browser
+        session's failure escape would lose those outcomes and report the
+        driver's exception to a member whose timed attempt came back with a
+        perfectly readable reason from the club.
         """
         if not settings.walden_adhoc_untimed_retry or settings.walden_adhoc_execute_delay_s <= 0:
             return results
@@ -1038,7 +1044,13 @@ class BookingService:
         )
         # A fresh session, firing at once - the configuration ad-hoc bookings
         # used before the delay existed, so the retry is the control.
-        retried = dict(await self.execute_bookings_batch(retryable, execute_at=None))
+        try:
+            retried = dict(await self.execute_bookings_batch(retryable, execute_at=None))
+        except Exception:
+            logger.exception(
+                "ADHOC_TIMED: The untimed retry failed to run; keeping the timed results"
+            )
+            return results
 
         merged: list[tuple[str, BookingResult]] = []
         for booking_id, result in results:

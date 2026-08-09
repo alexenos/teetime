@@ -18,25 +18,57 @@ wastes the run — a fix may already be in.
 git fetch origin && git checkout main && git pull --ff-only && git log --oneline -8
 ```
 
+One caution when the run being diagnosed is not this morning's: a commit to
+`main` redeploys, so `main` can have moved past the revision that actually
+executed. Check what ran before trusting the source:
+
+```bash
+gcloud run revisions list --service=teetime --region=us-central1 --project=gen-lang-client-0822973627 --limit=5 --format="table(name,creationTimestamp)"
+```
+
+If a deploy landed between the run and now, read the code at that revision's
+commit (`git show <sha>:<path>`, or a worktree) rather than at `main`.
+
 ## 2. Pull the run
 
 Project `gen-lang-client-0822973627`, Cloud Run service `teetime`, region
-`us-central1`. During CDT, 06:30 CT = 11:30 UTC (CST: 12:30 UTC).
+`us-central1`. The job fires at 06:28 CT and the window opens at 06:30 CT —
+11:30 UTC during CDT, 12:30 UTC during CST.
 
 **Use the Bash tool, not PowerShell** — PowerShell mangles the quoting inside
 the filter and gcloud rejects it with "Unparseable filter".
 
+Set the date once and derive the UTC bounds from it, so the same command works
+for any morning and picks the right offset either side of a DST change:
+
 ```bash
-gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="teetime" AND timestamp>="2026-08-09T11:20:00Z" AND timestamp<="2026-08-09T11:40:00Z"' --project=gen-lang-client-0822973627 --format="value(timestamp,textPayload)" --limit=1000 --order=asc | grep -v discord.gateway > run.txt
+DAY=2026-08-09
+read START END <<<"$(poetry run python - "$DAY" <<'PY'
+import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
+day = datetime.strptime(sys.argv[1], "%Y-%m-%d").replace(tzinfo=ZoneInfo("America/Chicago"))
+fmt = lambda d: d.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+print(fmt(day.replace(hour=6, minute=20)), fmt(day.replace(hour=6, minute=40)))
+PY
+)"
+gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"teetime\" AND timestamp>=\"$START\" AND timestamp<=\"$END\" AND textPayload!~\"discord\\.gateway\"" --project=gen-lang-client-0822973627 --format="value(timestamp,textPayload)" --limit=2000 --order=asc > run.txt
 ```
 
-`discord.gateway` DEBUG lines are heartbeat noise and one MESSAGE_CREATE event
-can be several hundred lines — always filter them out.
+Python rather than `date -d`: Git Bash here ignores `TZ=America/Chicago` when
+parsing (it returns the input unchanged), which would silently query the wrong
+five hours. `python -c` also swallows output through this shell — the heredoc
+form above is the one that works.
 
-To sweep several mornings at once and see whether a failure is new or chronic,
-loop the date and grep for the outcome lines:
+Exclude `discord.gateway` **in the query, not with a local `grep`**. It is
+heartbeat DEBUG noise, and `--limit` truncates server-side before a pipe ever
+sees the output — filtering locally can silently drop the `Firing Reserve` and
+`Chain finished` lines the whole post-mortem depends on.
 
-```
+To sweep several mornings and see whether a failure is new or chronic, loop
+`DAY` and grep the result for the outcome lines:
+
+```text
 Firing Reserve|Chain finished|No Reserve accepted|BATCH COMPLETE|Clock skew|arrives as the window|slot finder found
 ```
 
@@ -96,10 +128,10 @@ is not: grep the pre-window sheet for the message text. On 2026-08-09 the
 pre-window sheet had zero occurrences and the Reserve responses had one, so the
 club genuinely refused.
 
-The project's own parser is the right tool for structural questions:
+The project's own parser is the right tool for structural questions. Run it
+from the repository root so the import resolves on any checkout:
 
 ```python
-import sys; sys.path.insert(0, r"C:\Users\DaxGarner\Documents\Projects\teetime")
 from app.providers.walden_http import parse_html
 from app.providers.walden_http_booker import _slot_time_of, _find_blocked_message_in
 ```

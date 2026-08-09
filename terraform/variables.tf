@@ -196,6 +196,16 @@ variable "walden_adhoc_execute_delay_s" {
   EOT
   type        = number
   default     = 90
+
+  validation {
+    # Whole seconds, and not negative. The setting is read into an `int`, so a
+    # fractional value reaches the container as "90.5" and stops it booting -
+    # a deploy-time failure for something a plan can catch. The upper bound is
+    # a sanity rail: past ten minutes the ad-hoc booking has stopped being a
+    # booking, and Cloud Run's request budget is not the place to find out.
+    condition     = var.walden_adhoc_execute_delay_s == floor(var.walden_adhoc_execute_delay_s) && var.walden_adhoc_execute_delay_s >= 0 && var.walden_adhoc_execute_delay_s <= 600
+    error_message = "walden_adhoc_execute_delay_s must be a whole number of seconds between 0 and 600."
+  }
 }
 
 variable "walden_adhoc_untimed_retry" {

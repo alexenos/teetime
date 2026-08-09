@@ -3781,6 +3781,10 @@ class TestBlockedSlotResolution:
         assert result.error_message == "Slot blocked by another user"
         reservation_check.assert_not_called()
         artifact_capture.assert_not_called()
+        # The safety rule holds for this chain too. Its phase is past the
+        # Reserve and the reservations page was never read, so whether the slot
+        # is held is unknown - and unknown must not authorise a second attempt.
+        assert result.verified_not_reserved is False
 
 
 class TestBrowserErrorMessageExtraction:
