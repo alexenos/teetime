@@ -34,14 +34,26 @@ git checkout -b fix/<short-slug> && git push -u origin fix/<short-slug>
 
 ## 3. Wait
 
-Poll rather than sleeping in the foreground, and run it in the background:
+Poll rather than sleeping in the foreground. Pass `run_in_background: true` to
+the Bash tool — the loop itself is an ordinary foreground loop, the tool is what
+detaches it and notifies you on exit.
+
+The loop must **fail closed**. An auth error, a network blip, or an empty result
+all produce output with no `pending` in it, and a naive check reads that as
+"settled":
 
 ```bash
 for i in $(seq 1 40); do
-  out=$(gh pr checks <N> 2>&1)
-  if ! echo "$out" | grep -q "pending"; then echo "$out"; exit 0; fi
+  if ! out=$(gh pr checks <N> 2>&1); then
+    # gh exits non-zero when checks are still pending *and* on real errors, so
+    # distinguish them rather than treating any failure as either one.
+    if ! grep -q "pending" <<<"$out"; then echo "gh failed:"; echo "$out"; exit 2; fi
+  elif ! grep -q "pending" <<<"$out"; then
+    echo "$out"; exit 0
+  fi
   sleep 20
 done
+echo "still pending after 800s"; gh pr checks <N>; exit 1
 ```
 
 CodeRabbit posts an initial summary comment within a minute of the PR opening —
@@ -50,12 +62,26 @@ that is **not** the review. The review lands later as inline comments.
 ## 4. Read the review properly
 
 Inline comments do not appear in `gh pr view --json comments`. That field only
-holds issue-level comments. Fetch both:
+holds issue-level comments. Fetch both, and **project `id`** — step 6 needs it
+to reply, and re-fetching just to get it is pure friction:
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/<N>/comments --jq '.[] | {path, line, body}'
+gh api repos/{owner}/{repo}/pulls/<N>/comments --jq '.[] | {id, path, line, body}'
 gh pr view <N> --json comments --jq '.comments[] | {author: .author.login, body}'
 ```
+
+Checks going green is not proof the inline comments have landed, especially on
+a re-review after a push. If the comment list looks unchanged from before your
+push, wait and re-fetch before concluding the review found nothing.
+
+Two mechanics worth knowing:
+
+- The single-comment route is `/pulls/comments/{id}`, **not**
+  `/pulls/<N>/comments/{id}` — the latter 404s. Easiest is to fetch the list
+  once and filter locally.
+- Findings are wrapped in `<details>` blocks and emoji-heavy. When parsing with
+  Python, set `PYTHONIOENCODING=utf-8` or strip to ASCII; this console is cp1252
+  and will raise `UnicodeEncodeError` on the severity emoji.
 
 CodeRabbit marks its findings with severity and often collapses detail inside
 `<details>` blocks — read the whole body, not the first line. It also posts
@@ -77,6 +103,20 @@ The reviewer is a tool, not an authority. For each finding, decide:
 
 Do not "fix" something you believe is correct just to clear the review.
 
+**Ignore the severity labels; read the reasoning.** They are unreliable in both
+directions. On #145 a finding tagged `🔵 Trivial | 💤 Low value` pointed out that
+a terraform `type = number` accepts `90.5`, which `tostring` emits as `"90.5"`
+into a setting typed `int` — a container that will not boot, surfacing as a
+failed deploy rather than a failed plan. Meanwhile some `🟠 Major` items were
+documentation nits. Judge each one on what it says.
+
+**Run the suggested fix before committing it.** CodeRabbit's proposed diffs are
+plausible-looking and environment-blind. On #145 the suggested timezone handling
+(`TZ=America/Chicago date -d ...`) is silently wrong here — Git Bash ignores
+`TZ` when parsing and returns the input unchanged, so the "fix" would have
+queried the wrong five hours and found nothing. Verify, then commit what you
+verified, and leave a note saying why the obvious version was rejected.
+
 ## 6. Reply
 
 Reply to each substantive finding. Inline replies thread properly:
@@ -96,11 +136,22 @@ per nit.
 Run the full local gate before pushing — CI is slower than you are:
 
 ```bash
-poetry run pytest -q && poetry run ruff check app tests && poetry run ruff format --check app tests && poetry run mypy app
+poetry run pytest -q && poetry run ruff check . && poetry run ruff format --check . && poetry run mypy app
 ```
 
-Always `poetry run` — the venv lives outside the repo. Push, then re-poll;
-CodeRabbit re-reviews each push.
+Ruff over `.`, not `app tests` — that is what both CI jobs run, and scoping
+narrower locally lets a lint error in a file outside those two directories pass
+here and fail there.
+
+This gate is deliberately **stricter than CI in one respect**: CI marks mypy
+`continue-on-error: true` (pre-existing type errors), so a type regression will
+not fail the build. Keep it fatal locally so new ones do not accumulate.
+
+Always `poetry run` — the local venv lives outside the repo, under Poetry's
+cache. (CI is configured `virtualenvs-in-project`, so there it is `.venv`; both
+need `poetry run` either way.)
+
+Push, then re-poll; CodeRabbit re-reviews each push.
 
 ## 8. Report, and stop
 
