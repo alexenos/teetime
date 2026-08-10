@@ -45,8 +45,10 @@ all produce output with no `pending` in it, and a naive check reads that as
 ```bash
 for i in $(seq 1 40); do
   if ! out=$(gh pr checks <N> 2>&1); then
-    # gh exits non-zero when checks are still pending *and* on real errors, so
-    # distinguish them rather than treating any failure as either one.
+    # A non-zero exit means either "still pending" (documented as 8) or a real
+    # failure, so the output decides which. Verified the failure case: a bad PR
+    # number exits 1 with "Could not resolve to a PullRequest" and no "pending",
+    # which the old loop reported as a completed review.
     if ! grep -q "pending" <<<"$out"; then echo "gh failed:"; echo "$out"; exit 2; fi
   elif ! grep -q "pending" <<<"$out"; then
     echo "$out"; exit 0
@@ -66,26 +68,32 @@ holds issue-level comments. Fetch both, and **project `id`** — step 6 needs it
 to reply, and re-fetching just to get it is pure friction:
 
 ```bash
-gh api repos/{owner}/{repo}/pulls/<N>/comments --jq '.[] | {id, path, line, body}'
+gh api repos/{owner}/{repo}/pulls/<N>/comments --paginate \
+  --jq '.[] | select(.in_reply_to_id == null) | {id, path, line, body}'
 gh pr view <N> --json comments --jq '.comments[] | {author: .author.login, body}'
 ```
+
+`select(.in_reply_to_id == null)` is not optional. The endpoint returns replies
+alongside findings, so once you have answered a round the list is mostly your
+own text, and the reply API needs the *parent* id — a reply's id will not
+thread. Filtering also makes "did this push add findings?" answerable by
+sorting the survivors on `created_at`.
 
 Checks going green is not proof the inline comments have landed, especially on
 a re-review after a push. If the comment list looks unchanged from before your
 push, wait and re-fetch before concluding the review found nothing.
 
-Two mechanics worth knowing:
+Three mechanics worth knowing:
 
 - The single-comment route is `/pulls/comments/{id}`, **not**
   `/pulls/<N>/comments/{id}` — the latter 404s. Easiest is to fetch the list
   once and filter locally.
-- Findings are wrapped in `<details>` blocks and emoji-heavy. When parsing with
-  Python, set `PYTHONIOENCODING=utf-8` or strip to ASCII; this console is cp1252
-  and will raise `UnicodeEncodeError` on the severity emoji.
-
-CodeRabbit marks its findings with severity and often collapses detail inside
-`<details>` blocks — read the whole body, not the first line. It also posts
-"Nitpick" and "Outside diff range" sections that are advisory.
+- CodeRabbit collapses most of each finding inside `<details>` blocks, so a
+  one-line-per-comment summary shows only the severity tag. Read the whole
+  body. "Nitpick" and "Outside diff range" sections are advisory.
+- The bodies are emoji-heavy. When parsing with Python, set
+  `PYTHONIOENCODING=utf-8` or strip to ASCII; this console is cp1252 and will
+  raise `UnicodeEncodeError` on the severity emoji.
 
 ## 5. Judge each comment before acting
 
