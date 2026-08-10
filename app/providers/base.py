@@ -25,6 +25,16 @@ class BookingResult:
     error_message: str | None = None
     alternatives: str | None = None
     fallback_reason: str | None = None
+    # Set only when this attempt is known to have reserved nothing: either it
+    # stopped before the Reserve POST, or the club refused it and the member's
+    # reservations page was then read and found empty.
+    #
+    # This is what makes re-attempting the same tee time safe. The default is
+    # False for "we do not know", not "nothing was booked" - a Reserve on the
+    # wire whose response was lost looks identical to one never sent, and
+    # re-attempting that one risks a second reservation the club counts against
+    # the one-round-per-day rule.
+    verified_not_reserved: bool = False
 
 
 @dataclass

@@ -3212,6 +3212,14 @@ class WaldenGolfProvider(ReservationProvider):
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
+                    # Two ways to know this refusal left nothing behind: it
+                    # stopped before anything reached the server, or it did not
+                    # and the reservations page was read and came back empty.
+                    # `blocked_held is None` is the third case - asked and could
+                    # not tell - and stays unsafe.
+                    verified_not_reserved=(
+                        blocked_phase in PRE_SUBMIT_PHASES or blocked_held is False
+                    ),
                 )
 
             if not chain_result.get("success"):

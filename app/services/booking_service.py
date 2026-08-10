@@ -956,7 +956,10 @@ class BookingService:
             return
 
         try:
-            results = await self.execute_bookings_batch(bookings, execute_at=None)
+            results = await self.execute_bookings_batch(
+                bookings, execute_at=self._adhoc_execute_at()
+            )
+            results = await self._retry_blocked_untimed(bookings, results)
         except Exception as e:
             logger.exception("Batch booking attempt failed for %s", booking_ids)
             for booking in bookings:
@@ -979,6 +982,92 @@ class BookingService:
                 await self._try_notify_unreported_booking(
                     booking, "The booking attempt ended without reporting a result."
                 )
+
+    def _adhoc_execute_at(self) -> datetime | None:
+        """When an ad-hoc booking should fire Reserve, or None to fire at once.
+
+        An ad-hoc booking has no window to hit, so any wait here is bought
+        deliberately: it is what routes the booking through the same timed path
+        the 6:30 race uses - pre-location, clock probing, the precision wait,
+        and a session left to age before Reserve goes out. See
+        ``walden_adhoc_execute_delay_s``.
+        """
+        delay_s = settings.walden_adhoc_execute_delay_s
+        if delay_s <= 0:
+            return None
+        execute_at = CTDateTime.to_naive_ct(CTDateTime.now()) + timedelta(seconds=delay_s)
+        logger.info(
+            "ADHOC_TIMED: Booking on the timed path - Reserve fires at %s CT (in %ds)",
+            execute_at.strftime("%H:%M:%S"),
+            delay_s,
+        )
+        return execute_at
+
+    async def _retry_blocked_untimed(
+        self,
+        bookings: list[TeeTimeBooking],
+        results: list[tuple[str, BookingResult]],
+    ) -> list[tuple[str, BookingResult]]:
+        """Re-attempt refused ad-hoc bookings with no wait, and report the pair.
+
+        The delay above is the only difference between the two attempts, which
+        is what makes the pair worth reading: same tee time, same day, same
+        code, minutes apart. A refusal that clears on the retry is one the wait
+        caused, not another member.
+
+        Only results carrying ``verified_not_reserved`` are retried - a Reserve
+        whose outcome could not be established is never sent twice, because a
+        second reservation would collide with the club's one-round-per-day rule.
+
+        Never raises. This is a diagnostic control bolted onto a booking that
+        has already run and already has an outcome; letting a second browser
+        session's failure escape would lose those outcomes and report the
+        driver's exception to a member whose timed attempt came back with a
+        perfectly readable reason from the club.
+        """
+        if not settings.walden_adhoc_untimed_retry or settings.walden_adhoc_execute_delay_s <= 0:
+            return results
+
+        by_id = {booking.id: booking for booking in bookings if booking.id is not None}
+        retryable = [
+            by_id[booking_id]
+            for booking_id, result in results
+            if not result.success and result.verified_not_reserved and booking_id in by_id
+        ]
+        if not retryable:
+            return results
+
+        logger.info(
+            "ADHOC_TIMED: %d booking(s) refused on the timed path with nothing reserved; "
+            "re-attempting untimed to isolate the wait",
+            len(retryable),
+        )
+        # A fresh session, firing at once - the configuration ad-hoc bookings
+        # used before the delay existed, so the retry is the control.
+        try:
+            retried = dict(await self.execute_bookings_batch(retryable, execute_at=None))
+        except Exception:
+            logger.exception(
+                "ADHOC_TIMED: The untimed retry failed to run; keeping the timed results"
+            )
+            return results
+
+        merged: list[tuple[str, BookingResult]] = []
+        for booking_id, result in results:
+            retry = retried.get(booking_id)
+            if retry is None:
+                merged.append((booking_id, result))
+                continue
+            logger.info(
+                "ADHOC_TIMED: %s - timed attempt refused (%s), untimed retry %s",
+                booking_id,
+                result.error_message,
+                f"booked {retry.booked_time}"
+                if retry.success
+                else f"also failed: {retry.error_message}",
+            )
+            merged.append((booking_id, retry))
+        return merged
 
     async def _try_notify_booking_result(
         self, booking: TeeTimeBooking, result: BookingResult
