@@ -69,7 +69,7 @@ to reply, and re-fetching just to get it is pure friction:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<N>/comments --paginate \
-  --jq '.[] | select(.in_reply_to_id == null) | {id, path, line, body}'
+  --jq '.[] | select(.in_reply_to_id == null) | {id, created_at, path, line, body}'
 gh pr view <N> --json comments --jq '.comments[] | {author: .author.login, body}'
 ```
 
