@@ -1641,6 +1641,104 @@ class TestReserveFallbacks:
         assert recorder.sources == [RESERVE_ID]
 
 
+def sweep_booker(recorder: ChainRecorder, *offsets: int) -> DirectHttpBooker:
+    """A booker staged with a sweep ladder and the usual three-slot sheet."""
+    booker = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME)
+    booker._sweep_offsets_ms = offsets
+    return booker
+
+
+def just_now() -> int:
+    """A target instant already reached, so the precision waits return at once."""
+    return int(time_module.time() * 1000)
+
+
+class TestReserveSweep:
+    """An early refusal is answered by asking again, not by giving up the slot.
+
+    The club refuses for roughly the first second past the window and words it
+    "This slot is blocked by another user" whatever the cause. On 2026-08-08 the
+    same request was refused at 0ms and 812ms and accepted at 1291ms; 08-12
+    repeated it at 0/817/1239ms with the whole sheet still open an hour later. So
+    a refusal in the first second says nothing about who holds the slot, and
+    walking down the fallback list on one gives away the tee time for free.
+    """
+
+    def test_an_early_refusal_asks_for_the_same_slot_again(self) -> None:
+        """The second attempt is the slot we want, not the next one down."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0, 10).book(1, target_timestamp_ms=just_now())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+
+    def test_the_ladder_is_spent_before_any_fallback(self) -> None:
+        """Only once asking again has stopped helping does the list get walked."""
+        recorder = ChainRecorder(
+            [
+                blocked_sheet(*ALL_THREE),
+                blocked_sheet(*ALL_THREE),
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                BOOKED_PAGE,
+            ]
+        )
+        result = sweep_booker(recorder, 0, 10).book(1, target_timestamp_ms=just_now())
+
+        assert result.success, result.error
+        assert recorder.sources[:3] == [RESERVE_ID, RESERVE_ID, SLOT_B_ID]
+        assert result.booked_slot_time == SLOT_B_TIME
+
+    def test_a_grant_mid_ladder_stops_the_sweep(self) -> None:
+        """Rungs are a budget, not a quota - the slot is taken as soon as given."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0, 10, 20, 30, 40).book(1, target_timestamp_ms=just_now())
+
+        assert result.success, result.error
+        assert recorder.sources.count(RESERVE_ID) == 2
+
+    def test_every_attempt_is_recorded(self) -> None:
+        """The ledger is the whole point: refused attempts are the measurement."""
+        recorder = ChainRecorder(
+            [
+                blocked_sheet(*ALL_THREE),
+                blocked_sheet(*ALL_THREE),
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                BOOKED_PAGE,
+            ]
+        )
+        result = sweep_booker(recorder, 0, 10, 20).book(1, target_timestamp_ms=just_now())
+
+        verdicts = [observation.verdict for observation in result.attempt_log]
+        assert verdicts == ["refused", "refused", "unknown"]
+        assert [o.attempt for o in result.attempt_log] == [1, 2, 3]
+        # Sent times are measured against the window, which is what makes a
+        # losing morning still worth something.
+        assert all(o.sent_ms_past_window is not None for o in result.attempt_log)
+
+    def test_an_untimed_booking_does_not_sweep(self) -> None:
+        """Ad-hoc bookings fire into a window that opened days ago.
+
+        There is no boundary to find and no reason to ask twice, so the ladder
+        must not apply - a refusal there goes straight to the fallback list.
+        """
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0, 10, 20).book(1)
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+
+    def test_a_single_rung_ladder_is_the_old_behaviour(self) -> None:
+        """The kill switch: WALDEN_RESERVE_SWEEP_OFFSETS_MS=0."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0).book(1, target_timestamp_ms=just_now())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+
+
 class TestCountdownIsNotAVerdict:
     """The countdown is logged and never branched on.
 

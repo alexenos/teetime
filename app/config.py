@@ -1,7 +1,10 @@
+import logging
 from enum import Enum
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class WaitMode(str, Enum):
@@ -127,6 +130,34 @@ class Settings(BaseSettings):
     # a Reserve whose outcome is unknown is never sent twice.
     walden_adhoc_untimed_retry: bool = True
 
+    # Milliseconds past 06:30:00 to ask for the target slot at, before any
+    # fallback tee time is tried. Comma-separated; see walden_sweep_offsets_ms().
+    #
+    # The club refuses for roughly the first second past the window, and its
+    # refusal reads "This slot is blocked by another user" regardless of why. On
+    # 2026-08-08 a byte-identical request - same slot, same component id, same
+    # ViewState - was refused at 0ms, refused at 812ms and accepted at 1291ms;
+    # 08-12 repeated it at 0/817/1239ms on a 5:00 PM nobody else wanted, with
+    # every slot still open on the sheet an hour later. Firing once on the
+    # instant therefore asks the one question most likely to be answered no.
+    #
+    # Each rung is also a measurement. The ledger records which offsets were
+    # refused and which was granted, so a morning narrows the boundary to the
+    # rung spacing whether or not it wins. Once the boundary is known this
+    # collapses to a single well-chosen offset.
+    #
+    # "0" restores the historical one-shot behaviour.
+    walden_reserve_sweep_offsets_ms: str = "0,150,300,500,750,1000,1250,1500,1750"
+
+    # Write the per-attempt race ledger to the debug artifacts bucket.
+    #
+    # Only the *final* Reserve response was ever kept, and on both mornings the
+    # club actually granted a slot the evidence was in an earlier one. This
+    # stores every attempt's raw partial-response - including the <eval> scripts
+    # and callback parameters the parser used to discard, which is where a shown
+    # dialog is expected to differ from a re-rendered one.
+    walden_capture_race_ledger: bool = True
+
     user_phone_number: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./teetime.db"
@@ -165,6 +196,30 @@ class Settings(BaseSettings):
                 "channel and choose Copy Channel ID. Leave it unset to use DMs."
             )
         return v
+
+    def walden_sweep_offsets_ms(self) -> tuple[int, ...]:
+        """The sweep ladder as ordered, deduplicated, non-negative offsets.
+
+        Parsed leniently and never allowed to fail a booking: a malformed value
+        degrades to the historical single shot on the instant rather than
+        stopping the morning. Negative offsets are dropped - arriving before the
+        window is the one thing five mornings of evidence says does not work.
+        """
+        offsets: list[int] = []
+        for piece in self.walden_reserve_sweep_offsets_ms.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            try:
+                value = int(piece)
+            except ValueError:
+                logger.warning(
+                    "WALDEN_RESERVE_SWEEP_OFFSETS_MS: ignoring unparseable offset %r", piece
+                )
+                continue
+            if value >= 0:
+                offsets.append(value)
+        return tuple(sorted(dict.fromkeys(offsets))) or (0,)
 
     class Config:
         env_file = ".env"

@@ -245,6 +245,46 @@ variable "walden_measure_clock_skew" {
   default     = true
 }
 
+variable "walden_reserve_sweep_offsets_ms" {
+  description = <<-EOT
+    Milliseconds past 06:30:00 to ask for the target slot at, comma-separated,
+    before any fallback tee time is tried.
+
+    The club refuses for roughly the first second past the window, wording every
+    refusal "This slot is blocked by another user". On 2026-08-08 a byte-identical
+    request - same slot, same component id, same ViewState - was refused at 0ms,
+    refused at 812ms and accepted at 1291ms. 2026-08-12 repeated the pattern at
+    0/817/1239ms, on a 5:00 PM slot no other member wanted: the whole sheet was
+    still open an hour later. Asking once on the instant is therefore the single
+    worst-timed question we can ask.
+
+    Each rung doubles as a measurement - the race ledger records which offsets
+    were refused and which was granted - so a morning narrows the boundary to the
+    rung spacing whether or not it wins. Once it is known, collapse this to one
+    well-chosen offset.
+
+    "0" restores the historical single shot on the instant.
+  EOT
+  type        = string
+  default     = "0,150,300,500,750,1000,1250,1500,1750"
+}
+
+variable "walden_capture_race_ledger" {
+  description = <<-EOT
+    Write the per-attempt race ledger to the debug artifacts bucket.
+
+    Only the final Reserve response was ever kept, and on both mornings the club
+    actually granted a slot the evidence sat in an earlier one. This stores every
+    attempt's raw partial-response, including the <eval> scripts and callback
+    parameters the parser used to discard - the place a dialog the club *showed*
+    is expected to differ from one it merely re-rendered.
+
+    On. It writes only on the race path and only to the debug bucket.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "walden_fast_booking_batch" {
   description = <<-EOT
     Whether the scheduled 6:30 batch runs the fast chain (JS, or direct HTTP

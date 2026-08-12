@@ -557,13 +557,42 @@ def _serialize_form(form: Node) -> list[tuple[str, str]]:
 
 @dataclass
 class PartialResponse:
-    """A parsed JSF ``<partial-response>`` document."""
+    """A parsed JSF ``<partial-response>`` document.
+
+    ``updates`` is the re-rendered markup, and for a long time it was the only
+    thing kept. That turned out to hide the answer: PrimeFaces opens a dialog by
+    *scripting* it, in an ``<eval>`` block or a callback parameter, not by
+    marking up the dialog differently. Five mornings of saved Reserve responses
+    all carry the "blocked by another user" popup as inert markup - the two the
+    club had actually accepted included - so the markup alone cannot say whether
+    the club showed that popup or merely re-rendered it. Whatever does say so is
+    in the parts of the payload this class used to drop, hence ``eval_scripts``,
+    ``callback_args``, and ``raw_xml``.
+    """
 
     updates: dict[str, str] = field(default_factory=dict)
     view_state: str | None = None
     redirect_url: str | None = None
     error_name: str | None = None
     error_message: str | None = None
+    # Scripts the server asked the browser to run. A PrimeFaces dialog is shown
+    # from here - PF('...Var').show() - so this is where a genuine refusal is
+    # expected to differ from an acceptance carrying the same popup markup.
+    eval_scripts: list[str] = field(default_factory=list)
+    # <extension ln="primefaces" type="args"> - the JSON callback parameters a
+    # bean sets with addCallbackParam, e.g. {"validationFailed":true}.
+    callback_args: str | None = None
+    # The unparsed payload, kept so a morning can be re-read for signals nobody
+    # has thought to extract yet. Every prior diagnosis was limited to what the
+    # parser happened to keep at the time.
+    raw_xml: str = ""
+    # Transport facts about the exchange, for the race ledger.
+    status_code: int | None = None
+    # The club's own clock when it answered, from the HTTP Date header. Whole
+    # seconds, but that is enough to tell a ~1s boundary from a clock offset.
+    server_date_ms: int | None = None
+    sent_at_ms: int | None = None
+    received_at_ms: int | None = None
 
     @property
     def markup(self) -> str:
@@ -571,6 +600,11 @@ class PartialResponse:
         return "\n".join(
             value for key, value in self.updates.items() if _VIEW_STATE_PARAM not in key
         )
+
+    @property
+    def eval_text(self) -> str:
+        """All server-sent scripts as one string, for substring checks."""
+        return "\n".join(self.eval_scripts)
 
 
 def parse_partial_response(xml: str) -> PartialResponse:
@@ -595,7 +629,7 @@ def parse_partial_response(xml: str) -> PartialResponse:
             "the session has most likely expired"
         )
 
-    response = PartialResponse()
+    response = PartialResponse(raw_xml=xml)
 
     error = root.find("error")
     if error is not None:
@@ -626,6 +660,19 @@ def parse_partial_response(xml: str) -> PartialResponse:
         # "_teeTimePortlet_WAR_northstarportlet_:javax.faces.ViewState:0".
         if _VIEW_STATE_PARAM in update_id:
             response.view_state = content.strip()
+
+    for script in root.iter("eval"):
+        text = (script.text or "").strip()
+        if text:
+            response.eval_scripts.append(text)
+
+    # PrimeFaces puts addCallbackParam output in an extension element rather
+    # than an update, so it never reached the markup the diagnosis read.
+    for extension in root.iter("extension"):
+        if extension.get("type") == "args":
+            args = (extension.text or "").strip()
+            if args:
+                response.callback_args = args
 
     return response
 
@@ -941,6 +988,7 @@ class PrimeFacesSession:
                 far sooner than that and try something else.
         """
         payload = body if body is not None else self.build_body(config)
+        sent_at_ms = int(time_module.time() * 1000)
         # httpx distinguishes "no timeout argument" (use the client's) from any
         # explicit value via a sentinel, so the two calls cannot be collapsed
         # into one with a computed keyword.
@@ -953,6 +1001,7 @@ class PrimeFacesSession:
                 )
         except httpx.HTTPError as exc:
             raise DirectHttpError(f"POST for {config.source} failed: {exc}") from exc
+        received_at_ms = int(time_module.time() * 1000)
 
         if http_response.status_code != 200:
             raise DirectHttpError(
@@ -960,6 +1009,15 @@ class PrimeFacesSession:
             )
 
         response = parse_partial_response(http_response.text)
+        response.status_code = http_response.status_code
+        response.sent_at_ms = sent_at_ms
+        response.received_at_ms = received_at_ms
+        # The club's clock as of this exchange, read from the endpoint that
+        # actually decides the booking. The skew probe measures a static asset
+        # host, which need not share a clock with the application server - and
+        # if it does not, that alone would explain firing into a shut window.
+        server_seconds = _parse_http_date(http_response.headers.get("Date"))
+        response.server_date_ms = None if server_seconds is None else server_seconds * 1000
         if response.redirect_url:
             # JSF answers a dead session with a redirect to the login page
             # rather than an error element. Without this the body is never
