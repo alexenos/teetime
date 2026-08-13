@@ -105,6 +105,32 @@ POST is reported as contention, whatever the cause.
 
 ---
 
+## The alert was not late — it fired inside the window minute
+
+The `7:30 AM` on the notification is Discord rendering in the viewing device's
+local timezone, and the member's phone is on ET. The club is on CT, so that
+timestamp is **06:30 CT** — the window minute itself, not an hour after it.
+
+Two consequences:
+
+- **The whole run fit inside ~60 seconds of 06:30:00.** Login, sheet scan, the
+  Reserve ladder, the remaining chain steps, the reservations check and the
+  notification all completed within that minute. Any theory that has the bot
+  grinding for minutes before giving up is out.
+- **The 06:28 job fired on time and the pipeline ran end to end.** Whatever went
+  wrong went wrong inside the booking logic, not in scheduling or delivery.
+
+Caveat: this assumes the phone was on ET this morning too, not just now. The
+`send_booking_failure` log timestamp confirms it to the second and is worth
+reading anyway, since seconds-past-window is what the ledger has to be aligned
+against.
+
+Worth carrying forward as a standing hazard: the member reads in ET, the club
+runs in CT, and every log line and artifact name is in one or the other. A
+one-hour misread is available at every step of every future post-mortem.
+
+---
+
 ## The shared login breaks the verification oracle
 
 `_reservation_exists` asks the member's reservations page whether the tee time
@@ -144,7 +170,7 @@ unusually valuable even if the race was lost fairly.
 | Did the reservations check say False, or fail to read | `RESERVATION_CHECK:` |
 | Was 08:00 already gone when the bot scanned the sheet | `pre_window_sheet_.../tee_sheet.html`, `Slot scan of N row(s)` |
 | Did the 6:30 run report this, or a later attempt | count of `/jobs/execute-due-bookings` invocations |
-| Is the 7:30 alert an hour late, or 06:30 CT on an ET clock | the log timestamp of the `send_booking_failure` call |
+| Exact second the failure was sent (to align the ledger) | timestamp of the `send_booking_failure` call |
 
 A refusal at attempt 1 (+0ms) cannot be explained by a *completed* manual
 booking — nobody clicks through four players and Book Now in zero milliseconds.
@@ -184,9 +210,12 @@ is testable without a booking: log in twice as the same member, stage a view in
 session A, log in as session B, then act in session A. `scripts/probe_direct_http.py`
 already does read-only component work with an adopted cookie jar and is the
 natural place to extend. Needs `WALDEN_MEMBER_NUMBER` / `WALDEN_PASSWORD`.
-Worth asking whether he was logged in on 08-06/07/09 — and specifically whether
-he was *not* on 08-12, the 5:00 PM afternoon slot that still saw ~1.2s of
-refusals with nobody competing.
+The obvious way to kill this hypothesis cheaply would be 08-12 — the 5:00 PM
+afternoon slot that still saw ~1.2s of refusals with nobody plausibly competing.
+If his father was not logged in that afternoon, the ~1s boundary is independent
+of him and C dies. **The member does not know**, so that test is unavailable and
+C stays alive until the concurrent-session probe runs. The artifacts cannot
+settle it either — no log line records whether a second human was signed in.
 
 **A (weakened). The bot got the hold and misreported it.** Still consistent with
 findings 2 and 3, but it no longer has the screenshot behind it. The ledger's
