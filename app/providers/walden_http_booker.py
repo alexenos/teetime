@@ -258,10 +258,23 @@ class DirectBookingResult:
     # booked a slot by index long before this point and would otherwise report
     # and verify the wrong one.
     booked_slot_time: time | None = None
-    # Every tee time a Reserve went out for, in order. The record of how hard the
-    # morning was fought - one entry is a clean win, five is a sheet being taken
-    # apart around us - and the only place a fallback booking's reason comes from.
+    # One entry per Reserve sent, in order, naming the tee time it asked for.
+    # The record of how hard the morning was fought, and the only place a
+    # fallback booking's reason comes from. Since the sweep, consecutive entries
+    # repeat when a rung re-asks for the same slot - so its *length* is the
+    # number of attempts, which is what the refusal count wants, but reading it
+    # as a list of distinct tee times is a mistake. Use distinct_attempted_times
+    # for display.
     attempted_times: list[time] = field(default_factory=list)
+
+    def distinct_attempted_times(self) -> list[time]:
+        """The tee times asked for, in order, without the sweep's repeats."""
+        distinct: list[time] = []
+        for slot in self.attempted_times:
+            if not distinct or distinct[-1] != slot:
+                distinct.append(slot)
+        return distinct
+
     # One row per Reserve exchange: when it went, what the club's clock said,
     # which view came back, and the verdict. Previously only the final response
     # survived, and on both mornings that mattered the answer was in an earlier
@@ -281,6 +294,7 @@ class DirectBookingResult:
             "refreshMarkup": self.refresh_markup,
             "bookedSlotTime": self.booked_slot_time,
             "attemptedTimes": list(self.attempted_times),
+            "distinctAttemptedTimes": self.distinct_attempted_times(),
             "attemptLog": [observation.as_row() for observation in self.attempt_log],
             "path": DIRECT_HTTP_PATH,
         }
@@ -763,14 +777,15 @@ class DirectHttpBooker:
                 )
                 break
 
-            # The target is always set when rungs exist - they are only built for
-            # a timed booking - but the loop below sleeps to an absolute instant,
-            # so it is stated rather than assumed.
-            if rungs and target_timestamp_ms is not None:
+            rung_ms = _next_future_rung(rungs, target_timestamp_ms)
+            # The target is always set when a rung comes back - rungs are built
+            # only for a timed booking - but the sleep below is to an absolute
+            # instant, so it is stated rather than assumed.
+            if rung_ms is not None and target_timestamp_ms is not None:
                 # Same slot, a little later. Re-staged against the sheet the
                 # club just returned rather than the one staged pre-window, and
                 # re-serialized so the ViewState is the one it just handed back.
-                offset_ms = rungs.pop(0)
+                offset_ms = rung_ms
                 restaged = (
                     _relocate_reserve_in(document, response.markup, slot_time)
                     if slot_time is not None
@@ -812,7 +827,8 @@ class DirectHttpBooker:
             "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s",
             result.timing.get("reserveAttempts", 0),
             int((time_module.perf_counter() - started) * 1000),
-            ", ".join(t.strftime("%I:%M %p") for t in result.attempted_times) or "nothing",
+            ", ".join(t.strftime("%I:%M %p") for t in result.distinct_attempted_times())
+            or "nothing",
         )
         return None
 
@@ -1581,6 +1597,34 @@ def _find_blocked_message(response: PartialResponse) -> str | None:
     indication.
     """
     return _find_blocked_message_in(parse_html(response.markup))
+
+
+def _next_future_rung(rungs: list[int], target_timestamp_ms: int | None) -> int | None:
+    """Pop the next ladder rung still ahead of us, discarding any already past.
+
+    Every booking in a batch carries the same target timestamp - deliberately,
+    so the batch's 6:30 gate does not depend on booking 1 reaching its wait - and
+    the precision wait no-ops on a target already gone. For the second and later
+    bookings that means the entire ladder is in the past, and every rung's sleep
+    would return instantly. The sweep would then fire its whole ladder as fast as
+    the socket allows: a burst of identical Reserves, which is the opposite of
+    what spacing them out is for.
+
+    A rung only means something while the instant it names is still ahead. Once
+    the window is minutes old there is no boundary left to find, a refusal is
+    much more likely to be a slot genuinely held, and the fallback list is the
+    right next move.
+
+    Consumes ``rungs`` as it goes. Returns None when none are left in the future.
+    """
+    if target_timestamp_ms is None:
+        return None
+    now_ms = int(time_module.time() * 1000)
+    while rungs:
+        rung = rungs.pop(0)
+        if target_timestamp_ms + rung > now_ms:
+            return rung
+    return None
 
 
 def _find_new_blocked_message(response: PartialResponse, stale: str | None) -> str | None:

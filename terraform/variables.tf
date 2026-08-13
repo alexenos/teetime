@@ -267,6 +267,17 @@ variable "walden_reserve_sweep_offsets_ms" {
   EOT
   type        = string
   default     = "0,150,300,500,750,1000,1250,1500,1750"
+
+  validation {
+    # Whitespace is tolerated because the parser in app/config.py strips it, and
+    # a plan that rejected "0, 150" while the service accepted it would be a
+    # surprise in the wrong direction. Negative offsets are refused here rather
+    # than silently dropped at boot: arriving before the window is the one thing
+    # every saved morning says does not work, so asking for it is a mistake
+    # worth surfacing at plan time.
+    condition     = can(regex("^[0-9]+( *, *[0-9]+)*$", var.walden_reserve_sweep_offsets_ms))
+    error_message = "Must be non-negative whole milliseconds, comma-separated, e.g. \"0,150,300\"."
+  }
 }
 
 variable "walden_capture_race_ledger" {

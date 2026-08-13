@@ -140,9 +140,18 @@ class TestStaleMessagesLaterInTheChain:
 class TestSweepLadder:
     """The offsets the Reserve is asked at, parsed from configuration."""
 
-    def test_the_default_ladder_starts_on_the_instant_and_climbs(self) -> None:
-        """0ms is still asked first - the sweep adds rungs, it does not delay."""
-        ladder = Settings().walden_sweep_offsets_ms()
+    def test_the_default_ladder_starts_on_the_instant_and_climbs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """0ms is still asked first - the sweep adds rungs, it does not delay.
+
+        Isolated from the environment: terraform sets this variable on the
+        deployed service, so a shell mirroring the deployment would make this
+        assert what is configured rather than what ships. The two tests below
+        need no such care - an explicit init argument outranks both sources.
+        """
+        monkeypatch.delenv("WALDEN_RESERVE_SWEEP_OFFSETS_MS", raising=False)
+        ladder = Settings(_env_file=None).walden_sweep_offsets_ms()
 
         assert ladder[0] == 0
         assert list(ladder) == sorted(ladder)

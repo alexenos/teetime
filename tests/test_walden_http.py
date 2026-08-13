@@ -1648,9 +1648,20 @@ def sweep_booker(recorder: ChainRecorder, *offsets: int) -> DirectHttpBooker:
     return booker
 
 
-def just_now() -> int:
-    """A target instant already reached, so the precision waits return at once."""
-    return int(time_module.time() * 1000)
+def window_about_to_open(in_ms: int = 40) -> int:
+    """A target instant just ahead, so the ladder's rungs are still in the future.
+
+    The rungs below are spaced far wider than a mocked request needs, because a
+    rung whose instant has already passed is deliberately skipped and a tight
+    spacing would make that a race with the test runner rather than a check of
+    the behaviour.
+    """
+    return int(time_module.time() * 1000) + in_ms
+
+
+def window_long_past() -> int:
+    """A target a minute gone - a later booking in the same batch."""
+    return int(time_module.time() * 1000) - 60_000
 
 
 class TestReserveSweep:
@@ -1667,7 +1678,7 @@ class TestReserveSweep:
     def test_an_early_refusal_asks_for_the_same_slot_again(self) -> None:
         """The second attempt is the slot we want, not the next one down."""
         recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
-        result = sweep_booker(recorder, 0, 10).book(1, target_timestamp_ms=just_now())
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
 
         assert result.success, result.error
         assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
@@ -1684,7 +1695,7 @@ class TestReserveSweep:
                 BOOKED_PAGE,
             ]
         )
-        result = sweep_booker(recorder, 0, 10).book(1, target_timestamp_ms=just_now())
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
 
         assert result.success, result.error
         assert recorder.sources[:3] == [RESERVE_ID, RESERVE_ID, SLOT_B_ID]
@@ -1693,7 +1704,9 @@ class TestReserveSweep:
     def test_a_grant_mid_ladder_stops_the_sweep(self) -> None:
         """Rungs are a budget, not a quota - the slot is taken as soon as given."""
         recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
-        result = sweep_booker(recorder, 0, 10, 20, 30, 40).book(1, target_timestamp_ms=just_now())
+        result = sweep_booker(recorder, 0, 300, 600, 900).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
 
         assert result.success, result.error
         assert recorder.sources.count(RESERVE_ID) == 2
@@ -1709,7 +1722,9 @@ class TestReserveSweep:
                 BOOKED_PAGE,
             ]
         )
-        result = sweep_booker(recorder, 0, 10, 20).book(1, target_timestamp_ms=just_now())
+        result = sweep_booker(recorder, 0, 300, 600).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
 
         verdicts = [observation.verdict for observation in result.attempt_log]
         assert verdicts == ["refused", "refused", "unknown"]
@@ -1725,7 +1740,7 @@ class TestReserveSweep:
         must not apply - a refusal there goes straight to the fallback list.
         """
         recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
-        result = sweep_booker(recorder, 0, 10, 20).book(1)
+        result = sweep_booker(recorder, 0, 300, 600).book(1)
 
         assert result.success, result.error
         assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
@@ -1733,10 +1748,73 @@ class TestReserveSweep:
     def test_a_single_rung_ladder_is_the_old_behaviour(self) -> None:
         """The kill switch: WALDEN_RESERVE_SWEEP_OFFSETS_MS=0."""
         recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
-        result = sweep_booker(recorder, 0).book(1, target_timestamp_ms=just_now())
+        result = sweep_booker(recorder, 0).book(1, target_timestamp_ms=window_about_to_open())
 
         assert result.success, result.error
         assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+
+    def test_a_window_long_past_skips_the_ladder(self) -> None:
+        """Later bookings in a batch must not fire the ladder as a burst.
+
+        Every booking carries the same target timestamp, so for the second and
+        later ones every rung is already behind us and each sleep would return
+        instantly. Without skipping them the sweep becomes nine identical
+        Reserves back to back - and by then the window is minutes old, so a
+        refusal is far more likely to be a slot genuinely held.
+        """
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0, 300, 600).book(1, target_timestamp_ms=window_long_past())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+
+    def test_the_tried_list_does_not_repeat_a_swept_slot(self) -> None:
+        """One slot asked three times is one tee time, not three.
+
+        The per-attempt list stays as it is - its length is the refusal count -
+        but anything rendering it for a human reads the distinct one.
+        """
+        recorder = ChainRecorder(
+            [
+                blocked_sheet(*ALL_THREE),
+                blocked_sheet(*ALL_THREE),
+                blocked_sheet(*ALL_THREE),
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                BOOKED_PAGE,
+            ]
+        )
+        result = sweep_booker(recorder, 0, 300, 600).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert result.attempted_times[:3] == [RESERVE_SLOT_TIME] * 3
+        assert result.distinct_attempted_times() == [RESERVE_SLOT_TIME, SLOT_B_TIME]
+
+
+class TestStagingTheLadder:
+    """The ladder as it arrives through the public staging path."""
+
+    def test_the_staged_ladder_is_sorted_and_deduplicated(self) -> None:
+        """An unordered rung would sleep backwards and fire a burst instead.
+
+        _try_direct_http_booking passes the configured offsets straight through
+        on every timed booking, so this normalization is the only thing standing
+        between a mis-ordered setting and a collapsed sweep.
+        """
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        booker.prepare(RESERVE_ID, TEE_SHEET, sweep_offsets_ms=(300, 0, 300, 150))
+
+        assert booker._sweep_offsets_ms == (0, 150, 300)
+
+    def test_staging_without_a_ladder_is_a_single_shot(self) -> None:
+        """The default stays one Reserve on the instant."""
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        booker.prepare(RESERVE_ID, TEE_SHEET)
+
+        assert booker._sweep_offsets_ms == (0,)
 
 
 class TestCountdownIsNotAVerdict:
