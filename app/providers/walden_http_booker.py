@@ -258,10 +258,28 @@ class DirectBookingResult:
     # booked a slot by index long before this point and would otherwise report
     # and verify the wrong one.
     booked_slot_time: time | None = None
-    # Every tee time a Reserve went out for, in order. The record of how hard the
-    # morning was fought - one entry is a clean win, five is a sheet being taken
-    # apart around us - and the only place a fallback booking's reason comes from.
+    # One entry per Reserve sent, in order, naming the tee time it asked for.
+    # The record of how hard the morning was fought, and the only place a
+    # fallback booking's reason comes from. Since the sweep, consecutive entries
+    # repeat when a rung re-asks for the same slot - so its *length* is the
+    # number of attempts, which is what the refusal count wants, but reading it
+    # as a list of distinct tee times is a mistake. Use distinct_attempted_times
+    # for display.
     attempted_times: list[time] = field(default_factory=list)
+
+    def distinct_attempted_times(self) -> list[time]:
+        """The tee times asked for, in order, without the sweep's repeats."""
+        distinct: list[time] = []
+        for slot in self.attempted_times:
+            if not distinct or distinct[-1] != slot:
+                distinct.append(slot)
+        return distinct
+
+    # One row per Reserve exchange: when it went, what the club's clock said,
+    # which view came back, and the verdict. Previously only the final response
+    # survived, and on both mornings that mattered the answer was in an earlier
+    # one. This is the record the boundary gets measured from.
+    attempt_log: list["ReserveObservation"] = field(default_factory=list)
 
     def as_chain_result(self) -> dict[str, Any]:
         """Render as the dict shape ``_run_booking_chain_js`` returns."""
@@ -276,6 +294,8 @@ class DirectBookingResult:
             "refreshMarkup": self.refresh_markup,
             "bookedSlotTime": self.booked_slot_time,
             "attemptedTimes": list(self.attempted_times),
+            "distinctAttemptedTimes": self.distinct_attempted_times(),
+            "attemptLog": [observation.as_row() for observation in self.attempt_log],
             "path": DIRECT_HTTP_PATH,
         }
 
@@ -292,6 +312,9 @@ class DirectHttpBooker:
         self._slot_time: time | None = None
         self._fallback_times: tuple[time, ...] = ()
         self._lead_ms: float = 0.0
+        # Offsets past the window to ask for the staged slot at, first to last.
+        # The single 0 is the historical behaviour: one shot, on the instant.
+        self._sweep_offsets_ms: tuple[int, ...] = (0,)
 
     # -- staging ----------------------------------------------------------
 
@@ -303,6 +326,7 @@ class DirectHttpBooker:
         fallback_times: Sequence[time] = (),
         measure_skew: bool = False,
         refresh_at_window: bool = False,
+        sweep_offsets_ms: Sequence[int] = (0,),
     ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
@@ -326,6 +350,10 @@ class DirectHttpBooker:
             refresh_at_window: Re-render the tee sheet at the target instant and
                 fire Reserve against that render. Off by default; see
                 :meth:`_refresh_view` for why it is no longer the way in.
+            sweep_offsets_ms: Milliseconds past the window to ask for this slot
+                at, first to last, before any fallback is tried. Timed bookings
+                only. ``(0,)`` is one shot on the instant, which is what every
+                lost morning did. See :meth:`_reserve_until_accepted`.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -348,9 +376,13 @@ class DirectHttpBooker:
         self._fallback_times = tuple(
             dict.fromkeys(t for t in fallback_times if t != self._slot_time)
         )
+        # Sorted and deduplicated: the ladder is walked in order and each rung
+        # is slept to absolutely, so an unordered list would sleep backwards
+        # (returning instantly) and quietly collapse the sweep into a burst.
+        self._sweep_offsets_ms = tuple(sorted(dict.fromkeys(sweep_offsets_ms))) or (0,)
         logger.info(
             "DIRECT_HTTP: Reserve request staged - source=%s, slot=%s, %d body bytes, "
-            "viewState=%s, fallbacks=%s",
+            "viewState=%s, sweep=%s, fallbacks=%s",
             config.source,
             self._slot_time.strftime("%I:%M %p") if self._slot_time else "unreadable",
             len(self._reserve_body),
@@ -358,6 +390,7 @@ class DirectHttpBooker:
             # and all a post-mortem needs is whether the one that fired differs
             # from the one staged here.
             _view_state_fingerprint(self.session),
+            "+".join(str(offset) for offset in self._sweep_offsets_ms) + "ms",
             ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
         )
         if refresh_at_window:
@@ -561,18 +594,31 @@ class DirectHttpBooker:
             """Milliseconds since the first Reserve request went out."""
             return int((time_module.perf_counter() - start) * 1000)
 
-        response = self._reserve_with_fallbacks(config, body, target_timestamp_ms, result)
+        response = self._reserve_until_accepted(config, body, target_timestamp_ms, result)
         result.timing["reserveMs"] = elapsed_ms()
         if response is None:
             result.timing["blockedDetectedMs"] = elapsed_ms()
             return result
+
+        # The popup the club granted the slot alongside. It was already in the
+        # response that gave us the tee time, so it cannot be about anything the
+        # steps below do - only a *different* message from here on is news. This
+        # is the same staleness the countdown has, and without allowing for it
+        # the chain would refuse itself one step after winning.
+        stale_message = _find_blocked_message(response)
+        if stale_message is not None:
+            logger.info(
+                "DIRECT_HTTP: The granting response also carried %r; treating it as stale "
+                "for the rest of the chain",
+                stale_message,
+            )
 
         result.phase = PHASE_PLAYER_COUNT
         response = self._select_player_count(response, num_players)
         result.final_markup = response.markup
         result.timing["playerCountMs"] = elapsed_ms()
 
-        blocked_reason = _find_blocked_message(response)
+        blocked_reason = _find_new_blocked_message(response, stale_message)
         if blocked_reason is not None:
             result.blocked = True
             result.error = blocked_reason
@@ -584,7 +630,7 @@ class DirectHttpBooker:
             result.final_markup = response.markup
             result.timing["tbdGuestsMs"] = elapsed_ms()
 
-            blocked_reason = _find_blocked_message(response)
+            blocked_reason = _find_new_blocked_message(response, stale_message)
             if blocked_reason is not None:
                 result.blocked = True
                 result.error = blocked_reason
@@ -600,7 +646,7 @@ class DirectHttpBooker:
         # to COMPLETE. A booking the club turned down at Book Now was therefore
         # indistinguishable from one it accepted, because neither says anything
         # the phrase check recognizes.
-        blocked_reason = _find_blocked_message(response)
+        blocked_reason = _find_new_blocked_message(response, stale_message)
         if blocked_reason is not None:
             result.blocked = True
             result.error = blocked_reason
@@ -616,43 +662,59 @@ class DirectHttpBooker:
         result.timing["totalMs"] = elapsed_ms()
         return result
 
-    def _reserve_with_fallbacks(
+    def _reserve_until_accepted(
         self,
         config: AbConfig,
         body: bytes,
         target_timestamp_ms: int | None,
         result: DirectBookingResult,
     ) -> PartialResponse | None:
-        """Fire Reserve, and keep firing until one is accepted or the list runs out.
+        """Fire Reserve until the club grants a slot, or the budget runs out.
 
-        The club answers a Reserve on a slot another member is holding with
-        "This slot is blocked by another user" while still rendering that slot
-        as Available - a hold is not a booking, and the sheet only shows the
-        second. So the refusal is the only signal that a slot is gone, and one
-        Reserve per morning means one guess at which slot was not.
+        Two things the club does shape this loop, and both were read wrong for
+        five mornings.
 
-        The response to a refusal carries the whole re-rendered tee sheet, every
-        row's Reserve handler included, so walking to the next candidate costs a
-        parse rather than a round trip.
+        It refuses for about the first second past the window, and the refusal
+        it sends is "This slot is blocked by another user" whatever the reason.
+        On 2026-08-08 the *identical* request - same slot, same component id,
+        same ViewState - was refused at 0ms, refused at 812ms and accepted at
+        1291ms; on 08-12 the pattern repeated at 0/817/1239ms. No member's
+        behaviour changes in 479ms, and on both mornings every slot on the sheet
+        was still open an hour later. So an early refusal is not evidence that
+        the slot is taken, and treating it as such walked us off the tee time we
+        wanted onto a worse one for no reason.
+
+        Hence the ladder: while rungs remain, ask for the *same* slot again a
+        little further past the window. Only once the ladder is spent - by which
+        point a refusal plausibly is about the slot - does the fallback list come
+        into play. Each rung is also a measurement, recorded in
+        ``result.attempt_log``, so a morning spent losing still narrows where the
+        club's boundary actually sits.
 
         Returns:
-            The response that accepted a Reserve, or None with ``result``
-            describing the refusal that ended it.
+            The response granting a slot, or None with ``result`` describing the
+            refusal that ended it.
         """
         started = time_module.perf_counter()
         slot_time = self._slot_time
         remaining = list(self._fallback_times)
+        # Untimed bookings have no window to sweep around; the first rung is
+        # already spent by the precision wait in _run_chain.
+        rungs = list(self._sweep_offsets_ms[1:]) if target_timestamp_ms is not None else []
+        max_attempts = _RESERVE_MAX_ATTEMPTS + len(rungs)
         last_reason: str | None = None
+        attempt = 0
 
-        for attempt in range(1, _RESERVE_MAX_ATTEMPTS + 1):
+        while attempt < max_attempts:
+            attempt += 1
             result.timing["reserveAttempts"] = attempt
             if slot_time is not None:
                 result.attempted_times.append(slot_time)
 
             if target_timestamp_ms is not None and attempt == 1:
-                # First attempt only. Later ones are paced by the club's
-                # answers, not by the clock, and reporting each against the
-                # window would bury the number that says whether we were on time.
+                # First attempt only. Later ones are paced by the ladder, and
+                # reporting each against the window would bury the number that
+                # says whether we were on time.
                 result.timing["reserveSentAtMs"] = (
                     int(time_module.time() * 1000) - target_timestamp_ms
                 )
@@ -660,7 +722,7 @@ class DirectHttpBooker:
                 "DIRECT_HTTP: Firing Reserve %d/%d for %s - source=%s, viewState=%s, "
                 "%sms past the window",
                 attempt,
-                _RESERVE_MAX_ATTEMPTS,
+                max_attempts,
                 slot_time.strftime("%I:%M %p") if slot_time else "an unreadable slot",
                 config.source,
                 _view_state_fingerprint(self.session),
@@ -673,27 +735,40 @@ class DirectHttpBooker:
             # the socket we cannot tell "never sent" from "sent, response lost",
             # and a browser retry in the second case races our own reservation.
             result.phase = PHASE_RESERVE_SENT
+            view_state = _view_state_fingerprint(self.session)
             response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
             result.final_markup = response.markup
 
-            # One parse, two questions. At ~190ms for a 500KB sheet this is the
-            # largest single cost in the retry loop, and both the verdict and
-            # the next candidate's handler come out of the same tree.
+            # One parse, three questions now. At ~190ms for a 500KB sheet this
+            # is the largest single cost in the loop, and the verdict, the
+            # ledger row and the next candidate's handler all come out of it.
             document = parse_html(response.markup)
-            _log_countdown_observation(document, attempt)
-            reason = _find_blocked_message_in(document)
-            if reason is None:
+            observation = observe_reserve_response(
+                attempt=attempt,
+                slot_time=slot_time,
+                source=config.source,
+                view_state=view_state,
+                response=response,
+                document=document,
+                markup=response.markup,
+                target_timestamp_ms=target_timestamp_ms,
+            )
+            result.attempt_log.append(observation)
+            _log_reserve_observation(observation)
+
+            if observation.verdict != RESERVE_REFUSED:
                 result.booked_slot_time = slot_time
                 if attempt > 1:
                     logger.info(
-                        "DIRECT_HTTP: Reserve accepted for %s on attempt %d after %dms",
+                        "DIRECT_HTTP: Reserve accepted for %s on attempt %d after %dms " "(%s)",
                         slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
                         attempt,
                         int((time_module.perf_counter() - started) * 1000),
+                        observation.reason,
                     )
                 return response
 
-            last_reason = reason
+            last_reason = observation.reason
             spent_ms = (time_module.perf_counter() - started) * 1000
             if spent_ms >= _RESERVE_DEADLINE_MS:
                 logger.warning(
@@ -702,17 +777,47 @@ class DirectHttpBooker:
                 )
                 break
 
-            # Blocked: the slot is held. Nothing about asking again for it will
-            # change that, so the only move left is a different tee time.
+            rung_ms = _next_future_rung(rungs, target_timestamp_ms)
+            # The target is always set when a rung comes back - rungs are built
+            # only for a timed booking - but the sleep below is to an absolute
+            # instant, so it is stated rather than assumed.
+            if rung_ms is not None and target_timestamp_ms is not None:
+                # Same slot, a little later. Re-staged against the sheet the
+                # club just returned rather than the one staged pre-window, and
+                # re-serialized so the ViewState is the one it just handed back.
+                offset_ms = rung_ms
+                restaged = (
+                    _relocate_reserve_in(document, response.markup, slot_time)
+                    if slot_time is not None
+                    else None
+                )
+                if restaged is not None:
+                    config = restaged
+                body = self.session.build_body(config)
+                logger.info(
+                    "DIRECT_HTTP: Refused %sms past the window; asking again for %s at +%dms",
+                    observation.sent_ms_past_window
+                    if observation.sent_ms_past_window is not None
+                    else "?",
+                    slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                    offset_ms,
+                )
+                sleep_until(target_timestamp_ms + offset_ms - int(round(self._lead_ms)))
+                continue
+
+            # The ladder is spent. A refusal this far past the window is the
+            # kind the fallback list was built for.
             next_candidate = self._next_candidate(document, response.markup, remaining)
             if next_candidate is None:
-                logger.warning("DIRECT_HTTP: %s and no fallback tee time left to try", reason)
+                logger.warning(
+                    "DIRECT_HTTP: %s and no fallback tee time left to try", observation.reason
+                )
                 break
             config, slot_time = next_candidate
             body = self.session.build_body(config)
             logger.info(
                 "DIRECT_HTTP: %s; falling back to %s",
-                reason,
+                observation.reason,
                 slot_time.strftime("%I:%M %p"),
             )
 
@@ -722,7 +827,8 @@ class DirectHttpBooker:
             "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s",
             result.timing.get("reserveAttempts", 0),
             int((time_module.perf_counter() - started) * 1000),
-            ", ".join(t.strftime("%I:%M %p") for t in result.attempted_times) or "nothing",
+            ", ".join(t.strftime("%I:%M %p") for t in result.distinct_attempted_times())
+            or "nothing",
         )
         return None
 
@@ -1298,6 +1404,186 @@ def _is_message_container(node: Node) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# Reading what the club did with a Reserve
+# ---------------------------------------------------------------------------
+
+RESERVE_ACCEPTED = "accepted"
+RESERVE_REFUSED = "refused"
+RESERVE_UNKNOWN = "unknown"
+
+# The populated header of the booking form the club returns once it has given us
+# the slot: "Reservation at </label><label>04:53 PM". Populated is the point -
+# the tee sheet carries no such element at all, so a match is proof the view
+# advanced rather than re-rendered.
+_RESERVATION_FORM_RE = re.compile(
+    r"Reservation at</label>\s*<label[^>]*>\s*([^<]+?)\s*</label>", re.IGNORECASE
+)
+# Rows of the tee sheet itself. Present means the club handed the sheet back,
+# which is what a refusal looks like and what an acceptance never does.
+_SHEET_ROW_RE = re.compile(r"teeTimeSlots:(\d+):")
+_RESERVE_BUTTON_RE = re.compile(r"reserve_button")
+
+
+def _reservation_form_slot(markup: str) -> str | None:
+    """The tee time on the club's booking form, or None if it is not one.
+
+    This is the acceptance signal. It cannot be confused with a template: the
+    pre-window tee sheet contains no occurrence of the phrase, so the label only
+    exists once the club has moved the view onto a slot it granted.
+    """
+    match = _RESERVATION_FORM_RE.search(markup)
+    return match.group(1).strip() if match else None
+
+
+def classify_reserve_response(document: Node, markup: str) -> tuple[str, str]:
+    """Decide what the club did with a Reserve, from the shape of its answer.
+
+    Ordered deliberately, because the two signals co-occur and the wrong order
+    lost two mornings. The "This slot is blocked by another user" popup is
+    emitted as inert markup in *every* Reserve response - all five saved from
+    2026-08-06 through 08-12 carry it, including the two the club had accepted -
+    and nothing in the re-rendered markup says whether it was shown. Read alone
+    it is not a verdict, and reading it alone discarded a held tee time on both
+    08-08 and 08-12.
+
+    What does separate the five cleanly is which view came back:
+
+    * accepted - a populated booking form, no tee sheet at all (79KB, 0 slot
+      rows, 0 Reserve buttons, "Reservation at 04:53 PM")
+    * refused - the whole tee sheet re-rendered, 79-87 rows and 148-276 Reserve
+      buttons, and no booking form anywhere in it
+
+    Returns:
+        ``(verdict, reason)``; the reason is for logs and the ledger.
+    """
+    slot = _reservation_form_slot(markup)
+    if slot is not None:
+        return RESERVE_ACCEPTED, f"club returned its booking form for {slot}"
+
+    blocked = _find_blocked_message_in(document)
+    if blocked is not None:
+        return RESERVE_REFUSED, blocked
+
+    # Neither shape. Treated as progress rather than refusal, which is what this
+    # path did before any of it was classified: the next step looks for the
+    # element it needs and reports precisely what was missing if it is not there.
+    return RESERVE_UNKNOWN, "no booking form and no refusal in the response"
+
+
+@dataclass
+class ReserveObservation:
+    """One Reserve exchange, recorded whatever came back.
+
+    Until now only the *last* attempt's response was kept, and every post-mortem
+    that mattered turned on an earlier one. Two mornings were spent establishing
+    facts about attempt 3 while attempts 1 and 2 were unrecoverable.
+    """
+
+    attempt: int
+    slot_time: time | None
+    source: str
+    view_state: str
+    verdict: str
+    reason: str
+    # Timing, all relative to the booking window rather than to each other.
+    sent_ms_past_window: int | None = None
+    round_trip_ms: int | None = None
+    # The club's own clock when it answered, and where that sits relative to the
+    # window. Whole seconds, which is coarse but decisive for the open question:
+    # a boundary the club enforces looks different here from a clock we misread.
+    server_date_ms: int | None = None
+    server_ms_past_window: int | None = None
+    # Structure, the basis of the verdict.
+    response_bytes: int = 0
+    sheet_rows: int = 0
+    reserve_buttons: int = 0
+    reservation_form_slot: str | None = None
+    countdown_s: int | None = None
+    popup_present: bool = False
+    # The parts of the payload that were dropped before they could be read. The
+    # dialog is opened by script, so if anything distinguishes a shown popup
+    # from a re-rendered one, it is in here.
+    eval_text: str = ""
+    callback_args: str | None = None
+    # The unparsed payload. Held by reference to the string httpx already
+    # materialized, so keeping it costs no copy on the critical path, and it is
+    # the only way a future morning can be re-read for a signal nobody has
+    # thought of yet. Excluded from as_row(); it is stored as its own object.
+    raw_xml: str = ""
+
+    def as_row(self) -> dict[str, Any]:
+        """Flatten for the JSONL ledger."""
+        return {
+            "attempt": self.attempt,
+            "slot": self.slot_time.strftime("%I:%M %p") if self.slot_time else None,
+            "source": self.source,
+            "viewState": self.view_state,
+            "verdict": self.verdict,
+            "reason": self.reason,
+            "sentMsPastWindow": self.sent_ms_past_window,
+            "roundTripMs": self.round_trip_ms,
+            "serverDateMs": self.server_date_ms,
+            "serverMsPastWindow": self.server_ms_past_window,
+            "responseBytes": self.response_bytes,
+            "sheetRows": self.sheet_rows,
+            "reserveButtons": self.reserve_buttons,
+            "reservationFormSlot": self.reservation_form_slot,
+            "countdownS": self.countdown_s,
+            "popupPresent": self.popup_present,
+            "evalText": self.eval_text[:2000],
+            "callbackArgs": self.callback_args,
+        }
+
+
+def observe_reserve_response(
+    *,
+    attempt: int,
+    slot_time: time | None,
+    source: str,
+    view_state: str,
+    response: PartialResponse,
+    document: Node,
+    markup: str,
+    target_timestamp_ms: int | None,
+) -> ReserveObservation:
+    """Build the ledger row for one Reserve exchange."""
+    verdict, reason = classify_reserve_response(document, markup)
+
+    sent_past = received_past = None
+    if target_timestamp_ms is not None:
+        if response.sent_at_ms is not None:
+            sent_past = response.sent_at_ms - target_timestamp_ms
+        if response.server_date_ms is not None:
+            received_past = response.server_date_ms - target_timestamp_ms
+
+    round_trip = None
+    if response.sent_at_ms is not None and response.received_at_ms is not None:
+        round_trip = response.received_at_ms - response.sent_at_ms
+
+    return ReserveObservation(
+        attempt=attempt,
+        slot_time=slot_time,
+        source=source,
+        view_state=view_state,
+        verdict=verdict,
+        reason=reason,
+        sent_ms_past_window=sent_past,
+        round_trip_ms=round_trip,
+        server_date_ms=response.server_date_ms,
+        server_ms_past_window=received_past,
+        response_bytes=len(markup),
+        sheet_rows=len(set(_SHEET_ROW_RE.findall(markup))),
+        reserve_buttons=len(_RESERVE_BUTTON_RE.findall(markup)),
+        reservation_form_slot=_reservation_form_slot(markup),
+        countdown_s=_countdown_in(document),
+        popup_present=_find_blocked_message_in(document) is not None,
+        eval_text=response.eval_text,
+        callback_args=response.callback_args,
+        raw_xml=response.raw_xml,
+    )
+
+
 def _find_blocked_message(response: PartialResponse) -> str | None:
     """Detect the 'slot blocked by another user' validation popup.
 
@@ -1311,6 +1597,92 @@ def _find_blocked_message(response: PartialResponse) -> str | None:
     indication.
     """
     return _find_blocked_message_in(parse_html(response.markup))
+
+
+def _next_future_rung(rungs: list[int], target_timestamp_ms: int | None) -> int | None:
+    """Pop the next ladder rung still ahead of us, discarding any already past.
+
+    Every booking in a batch carries the same target timestamp - deliberately,
+    so the batch's 6:30 gate does not depend on booking 1 reaching its wait - and
+    the precision wait no-ops on a target already gone. For the second and later
+    bookings that means the entire ladder is in the past, and every rung's sleep
+    would return instantly. The sweep would then fire its whole ladder as fast as
+    the socket allows: a burst of identical Reserves, which is the opposite of
+    what spacing them out is for.
+
+    A rung only means something while the instant it names is still ahead. Once
+    the window is minutes old there is no boundary left to find, a refusal is
+    much more likely to be a slot genuinely held, and the fallback list is the
+    right next move.
+
+    Consumes ``rungs`` as it goes. Returns None when none are left in the future.
+    """
+    if target_timestamp_ms is None:
+        return None
+    now_ms = int(time_module.time() * 1000)
+    while rungs:
+        rung = rungs.pop(0)
+        if target_timestamp_ms + rung > now_ms:
+            return rung
+    return None
+
+
+def _find_new_blocked_message(response: PartialResponse, stale: str | None) -> str | None:
+    """A refusal in ``response``, unless the club was already saying it.
+
+    The validation popup is view-scoped: once a message is set it re-renders
+    into every later response for the same view, which is why a Reserve the club
+    accepted still came back carrying "This slot is blocked by another user".
+    A message that was already present before a step ran cannot be that step's
+    answer, so only a changed one counts.
+    """
+    found = _find_blocked_message(response)
+    if found is None or found == stale:
+        return None
+    return found
+
+
+def _log_reserve_observation(observation: ReserveObservation) -> None:
+    """Log one Reserve exchange as a single, greppable line.
+
+    Everything a post-mortem has had to reconstruct from artifacts is on this
+    line: when it was sent relative to the window, what the club's own clock
+    said, which view came back, and the verdict that view produced.
+    """
+    logger.info(
+        "DIRECT_HTTP: Reserve %d -> %s (%s) - sent %sms past the window, club clock %sms "
+        "past, round trip %sms, %d bytes, %d sheet row(s), %d Reserve button(s), "
+        "form=%s, countdown=%s, popup=%s",
+        observation.attempt,
+        observation.verdict,
+        observation.reason,
+        observation.sent_ms_past_window if observation.sent_ms_past_window is not None else "n/a",
+        observation.server_ms_past_window
+        if observation.server_ms_past_window is not None
+        else "unreadable",
+        observation.round_trip_ms if observation.round_trip_ms is not None else "n/a",
+        observation.response_bytes,
+        observation.sheet_rows,
+        observation.reserve_buttons,
+        observation.reservation_form_slot or "none",
+        observation.countdown_s if observation.countdown_s is not None else "none",
+        observation.popup_present,
+    )
+    # The dialog is opened by script, not by markup, so whatever separates a
+    # shown popup from a re-rendered one lives here. Logged in full the first
+    # time it is ever captured, because no saved morning contains it.
+    if observation.eval_text:
+        logger.info(
+            "DIRECT_HTTP: Reserve %d server script: %r",
+            observation.attempt,
+            observation.eval_text[:1000],
+        )
+    if observation.callback_args:
+        logger.info(
+            "DIRECT_HTTP: Reserve %d callback args: %r",
+            observation.attempt,
+            observation.callback_args[:500],
+        )
 
 
 def _log_countdown_observation(document: Node, attempt: int) -> None:
@@ -1343,10 +1715,17 @@ def _log_countdown_observation(document: Node, attempt: int) -> None:
 
 
 def _find_blocked_message_in(document: Node) -> str | None:
-    """The blocked-popup check, against a sheet already parsed.
+    """The blocked-popup text, against a sheet already parsed.
 
     Split out so the retry loop can ask this and :func:`_countdown_in` of one
     parse: the sheet is ~500KB and the parse is the loop's largest single cost.
+
+    Not a verdict on its own. The ``aria-hidden`` test below can never exclude
+    anything on this path - the club serves the popup with ``ui-hidden-container``
+    and no ``aria-hidden`` at all, and it is PrimeFaces' client-side script, which
+    no browser here runs, that would set it. So this returns the message whenever
+    the club rendered one, shown or not. Use :func:`classify_reserve_response`
+    for a Reserve, and :func:`_find_new_blocked_message` for later steps.
     """
     for node in document.descendants():
         if "teesheetvalidationerrorpopup" not in node.id.lower():

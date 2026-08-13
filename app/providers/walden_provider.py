@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import json
 import logging
 import os
 import re
@@ -41,6 +42,8 @@ from app.providers.walden_http import PrimeFacesSession, visible_text
 from app.providers.walden_http_booker import (
     DIRECT_HTTP_PATH,
     PRE_SUBMIT_PHASES,
+    RESERVE_ACCEPTED,
+    RESERVE_REFUSED,
     DirectHttpBooker,
     container_message_text,
 )
@@ -55,6 +58,11 @@ TRANSIENT_EXCEPTIONS = (
     ElementClickInterceptedException,
     TimeoutException,
 )
+
+# Raw partial-responses stored per race, out of up to a full sweep's worth. Each
+# refusal is a whole tee sheet at 500-680KB and consecutive ones are the same
+# sheet, so the ends are what get read. Ledger rows are kept for every attempt.
+_RACE_LEDGER_MAX_PAYLOADS = 4
 
 
 def with_retry(
@@ -3136,8 +3144,15 @@ class WaldenGolfProvider(ReservationProvider):
                     held_time.strftime("%I:%M %p"),
                     booked_time.strftime("%I:%M %p"),
                     len(chain_result.get("attemptedTimes", [])) - 1,
+                    # Distinct, because a sweep asks for the same tee time on
+                    # several rungs and listing it once per attempt reads as
+                    # several slots refused when it was one slot asked twice.
+                    # The count above stays per-attempt: that is the refusals.
                     ", ".join(
-                        t.strftime("%I:%M %p") for t in chain_result.get("attemptedTimes", [])
+                        t.strftime("%I:%M %p")
+                        for t in chain_result.get(
+                            "distinctAttemptedTimes", chain_result.get("attemptedTimes", [])
+                        )
                     ),
                 )
                 booked_time = held_time
@@ -4124,6 +4139,14 @@ class WaldenGolfProvider(ReservationProvider):
                 refresh_at_window=(
                     settings.walden_refresh_view_at_window and execute_at_timestamp_ms is not None
                 ),
+                # The race only. An ad-hoc booking has no window to sweep around
+                # - it fires into one that opened days ago - and a ladder there
+                # would be nine requests for a slot the first one can have.
+                sweep_offsets_ms=(
+                    settings.walden_sweep_offsets_ms()
+                    if execute_at_timestamp_ms is not None
+                    else (0,)
+                ),
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
@@ -4156,6 +4179,12 @@ class WaldenGolfProvider(ReservationProvider):
             }
         finally:
             session.close()
+
+        # Before the summary line and outside the failure branches: the ledger is
+        # the record of what the club did, and a morning that *won* is exactly
+        # as informative about where the boundary sits as one that lost.
+        if settings.walden_capture_race_ledger and execute_at_timestamp_ms is not None:
+            self._capture_race_ledger(result, execute_at_timestamp_ms)
 
         # The one line a post-mortem starts from, so everything that decides a
         # morning has to be readable in it without going back through the run.
@@ -5418,6 +5447,127 @@ class WaldenGolfProvider(ReservationProvider):
             )
         except Exception as exc:  # noqa: BLE001 - diagnostics must not fail a booking
             logger.warning("BOOKING_DEBUG: Failed to upload the pre-window tee sheet: %s", exc)
+
+    def _ledger_payloads_worth_storing(self, attempts: list[Any]) -> list[Any]:
+        """The attempts whose raw payload earns its upload.
+
+        Every refusal carries the whole re-rendered tee sheet - 500-680KB in the
+        saved mornings - and a full ladder would be several megabytes uploaded
+        one object at a time, each paying its own token refresh, while the next
+        booking in the batch waits on it.
+
+        Storing all of them buys little, because consecutive refusals are the
+        same sheet. What a post-mortem actually reads is the shape of the two
+        ends: the first refusal, the last one before the club changed its mind,
+        and whatever ended the loop. Every attempt still gets a ledger row -
+        those are small, and they carry the timings and the scripts.
+        """
+        if len(attempts) <= _RACE_LEDGER_MAX_PAYLOADS:
+            return list(attempts)
+
+        refusals = [o for o in attempts if o.verdict == RESERVE_REFUSED]
+        # dict.fromkeys over attempt numbers: the ends can coincide, and the
+        # order of the ledger must be preserved for the reader.
+        wanted = {attempts[0].attempt, attempts[-1].attempt}
+        if refusals:
+            wanted.add(refusals[0].attempt)
+            wanted.add(refusals[-1].attempt)
+        chosen = [o for o in attempts if o.attempt in wanted][:_RACE_LEDGER_MAX_PAYLOADS]
+        logger.info(
+            "RACE_LEDGER: storing %d of %d raw payload(s) - attempts %s; "
+            "the rest are repeats of the same sheet",
+            len(chosen),
+            len(attempts),
+            ", ".join(str(o.attempt) for o in chosen),
+        )
+        return chosen
+
+    def _capture_race_ledger(self, result: Any, target_timestamp_ms: int) -> None:
+        """Store every Reserve exchange of a timed run, refused ones included.
+
+        Five mornings were diagnosed from the *last* response alone, because it
+        was the only one kept. Twice the answer was in an earlier one: the club
+        had granted a slot on attempt 3 and the run reported itself blocked. The
+        ledger removes that blind spot - one JSONL row per attempt, plus each
+        attempt's unparsed partial-response, which carries the <eval> scripts and
+        callback parameters the parser discards and no saved morning contains.
+
+        Never raises: this is a record of a booking, not part of making one.
+        """
+        attempts = getattr(result, "attempt_log", None)
+        if not attempts:
+            return
+
+        bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        summary = " | ".join(
+            f"#{o.attempt} {o.slot_time.strftime('%I:%M %p') if o.slot_time else '?'} "
+            f"@{o.sent_ms_past_window if o.sent_ms_past_window is not None else '?'}ms "
+            f"-> {o.verdict}"
+            for o in attempts
+        )
+        logger.info("RACE_LEDGER: %d attempt(s) - %s", len(attempts), summary)
+
+        # The boundary, stated outright, so it is in the log even if the bucket
+        # write fails. This is the number the sweep exists to produce.
+        refused = [o for o in attempts if o.verdict == RESERVE_REFUSED]
+        granted = next((o for o in attempts if o.verdict == RESERVE_ACCEPTED), None)
+        if granted is not None and granted.sent_ms_past_window is not None:
+            last_refused = max(
+                (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
+                default=None,
+            )
+            logger.info(
+                "RACE_LEDGER: club granted %s at +%dms past the window%s",
+                granted.slot_time.strftime("%I:%M %p") if granted.slot_time else "a slot",
+                granted.sent_ms_past_window,
+                f"; last refusal was +{last_refused}ms" if last_refused is not None else "",
+            )
+        elif refused:
+            logger.warning(
+                "RACE_LEDGER: every attempt refused, out to +%sms past the window",
+                max(
+                    (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
+                    default="?",
+                ),
+            )
+
+        if not bucket_name:
+            return
+
+        try:
+            rows = []
+            for observation in attempts:
+                row = observation.as_row()
+                row["targetTimestampMs"] = target_timestamp_ms
+                rows.append(json.dumps(row, default=str))
+            uri = self._upload_bytes_to_gcs(
+                bucket_name=bucket_name,
+                object_name=f"walden/race/{run_id}/ledger.jsonl",
+                content_type="application/x-ndjson; charset=utf-8",
+                data=("\n".join(rows) + "\n").encode("utf-8", errors="replace"),
+            )
+            logger.info("RACE_LEDGER: wrote %d row(s) to %s", len(rows), uri)
+        except Exception as e:  # noqa: BLE001 - diagnostics must not fail a booking
+            logger.warning(f"RACE_LEDGER: failed to write ledger rows: {e}")
+
+        for observation in self._ledger_payloads_worth_storing(attempts):
+            if not observation.raw_xml:
+                continue
+            try:
+                self._upload_bytes_to_gcs(
+                    bucket_name=bucket_name,
+                    object_name=(
+                        f"walden/race/{run_id}/attempt_{observation.attempt:02d}"
+                        f"_{observation.verdict}.xml"
+                    ),
+                    content_type="application/xml; charset=utf-8",
+                    data=observation.raw_xml.encode("utf-8", errors="replace"),
+                )
+            except Exception as e:  # noqa: BLE001 - see above
+                logger.warning(
+                    f"RACE_LEDGER: failed to store attempt {observation.attempt} payload: {e}"
+                )
 
     def _capture_response_artifact(self, context: str, markup: str) -> None:
         """Record a direct-HTTP response body for diagnosis.
