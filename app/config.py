@@ -146,8 +146,22 @@ class Settings(BaseSettings):
     # rung spacing whether or not it wins. Once the boundary is known this
     # collapses to a single well-chosen offset.
     #
+    # Spacing is bounded by how fast the club answers, not by what is written
+    # here. Rungs are slept to as absolute instants, so any rung whose moment has
+    # already passed when the previous response lands is skipped - and a Reserve
+    # round trip has measured 593ms and 647ms on the two lost mornings and 828ms
+    # on an uncontested ad-hoc booking. The previous 150/300/500/750 rungs
+    # therefore never once fired: attempt 1's answer arrived at ~860ms, past all
+    # four. A ladder written at that spacing reads like nine attempts and
+    # delivers three.
+    #
+    # These are spaced to survive a ~700ms round trip while still bracketing the
+    # known boundary: 900 sits just past the last observed refusal (817ms), 1300
+    # just past the earliest observed grant (1239ms), and the rest walk out well
+    # beyond it in case the boundary moves.
+    #
     # "0" restores the historical one-shot behaviour.
-    walden_reserve_sweep_offsets_ms: str = "0,150,300,500,750,1000,1250,1500,1750"
+    walden_reserve_sweep_offsets_ms: str = "0,900,1300,2000,3000,4500"
 
     # Write the per-attempt race ledger to the debug artifacts bucket.
     #

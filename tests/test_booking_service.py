@@ -333,7 +333,13 @@ class TestBookingServiceImmediateExecution:
     async def test_create_booking_executes_immediately_when_past(
         self, booking_service: BookingService
     ) -> None:
-        """Test that booking is executed immediately when execution time is in the past."""
+        """An open window books now, as a batch of one so it takes the timed path.
+
+        The batch entry point is the only one that accepts an ``execute_at``, and
+        every race behaviour is gated on it. Routed through the single-booking
+        path this booked untimed no matter what walden_adhoc_execute_delay_s
+        said, which is what the 2026-08-14 ad-hoc booking did.
+        """
         import pytz
 
         # Request for Dec 29, 2025 at 8:00 AM CT
@@ -374,18 +380,34 @@ class TestBookingServiceImmediateExecution:
 
             mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
 
-            mock_provider = MagicMock()
-            mock_provider.book_tee_time = AsyncMock(
-                return_value=BookingResult(
-                    success=True,
-                    booked_time=time(8, 0),
-                    confirmation_number="CONF123",
+            from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+            async def book_multiple(
+                target_date: date, requests: list, execute_at: datetime | None = None
+            ) -> BatchBookingResult:
+                return BatchBookingResult(
+                    results=[
+                        BatchBookingItemResult(
+                            booking_id=item.booking_id,
+                            result=BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF123",
+                            ),
+                        )
+                        for item in requests
+                    ],
+                    total_succeeded=len(requests),
                 )
-            )
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock()
+            mock_provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
             booking_service.set_reservation_provider(mock_provider)
 
             with patch("app.services.booking_service.sms_service") as mock_sms:
                 mock_sms.send_booking_confirmation = AsyncMock()
+                mock_sms.send_booking_failure = AsyncMock()
 
                 with patch.object(CTDateTime, "now") as mock_ct_now:
                     tz = pytz.timezone("America/Chicago")
@@ -401,7 +423,11 @@ class TestBookingServiceImmediateExecution:
                     assert result.status == BookingStatus.IN_PROGRESS
                     await booking_service.wait_for_background_bookings()
 
-            mock_provider.book_tee_time.assert_called_once()
+            # The batch path, not the single one - and carrying an execute_at,
+            # which is what switches the race behaviours on.
+            mock_provider.book_multiple_tee_times.assert_awaited_once()
+            assert mock_provider.book_tee_time.await_count == 0
+            assert mock_provider.book_multiple_tee_times.await_args.kwargs["execute_at"] is not None
 
     @pytest.mark.asyncio
     async def test_create_booking_schedules_when_future(
@@ -479,18 +505,34 @@ class TestBookingServiceImmediateExecution:
 
             mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
 
-            mock_provider = MagicMock()
-            mock_provider.book_tee_time = AsyncMock(
-                return_value=BookingResult(
-                    success=True,
-                    booked_time=time(8, 0),
-                    confirmation_number="CONF123",
+            from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+            async def book_multiple(
+                target_date: date, requests: list, execute_at: datetime | None = None
+            ) -> BatchBookingResult:
+                return BatchBookingResult(
+                    results=[
+                        BatchBookingItemResult(
+                            booking_id=item.booking_id,
+                            result=BookingResult(
+                                success=True,
+                                booked_time=time(8, 0),
+                                confirmation_number="CONF123",
+                            ),
+                        )
+                        for item in requests
+                    ],
+                    total_succeeded=len(requests),
                 )
-            )
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock()
+            mock_provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
             booking_service.set_reservation_provider(mock_provider)
 
             with patch("app.services.booking_service.sms_service") as mock_sms:
                 mock_sms.send_booking_confirmation = AsyncMock()
+                mock_sms.send_booking_failure = AsyncMock()
 
                 with patch.object(CTDateTime, "now") as mock_ct_now:
                     tz = pytz.timezone("America/Chicago")
@@ -502,7 +544,8 @@ class TestBookingServiceImmediateExecution:
                     assert result.status == BookingStatus.IN_PROGRESS
                     await booking_service.wait_for_background_bookings()
 
-            mock_provider.book_tee_time.assert_called_once()
+            mock_provider.book_multiple_tee_times.assert_awaited_once()
+            assert mock_provider.book_tee_time.await_count == 0
 
 
 class TestBookingServiceConfirmIntentImmediateExecution:
@@ -2805,9 +2848,22 @@ class TestImmediateBookingDoesNotBlockReply:
         )
         release = asyncio.Event()
 
-        async def slow_booking(**_kwargs: object) -> BookingResult:
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        async def slow_booking(
+            target_date: date, requests: list, execute_at: datetime | None = None
+        ) -> BatchBookingResult:
             await release.wait()
-            return BookingResult(success=True, booked_time=time(8, 0))
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=item.booking_id,
+                        result=BookingResult(success=True, booked_time=time(8, 0)),
+                    )
+                    for item in requests
+                ],
+                total_succeeded=len(requests),
+            )
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
@@ -2822,11 +2878,13 @@ class TestImmediateBookingDoesNotBlockReply:
             )
 
             mock_provider = MagicMock()
-            mock_provider.book_tee_time = AsyncMock(side_effect=slow_booking)
+            mock_provider.book_tee_time = AsyncMock()
+            mock_provider.book_multiple_tee_times = AsyncMock(side_effect=slow_booking)
             booking_service.set_reservation_provider(mock_provider)
 
             with patch("app.services.booking_service.sms_service") as mock_sms:
                 mock_sms.send_booking_confirmation = AsyncMock()
+                mock_sms.send_booking_failure = AsyncMock()
 
                 with patch.object(CTDateTime, "now") as mock_ct_now:
                     tz = pytz.timezone("America/Chicago")

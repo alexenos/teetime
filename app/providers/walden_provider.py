@@ -44,6 +44,7 @@ from app.providers.walden_http_booker import (
     PRE_SUBMIT_PHASES,
     RESERVE_ACCEPTED,
     RESERVE_REFUSED,
+    RESERVE_TIMEDOUT,
     DirectHttpBooker,
     container_message_text,
 )
@@ -5524,12 +5525,43 @@ class WaldenGolfProvider(ReservationProvider):
                 f"; last refusal was +{last_refused}ms" if last_refused is not None else "",
             )
         elif refused:
+            # Timeouts are counted separately rather than folded in. An attempt
+            # that never answered is not a refusal, so "every attempt refused"
+            # would be false whenever one is present - and this line is what a
+            # post-mortem reads first to decide whether the club's boundary was
+            # actually probed out to the offsets the ladder reached.
+            timed_out = [o for o in attempts if o.verdict == RESERVE_TIMEDOUT]
+            furthest = max(
+                (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
+                default="?",
+            )
+            if timed_out:
+                logger.warning(
+                    "RACE_LEDGER: no attempt was granted - %d refused (out to +%sms past the "
+                    "window), %d never answered",
+                    len(refused),
+                    furthest,
+                    len(timed_out),
+                )
+            else:
+                logger.warning(
+                    "RACE_LEDGER: every attempt refused, out to +%sms past the window",
+                    furthest,
+                )
+        elif attempts:
+            # Nothing granted and nothing refused, so every attempt either never
+            # answered or came back unclassifiable. Those are opposite facts -
+            # RESERVE_UNKNOWN means the club *did* reply and the parser could not
+            # read it - and reporting them as one would send a post-mortem
+            # looking for a network fault that never happened.
+            never_answered = [o for o in attempts if o.verdict == RESERVE_TIMEDOUT]
+            unreadable = len(attempts) - len(never_answered)
             logger.warning(
-                "RACE_LEDGER: every attempt refused, out to +%sms past the window",
-                max(
-                    (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
-                    default="?",
-                ),
+                "RACE_LEDGER: no attempt was granted or refused - %d Reserve(s) sent, "
+                "%d never answered, %d answered unreadably",
+                len(attempts),
+                len(never_answered),
+                unreadable,
             )
 
         if not bucket_name:
