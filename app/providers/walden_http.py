@@ -214,6 +214,27 @@ class DirectHttpTimeoutError(DirectHttpError):
 
     On 2026-08-13 and 08-14 this ended the race two rungs short of the offset
     that had been granted on the two mornings before them.
+
+    Read and write timeouts only. See :class:`DirectHttpConnectionError` for the
+    ones that are *not* uncertain.
+    """
+
+
+class DirectHttpConnectionError(DirectHttpError):
+    """No connection was ever established, so nothing reached the club.
+
+    The distinction from :class:`DirectHttpTimeoutError` is the whole point.
+    ``httpx.TimeoutException`` covers ConnectTimeout and PoolTimeout as well as
+    ReadTimeout and WriteTimeout, but the first two fire *before* any byte is
+    written: one could not open the socket, the other could not take a
+    connection from the pool. ConnectError is the same case without the clock
+    running out.
+
+    Folding those into the uncertain bucket would be doubly costly. The caller
+    would close its fallback list against a hold that cannot exist, and it would
+    leave the phase past PRE_SUBMIT_PHASES - which is what tells the provider a
+    Selenium retry is unsafe. A 6:30 that cannot open a socket can still be won
+    by the browser chain, and this keeps that door open.
     """
 
 
@@ -1014,9 +1035,16 @@ class PrimeFacesSession:
                 http_response = self._client.post(
                     self.form_state.action_url, content=payload, timeout=timeout_s
                 )
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
+            # Before the TimeoutException case: the first two are subclasses of
+            # it, and this ordering is the only thing separating "never sent"
+            # from "sent, outcome unknown".
+            raise DirectHttpConnectionError(
+                f"POST for {config.source} never connected: {exc}"
+            ) from exc
         except httpx.TimeoutException as exc:
-            # Checked before the general case below - TimeoutException is an
-            # HTTPError, so the order here is what makes the distinction exist.
+            # Read and write timeouts. Checked before the general case below -
+            # TimeoutException is an HTTPError, so the order makes it reachable.
             raise DirectHttpTimeoutError(f"POST for {config.source} timed out: {exc}") from exc
         except httpx.HTTPError as exc:
             raise DirectHttpError(f"POST for {config.source} failed: {exc}") from exc

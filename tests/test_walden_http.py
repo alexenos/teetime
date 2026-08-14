@@ -32,6 +32,7 @@ from app.providers.walden_http import (
 from app.providers.walden_http_booker import (
     PHASE_BOOK_NOW,
     PHASE_RESERVE_SENT,
+    PHASE_RESERVE_STAGED,
     PHASE_VIEW_REFRESH,
     PRE_SUBMIT_PHASES,
     DirectHttpBooker,
@@ -965,11 +966,20 @@ class TestDirectHttpBooker:
         assert result.error is not None and "Book Now" in result.error
 
     def test_transport_failure_is_reported_not_raised(self) -> None:
-        """A dropped connection becomes a result, not an exception."""
+        """A connection that never opened becomes a result, not an exception.
+
+        The phase is pre-submit on purpose. httpx raises ConnectError only from
+        establishing the connection, so no byte of the Reserve was written and a
+        Selenium retry cannot race a booking that does not exist. This used to
+        assert PHASE_RESERVE_SENT, which was safe but pessimistic: past
+        PRE_SUBMIT_PHASES the provider reports the failure instead of retrying,
+        so a 6:30 that could not open a socket was given up on rather than
+        handed to the browser chain that could still have won it.
+        """
 
         def handler(request: httpx.Request) -> httpx.Response:
             """Mock transport handler for one test case."""
-            raise httpx.ConnectError("connection reset")
+            raise httpx.ConnectError("connection refused")
 
         session = make_session(FormState.from_html(TEE_SHEET), handler)
         booker = DirectHttpBooker(session)
@@ -978,8 +988,9 @@ class TestDirectHttpBooker:
         result = booker.book(4)
 
         assert not result.success
-        assert result.phase == PHASE_RESERVE_SENT
-        assert result.error is not None and "connection reset" in result.error
+        assert result.phase == PHASE_RESERVE_STAGED
+        assert result.phase in PRE_SUBMIT_PHASES
+        assert result.error is not None and "connection refused" in result.error
 
     def test_book_without_prepare_is_rejected(self) -> None:
         """Misuse is a pre-submit result, so the caller falls back rather than
@@ -1799,15 +1810,35 @@ class StallingRecorder(ChainRecorder):
     to the socket and the club returns nothing before the budget runs out.
     """
 
-    def __init__(self, pages: list[str], stall_on: set[int]) -> None:
-        """``stall_on`` holds 1-based attempt numbers that time out."""
+    def __init__(
+        self,
+        pages: list[str],
+        stall_on: set[int],
+        *,
+        stall_delay_s: float = 0.0,
+        error: type[httpx.HTTPError] = httpx.ReadTimeout,
+    ) -> None:
+        """``stall_on`` holds 1-based attempt numbers that fail.
+
+        ``stall_delay_s`` burns real time before failing. A stall that raises
+        instantly leaves the ladder's later rungs still in the future, where
+        _next_future_rung would hand one back and a test could not tell the
+        rung-schedule fix from a plain catch-and-continue. ``error`` selects
+        which httpx failure to raise, since the four timeout subclasses do not
+        all mean the same thing.
+        """
         super().__init__(pages)
         self.stall_on = stall_on
+        self.stall_delay_s = stall_delay_s
+        self.error = error
         # Answered requests only. The canned pages are the *replies* the club
         # makes, so a request it never answers must not consume one - indexing
         # on every request instead would silently hand the next attempt the page
         # meant for this one.
         self.answered = 0
+        # Milliseconds past the window each request left at, so a test can show
+        # a rung's instant had already gone by when its retry fired.
+        self.sent_at_ms: list[int] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         """Answer as usual, unless this attempt is one of the stalled ones."""
@@ -1816,8 +1847,11 @@ class StallingRecorder(ChainRecorder):
         # which is the entire reason it cannot be treated as a no-op.
         self.requests.append(params)
         self.sources.append(params.get("javax.faces.source", ""))
+        self.sent_at_ms.append(int(time_module.time() * 1000))
         if len(self.sources) in self.stall_on:
-            raise httpx.ReadTimeout("The read operation timed out", request=request)
+            if self.stall_delay_s:
+                time_module.sleep(self.stall_delay_s)
+            raise self.error("stalled by the test", request=request)
         page = self.pages[min(self.answered, len(self.pages) - 1)]
         self.answered += 1
         return httpx.Response(200, text=partial_response(page, f"vs-{len(self.sources)}"))
@@ -1888,17 +1922,74 @@ class TestReserveTimeoutKeepsTheLadderWalking:
     def test_consecutive_stalls_still_reach_a_later_rung(self) -> None:
         """The stall itself carries us past the remaining rungs' instants.
 
-        _next_future_rung would discard every one of them and end the run, which
-        is the bug this whole class exists for. After a stall the ladder's length
-        is the budget; its schedule is moot.
+        This is the case a plain catch-and-continue does not survive. A real
+        stall costs seconds, so by the time it raises every remaining rung is in
+        the past, _next_future_rung discards all of them and the run ends with
+        the ladder unwalked - which is exactly what 08-13 and 08-14 did. After a
+        stall the ladder's length is still a budget; only its schedule is moot.
+
+        The rungs are tight and the stall deliberately slower than all of them,
+        so the retries provably fire after both instants have gone by rather
+        than merely happening to be next in the list.
         """
-        recorder = StallingRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1, 2})
-        result = sweep_booker(recorder, 0, 300, 600).book(
-            1, target_timestamp_ms=window_about_to_open()
+        target = window_about_to_open()
+        recorder = StallingRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1, 2}, stall_delay_s=0.15
         )
+        result = sweep_booker(recorder, 0, 60, 120).book(1, target_timestamp_ms=target)
 
         assert result.success, result.error
         assert recorder.sources[:3] == [RESERVE_ID, RESERVE_ID, RESERVE_ID]
+        # Both retries left after the last rung's instant, so neither could have
+        # come from _next_future_rung - it would have returned None for both.
+        assert recorder.sent_at_ms[1] - target > 120
+        assert recorder.sent_at_ms[2] - target > 120
+
+    def test_a_reserve_that_never_connected_stays_pre_submit(self) -> None:
+        """ConnectTimeout is not uncertainty - nothing was ever written.
+
+        httpx.TimeoutException covers ConnectTimeout and PoolTimeout as well as
+        ReadTimeout, but those two fire before any byte reaches the socket.
+        Treating them as post-send would close the fallback list against a hold
+        that cannot exist and, worse, leave the phase past PRE_SUBMIT_PHASES -
+        which is what tells the provider a Selenium retry would race our own
+        booking. A 6:30 that cannot open a socket can still be won by the
+        browser chain.
+        """
+        recorder = StallingRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE],
+            stall_on={1},
+            error=httpx.ConnectTimeout,
+        )
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert result.phase == PHASE_RESERVE_STAGED
+        assert result.phase in PRE_SUBMIT_PHASES
+        # Not swept and not blocked: there is no hold to protect, so the run is
+        # simply handed back for the browser chain to retry.
+        assert recorder.sources == [RESERVE_ID]
+        assert not result.blocked
+
+    def test_a_pool_timeout_is_also_pre_submit(self) -> None:
+        """The other half of the never-sent pair, for the same reason."""
+        recorder = StallingRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1}, error=httpx.PoolTimeout
+        )
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert result.phase in PRE_SUBMIT_PHASES
+
+    def test_a_write_timeout_is_treated_as_uncertain(self) -> None:
+        """A partly-written request may still have landed, so it sweeps on."""
+        recorder = StallingRecorder(
+            [PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1}, error=httpx.WriteTimeout
+        )
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
 
 
 class TestStagingTheLadder:

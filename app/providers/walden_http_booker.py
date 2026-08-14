@@ -55,6 +55,7 @@ from typing import Any
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import (
     AbConfig,
+    DirectHttpConnectionError,
     DirectHttpError,
     DirectHttpTimeoutError,
     Node,
@@ -781,6 +782,15 @@ class DirectHttpBooker:
             )
             try:
                 response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+            except DirectHttpConnectionError:
+                # The phase was advanced before the call because a request on the
+                # socket cannot be told from one that was answered and lost. This
+                # is the one case where it can: no connection was established, so
+                # nothing was submitted. Rolling the phase back is what keeps the
+                # browser chain available - past PRE_SUBMIT_PHASES the provider
+                # treats a retry as racing our own booking and reports instead.
+                result.phase = PHASE_RESERVE_STAGED
+                raise
             except DirectHttpTimeoutError as exc:
                 timed_out = True
                 last_reason = str(exc)

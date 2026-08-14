@@ -5525,18 +5525,29 @@ class WaldenGolfProvider(ReservationProvider):
                 f"; last refusal was +{last_refused}ms" if last_refused is not None else "",
             )
         elif refused:
-            # Timeouts are called out rather than folded in: an attempt that
-            # never answered is not a refusal, and a run that ends on one has not
-            # established that the club said no out to the offsets it reached.
+            # Timeouts are counted separately rather than folded in. An attempt
+            # that never answered is not a refusal, so "every attempt refused"
+            # would be false whenever one is present - and this line is what a
+            # post-mortem reads first to decide whether the club's boundary was
+            # actually probed out to the offsets the ladder reached.
             timed_out = [o for o in attempts if o.verdict == RESERVE_TIMEDOUT]
-            logger.warning(
-                "RACE_LEDGER: every attempt refused, out to +%sms past the window%s",
-                max(
-                    (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
-                    default="?",
-                ),
-                f"; {len(timed_out)} attempt(s) never answered" if timed_out else "",
+            furthest = max(
+                (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
+                default="?",
             )
+            if timed_out:
+                logger.warning(
+                    "RACE_LEDGER: no attempt was granted - %d refused (out to +%sms past the "
+                    "window), %d never answered",
+                    len(refused),
+                    furthest,
+                    len(timed_out),
+                )
+            else:
+                logger.warning(
+                    "RACE_LEDGER: every attempt refused, out to +%sms past the window",
+                    furthest,
+                )
         elif attempts:
             logger.warning(
                 "RACE_LEDGER: no attempt was answered - %d Reserve(s) sent, none returned",
