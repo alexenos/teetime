@@ -5549,9 +5549,19 @@ class WaldenGolfProvider(ReservationProvider):
                     furthest,
                 )
         elif attempts:
+            # Nothing granted and nothing refused, so every attempt either never
+            # answered or came back unclassifiable. Those are opposite facts -
+            # RESERVE_UNKNOWN means the club *did* reply and the parser could not
+            # read it - and reporting them as one would send a post-mortem
+            # looking for a network fault that never happened.
+            never_answered = [o for o in attempts if o.verdict == RESERVE_TIMEDOUT]
+            unreadable = len(attempts) - len(never_answered)
             logger.warning(
-                "RACE_LEDGER: no attempt was answered - %d Reserve(s) sent, none returned",
+                "RACE_LEDGER: no attempt was granted or refused - %d Reserve(s) sent, "
+                "%d never answered, %d answered unreadably",
                 len(attempts),
+                len(never_answered),
+                unreadable,
             )
 
         if not bucket_name:
