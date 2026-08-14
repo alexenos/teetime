@@ -1792,6 +1792,115 @@ class TestReserveSweep:
         assert result.distinct_attempted_times() == [RESERVE_SLOT_TIME, SLOT_B_TIME]
 
 
+class StallingRecorder(ChainRecorder):
+    """A ChainRecorder where chosen attempts never answer.
+
+    Models the failure of 2026-08-13 and 08-14 exactly: the Reserve is written
+    to the socket and the club returns nothing before the budget runs out.
+    """
+
+    def __init__(self, pages: list[str], stall_on: set[int]) -> None:
+        """``stall_on`` holds 1-based attempt numbers that time out."""
+        super().__init__(pages)
+        self.stall_on = stall_on
+        # Answered requests only. The canned pages are the *replies* the club
+        # makes, so a request it never answers must not consume one - indexing
+        # on every request instead would silently hand the next attempt the page
+        # meant for this one.
+        self.answered = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """Answer as usual, unless this attempt is one of the stalled ones."""
+        params = dict(urllib.parse.parse_qsl(request.content.decode()))
+        # Recorded before any raise, so a stalled request still counts as sent -
+        # which is the entire reason it cannot be treated as a no-op.
+        self.requests.append(params)
+        self.sources.append(params.get("javax.faces.source", ""))
+        if len(self.sources) in self.stall_on:
+            raise httpx.ReadTimeout("The read operation timed out", request=request)
+        page = self.pages[min(self.answered, len(self.pages) - 1)]
+        self.answered += 1
+        return httpx.Response(200, text=partial_response(page, f"vs-{len(self.sources)}"))
+
+
+class TestReserveTimeoutKeepsTheLadderWalking:
+    """A Reserve that never answers must not end the race.
+
+    On 2026-08-13 and 08-14 attempt 2 fired at +1000ms, hit the 2s budget and
+    raised, which ended the run at phase=reserve_sent with the ladder's 1250,
+    1500 and 1750 rungs unfired - and ~1.24s is exactly where the club had
+    granted the slot on 08-08 and 08-12.
+
+    It stays contagious in one direction: the request may have reached the club,
+    so the same slot may be asked for again, but no *other* tee time may be,
+    now or later in the run. A second booking stacked on an invisible hold
+    collides with the club's one-round-per-member-per-day rule.
+    """
+
+    def test_a_stalled_reserve_asks_the_same_slot_again(self) -> None:
+        """The rung after a timeout is the slot we want, not the next one down."""
+        recorder = StallingRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1})
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+
+    def test_a_stalled_reserve_never_walks_to_a_fallback(self) -> None:
+        """Even a later refusal must not move us onto a different tee time."""
+        recorder = StallingRecorder(
+            [blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1}
+        )
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert SLOT_B_ID not in recorder.sources
+        assert SLOT_C_ID not in recorder.sources
+        assert result.distinct_attempted_times() == [RESERVE_SLOT_TIME]
+
+    def test_a_stall_with_the_ladder_spent_stops_without_claiming_blocked(self) -> None:
+        """ "We never heard back" is not "another member took it".
+
+        `blocked` picks the member-facing "someone else got it" message and gates
+        the untimed retry, which must never re-fire at a slot the club may be
+        holding.
+        """
+        recorder = StallingRecorder([blocked_sheet(*ALL_THREE)], stall_on={1})
+        result = sweep_booker(recorder, 0).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert not result.blocked
+        assert recorder.sources == [RESERVE_ID]
+
+    def test_the_stalled_attempt_is_recorded_in_the_ledger(self) -> None:
+        """The attempt that decided both mornings left no row at all.
+
+        The ledger read "1 attempt, every attempt refused" for a run whose second
+        Reserve was the one that mattered.
+        """
+        from app.providers.walden_http_booker import RESERVE_TIMEDOUT
+
+        recorder = StallingRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1})
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert [o.verdict for o in result.attempt_log][:1] == [RESERVE_TIMEDOUT]
+        assert result.attempt_log[0].slot_time == RESERVE_SLOT_TIME
+
+    def test_consecutive_stalls_still_reach_a_later_rung(self) -> None:
+        """The stall itself carries us past the remaining rungs' instants.
+
+        _next_future_rung would discard every one of them and end the run, which
+        is the bug this whole class exists for. After a stall the ladder's length
+        is the budget; its schedule is moot.
+        """
+        recorder = StallingRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE], stall_on={1, 2})
+        result = sweep_booker(recorder, 0, 300, 600).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert result.success, result.error
+        assert recorder.sources[:3] == [RESERVE_ID, RESERVE_ID, RESERVE_ID]
+
+
 class TestStagingTheLadder:
     """The ladder as it arrives through the public staging path."""
 

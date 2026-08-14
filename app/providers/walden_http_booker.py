@@ -56,6 +56,7 @@ from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import (
     AbConfig,
     DirectHttpError,
+    DirectHttpTimeoutError,
     Node,
     PartialResponse,
     PrimeFacesSession,
@@ -173,19 +174,34 @@ _RESERVE_MAX_ATTEMPTS = 6
 
 # Stop *starting* attempts once the race is this far gone. An attempt already in
 # flight is allowed to finish - abandoning it would not un-send it.
-_RESERVE_DEADLINE_MS = 6000
+#
+# 6000 was sized when a timeout ended the run outright, so it only ever had to
+# bound a healthy ladder. Now that a stalled Reserve is survivable, one stall
+# can spend 3s of it, and 6000 would leave a ladder that survived the stall with
+# no room left to walk. The club has granted slots at ~1.24s and the member
+# wants the tee time whenever it comes, so asking out to 10s costs nothing on a
+# morning already being lost.
+_RESERVE_DEADLINE_MS = 10000
 
 # Budget for a single Reserve POST, well under the session default. The deadline
 # above cannot cancel a request already handed to the socket, so without this a
 # single stalled Reserve spends the entire race and the fallback list - the
-# thing that exists to survive exactly this - is never walked. Round trips have
-# run 230-535ms; one that has not answered in this long has lost anyway.
+# thing that exists to survive exactly this - is never walked.
 #
-# A timeout is deliberately left terminal rather than advancing to the next tee
-# time. The request may well have reached the club, and reserving a second slot
-# on top of a hold we cannot see would collide with the one-round-per-day rule -
-# trading a lost morning for a booking mess.
-_RESERVE_TIMEOUT_S = 2.0
+# Sized against measured round trips, and the earlier 2.0s was sized against a
+# stale set of them. "230-535ms" came from runs that predate the sweep; the two
+# mornings of 2026-08-13/14 answered in 593ms and 647ms, and an uncontested
+# ad-hoc booking on 08-14 - no race, quiet server, warm connection - took 828ms.
+# 2.0s was therefore barely 2.4x a quiet day, and rung 6 blew through it on both
+# mornings, ending each run two rungs short of the offset that had been granted
+# on 08-08 and 08-12.
+#
+# Raised rather than lowered, and not raised further, because the timeout now
+# trades against _RESERVE_DEADLINE_MS instead of ending the run: every second
+# spent waiting on a stalled request is a second of ladder not walked. This is
+# ~3.6x a quiet-day round trip, which leaves a stall recoverable inside the
+# deadline below.
+_RESERVE_TIMEOUT_S = 3.0
 
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
@@ -691,6 +707,20 @@ class DirectHttpBooker:
         ``result.attempt_log``, so a morning spent losing still narrows where the
         club's boundary actually sits.
 
+        A Reserve that never answers is survivable but contagious. It used to end
+        the run, which on 2026-08-13 and 08-14 stopped the ladder at +1000ms -
+        two rungs short of the ~1.24s that had been granted on the two mornings
+        before. So a timeout now continues the ladder, but only ever onto the
+        *same* slot: the request may have reached the club, and a second tee time
+        stacked on a hold we cannot see would collide with the one-round-per-day
+        rule. Once anything has timed out the fallback list is closed for the
+        rest of the run, because that risk does not expire with the attempt.
+
+        Note the ladder cannot be walked faster than the club answers. Rungs
+        closer together than one round trip - ~600-830ms in every run measured -
+        are already in the past when the previous answer lands and are skipped,
+        so the configured 150/300/500/750 rungs have never fired.
+
         Returns:
             The response granting a slot, or None with ``result`` describing the
             refusal that ended it.
@@ -698,6 +728,8 @@ class DirectHttpBooker:
         started = time_module.perf_counter()
         slot_time = self._slot_time
         remaining = list(self._fallback_times)
+        # Latches on the first timeout and never clears; see the docstring.
+        timed_out = False
         # Untimed bookings have no window to sweep around; the first rung is
         # already spent by the precision wait in _run_chain.
         rungs = list(self._sweep_offsets_ms[1:]) if target_timestamp_ms is not None else []
@@ -736,7 +768,81 @@ class DirectHttpBooker:
             # and a browser retry in the second case races our own reservation.
             result.phase = PHASE_RESERVE_SENT
             view_state = _view_state_fingerprint(self.session)
-            response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+            # Read here rather than reused from `reserveSentAtMs` above, and kept
+            # for every attempt rather than the first: an answered request takes
+            # this from the response's own send timestamp, so this value is only
+            # ever consumed when there is no response to take it from. The log
+            # line and fingerprint between the two reads are real work, and the
+            # closer read is the honest one for the ledger.
+            sent_ms_past_window = (
+                int(time_module.time() * 1000) - target_timestamp_ms
+                if target_timestamp_ms is not None
+                else None
+            )
+            try:
+                response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+            except DirectHttpTimeoutError as exc:
+                timed_out = True
+                last_reason = str(exc)
+                # Recorded like any other attempt. The ledger previously lost the
+                # attempt that decided both mornings, so a run whose ladder was
+                # cut short read as "1 attempt, every attempt refused".
+                observation = ReserveObservation(
+                    attempt=attempt,
+                    slot_time=slot_time,
+                    source=config.source,
+                    view_state=view_state,
+                    verdict=RESERVE_TIMEDOUT,
+                    reason=str(exc),
+                    sent_ms_past_window=sent_ms_past_window,
+                    round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+                )
+                result.attempt_log.append(observation)
+                _log_reserve_observation(observation)
+
+                # Checked here as well as after a refusal: the refusal path is
+                # `continue`d past, and without this a run that only ever timed
+                # out would spend a full _RESERVE_TIMEOUT_S per remaining rung.
+                spent_ms = (time_module.perf_counter() - started) * 1000
+                if spent_ms >= _RESERVE_DEADLINE_MS or target_timestamp_ms is None:
+                    logger.warning(
+                        "DIRECT_HTTP: Reserve %d never answered and %dms is spent; stopping "
+                        "rather than asking for a different tee time",
+                        attempt,
+                        int(spent_ms),
+                    )
+                    break
+
+                # Deliberately not _next_future_rung. A stall of seconds has
+                # already carried us past every offset the ladder was there to
+                # explore, so its *schedule* is moot - but its length is still
+                # the budget for how many more times to ask. Take the next rung
+                # whether or not its instant has passed; sleep_until no-ops on
+                # one already gone, which fires the retry at once. That is the
+                # right move anyway: the club granted at ~1.24s on 08-08 and
+                # 08-12, and a stall leaves us well past that.
+                if not rungs:
+                    logger.warning(
+                        "DIRECT_HTTP: Reserve %d never answered and the ladder is spent; "
+                        "stopping rather than asking for a different tee time",
+                        attempt,
+                    )
+                    break
+                stall_rung_ms = rungs.pop(0)
+                # Re-staged from nothing: there is no response to relocate the
+                # button in, so the previously staged config and body are sent
+                # again unchanged. Same slot, same ViewState - which is exactly
+                # the request 08-08 and 08-12 had accepted a rung later.
+                logger.info(
+                    "DIRECT_HTTP: Reserve %d never answered after %dms; asking again for %s "
+                    "at +%dms (same slot only - the club may already be holding it)",
+                    attempt,
+                    int(spent_ms),
+                    slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                    stall_rung_ms,
+                )
+                sleep_until(target_timestamp_ms + stall_rung_ms - int(round(self._lead_ms)))
+                continue
             result.final_markup = response.markup
 
             # One parse, three questions now. At ~190ms for a 500KB sheet this
@@ -806,7 +912,19 @@ class DirectHttpBooker:
                 continue
 
             # The ladder is spent. A refusal this far past the window is the
-            # kind the fallback list was built for.
+            # kind the fallback list was built for - unless a Reserve went
+            # unanswered earlier, in which case the club may be holding the slot
+            # we just asked about and a different tee time would be a second
+            # booking on the same day. Losing the morning beats that.
+            if timed_out:
+                logger.warning(
+                    "DIRECT_HTTP: %s, but an earlier Reserve never answered - not trying "
+                    "another tee time, as the club may be holding %s",
+                    observation.reason,
+                    slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                )
+                break
+
             next_candidate = self._next_candidate(document, response.markup, remaining)
             if next_candidate is None:
                 logger.warning(
@@ -821,14 +939,21 @@ class DirectHttpBooker:
                 slot_time.strftime("%I:%M %p"),
             )
 
-        result.blocked = True
+        # Only a run the club actually refused is "blocked". One that ended
+        # because a Reserve never answered gets reported as a plain failure, the
+        # same shape the raised timeout produced before it was survivable, and
+        # for the same reason: `blocked` selects the "another member took it"
+        # message for the member, and it feeds the untimed retry - which must
+        # never re-fire at a slot the club may be silently holding.
+        result.blocked = not timed_out
         result.error = last_reason or "Slot blocked by another user"
         logger.warning(
-            "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s",
+            "DIRECT_HTTP: No Reserve accepted after %d attempt(s) over %dms - tried %s%s",
             result.timing.get("reserveAttempts", 0),
             int((time_module.perf_counter() - started) * 1000),
             ", ".join(t.strftime("%I:%M %p") for t in result.distinct_attempted_times())
             or "nothing",
+            "; at least one Reserve never answered, so the outcome is unknown" if timed_out else "",
         )
         return None
 
@@ -1411,6 +1536,11 @@ def _is_message_container(node: Node) -> bool:
 RESERVE_ACCEPTED = "accepted"
 RESERVE_REFUSED = "refused"
 RESERVE_UNKNOWN = "unknown"
+# No response at all, as against RESERVE_UNKNOWN's "a response we cannot read".
+# The distinction is the whole point: an unreadable response says the club
+# answered, a timeout says we do not know whether it acted. Only the latter
+# closes the fallback list off for the rest of the run.
+RESERVE_TIMEDOUT = "timeout"
 
 # The populated header of the booking form the club returns once it has given us
 # the slot: "Reservation at </label><label>04:53 PM". Populated is the point -

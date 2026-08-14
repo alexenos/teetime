@@ -263,10 +263,18 @@ variable "walden_reserve_sweep_offsets_ms" {
     rung spacing whether or not it wins. Once it is known, collapse this to one
     well-chosen offset.
 
+    Spacing is bounded by how fast the club answers, not by what is set here.
+    Rungs are slept to as absolute instants, so one whose moment has already
+    passed when the previous response lands is skipped - and a Reserve round trip
+    has measured 593ms and 647ms on the two lost mornings and 828ms on an
+    uncontested ad-hoc booking. The previous 150/300/500/750 rungs never once
+    fired: attempt 1's answer arrived ~860ms in, past all four. Rungs spaced
+    tighter than a round trip make the ladder read longer than it runs.
+
     "0" restores the historical single shot on the instant.
   EOT
   type        = string
-  default     = "0,150,300,500,750,1000,1250,1500,1750"
+  default     = "0,900,1300,2000,3000,4500"
 
   validation {
     # Whitespace is tolerated because the parser in app/config.py strips it, and

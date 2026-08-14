@@ -885,12 +885,24 @@ class BookingService:
                 # send its reply until this returns. Awaiting it here means any
                 # crash during the attempt takes the user's reply down with it,
                 # leaving them with silence. The caller now acknowledges
-                # immediately and execute_booking sends the real outcome when
-                # it lands.
+                # immediately and the batch reports the real outcome when it
+                # lands.
+                #
+                # As a batch of one, deliberately. The 6:30 race is itself a
+                # batch of one, and every race behaviour - fallback ranking, the
+                # clock probe, refresh-at-window, the sweep ladder, the precision
+                # wait, the race ledger - is gated on `execute_at` being set,
+                # which only the batch path supplies. Routed through
+                # execute_booking instead, an ad-hoc booking took a path that
+                # structurally could not be timed: book_tee_time has no
+                # execute_at parameter, so all six switched off and the 08-14
+                # ad-hoc booking ran untimed with walden_adhoc_execute_delay_s
+                # set to 90. That left the machinery deciding the only booking
+                # that matters exercised once a day, unobserved.
                 created_booking.status = BookingStatus.IN_PROGRESS
                 await database_service.update_booking(created_booking)
                 if not defer_execution:
-                    self._spawn_booking_execution(booking_id_opt)
+                    self._spawn_bookings_batch_execution([booking_id_opt])
 
         return created_booking
 

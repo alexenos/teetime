@@ -202,6 +202,21 @@ class ViewExpiredError(DirectHttpError):
     """The server rejected our ViewState - the adopted session is stale."""
 
 
+class DirectHttpTimeoutError(DirectHttpError):
+    """A request was written to the socket and no answer arrived in time.
+
+    Separated from its parent because the two demand opposite responses. Most
+    DirectHttpErrors mean the step did not happen; a timeout means we cannot
+    tell. The request may have reached the club and been acted on, so the caller
+    may re-ask for the *same* thing but must not go on to ask for a different
+    one - a second tee time stacked on an invisible hold collides with the
+    club's one-round-per-member-per-day rule.
+
+    On 2026-08-13 and 08-14 this ended the race two rungs short of the offset
+    that had been granted on the two mornings before them.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Minimal HTML tree
 # ---------------------------------------------------------------------------
@@ -999,6 +1014,10 @@ class PrimeFacesSession:
                 http_response = self._client.post(
                     self.form_state.action_url, content=payload, timeout=timeout_s
                 )
+        except httpx.TimeoutException as exc:
+            # Checked before the general case below - TimeoutException is an
+            # HTTPError, so the order here is what makes the distinction exist.
+            raise DirectHttpTimeoutError(f"POST for {config.source} timed out: {exc}") from exc
         except httpx.HTTPError as exc:
             raise DirectHttpError(f"POST for {config.source} failed: {exc}") from exc
         received_at_ms = int(time_module.time() * 1000)

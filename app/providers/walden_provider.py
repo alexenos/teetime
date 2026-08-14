@@ -44,6 +44,7 @@ from app.providers.walden_http_booker import (
     PRE_SUBMIT_PHASES,
     RESERVE_ACCEPTED,
     RESERVE_REFUSED,
+    RESERVE_TIMEDOUT,
     DirectHttpBooker,
     container_message_text,
 )
@@ -5524,12 +5525,22 @@ class WaldenGolfProvider(ReservationProvider):
                 f"; last refusal was +{last_refused}ms" if last_refused is not None else "",
             )
         elif refused:
+            # Timeouts are called out rather than folded in: an attempt that
+            # never answered is not a refusal, and a run that ends on one has not
+            # established that the club said no out to the offsets it reached.
+            timed_out = [o for o in attempts if o.verdict == RESERVE_TIMEDOUT]
             logger.warning(
-                "RACE_LEDGER: every attempt refused, out to +%sms past the window",
+                "RACE_LEDGER: every attempt refused, out to +%sms past the window%s",
                 max(
                     (o.sent_ms_past_window for o in refused if o.sent_ms_past_window is not None),
                     default="?",
                 ),
+                f"; {len(timed_out)} attempt(s) never answered" if timed_out else "",
+            )
+        elif attempts:
+            logger.warning(
+                "RACE_LEDGER: no attempt was answered - %d Reserve(s) sent, none returned",
+                len(attempts),
             )
 
         if not bucket_name:
