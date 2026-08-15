@@ -97,8 +97,8 @@ All GCP infrastructure is managed via Terraform in the `terraform/` directory.
 1. Create a GCS bucket for Terraform state:
    ```bash
    PROJECT_ID="teetime"
-   gsutil mb -p $PROJECT_ID gs://${PROJECT_ID}-terraform-state
-   gsutil versioning set on gs://${PROJECT_ID}-terraform-state
+   gcloud storage buckets create gs://${PROJECT_ID}-terraform-state --project=$PROJECT_ID
+   gcloud storage buckets update gs://${PROJECT_ID}-terraform-state --versioning
    ```
 
 2. Connect GitHub to Cloud Build (one-time, via console):
