@@ -204,7 +204,27 @@ class Settings(BaseSettings):
     # *same* slot, so the second cannot reserve a second tee time and collide
     # with the one-round-per-day rule; the worst case is that the club grants the
     # same hold twice.
-    walden_reserve_pipeline_opening_pair: bool = True
+    #
+    # Off by default, deliberately, and not because it is thought wrong.
+    #
+    # Two reasons. Serially the ladder now asks at roughly +1030, +1770 and
+    # +2510ms from the stated window - every one of them past all seven refusals
+    # on record, and the last two past every grant - so pipelining buys an ask at
+    # +1280 instead of +1770 and only pays on a morning where the hypothesis is
+    # wrong *and* the slot is contested.
+    #
+    # Against that, it is untested against the club, and the sequence it creates
+    # - a Reserve granted while a second one for the same slot is already in
+    # flight - has never been observed. That was an occasional case when the
+    # first rung was a guess. Now that rung 0 is the hypothesis, a right
+    # hypothesis means rung 0 wins every morning, which makes the untested
+    # sequence the daily case rather than the rare one.
+    #
+    # And the morning it would first run is the morning testing whether the sheet
+    # opens at 06:30:01. Two new variables at once makes a failure unreadable.
+    # Exercise this with an ad-hoc booking - same timed path, nothing at stake,
+    # and rung 0 always wins there - before letting it near the race.
+    walden_reserve_pipeline_opening_pair: bool = False
 
     # Write the per-attempt race ledger to the debug artifacts bucket.
     #

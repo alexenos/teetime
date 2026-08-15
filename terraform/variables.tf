@@ -346,16 +346,27 @@ variable "walden_reserve_pipeline_opening_pair" {
     the follow-up to ~+1780ms, later than the +1240ms that has been granted three
     times.
 
-    Pipelined, the pair brackets the boundary inside one round trip and the run
-    is no worse off than a serial 1250 even when the tick estimate is wrong. Both
-    requests are for the same slot, so neither can reserve a second tee time and
-    collide with the club's one-round-per-day rule; the worst case is the club
-    granting the same hold twice.
+    Pipelined, the pair brackets the open inside one round trip. Both requests
+    are for the same slot, so neither can reserve a second tee time and collide
+    with the club's one-round-per-day rule; the worst case is the club granting
+    the same hold twice.
+
+    Off by default, and not because it is thought wrong. Serially the ladder now
+    asks at roughly +1030, +1770 and +2510ms from the stated window - all past
+    every refusal on record, the last two past every grant - so this buys an ask
+    at +1280 instead of +1770, which only pays when the hypothesis is wrong and
+    the slot is contested.
+
+    Against that it is untested against the club, and the sequence it creates - a
+    Reserve granted while a second for the same slot is already in flight - has
+    never been observed. With rung 0 now being the hypothesis rather than a
+    guess, a right hypothesis makes that sequence the daily case, not the rare
+    one. Exercise it with an ad-hoc booking before letting it near the race.
 
     Needs at least two offsets and a timed booking; ignored otherwise.
   EOT
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "walden_capture_race_ledger" {

@@ -190,6 +190,25 @@ class TestSweepLadder:
         # search it replaced.
         assert len(ladder) <= 4
 
+    def test_the_opening_pair_is_off_until_it_has_been_exercised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Untested concurrency does not get its first run in the race.
+
+        Firing rungs 0 and 250 together has never run against the club, and the
+        sequence it creates - a Reserve granted while a second for the same slot
+        is already in flight - has never been observed. With rung 0 now being the
+        hypothesis rather than a guess, a right hypothesis makes that sequence
+        the daily case rather than the rare one.
+
+        Serially the ladder still asks at roughly +1030, +1770 and +2510ms from
+        the stated window, all past every refusal on record, so the cost of
+        leaving this off is an ask at +1770 instead of +1280.
+        """
+        monkeypatch.delenv("WALDEN_RESERVE_PIPELINE_OPENING_PAIR", raising=False)
+
+        assert Settings(_env_file=None).walden_reserve_pipeline_opening_pair is False
+
     def test_a_malformed_ladder_degrades_to_one_shot(self) -> None:
         """A bad value must not stop a morning."""
         assert Settings(walden_reserve_sweep_offsets_ms="nonsense").walden_sweep_offsets_ms() == (
