@@ -10,18 +10,64 @@ project's logs.
 
 ## What is not needed
 
-- **The `gcloud` CLI.** `WaldenProvider._upload_bytes_to_gcs` already does GCS
-  I/O with `google.auth` + `httpx` against the JSON API, with no
-  `google-cloud-storage` dependency. `scripts/fetch_debug_artifacts.py` reads
-  them back the same way, with read-only scopes. Both libraries are already in
-  the venv.
 - **A network policy change.** `storage.googleapis.com`,
   `logging.googleapis.com` and `oauth2.googleapis.com` are all reachable from a
   remote session today; an unauthenticated bucket request returns a genuine GCS
-  `401`, not a proxy block. (`dl.google.com` *is* refused, which is why
-  installing the CLI fails — but the CLI is not the path.)
+  `401`, not a proxy block.
+- **The `gcloud` CLI**, for the artifacts themselves.
+  `WaldenProvider._upload_bytes_to_gcs` already does GCS I/O with `google.auth`
+  + `httpx` against the JSON API, with no `google-cloud-storage` dependency.
+  `scripts/fetch_debug_artifacts.py` reads them back the same way, with
+  read-only scopes. Both libraries are already in the venv.
 
 The only missing piece is a credential.
+
+## The CLI, which turns out to be installable after all
+
+This document originally said the CLI could not be installed in a remote
+session, because the egress policy refuses `dl.google.com`. It does refuse it,
+and `packages.cloud.google.com` as well — but that was the wrong conclusion.
+`dl.google.com` is a CDN in front of the `cloud-sdk-release` GCS bucket, and
+`storage.googleapis.com` is reachable, being the same host the debug artifacts
+come from. Pulling the tarball from the bucket installs a complete SDK — `bq`
+and `gsutil` included, with its own bundled Python, so the
+`python3.13: command not found` that breaks gsutil locally does not apply:
+
+```bash
+curl -sS -o /tmp/gcloud.tar.gz \
+  https://storage.googleapis.com/cloud-sdk-release/google-cloud-cli-linux-x86_64.tar.gz
+tar -xzf /tmp/gcloud.tar.gz -C /opt
+ln -sf /opt/google-cloud-sdk/bin/{gcloud,gsutil,bq} /usr/local/bin/
+gcloud config set component_manager/disable_update_check true
+gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+```
+
+Verified 2026-08-15: `gcloud storage ls` and `gcloud logging read` both work
+against this project, cold install to working command in about 16 seconds.
+
+Two details that matter. Set `component_manager/disable_update_check` — every
+invocation otherwise reaches for `dl.google.com` and prints a `ProxyError`
+traceback that reads like the command itself failed, when it has not. And
+symlink into `/usr/local/bin` rather than exporting `PATH`: the agent's shell
+does not inherit a setup script's exports.
+
+`scripts/setup_remote_env.sh` does all of the above plus the key and the venv,
+and is idempotent. Point the environment's setup-script setting at it.
+
+### What the CLI still cannot do here
+
+`gcloud run revisions list` — the step a post-mortem wants for "which code
+actually ran" — fails with `Permission 'run.revisions.list' denied`. That is
+this account's IAM, not the network: the grant below is storage and logging
+only. Adding `roles/run.viewer` would close it:
+
+```bash
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member=serviceAccount:$SA --role=roles/run.viewer
+```
+
+Without it, the logs still name the revision that served a run, in
+`resource.labels.revision_name`.
 
 ## Setting it up
 
@@ -66,8 +112,18 @@ docs](https://code.claude.com/docs/en/claude-code-on-the-web)):
 
 ### 3. Setup script
 
+Point the environment's setup-script setting at `scripts/setup_remote_env.sh`.
+It decodes the key, installs the CLI, authenticates, and installs the venv;
+it is idempotent, so a warm container re-runs it in about a second.
+
+**Setting the two environment variables is not sufficient on its own.** Without
+the script nothing decodes `GCP_KEY_B64` into `/tmp/gcp-key.json`, and on
+2026-08-15 the target file existed and was zero bytes — so a check for the
+file's existence passed while every read failed with an ADC error that named
+nothing. If you are doing it by hand, test `-s`, not `-f`:
+
 ```bash
-echo "$GCP_KEY_B64" | base64 -d > /tmp/gcp-key.json
+[ -s /tmp/gcp-key.json ] || printf '%s' "$GCP_KEY_B64" | base64 -d > /tmp/gcp-key.json
 chmod 600 /tmp/gcp-key.json
 ```
 
@@ -79,10 +135,13 @@ script's exports, but environment-level variables are present on every call.
 
 ```bash
 poetry run python scripts/fetch_debug_artifacts.py list --date 20260813
+gcloud storage ls gs://gen-lang-client-0822973627-teetime-debug-artifacts/walden/race/
 ```
 
 A listing means it works. A `403` names the missing role; a credentials error
-means ADC never found the key file.
+means ADC never found the key file. Note that the venv starts empty on a fresh
+container — a `ModuleNotFoundError: No module named 'google'` means
+`poetry install --no-root` has not run, not that anything is misconfigured.
 
 ## Using it
 

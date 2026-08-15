@@ -5,9 +5,48 @@ description: Diagnose why the morning's TeeTime booking run failed. Use when the
 
 # Morning booking post-mortem
 
-The booking job fires at 06:28 CT and the window opens at 06:30:00 CT. Every
-morning it loses, the question is the same: did we lose the race, or did we
-refuse ourselves? This skill is the repeatable path to that answer.
+The booking job fires at 06:28 CT. The window nominally opens at 06:30:00 CT,
+but the club's sheet actually opens at 06:30:01 — see §7a, which is why the run
+no longer aims at 06:30:00.000. Every morning it loses, the question is the
+same: did we lose the race, or did we refuse ourselves? This skill is the
+repeatable path to that answer.
+
+## 0. Set the session up
+
+A fresh remote container (Claude Code on the web) has neither `gcloud` nor a
+usable credential nor an installed venv. One script fixes all three, is
+idempotent, and takes about 16 seconds cold:
+
+```bash
+bash scripts/setup_remote_env.sh
+gcloud storage ls gs://gen-lang-client-0822973627-teetime-debug-artifacts/walden/race/
+```
+
+A listing means every command in this skill works. Point the environment's
+setup-script setting at that file and it happens before you are asked anything.
+
+Two things worth knowing, because the earlier version of this skill got both
+wrong and cost a post-mortem each:
+
+**`gcloud` does install here.** The egress policy refuses `dl.google.com` and
+`packages.cloud.google.com`, which is why installing the CLI the documented way
+fails — but `dl.google.com` is only a CDN in front of the `cloud-sdk-release`
+bucket, and `storage.googleapis.com` is reachable because it is the same host
+the debug artifacts come from. `curl` the tarball out of the bucket and you get
+a complete SDK, `gsutil` and `bq` included, with its own bundled Python.
+Established 2026-08-15; the setup script does exactly this.
+
+**The key file exists and is empty.** The environment sets `GCP_KEY_B64` and
+points `GOOGLE_APPLICATION_CREDENTIALS` at `/tmp/gcp-key.json`, but nothing
+decodes one into the other, so a test for the file's *existence* passes and
+everything downstream fails with an ADC error that names nothing. Test `-s`, not
+`-f`. See `docs/debug-artifact-access.md` for the service account and its
+grant — read-only, one bucket and the project's logs.
+
+If for some reason the CLI is unavailable, nothing here is blocked:
+`scripts/fetch_debug_artifacts.py` reads the same logs and the same bucket over
+the JSON APIs with `google.auth` + `httpx`, and every step below gives both
+forms.
 
 ## 1. Get to latest first
 
@@ -29,17 +68,54 @@ gcloud run revisions list --service=teetime --region=us-central1 --project=gen-l
 If a deploy landed between the run and now, read the code at that revision's
 commit (`git show <sha>:<path>`, or a worktree) rather than at `main`.
 
+**That command fails for the post-mortem service account** — it needs
+`run.revisions.list`, and the grant is deliberately only storage + logging. It
+is an IAM gap, not a tooling one; `roles/run.viewer` on the account would close
+it. Until then, the logs name the revision themselves:
+
+```bash
+gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"teetime\" AND timestamp>=\"2026-08-15T11:28:00Z\" AND timestamp<=\"2026-08-15T11:31:00Z\"" --project=gen-lang-client-0822973627 --format="value(resource.labels.revision_name)" --limit=200 | sort -u
+```
+
+That gives the revision that served the run (`teetime-00063-779` on 2026-08-15)
+but not its commit. Bound that from commit timestamps and confirm against the
+run's own behaviour:
+
+```bash
+git log --format="%h %ad %s" --date=iso -8
+```
+
+Any commit dated after the run was not in it. Confirm rather than assume: the
+run logs what the deployed code did, so a field the newest commit introduced —
+or a constant it changed — settles which side of the deploy you are on. On
+2026-08-15 the ledger's `targetTimestampMs` decoded to 06:29:59.999 CT and no
+`RESERVATION_CHECK` line appeared, both of which place the morning run before
+#150 (merged 16:32 CT the same day) without ever listing a revision.
+
 ## 2. Pull the run
 
 Project `gen-lang-client-0822973627`, Cloud Run service `teetime`, region
 `us-central1`. The job fires at 06:28 CT and the window opens at 06:30 CT —
 11:30 UTC during CDT, 12:30 UTC during CST.
 
+**The short form, and the only one that works without `gcloud`.** It takes CT
+wall-clock times and does the UTC conversion, the DST offset and the
+`discord.gateway` exclusion itself:
+
+```bash
+poetry run python scripts/fetch_debug_artifacts.py logs \
+  --date 2026-08-15 --from 06:20 --to 06:40 --out run.txt
+```
+
+Widen `--to` to `08:00` when the question is about what happened *after* the
+race — a later manual booking, or the SMS the member got.
+
 **Use the Bash tool, not PowerShell** — PowerShell mangles the quoting inside
 the filter and gcloud rejects it with "Unparseable filter".
 
-Set the date once and derive the UTC bounds from it, so the same command works
-for any morning and picks the right offset either side of a DST change:
+The `gcloud` form, for a machine that has it. Set the date once and derive the
+UTC bounds from it, so the same command works for any morning and picks the
+right offset either side of a DST change:
 
 ```bash
 DAY=2026-08-09
@@ -95,9 +171,20 @@ The sweep means a run now fires several Reserves for the **same** slot before it
 touches the fallback list. A refused attempt 1 is expected and is not the story;
 which rung was granted is.
 
-`phase=complete, success=True` is **not** proof of a booking — the provider
-verifies against the member's reservations page afterwards
-(`RESERVATION_CHECK:`). Read that line before declaring a win.
+`phase=complete, success=True` is **not** proof of a booking. Success is a
+phrase match on a PrimeFaces partial update — 2026-08-15 returned it on the
+words "thank you" — and the one failure class that looks exactly like a win in
+the logs is a chain that completed against no reservation. As of #150 the
+provider checks the member's reservations page even when the response said yes,
+and logs `RESERVATION_CHECK:`. Read that line before declaring a win.
+
+Its **absence** means different things either side of that commit: in a run
+after #150 the check should be there, and in a run before it a text-confirmed
+booking returned without ever looking. 08-15's morning run has no such line for
+that reason, not because anything went wrong. Failing the check is reported,
+not enforced — a confirmed booking is not discarded because the page was slow,
+so `RESERVATION_CHECK: ... not on the member's reservations page` is an
+`ERROR` line in an otherwise successful-looking run.
 
 ## 4. Pull the artifacts
 
@@ -105,8 +192,31 @@ Failures upload to `gs://gen-lang-client-0822973627-teetime-debug-artifacts/`.
 The log lines print the exact paths; the naming is
 `walden/<reason>/<YYYYMMDD_HHMMSS>/<file>`.
 
-**Use `gcloud storage cp`, not `gsutil`** — gsutil is broken in this
-environment (`python3.13: command not found`).
+List what a morning left, then pull it. This works with or without `gcloud`, and
+summarizes any ledger it downloads:
+
+```bash
+poetry run python scripts/fetch_debug_artifacts.py list  --date 20260815
+poetry run python scripts/fetch_debug_artifacts.py fetch --date 20260815 --out ./artifacts
+```
+
+Artifact object names come from `datetime.now()` inside Cloud Run with no `TZ`
+set, so **they are stamped UTC**. A 06:30 CT run lands under the same date
+either way; an evening run does not.
+
+**Pick the morning's directory, not just the day's.** Ad-hoc bookings write
+race ledgers into the same bucket, so a date often has two — `20260815_113004`
+is the 06:30 race, `20260815_224814` is a 17:48 CT ad-hoc run. Do not read an
+evening ledger as evidence about the boundary: there is no queue outside the
+race and the club accepts immediately, so 08-14's evening run was granted at
+**−25ms** and 08-15's on the first rung it tried. Neither says anything about
+what happens at 06:30. The race is the one whose first Reserve fires near the
+window.
+
+To copy by hand, `gcloud storage cp` and `gcloud storage ls` both work. Prefer
+them to `gsutil` out of habit — gsutil is broken on the maintainer's local
+machine (`python3.13: command not found`), though it does work in a remote
+session, where the SDK tarball brings its own Python.
 
 **Start with the race ledger** — `walden/race/<YYYYMMDD_HHMMSS>/`. It is the
 whole run rather than its last frame:
@@ -143,16 +253,33 @@ matching it to the pre-window sheet's `Booking Starts In : 00:0X:XX` — on
 2026-08-09 both read 70s. It is logged, never branched on. Don't re-derive
 "the window wasn't open" from it.
 
-**The blocked popup is not a verdict.** `teeSheetValidationErrorPopup` and the
-text "This slot is blocked by another user" appear in *every* Reserve response —
-all five saved from 2026-08-06 to 08-12, including the two where the club had
-just granted a tee time. It is emitted as inert markup: no `visible:true`, no
-`.show()` anywhere in the payload, `ui-hidden-container` and no `aria-hidden`.
-Reading it as a refusal discarded a held slot on 08-08 and again on 08-12.
+**The popup's markup is not a verdict.** `teeSheetValidationErrorPopup` and the
+text "This slot is blocked by another user" are carried by Reserve responses
+that *accepted* — all five saved from 2026-08-06 to 08-12 and both of 08-15's
+morning attempts have it, including the three where the club had just granted a
+tee time. In the re-rendered markup it is inert: `ui-hidden-container`, no
+`aria-hidden`, no `visible:true`. Reading it as a refusal discarded a held slot
+on 08-08 and again on 08-12. `ledger.jsonl` records it as `popupPresent`, which
+is `True` on accepted rows too — a presence flag, not an outcome.
+
+It is not in literally every response: 08-15's evening ad-hoc booking was
+accepted with `popupPresent=False`. So its *absence* carries no information
+either. Neither direction of that flag is a verdict; stop reading it as one.
 
 Its absence from the pre-window sheet proves only that the club renders it in
 responses, not in sheets. That is not the same as showing it, and the 08-09
 inference built on it does not generalize.
+
+**What does show it is the `<eval>`, and that is a verdict.** Corrected
+2026-08-15, the first morning whose raw envelopes were kept: the refused attempt
+carried `PF('teeSheetValidationErrorPopupVar').show();;` and the accepted one
+carried `executeHoldTimeTimer('300');;stopSheetTimers();;` and no `.show()` at
+all. The earlier "no `.show()` anywhere in the payload" was true of what had been
+saved, not of what the club sent — the parser dropped `<eval>` before 08-12. So
+the popup on a refusal is genuinely displayed to the member, and `evalText` in
+the ledger is a second, independent read on the verdict. Do not go back to
+matching the popup's *markup*; that is the trap this replaces, not a reprieve
+from it.
 
 **What separates them is which view came back:**
 
@@ -172,6 +299,23 @@ from app.providers.walden_http import parse_html
 from app.providers.walden_http_booker import classify_reserve_response
 verdict, reason = classify_reserve_response(parse_html(markup), markup)
 ```
+
+**`markup` there means the extracted markup, not the file you downloaded.** The
+`attempt_NN_*.xml` artifacts are the raw `<partial-response>` envelope, and the
+classifier reads the re-rendered form inside its CDATA. Hand it the envelope and
+a refusal comes back `unknown` — the failure is silent and reads like a finding.
+Unwrap it first, which also gives you the `<eval>` scripts:
+
+```python
+from app.providers.walden_http import parse_html, parse_partial_response
+from app.providers.walden_http_booker import classify_reserve_response
+response = parse_partial_response(Path("attempt_01_refused.xml").read_text(errors="replace"))
+verdict, reason = classify_reserve_response(parse_html(response.markup), response.markup)
+```
+
+Reproduced both of 2026-08-15's verdicts exactly. The older
+`direct_http_response.html` artifacts are already-extracted markup and take the
+first form.
 
 It is pinned by `tests/test_reserve_verdict.py` against all five real responses,
 kept gzipped in `tests/fixtures/reserve_responses/`. A structural question about
@@ -220,21 +364,39 @@ Don't re-litigate these; each was established from artifacts, not reasoning:
   own screenshot at 7:46 showed every slot from 4:23 to 6:00 PM still Available.
   The club words *every* early refusal "blocked by another user".
 
-## 7a. The open question
+## 7a. The question that was open, and its answer
 
-The club refuses for roughly the first second past the window and then accepts.
-Two readings remain, and one morning's ledger separates them:
+**Settled 2026-08-15, the morning the bot first won.** The club refused for
+roughly the first second past the window and then accepted, and two readings
+were live: a clock difference (the skew probe measures a *static asset host*,
+which need not share a clock with the application server) or a deliberate
+boundary. 08-15's ledger separates them:
 
-- **A clock difference.** The skew probe measures a *static asset host*, which
-  need not share a clock with the application server that decides bookings.
-  `serverMsPastWindow` in the ledger reads the `Date` header off the Reserve
-  POST itself. If it says ~−1000ms when we sent at our 06:30:00.000, we are
-  simply early and the probe target is wrong.
-- **A server-side grace period.** If the club's own clock reads 06:30:00 and it
-  refuses anyway, the boundary is deliberate and the answer is to aim past it.
+| attempt | sent | club `Date` | verdict |
+|---|---|---|---|
+| 1 | −60ms | inside the 06:30:00 second | refused |
+| 2 | +1240ms | inside the 06:30:01 second | accepted |
 
-Either way the sweep records which offsets were refused and which was granted,
-so the boundary narrows to the rung spacing every morning it runs.
+The club refused while its **own** clock read 06:30:00. That is the boundary
+reading, not the clock reading — the probe was not measuring the wrong host, and
+the split holds across every morning on record: refused at −60, −14, −7, 0, 0,
+812, 817; granted at 1239, 1240, 1291. The sheet opens at 06:30:01, so every
+first Reserve ever sent at ~0ms was spent on a certain no.
+
+#150 acted on this: the first rung is now 1030ms rather than 0, the ladder is
+`1030,1250,2000,3000,4500`, the precision wait sleeps to the first rung rather
+than to the window, and the clock probe is budget-bounded at 5s with 20ms
+spacing so the tick is bracketed tightly enough to aim 30ms past it.
+
+**Read `serverMsPastWindow` as ±1s, not as a millisecond figure.** The HTTP
+`Date` header is whole-second resolution and the parser multiplies seconds by
+1000 (`walden_http.py`), so a row reading `1` means "somewhere in the 06:30:00
+second", not "1ms past". It is precise enough to say which second the club was
+in — which is the whole question — and not precise enough for anything finer.
+
+What is still open is narrower: whether the 06:30:01 boundary is fixed or drifts
+morning to morning. The ladder brackets it either way, and `serverMsPastWindow`
+on the granted row records which second won.
 
 ## 8. Report
 
