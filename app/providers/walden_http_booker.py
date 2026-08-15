@@ -927,7 +927,13 @@ class DirectHttpBooker:
                 observation = pair.carried_observation
                 assert document is not None and observation is not None
             else:
-                response, document, observation, stalled = self._fire_single_reserve(
+                # Bound to their own names and only widened into the loop's
+                # variables past the stall check below. Assigning straight into
+                # `response` would give it an optional type on this branch and a
+                # non-optional one on the paired branch above, which is a real
+                # ambiguity rather than a typing nuisance: the two branches have
+                # to hand the shared tail the same thing.
+                sent, sent_document, sent_observation, stalled = self._fire_single_reserve(
                     config,
                     body,
                     window_frame_ms=window_frame_ms,
@@ -976,7 +982,10 @@ class DirectHttpBooker:
                     )
                     sleep_until(target_timestamp_ms + stall_rung_ms - int(round(self._lead_ms)))
                     continue
-                assert response is not None and document is not None and observation is not None
+                assert (
+                    sent is not None and sent_document is not None and sent_observation is not None
+                )
+                response, document, observation = sent, sent_document, sent_observation
             if observation.verdict != RESERVE_REFUSED:
                 result.booked_slot_time = slot_time
                 if attempt > 1:
