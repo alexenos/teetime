@@ -140,31 +140,55 @@ class TestStaleMessagesLaterInTheChain:
 class TestSweepLadder:
     """The offsets the Reserve is asked at, parsed from configuration."""
 
-    def test_the_default_ladder_aims_past_the_clubs_second_tick(
+    def test_the_aim_clears_every_refusal_on_record(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The sheet is believed to open at 06:30:01, and that is where we aim.
+
+        Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
+        817) and every grant over +1200ms, with the club stamping refusals inside
+        the 06:30:00 second and its grant inside 06:30:01. An aim that did not
+        clear the last refusal would be spending the primary shot on a question
+        already answered no seven times.
+
+        Isolated from the environment: terraform sets these on the deployed
+        service, so a shell mirroring the deployment would make this assert what
+        is configured rather than what ships.
+        """
+        monkeypatch.delenv("WALDEN_WINDOW_OPENS_OFFSET_MS", raising=False)
+        monkeypatch.delenv("WALDEN_RESERVE_AIM_MARGIN_MS", raising=False)
+        config = Settings(_env_file=None)
+
+        aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
+
+        assert config.walden_window_opens_offset_ms >= 1000
+        # Strictly past, not equal: landing exactly on the tick is the case the
+        # margin exists for, since the probe pins it to only about +-15ms.
+        assert aim_ms > 1000
+
+    def test_the_default_ladder_is_retries_from_the_aim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The first rung clears +1000ms, and the ladder still reaches the grants.
+        """Rungs are offsets past the open now, so the first one is 0.
 
-        Every refusal on record arrived under +1000ms and every grant over
-        +1200ms, with the club stamping refusals inside the 06:30:00 second and
-        its grant inside 06:30:01. Aiming the first question at 0ms spent it on a
-        certain no; this pins that it is no longer aimed there.
-
-        Isolated from the environment: terraform sets this variable on the
-        deployed service, so a shell mirroring the deployment would make this
-        assert what is configured rather than what ships. The tests below need no
-        such care - an explicit init argument outranks both sources.
+        The ladder stopped being a search over offsets once the open was named:
+        rung 0 *is* the hypothesis, and the rest are there to catch it being
+        wrong. One of them still has to reach the offsets the club has actually
+        granted at, or a wrong hypothesis costs the morning rather than a rung.
         """
         monkeypatch.delenv("WALDEN_RESERVE_SWEEP_OFFSETS_MS", raising=False)
-        ladder = Settings(_env_file=None).walden_sweep_offsets_ms()
+        monkeypatch.delenv("WALDEN_WINDOW_OPENS_OFFSET_MS", raising=False)
+        monkeypatch.delenv("WALDEN_RESERVE_AIM_MARGIN_MS", raising=False)
+        config = Settings(_env_file=None)
+        ladder = config.walden_sweep_offsets_ms()
+        aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
 
-        assert ladder[0] > 1000
+        assert ladder[0] == 0
         assert list(ladder) == sorted(ladder)
-        # 08-08 was granted at +1291ms, 08-12 at +1239ms and 08-15 at +1240ms, so
-        # a ladder that stopped short of those would give up the offset that has
-        # actually been winning while the new aim point is still unproven.
-        assert ladder[1] >= 1239
-        assert ladder[-1] >= 1300
+        # 08-08 was granted at +1291ms, 08-12 at +1239ms and 08-15 at +1240ms,
+        # measured from the stated window. A rung has to land out there.
+        assert any(aim_ms + rung >= 1239 for rung in ladder)
+        # And the ladder has to be short. It is retries now; a long one is the
+        # search it replaced.
+        assert len(ladder) <= 4
 
     def test_a_malformed_ladder_degrades_to_one_shot(self) -> None:
         """A bad value must not stop a morning."""

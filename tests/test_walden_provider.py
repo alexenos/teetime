@@ -3088,7 +3088,9 @@ class TestDirectHttpBookingWiring:
         assert chain_result is not None
         assert chain_result["success"] is True
         assert chain_result["phase"] == "complete"
-        booker.book.assert_called_once_with(4, target_timestamp_ms=1770000000000)
+        booker.book.assert_called_once_with(
+            4, target_timestamp_ms=1770000000000, window_timestamp_ms=None
+        )
         session.close.assert_called_once()
 
     def test_blocked_is_honored_not_retried(
@@ -4144,7 +4146,7 @@ class TestImmediateBookingFastPath:
         assert result.confirmation_number == "12345"
         assert result.booked_time == time(8, 42)
         # Untimed: Reserve fires as soon as it is staged, no target to wait for.
-        booker.book.assert_called_once_with(4, target_timestamp_ms=None)
+        booker.book.assert_called_once_with(4, target_timestamp_ms=None, window_timestamp_ms=None)
         fast_chain.assert_not_called()
 
     def test_immediate_booking_uses_the_js_chain_when_direct_http_is_off(

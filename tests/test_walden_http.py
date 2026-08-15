@@ -2167,6 +2167,80 @@ class TestOpeningPairIsFiredTogether:
         assert result.distinct_attempted_times() == [RESERVE_SLOT_TIME]
 
 
+class TestReportingStaysInTheStatedWindowFrame:
+    """The aim moved to 06:30:01; the scale everything is reported on did not.
+
+    Ten mornings of evidence are recorded as milliseconds past the club's stated
+    06:30:00 - refusals at -60, -14, -7, 0, 0, 812, 817 and grants at 1239, 1240,
+    1291. If moving the aim also moved the frame, tomorrow's ledger would read
+    "sent 0ms, accepted" and could not be compared with any of it.
+    """
+
+    def test_offsets_are_measured_from_the_window_not_the_aim(self) -> None:
+        """A run aimed 1030ms late reports 1030, not 0."""
+        recorder = PairRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        aim = window_about_to_open(20)
+        result = sweep_booker(recorder, 0).book(
+            1, target_timestamp_ms=aim, window_timestamp_ms=aim - 1030
+        )
+
+        assert result.success, result.error
+        sent = result.attempt_log[0].sent_ms_past_window
+        assert sent is not None
+        # Wide, because the wait may overshoot; the point is the ~1030 offset is
+        # present at all rather than having been zeroed out by the reframing.
+        assert 950 < sent < 1500
+        assert result.timing["reserveSentAtMs"] > 950
+
+    def test_without_a_separate_window_the_frame_is_the_target(self) -> None:
+        """The pre-existing behaviour, for every caller that passes one instant."""
+        recorder = PairRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0).book(1, target_timestamp_ms=window_about_to_open(20))
+
+        assert result.success, result.error
+        sent = result.attempt_log[0].sent_ms_past_window
+        assert sent is not None
+        assert -50 < sent < 500
+
+
+class TestARungOurOwnLatencyOvershotStillFires:
+    """A rung reached late is still asked, unless the whole window is stale.
+
+    Rungs are reached only once the previous answer lands, so a round trip of
+    593-828ms eats whatever rung falls inside it. With the opening pair resolving
+    around aim+1000ms, the 1000 rung would fire on a fast morning and be dropped
+    on a slow one - sending the run to the fallback list with an ask still owed
+    to the tee time we actually wanted.
+
+    The grace has to stay well short of the minutes by which a later booking in a
+    batch overshoots its shared target, which is the case the discard exists for.
+    """
+
+    def test_a_rung_just_overshot_is_still_taken(self) -> None:
+        """Our own round trip must not cost a retry."""
+        from app.providers.walden_http_booker import _next_future_rung
+
+        target = int(time_module.time() * 1000) - 1500
+
+        assert _next_future_rung([1000], target) == 1000
+
+    def test_a_rung_from_a_stale_window_is_dropped(self) -> None:
+        """A later booking in a batch has no boundary left to find."""
+        from app.providers.walden_http_booker import _next_future_rung
+
+        target = int(time_module.time() * 1000) - 60_000
+
+        assert _next_future_rung([0, 250, 1000], target) is None
+
+    def test_a_rung_still_ahead_is_taken_unchanged(self) -> None:
+        """The ordinary case the grace must not disturb."""
+        from app.providers.walden_http_booker import _next_future_rung
+
+        target = int(time_module.time() * 1000) + 500
+
+        assert _next_future_rung([250, 1000], target) == 250
+
+
 class TestTheAimPointIsTheFirstRung:
     """The precision wait sleeps to the first rung, not to the window.
 

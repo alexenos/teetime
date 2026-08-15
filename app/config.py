@@ -130,76 +130,80 @@ class Settings(BaseSettings):
     # a Reserve whose outcome is unknown is never sent twice.
     walden_adhoc_untimed_retry: bool = True
 
-    # Milliseconds past 06:30:00 to ask for the target slot at, before any
-    # fallback tee time is tried. Comma-separated; see walden_sweep_offsets_ms().
+    # When the tee sheet actually opens, as milliseconds past the club's stated
+    # 06:30:00. This is a claim about the club, and the one tomorrow tests.
     #
-    # The club refuses for roughly the first second past the window, and its
-    # refusal reads "This slot is blocked by another user" regardless of why. On
-    # 2026-08-08 a byte-identical request - same slot, same component id, same
-    # ViewState - was refused at 0ms, refused at 812ms and accepted at 1291ms;
-    # 08-12 repeated it at 0/817/1239ms on a 5:00 PM nobody else wanted, with
-    # every slot still open on the sheet an hour later. Firing once on the
-    # instant therefore asks the one question most likely to be answered no.
+    # Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
+    # 817) and every grant over +1200ms (1239, 1240, 1291). On 2026-08-15 the
+    # refusal carried a Date header stamped inside the 06:30:00 second and the
+    # grant one inside 06:30:01, and the clock probe agreed with the application
+    # server to within that header's one-second resolution. So the club is not
+    # running on a clock we misread: it refuses while its own clock still reads
+    # 06:30:00, and the sheet is open from 06:30:01.
     #
-    # Each rung is also a measurement. The ledger records which offsets were
-    # refused and which was granted, so a morning narrows the boundary to the
-    # rung spacing whether or not it wins. Once the boundary is known this
-    # collapses to a single well-chosen offset.
+    # Everything is timed from here. The sweep offsets below are past *this*
+    # instant, not past 06:30:00 - so a run aims at the moment we believe the
+    # sheet opens and retries from there, rather than searching for it.
+    #
+    # Reporting deliberately stays in the 06:30:00 frame: the ledger's
+    # sentMsPastWindow and serverMsPastWindow are still measured from the club's
+    # stated window, so tomorrow's numbers line up with the ten data points above
+    # rather than starting a second, incompatible scale.
+    #
+    # 0 restores the historical behaviour of treating 06:30:00 as the open.
+    walden_window_opens_offset_ms: int = 1000
+
+    # Slack added to the aim, for measurement error rather than for the club.
+    #
+    # Kept separate from the offset above because the two are tuned for different
+    # reasons: that one is what we believe about the club, this one is how much we
+    # distrust our own clock probe. The probe pins the club's second tick to
+    # roughly +-15ms, and arriving 15ms early lands back inside the second that
+    # has never once been granted - so the primary shot is aimed just past it.
+    # Folding these into one number would leave a refusal at the aim point
+    # ambiguous between "move the belief" and "widen the slack".
+    walden_reserve_aim_margin_ms: int = 30
+
+    # Milliseconds past the open (above) to ask for the target slot at, before
+    # any fallback tee time is tried. Comma-separated; see
+    # walden_sweep_offsets_ms().
+    #
+    # These are retries now, not a search. 0 is the aim point - the instant we
+    # believe the sheet opens - and the rest exist to catch the hypothesis being
+    # wrong. A grant at 0 confirms it; a grant at 250 or 1000 says the boundary
+    # is later than the tick and the offset above should move.
+    #
+    # 250 is fired without waiting for 0's answer (see
+    # walden_reserve_pipeline_opening_pair), which puts it near +1280ms in the
+    # old frame - close to the +1239/1240/1291 that have actually been granted.
+    # So a wrong hypothesis costs a rung rather than the morning.
+    #
+    # 1000 is the last ask before the fallback list. It lands around +2030ms in
+    # the old frame, past every grant on record.
     #
     # Spacing is bounded by how fast the club answers, not by what is written
-    # here. Rungs are slept to as absolute instants, so any rung whose moment has
-    # already passed when the previous response lands is skipped - and a Reserve
-    # round trip has measured 593ms and 647ms on the two lost mornings and 828ms
-    # on an uncontested ad-hoc booking. The previous 150/300/500/750 rungs
-    # therefore never once fired: attempt 1's answer arrived at ~860ms, past all
-    # four. A ladder written at that spacing reads like nine attempts and
-    # delivers three.
+    # here: a rung is reached only once the previous answer lands, and a Reserve
+    # round trip has measured 593-828ms. A rung our own latency has just
+    # overshot still fires - see _RUNG_LATE_GRACE_MS - but one spaced tighter
+    # than a round trip will not fire at the instant it names.
     #
-    # The first rung is the aim point, and as of 2026-08-15 it is no longer 0.
-    # Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
-    # 817) and every grant over +1200ms (1239, 1240, 1291), and the club stamped
-    # its refusals inside the 06:30:00 second and its grant inside 06:30:01. The
-    # boundary that fits all of it is the club's own second tick: it refuses
-    # while its clock still reads 06:30:00. Firing at 0ms therefore spends the
-    # first request on a certain no, which is what every morning has done.
-    #
-    # 1030 arrives 30ms past that tick. Rungs are offsets of *arrival* on the
-    # club's clock - the lead subtracts the measured offset and flight time - so
-    # this is 30ms of margin against the tick measurement, which the tightened
-    # clock probe pins to roughly +-15ms.
-    #
-    # 1250 is kept as the second rung because it is where the club has actually
-    # granted three times. It is fired without waiting for 1030's answer (see
-    # walden_reserve_pipeline_opening_pair), so aiming earlier cannot cost the
-    # offset that has been winning.
-    #
-    # Each rung is also a measurement. The ledger records which offsets were
-    # refused and which was granted, so a morning narrows the boundary whether or
-    # not it wins - and a grant at 1030 is the first evidence that the boundary
-    # is the tick rather than something later.
-    #
-    # Spacing past the pair is bounded by how fast the club answers, not by what
-    # is written here. Rungs are slept to as absolute instants, so any rung whose
-    # moment has passed when the previous response lands is skipped - and a
-    # Reserve round trip has measured 593-828ms.
-    #
-    # "0" restores the historical one-shot behaviour.
-    walden_reserve_sweep_offsets_ms: str = "1030,1250,2000,3000,4500"
+    # "0" restores the historical single ask.
+    walden_reserve_sweep_offsets_ms: str = "0,250,1000"
 
     # Fire the first two rungs without waiting for the first one's answer.
     #
     # Serialised, the ladder cannot ask twice inside one round trip: 08-15 fired
     # at -60ms, got its refusal back at +940ms, and by then the 900 rung was gone
-    # so the next question went at +1240ms. Aiming the first rung at the tick
-    # (1030) without this would make the second rung ~1780ms - later than the
-    # offset that has won three times - so a mis-measured tick would cost the
-    # morning rather than one rung.
+    # so the next question went at +1240ms. Aiming at the open without this would
+    # put the retry near +1780ms in the old frame - later than the offset that has
+    # won three times - so a wrong hypothesis would cost the morning rather than
+    # one rung.
     #
-    # Pipelined, the pair brackets the boundary in one round trip and the run is
-    # no worse off than a serial 1250 even if 1030 is refused. Both requests are
-    # for the *same* slot, so the second cannot reserve a second tee time and
-    # collide with the one-round-per-day rule; the worst case is that the club
-    # grants the same hold twice.
+    # Pipelined, the pair brackets the open in one round trip and the run is no
+    # worse off than the +1240ms that has been winning. Both requests are for the
+    # *same* slot, so the second cannot reserve a second tee time and collide
+    # with the one-round-per-day rule; the worst case is that the club grants the
+    # same hold twice.
     walden_reserve_pipeline_opening_pair: bool = True
 
     # Write the per-attempt race ledger to the debug artifacts bucket.

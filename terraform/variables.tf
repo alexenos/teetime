@@ -245,47 +245,82 @@ variable "walden_measure_clock_skew" {
   default     = true
 }
 
+variable "walden_window_opens_offset_ms" {
+  description = <<-EOT
+    When the tee sheet actually opens, as milliseconds past the club's stated
+    06:30:00. A claim about the club, and the one being tested.
+
+    Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812, 817)
+    and every grant over +1200ms (1239, 1240, 1291). On 2026-08-15 the refusal
+    carried a Date header stamped inside the 06:30:00 second and the grant one
+    inside 06:30:01, and the clock probe agreed with the application server to
+    within that header's one-second resolution. The club is not running on a
+    clock we misread: it refuses while its own clock still reads 06:30:00.
+
+    Everything is timed from here - walden_reserve_sweep_offsets_ms are offsets
+    past this instant, not past 06:30:00. Reporting deliberately is not: the race
+    ledger still measures from the stated window, so a morning's numbers stay
+    comparable with the ten data points above.
+
+    0 restores the historical behaviour of treating 06:30:00 as the open.
+  EOT
+  type        = number
+  default     = 1000
+
+  validation {
+    condition     = var.walden_window_opens_offset_ms == floor(var.walden_window_opens_offset_ms) && var.walden_window_opens_offset_ms >= 0 && var.walden_window_opens_offset_ms <= 10000
+    error_message = "walden_window_opens_offset_ms must be a whole number of milliseconds between 0 and 10000."
+  }
+}
+
+variable "walden_reserve_aim_margin_ms" {
+  description = <<-EOT
+    Slack added to the aim, for measurement error rather than for the club.
+
+    Kept separate from walden_window_opens_offset_ms because the two are tuned
+    for different reasons: that one is what we believe about the club, this is how
+    far we distrust our own clock probe. The probe pins the club's second tick to
+    roughly +-15ms, and arriving 15ms early lands back inside the second that has
+    never once been granted. Folding them into one number would leave a refusal
+    at the aim point ambiguous between "move the belief" and "widen the slack".
+  EOT
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.walden_reserve_aim_margin_ms == floor(var.walden_reserve_aim_margin_ms) && var.walden_reserve_aim_margin_ms >= 0 && var.walden_reserve_aim_margin_ms <= 1000
+    error_message = "walden_reserve_aim_margin_ms must be a whole number of milliseconds between 0 and 1000."
+  }
+}
+
 variable "walden_reserve_sweep_offsets_ms" {
   description = <<-EOT
-    Milliseconds past 06:30:00 to ask for the target slot at, comma-separated,
-    before any fallback tee time is tried.
+    Milliseconds past the open (walden_window_opens_offset_ms) to ask for the
+    target slot at, comma-separated, before any fallback tee time is tried.
 
-    The club refuses for roughly the first second past the window, wording every
-    refusal "This slot is blocked by another user". On 2026-08-08 a byte-identical
-    request - same slot, same component id, same ViewState - was refused at 0ms,
-    refused at 812ms and accepted at 1291ms. 2026-08-12 repeated the pattern at
-    0/817/1239ms, on a 5:00 PM slot no other member wanted: the whole sheet was
-    still open an hour later. Asking once on the instant is therefore the single
-    worst-timed question we can ask.
+    These are retries, not a search. 0 is the aim point - the instant we believe
+    the sheet opens - and the rest exist to catch that belief being wrong. A grant
+    at 0 confirms it; a grant at 250 or 1000 says the boundary is later than the
+    club's second tick and walden_window_opens_offset_ms should move.
 
-    The first offset is the aim point, and as of 2026-08-15 it is no longer 0.
-    Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812, 817)
-    and every grant over +1200ms (1239, 1240, 1291), and the club stamped its
-    refusals inside the 06:30:00 second and its one grant inside 06:30:01. The
-    boundary that fits all of it is the club's own second tick: it refuses while
-    its clock still reads 06:30:00. 1030 arrives 30ms past that tick, which is
-    margin against a tick measurement good to roughly +-15ms.
+    250 is fired without waiting for 0's answer (see
+    walden_reserve_pipeline_opening_pair), which puts it near +1280ms measured
+    from the stated window - close to the +1239/1240/1291 that have actually been
+    granted. So a wrong hypothesis costs a rung rather than the morning.
 
-    1250 is kept as the second offset because it is where the club has actually
-    granted three times, and walden_reserve_pipeline_opening_pair fires it
-    without waiting for 1030's answer - so aiming earlier cannot cost the offset
-    that has been winning.
+    1000 is the last ask before the fallback list, landing near +2030ms from the
+    stated window, past every grant on record.
 
-    Each rung doubles as a measurement - the race ledger records which offsets
-    were refused and which was granted - so a morning narrows the boundary
-    whether or not it wins. A grant at 1030 is the first evidence that the
-    boundary is the tick rather than something later.
+    Spacing is bounded by how fast the club answers, not by what is set here: a
+    rung is reached only once the previous answer lands, and a Reserve round trip
+    has measured 593-828ms. A rung our own latency has just overshot still fires
+    (see _RUNG_LATE_GRACE_MS in walden_http_booker.py), but one spaced tighter
+    than a round trip will not fire at the instant it names.
 
-    Spacing past the pair is bounded by how fast the club answers, not by what is
-    set here. Rungs are slept to as absolute instants, so one whose moment has
-    already passed when the previous response lands is skipped - and a Reserve
-    round trip has measured 593-828ms. Rungs spaced tighter than a round trip
-    make the ladder read longer than it runs.
-
-    "0" restores the historical single shot on the instant.
+    "0" restores the historical single ask.
   EOT
   type        = string
-  default     = "1030,1250,2000,3000,4500"
+  default     = "0,250,1000"
 
   validation {
     # Whitespace is tolerated because the parser in app/config.py strips it, and

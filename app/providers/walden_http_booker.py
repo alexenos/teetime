@@ -205,6 +205,16 @@ _RESERVE_DEADLINE_MS = 10000
 # deadline below.
 _RESERVE_TIMEOUT_S = 3.0
 
+# How far past its instant a ladder rung is still worth firing at once.
+#
+# Rungs are reached only after the previous answer lands, so a rung spaced closer
+# to its predecessor than one round trip is already gone by the time it is
+# considered. Sized above the slowest Reserve round trip measured (828ms) so that
+# our own latency never silently costs a rung, and far below the minutes by which
+# a later booking in a batch overshoots its shared target - which is the case
+# _next_future_rung exists to drop.
+_RUNG_LATE_GRACE_MS = 2000
+
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
 # DOM untouched, so only this one needs the outcome resolved against the site.
@@ -337,6 +347,9 @@ class DirectHttpBooker:
         # trip between them. Off here so the historical one-shot default stays
         # exactly that; prepare() turns it on.
         self._pipeline_opening_pair: bool = False
+        # The frame every reported offset is measured from - the club's stated
+        # 06:30:00, which the aim may sit past. book() sets it.
+        self._window_timestamp_ms: int | None = None
 
     # -- staging ----------------------------------------------------------
 
@@ -533,6 +546,7 @@ class DirectHttpBooker:
         num_players: int,
         *,
         target_timestamp_ms: int | None = None,
+        window_timestamp_ms: int | None = None,
     ) -> DirectBookingResult:
         """Run the full chain, firing Reserve at ``target_timestamp_ms``.
 
@@ -546,11 +560,23 @@ class DirectHttpBooker:
             target_timestamp_ms: Epoch ms to send the Reserve POST at. None
                 fires immediately (later bookings in a batch, window already
                 open).
+            window_timestamp_ms: The club's stated window, when the aim above has
+                been moved off it. Every offset reported - the ledger's
+                ``sentMsPastWindow`` and ``serverMsPastWindow``, and the timing
+                summary - is measured from here, so moving the aim does not put
+                a morning on a different scale from the ones before it. Defaults
+                to the target, which is what it was before the two diverged.
 
         Returns:
             The outcome; never raises for an ordinary booking failure.
         """
         result = DirectBookingResult()
+        # Held on the instance so the observation calls deep in the ladder do not
+        # each need it threaded down. Set before any early return so a misuse
+        # result carries a coherent frame too.
+        self._window_timestamp_ms = (
+            window_timestamp_ms if window_timestamp_ms is not None else target_timestamp_ms
+        )
 
         # Misuse, not a booking outcome - but reported as a PHASE_INIT result
         # rather than raised, because nothing has been sent and the caller's
@@ -752,6 +778,14 @@ class DirectHttpBooker:
         started = time_module.perf_counter()
         slot_time = self._slot_time
         remaining = list(self._fallback_times)
+        # Every *reported* offset is measured from the club's stated window; every
+        # instant slept to is measured from the aim. Keeping the two apart is what
+        # lets the aim move to 06:30:01 without the ledger changing scale.
+        window_frame_ms = (
+            self._window_timestamp_ms
+            if self._window_timestamp_ms is not None
+            else target_timestamp_ms
+        )
         # Latches on the first timeout and never clears; see the docstring.
         timed_out = False
         # Untimed bookings have no window to sweep around; the first rung is
@@ -773,13 +807,16 @@ class DirectHttpBooker:
             if slot_time is not None:
                 result.attempted_times.append(slot_time)
 
-            if target_timestamp_ms is not None and attempt == 1:
+            if window_frame_ms is not None and attempt == 1:
                 # First attempt only. Later ones are paced by the ladder, and
                 # reporting each against the window would bury the number that
                 # says whether we were on time.
-                result.timing["reserveSentAtMs"] = (
-                    int(time_module.time() * 1000) - target_timestamp_ms
-                )
+                #
+                # Measured from the club's stated window rather than from where
+                # we aimed, so this stays the same number the mornings before
+                # this one reported - "1030ms past the window", not "0ms past
+                # the thing we decided to aim at".
+                result.timing["reserveSentAtMs"] = int(time_module.time() * 1000) - window_frame_ms
             logger.info(
                 "DIRECT_HTTP: Firing Reserve %d/%d for %s - source=%s, viewState=%s, "
                 "%sms past the window",
@@ -805,8 +842,8 @@ class DirectHttpBooker:
             # line and fingerprint between the two reads are real work, and the
             # closer read is the honest one for the ledger.
             sent_ms_past_window = (
-                int(time_module.time() * 1000) - target_timestamp_ms
-                if target_timestamp_ms is not None
+                int(time_module.time() * 1000) - window_frame_ms
+                if window_frame_ms is not None
                 else None
             )
             if paired_rung_ms is not None and attempt == 1:
@@ -815,6 +852,7 @@ class DirectHttpBooker:
                     config,
                     body,
                     target_timestamp_ms=target_timestamp_ms,
+                    window_frame_ms=window_frame_ms,
                     second_rung_ms=paired_rung_ms,
                     slot_time=slot_time,
                     view_state=view_state,
@@ -892,7 +930,7 @@ class DirectHttpBooker:
                 response, document, observation, stalled = self._fire_single_reserve(
                     config,
                     body,
-                    target_timestamp_ms=target_timestamp_ms,
+                    window_frame_ms=window_frame_ms,
                     slot_time=slot_time,
                     view_state=view_state,
                     sent_ms_past_window=sent_ms_past_window,
@@ -1039,7 +1077,7 @@ class DirectHttpBooker:
         config: AbConfig,
         body: bytes,
         *,
-        target_timestamp_ms: int | None,
+        window_frame_ms: int | None,
         slot_time: time | None,
         view_state: str,
         sent_ms_past_window: int | None,
@@ -1047,6 +1085,10 @@ class DirectHttpBooker:
         result: DirectBookingResult,
     ) -> "tuple[PartialResponse | None, Node | None, ReserveObservation | None, str | None]":
         """Send one Reserve and observe the answer.
+
+        ``window_frame_ms`` is the club's stated window, which every offset in
+        the observation is measured from. Nothing here sleeps, so the aim does
+        not reach this far.
 
         Extracted from :meth:`_reserve_until_accepted` when the opening pair grew
         a second way of sending, so both paths hand the loop the same three
@@ -1099,7 +1141,7 @@ class DirectHttpBooker:
             response=response,
             document=document,
             markup=response.markup,
-            target_timestamp_ms=target_timestamp_ms,
+            target_timestamp_ms=window_frame_ms,
         )
         result.attempt_log.append(observation)
         _log_reserve_observation(observation)
@@ -1111,6 +1153,7 @@ class DirectHttpBooker:
         body: bytes,
         *,
         target_timestamp_ms: int,
+        window_frame_ms: int | None,
         second_rung_ms: int,
         slot_time: time | None,
         view_state: str,
@@ -1137,13 +1180,17 @@ class DirectHttpBooker:
         adopts exactly one.
         """
         lead_ms = int(round(self._lead_ms))
+        frame_ms = window_frame_ms if window_frame_ms is not None else target_timestamp_ms
 
         def send(
             rung_ms: int, wait: bool
         ) -> tuple[int, int, PartialResponse | None, Exception | None]:
+            # Slept to against the aim, reported against the club's stated
+            # window. The two differ by the offset at which we believe the sheet
+            # actually opens.
             if wait:
                 sleep_until(target_timestamp_ms + rung_ms - lead_ms)
-            sent_ms = int(time_module.time() * 1000) - target_timestamp_ms
+            sent_ms = int(time_module.time() * 1000) - frame_ms
             try:
                 sent = self.session.send_detached(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
             except (DirectHttpError, ViewExpiredError) as exc:
@@ -1198,7 +1245,7 @@ class DirectHttpBooker:
                 response=response,
                 document=document,
                 markup=response.markup,
-                target_timestamp_ms=target_timestamp_ms,
+                target_timestamp_ms=frame_ms,
             )
             pair.observations.append(observation)
             if observation.verdict != RESERVE_REFUSED and pair.accepted is None:
@@ -2030,7 +2077,7 @@ def _find_blocked_message(response: PartialResponse) -> str | None:
 
 
 def _next_future_rung(rungs: list[int], target_timestamp_ms: int | None) -> int | None:
-    """Pop the next ladder rung still ahead of us, discarding any already past.
+    """Pop the next ladder rung not yet meaningfully past, discarding stale ones.
 
     Every booking in a batch carries the same target timestamp - deliberately,
     so the batch's 6:30 gate does not depend on booking 1 reaching its wait - and
@@ -2040,19 +2087,27 @@ def _next_future_rung(rungs: list[int], target_timestamp_ms: int | None) -> int 
     the socket allows: a burst of identical Reserves, which is the opposite of
     what spacing them out is for.
 
-    A rung only means something while the instant it names is still ahead. Once
-    the window is minutes old there is no boundary left to find, a refusal is
-    much more likely to be a slot genuinely held, and the fallback list is the
+    Once the window is minutes old there is no boundary left to find, a refusal
+    is much more likely to be a slot genuinely held, and the fallback list is the
     right next move.
 
-    Consumes ``rungs`` as it goes. Returns None when none are left in the future.
+    But "still ahead" was too strict once the ladder became retries rather than a
+    search over offsets. A rung is reached only after the previous answer lands,
+    so our own round trip - 593-828ms measured - eats whatever rung falls inside
+    it. With the opening pair resolving around aim+1000ms, a 1000ms rung would
+    fire on a fast morning and be silently dropped on a slow one, sending the run
+    to the fallback list while the tee time we wanted had one ask left. The grace
+    below is what separates "our round trip ate this rung" from "this booking is
+    minutes past its window".
+
+    Consumes ``rungs`` as it goes. Returns None when only stale ones are left.
     """
     if target_timestamp_ms is None:
         return None
     now_ms = int(time_module.time() * 1000)
     while rungs:
         rung = rungs.pop(0)
-        if target_timestamp_ms + rung > now_ms:
+        if target_timestamp_ms + rung + _RUNG_LATE_GRACE_MS > now_ms:
             return rung
     return None
 
