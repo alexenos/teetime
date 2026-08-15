@@ -140,24 +140,74 @@ class TestStaleMessagesLaterInTheChain:
 class TestSweepLadder:
     """The offsets the Reserve is asked at, parsed from configuration."""
 
-    def test_the_default_ladder_starts_on_the_instant_and_climbs(
+    def test_the_aim_clears_every_refusal_on_record(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The sheet is believed to open at 06:30:01, and that is where we aim.
+
+        Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
+        817) and every grant over +1200ms, with the club stamping refusals inside
+        the 06:30:00 second and its grant inside 06:30:01. An aim that did not
+        clear the last refusal would be spending the primary shot on a question
+        already answered no seven times.
+
+        Isolated from the environment: terraform sets these on the deployed
+        service, so a shell mirroring the deployment would make this assert what
+        is configured rather than what ships.
+        """
+        monkeypatch.delenv("WALDEN_WINDOW_OPENS_OFFSET_MS", raising=False)
+        monkeypatch.delenv("WALDEN_RESERVE_AIM_MARGIN_MS", raising=False)
+        config = Settings(_env_file=None)
+
+        aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
+
+        assert config.walden_window_opens_offset_ms >= 1000
+        # Strictly past, not equal: landing exactly on the tick is the case the
+        # margin exists for, since the probe pins it to only about +-15ms.
+        assert aim_ms > 1000
+
+    def test_the_default_ladder_is_retries_from_the_aim(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """0ms is still asked first - the sweep adds rungs, it does not delay.
+        """Rungs are offsets past the open now, so the first one is 0.
 
-        Isolated from the environment: terraform sets this variable on the
-        deployed service, so a shell mirroring the deployment would make this
-        assert what is configured rather than what ships. The two tests below
-        need no such care - an explicit init argument outranks both sources.
+        The ladder stopped being a search over offsets once the open was named:
+        rung 0 *is* the hypothesis, and the rest are there to catch it being
+        wrong. One of them still has to reach the offsets the club has actually
+        granted at, or a wrong hypothesis costs the morning rather than a rung.
         """
         monkeypatch.delenv("WALDEN_RESERVE_SWEEP_OFFSETS_MS", raising=False)
-        ladder = Settings(_env_file=None).walden_sweep_offsets_ms()
+        monkeypatch.delenv("WALDEN_WINDOW_OPENS_OFFSET_MS", raising=False)
+        monkeypatch.delenv("WALDEN_RESERVE_AIM_MARGIN_MS", raising=False)
+        config = Settings(_env_file=None)
+        ladder = config.walden_sweep_offsets_ms()
+        aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
 
         assert ladder[0] == 0
         assert list(ladder) == sorted(ladder)
-        # 08-08 was granted at +1291ms and 08-12 at +1239ms, so a ladder that
-        # stopped short of those would have measured nothing on either morning.
-        assert ladder[-1] >= 1300
+        # 08-08 was granted at +1291ms, 08-12 at +1239ms and 08-15 at +1240ms,
+        # measured from the stated window. A rung has to land out there.
+        assert any(aim_ms + rung >= 1239 for rung in ladder)
+        # And the ladder has to be short. It is retries now; a long one is the
+        # search it replaced.
+        assert len(ladder) <= 4
+
+    def test_the_opening_pair_is_off_until_it_has_been_exercised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Untested concurrency does not get its first run in the race.
+
+        Firing rungs 0 and 250 together has never run against the club, and the
+        sequence it creates - a Reserve granted while a second for the same slot
+        is already in flight - has never been observed. With rung 0 now being the
+        hypothesis rather than a guess, a right hypothesis makes that sequence
+        the daily case rather than the rare one.
+
+        Serially the ladder still asks at roughly +1030, +1770 and +2510ms from
+        the stated window, all past every refusal on record, so the cost of
+        leaving this off is an ask at +1770 instead of +1280.
+        """
+        monkeypatch.delenv("WALDEN_RESERVE_PIPELINE_OPENING_PAIR", raising=False)
+
+        assert Settings(_env_file=None).walden_reserve_pipeline_opening_pair is False
 
     def test_a_malformed_ladder_degrades_to_one_shot(self) -> None:
         """A bad value must not stop a morning."""

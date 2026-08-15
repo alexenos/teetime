@@ -239,8 +239,23 @@ resource "google_cloud_run_v2_service" "teetime" {
       }
 
       env {
+        name  = "WALDEN_WINDOW_OPENS_OFFSET_MS"
+        value = tostring(var.walden_window_opens_offset_ms)
+      }
+
+      env {
+        name  = "WALDEN_RESERVE_AIM_MARGIN_MS"
+        value = tostring(var.walden_reserve_aim_margin_ms)
+      }
+
+      env {
         name  = "WALDEN_RESERVE_SWEEP_OFFSETS_MS"
         value = var.walden_reserve_sweep_offsets_ms
+      }
+
+      env {
+        name  = "WALDEN_RESERVE_PIPELINE_OPENING_PAIR"
+        value = tostring(var.walden_reserve_pipeline_opening_pair)
       }
 
       env {

@@ -2871,7 +2871,16 @@ class TestBatchBookingPreparation:
         # The 6:30 gate lives in the fast chain's JS/HTTP precision wait. With
         # the chain off, Python has to hold the window itself or the batch races
         # a locked tee sheet - the bug #122 fixed, re-entering by the back door.
-        precision_wait.assert_called_once_with(datetime(2026, 2, 19, 6, 30, 0))
+        #
+        # Shifted, where this used to assert the stated 06:30:00. That assertion
+        # encoded a time we now know the club refuses: this path reads execute_at
+        # rather than execute_at_timestamp_ms, so it was the one route still
+        # firing at the stated window while the other two aimed at the open.
+        aim = timedelta(
+            milliseconds=settings.walden_window_opens_offset_ms
+            + settings.walden_reserve_aim_margin_ms
+        )
+        precision_wait.assert_called_once_with(datetime(2026, 2, 19, 6, 30, 0) + aim)
 
     def test_untimed_batch_uses_the_fast_chain(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -3088,7 +3097,9 @@ class TestDirectHttpBookingWiring:
         assert chain_result is not None
         assert chain_result["success"] is True
         assert chain_result["phase"] == "complete"
-        booker.book.assert_called_once_with(4, target_timestamp_ms=1770000000000)
+        booker.book.assert_called_once_with(
+            4, target_timestamp_ms=1770000000000, window_timestamp_ms=None
+        )
         session.close.assert_called_once()
 
     def test_blocked_is_honored_not_retried(
@@ -3455,6 +3466,47 @@ class TestUnconfirmedBookingResolution:
         assert result.error_message is not None
         assert "could not be checked" in result.error_message
 
+    def test_a_confirmed_response_is_still_checked_against_the_page(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "Confirmed" is a phrase match, and the logs must not stop there.
+
+        2026-08-15 returned success on the word "thank you" in a PrimeFaces
+        partial update and never looked at the reservations page, so a run that
+        completed against no reservation - the one failure class that reads as a
+        win - would have been indistinguishable from the morning it won.
+        """
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain("<div><p>Thank you, your tee time is booked.</p></div>"),
+            reservation_exists=True,
+        )
+
+        assert result.success is True
+        reservation_check.assert_called_once_with(ANY, self.TARGET_DATE, time(8, 42))
+
+    def test_a_confirmed_response_the_page_does_not_list_still_reports_success(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reported, not enforced - and deliberately so.
+
+        The member dashboard can lag a booking by seconds, and flipping a
+        text-confirmed win to a failure would feed the untimed retry, which is
+        how a second tee time gets stacked on a hold that does exist. The
+        discrepancy is loud in the logs and keeps an artifact; it does not change
+        the outcome.
+        """
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain("<div><p>Thank you, your tee time is booked.</p></div>"),
+            reservation_exists=False,
+        )
+
+        assert result.success is True
+        reservation_check.assert_called_once_with(ANY, self.TARGET_DATE, time(8, 42))
+
     def test_refusal_wording_is_carried_into_the_error(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3505,20 +3557,6 @@ class TestUnconfirmedBookingResolution:
         assert result.error_message is not None
         assert result.error_message.startswith("Restriction: Member: Sample, Member")
         assert "could not be checked" in result.error_message
-
-    def test_a_confirmed_response_never_reaches_the_reservations_page(
-        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The check costs the tee sheet, so it only runs when it is needed."""
-        result, reservation_check = self._book(
-            provider,
-            monkeypatch,
-            self._completed_chain("<div><h2>Your tee time is booked</h2></div>"),
-            reservation_exists=False,
-        )
-
-        assert result.success is True
-        reservation_check.assert_not_called()
 
     def test_failure_after_reserve_was_sent_checks_the_reservations_page(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -4117,7 +4155,7 @@ class TestImmediateBookingFastPath:
         assert result.confirmation_number == "12345"
         assert result.booked_time == time(8, 42)
         # Untimed: Reserve fires as soon as it is staged, no target to wait for.
-        booker.book.assert_called_once_with(4, target_timestamp_ms=None)
+        booker.book.assert_called_once_with(4, target_timestamp_ms=None, window_timestamp_ms=None)
         fast_chain.assert_not_called()
 
     def test_immediate_booking_uses_the_js_chain_when_direct_http_is_off(

@@ -108,11 +108,24 @@ _SPIN_WINDOW_MS = 3
 # second of resolution, so a single sample says nothing better than "somewhere
 # in this second". What is readable is the *transition*: probe faster than the
 # second ticks, and the local time at which the header increments is a server
-# second boundary observed directly. Spacing bounds the error (+-40 ms here);
-# the count has to span more than a second so at least one transition is
-# guaranteed to fall inside the run.
-_SKEW_PROBE_COUNT = 16
-_SKEW_PROBE_SPACING_S = 0.08
+# second boundary observed directly. Spacing bounds the error; the run has to
+# span more than a second so at least one transition falls inside it.
+#
+# Sized for the boundary, not just the lead. Until 2026-08-15 this was 16 probes
+# at 80ms, which spans 1.3s and yields one transition bracketed to +-105ms - fine
+# for arriving "about when the window opens", useless for aiming at the club's
+# second tick, which is what the refusal boundary turns out to be keyed to (see
+# _OPENING_OFFSET_MS in walden_http_booker). Tighter spacing over a longer run
+# gives several transitions instead of one, and the median of them is what makes
+# the estimate better than any single bracket.
+#
+# Budget-bounded rather than count-bounded: the probe target has answered in
+# 26-131ms across mornings, and a count that is 5s of probing on a quiet day
+# would be 40s on a slow one - inside the ~70s before the window, but spending
+# the staging margin on a measurement is not a trade worth making silently.
+_SKEW_PROBE_SPACING_S = 0.02
+_SKEW_PROBE_BUDGET_S = 5.0
+_SKEW_PROBE_MAX = 300
 # A probe is only usable if its own round trip is short enough that the header
 # was stamped near the midpoint we ascribe to it. A stalled probe is dropped
 # rather than allowed to drag the estimate.
@@ -146,12 +159,19 @@ class ClockSkew:
     ``offset_ms`` is the club's clock minus ours: positive means the club gets
     to 06:30:00 before we do. ``one_way_ms`` is the outbound flight time. Their
     sum is how early a request has to leave to arrive as the window opens.
+
+    ``tick_bracket_ms`` is how tightly the server's second boundary was pinned -
+    the median gap between the two probes that straddled a transition. It bounds
+    the error on ``offset_ms``, and so on any aim taken relative to the club's
+    own second tick. Reported rather than acted on: a wide bracket is a reason
+    to distrust a tight aim, and the log is where that gets noticed.
     """
 
     offset_ms: float
     one_way_ms: float
     probes: int
     transitions: int
+    tick_bracket_ms: float = 0.0
 
     @property
     def lead_ms(self) -> float:
@@ -930,9 +950,14 @@ class PrimeFacesSession:
         probe_url = self._resolve_probe_url()
         samples: list[tuple[float, int]] = []
         round_trips: list[float] = []
-        for probe in range(_SKEW_PROBE_COUNT):
+        deadline = time_module.monotonic() + _SKEW_PROBE_BUDGET_S
+        attempted = 0
+        for probe in range(_SKEW_PROBE_MAX):
             if probe:
+                if time_module.monotonic() >= deadline:
+                    break
                 time_module.sleep(_SKEW_PROBE_SPACING_S)
+            attempted += 1
             sent = time_module.time()
             try:
                 response = self._client.head(probe_url)
@@ -958,17 +983,20 @@ class PrimeFacesSession:
                 "DIRECT_HTTP: Clock skew unmeasurable - %d usable probe(s) of %d against %s "
                 "(round trips over %.1fs are dropped)",
                 len(samples),
-                _SKEW_PROBE_COUNT,
+                attempted,
                 probe_url,
                 _SKEW_MAX_PROBE_RTT_S,
             )
             return None
 
-        offsets = [
+        # Each transition gives one estimate of the offset and one bracket that
+        # bounds it. Kept paired so the reported uncertainty belongs to the same
+        # transitions the median was taken over.
+        transitions = [
             # The increment happened between these two probes, so the server's
             # own second boundary sits at their midpoint by our clock. Its
             # distance from the whole second the server reported is the offset.
-            later_second - (earlier_mid + later_mid) / 2
+            (later_second - (earlier_mid + later_mid) / 2, later_mid - earlier_mid)
             for (earlier_mid, earlier_second), (later_mid, later_second) in zip(
                 samples, samples[1:]
             )
@@ -976,15 +1004,16 @@ class PrimeFacesSession:
             # to say where inside it the boundary was.
             if later_second - earlier_second == 1
         ]
-        if not offsets:
+        if not transitions:
             logger.warning(
                 "DIRECT_HTTP: Clock skew unmeasurable - the Date header never advanced "
                 "across %d probes spanning %.1fs (cached?)",
                 len(samples),
-                _SKEW_PROBE_COUNT * _SKEW_PROBE_SPACING_S,
+                samples[-1][0] - samples[0][0],
             )
             return None
 
+        offsets = [offset for offset, _bracket in transitions]
         skew = ClockSkew(
             offset_ms=_median(offsets) * 1000,
             # Halved on the usual assumption that the two legs are symmetric.
@@ -992,15 +1021,25 @@ class PrimeFacesSession:
             # journey back happens after the club has already acted.
             one_way_ms=_median(round_trips) * 1000 / 2,
             probes=len(samples),
-            transitions=len(offsets),
+            transitions=len(transitions),
+            tick_bracket_ms=_median([bracket for _offset, bracket in transitions]) * 1000,
         )
         logger.info(
             "DIRECT_HTTP: Clock skew measured - club is %+.0fms from us, one-way %.0fms "
-            "(%d probes, %d transitions)",
+            "(%d probes, %d transitions, tick pinned to +-%.0fms)",
             skew.offset_ms,
             skew.one_way_ms,
             skew.probes,
             skew.transitions,
+            skew.tick_bracket_ms / 2,
+        )
+        # Stated in our own clock because that is the frame every rung is slept
+        # to. The club's second boundary is the thing the refusal boundary has
+        # tracked on every morning measured, so where it falls is worth its own
+        # line rather than being left implicit in the offset.
+        logger.info(
+            "DIRECT_HTTP: The club's second ticks at %+.0fms against our own whole second",
+            -skew.offset_ms,
         )
         self.clock_skew = skew
         return skew
@@ -1022,6 +1061,30 @@ class PrimeFacesSession:
                 session default is sized for a chain step that must not be
                 abandoned; a request made *during* the race needs to give up
                 far sooner than that and try something else.
+        """
+        response = self.send_detached(config, body=body, timeout_s=timeout_s)
+        self.adopt(response)
+        return response
+
+    def send_detached(
+        self,
+        config: AbConfig,
+        *,
+        body: bytes | None = None,
+        timeout_s: float | None = None,
+    ) -> PartialResponse:
+        """Send one request and return its response without touching session state.
+
+        :meth:`post` is this plus :meth:`adopt`. They are separable because the
+        opening pair of Reserves is fired concurrently: ``adopt`` rebuilds
+        ``form_state`` from the returned markup, so two in-flight requests
+        folding themselves in would race over the fields and ViewState the rest
+        of the chain is built from. Both are sent detached and only the response
+        actually carried forward is adopted.
+
+        The caller owns that choice, and must adopt exactly one response before
+        continuing the chain - otherwise the next step serializes the pre-window
+        form against a view the club has already moved past.
         """
         payload = body if body is not None else self.build_body(config)
         sent_at_ms = int(time_module.time() * 1000)
@@ -1073,8 +1136,15 @@ class PrimeFacesSession:
                 f"Server redirected {config.source} to {response.redirect_url}; "
                 "the adopted session is no longer valid"
             )
-        self._apply(response)
         return response
+
+    def adopt(self, response: PartialResponse) -> None:
+        """Fold a detached response into the session state.
+
+        The other half of :meth:`send_detached`. Call this on the one response
+        the chain carries forward, and only that one.
+        """
+        self._apply(response)
 
     def _apply(self, response: PartialResponse) -> None:
         """Fold a partial response into the session state.

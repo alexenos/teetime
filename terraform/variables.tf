@@ -245,36 +245,82 @@ variable "walden_measure_clock_skew" {
   default     = true
 }
 
+variable "walden_window_opens_offset_ms" {
+  description = <<-EOT
+    When the tee sheet actually opens, as milliseconds past the club's stated
+    06:30:00. A claim about the club, and the one being tested.
+
+    Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812, 817)
+    and every grant over +1200ms (1239, 1240, 1291). On 2026-08-15 the refusal
+    carried a Date header stamped inside the 06:30:00 second and the grant one
+    inside 06:30:01, and the clock probe agreed with the application server to
+    within that header's one-second resolution. The club is not running on a
+    clock we misread: it refuses while its own clock still reads 06:30:00.
+
+    Everything is timed from here - walden_reserve_sweep_offsets_ms are offsets
+    past this instant, not past 06:30:00. Reporting deliberately is not: the race
+    ledger still measures from the stated window, so a morning's numbers stay
+    comparable with the ten data points above.
+
+    0 restores the historical behaviour of treating 06:30:00 as the open.
+  EOT
+  type        = number
+  default     = 1000
+
+  validation {
+    condition     = var.walden_window_opens_offset_ms == floor(var.walden_window_opens_offset_ms) && var.walden_window_opens_offset_ms >= 0 && var.walden_window_opens_offset_ms <= 10000
+    error_message = "walden_window_opens_offset_ms must be a whole number of milliseconds between 0 and 10000."
+  }
+}
+
+variable "walden_reserve_aim_margin_ms" {
+  description = <<-EOT
+    Slack added to the aim, for measurement error rather than for the club.
+
+    Kept separate from walden_window_opens_offset_ms because the two are tuned
+    for different reasons: that one is what we believe about the club, this is how
+    far we distrust our own clock probe. The probe pins the club's second tick to
+    roughly +-15ms, and arriving 15ms early lands back inside the second that has
+    never once been granted. Folding them into one number would leave a refusal
+    at the aim point ambiguous between "move the belief" and "widen the slack".
+  EOT
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.walden_reserve_aim_margin_ms == floor(var.walden_reserve_aim_margin_ms) && var.walden_reserve_aim_margin_ms >= 0 && var.walden_reserve_aim_margin_ms <= 1000
+    error_message = "walden_reserve_aim_margin_ms must be a whole number of milliseconds between 0 and 1000."
+  }
+}
+
 variable "walden_reserve_sweep_offsets_ms" {
   description = <<-EOT
-    Milliseconds past 06:30:00 to ask for the target slot at, comma-separated,
-    before any fallback tee time is tried.
+    Milliseconds past the open (walden_window_opens_offset_ms) to ask for the
+    target slot at, comma-separated, before any fallback tee time is tried.
 
-    The club refuses for roughly the first second past the window, wording every
-    refusal "This slot is blocked by another user". On 2026-08-08 a byte-identical
-    request - same slot, same component id, same ViewState - was refused at 0ms,
-    refused at 812ms and accepted at 1291ms. 2026-08-12 repeated the pattern at
-    0/817/1239ms, on a 5:00 PM slot no other member wanted: the whole sheet was
-    still open an hour later. Asking once on the instant is therefore the single
-    worst-timed question we can ask.
+    These are retries, not a search. 0 is the aim point - the instant we believe
+    the sheet opens - and the rest exist to catch that belief being wrong. A grant
+    at 0 confirms it; a grant at 250 or 1000 says the boundary is later than the
+    club's second tick and walden_window_opens_offset_ms should move.
 
-    Each rung doubles as a measurement - the race ledger records which offsets
-    were refused and which was granted - so a morning narrows the boundary to the
-    rung spacing whether or not it wins. Once it is known, collapse this to one
-    well-chosen offset.
+    250 is fired without waiting for 0's answer (see
+    walden_reserve_pipeline_opening_pair), which puts it near +1280ms measured
+    from the stated window - close to the +1239/1240/1291 that have actually been
+    granted. So a wrong hypothesis costs a rung rather than the morning.
 
-    Spacing is bounded by how fast the club answers, not by what is set here.
-    Rungs are slept to as absolute instants, so one whose moment has already
-    passed when the previous response lands is skipped - and a Reserve round trip
-    has measured 593ms and 647ms on the two lost mornings and 828ms on an
-    uncontested ad-hoc booking. The previous 150/300/500/750 rungs never once
-    fired: attempt 1's answer arrived ~860ms in, past all four. Rungs spaced
-    tighter than a round trip make the ladder read longer than it runs.
+    1000 is the last ask before the fallback list, landing near +2030ms from the
+    stated window, past every grant on record.
 
-    "0" restores the historical single shot on the instant.
+    Spacing is bounded by how fast the club answers, not by what is set here: a
+    rung is reached only once the previous answer lands, and a Reserve round trip
+    has measured 593-828ms. A rung our own latency has just overshot still fires
+    (see _RUNG_LATE_GRACE_MS in walden_http_booker.py), but one spaced tighter
+    than a round trip will not fire at the instant it names.
+
+    "0" restores the historical single ask.
   EOT
   type        = string
-  default     = "0,900,1300,2000,3000,4500"
+  default     = "0,250,1000"
 
   validation {
     # Whitespace is tolerated because the parser in app/config.py strips it, and
@@ -286,6 +332,41 @@ variable "walden_reserve_sweep_offsets_ms" {
     condition     = can(regex("^[0-9]+( *, *[0-9]+)*$", var.walden_reserve_sweep_offsets_ms))
     error_message = "Must be non-negative whole milliseconds, comma-separated, e.g. \"0,150,300\"."
   }
+}
+
+variable "walden_reserve_pipeline_opening_pair" {
+  description = <<-EOT
+    Fire the first two sweep offsets without waiting for the first one's answer.
+
+    Serialised, the ladder cannot ask twice inside one round trip. On 2026-08-15
+    the first Reserve went at -60ms, its refusal landed at +940ms, and by then
+    the +900 rung was gone - so the next question could not go until +1240ms.
+    That is harmless when the first rung is 0 and expected to fail, but the first
+    rung now aims at the club's second tick, and aiming there serially would push
+    the follow-up to ~+1780ms, later than the +1240ms that has been granted three
+    times.
+
+    Pipelined, the pair brackets the open inside one round trip. Both requests
+    are for the same slot, so neither can reserve a second tee time and collide
+    with the club's one-round-per-day rule; the worst case is the club granting
+    the same hold twice.
+
+    Off by default, and not because it is thought wrong. Serially the ladder now
+    asks at roughly +1030, +1770 and +2510ms from the stated window - all past
+    every refusal on record, the last two past every grant - so this buys an ask
+    at +1280 instead of +1770, which only pays when the hypothesis is wrong and
+    the slot is contested.
+
+    Against that it is untested against the club, and the sequence it creates - a
+    Reserve granted while a second for the same slot is already in flight - has
+    never been observed. With rung 0 now being the hypothesis rather than a
+    guess, a right hypothesis makes that sequence the daily case, not the rare
+    one. Exercise it with an ad-hoc booking before letting it near the race.
+
+    Needs at least two offsets and a timed booking; ignored otherwise.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "walden_capture_race_ledger" {

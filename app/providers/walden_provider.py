@@ -1296,6 +1296,10 @@ class WaldenGolfProvider(ReservationProvider):
             # Instead of Python waiting then calling JS, we inject JS that self-triggers
             # at the exact timestamp. This eliminates Python→Selenium→JS handoff latency.
             execute_at_timestamp_ms: int | None = None
+            # The club's stated window, kept unshifted. Every offset in the race
+            # ledger is measured from here, so the numbers stay on one scale
+            # across the aim moving - ten mornings of evidence are in this frame.
+            window_timestamp_ms: int | None = None
             if execute_at:
                 # Normalize to naive CT first (execute_at may be aware or naive),
                 # then convert via relative delta to avoid host-timezone interpretation.
@@ -1303,12 +1307,32 @@ class WaldenGolfProvider(ReservationProvider):
                 execute_at_ct = CTDateTime.to_naive_ct(execute_at)
                 now_ct = CTDateTime.to_naive_ct(CTDateTime.now())
                 delay_ms = max(0, int((execute_at_ct - now_ct).total_seconds() * 1000))
-                execute_at_timestamp_ms = int(time_module.time() * 1000) + delay_ms
+                window_timestamp_ms = int(time_module.time() * 1000) + delay_ms
+                # The sheet does not open when the club says it does. Applied
+                # here rather than inside the direct booker so both chains agree
+                # on when the window opens - the JS chain reads the same target
+                # and would otherwise click into the one arrival that has never
+                # been granted.
+                aim_offset_ms = max(
+                    0,
+                    settings.walden_window_opens_offset_ms + settings.walden_reserve_aim_margin_ms,
+                )
+                execute_at_timestamp_ms = window_timestamp_ms + aim_offset_ms
                 logger.info(
                     f"BATCH_BOOKING: Step 7 - Timed booking mode, "
                     f"target timestamp: {execute_at_timestamp_ms} "
-                    f"({execute_at_ct.strftime('%H:%M:%S.%f')} CT, delay={delay_ms}ms)"
+                    f"({execute_at_ct.strftime('%H:%M:%S.%f')} CT +{aim_offset_ms}ms, "
+                    f"delay={delay_ms + aim_offset_ms}ms)"
                 )
+                if aim_offset_ms:
+                    logger.info(
+                        "BATCH_BOOKING: Aiming %dms past the stated window - the club opens "
+                        "at +%dms and %dms is margin on the clock probe. Ledger offsets "
+                        "stay measured from the stated window.",
+                        aim_offset_ms,
+                        settings.walden_window_opens_offset_ms,
+                        settings.walden_reserve_aim_margin_ms,
+                    )
 
                 if not use_fast_booking:
                     # The 6:30 gate lives inside the fast chain - the JS
@@ -1318,11 +1342,19 @@ class WaldenGolfProvider(ReservationProvider):
                     # batch back and it would race a still-locked tee sheet.
                     # Wait in Python instead: coarser, but a kill switch that
                     # silently drops the window gate is worse than a slow one.
+                    #
+                    # Shifted by the same offset as the other two chains. This
+                    # path reads execute_at rather than execute_at_timestamp_ms,
+                    # so without this it would be the one route still firing at
+                    # the stated window - the arrival the offset exists to avoid,
+                    # and a silent disagreement about when the window opens
+                    # sitting behind a kill switch nobody exercises.
                     logger.info(
                         "BATCH_BOOKING: Fast chain disabled - waiting for the booking "
-                        "window in Python before the Selenium flow"
+                        "window (+%dms) in Python before the Selenium flow",
+                        aim_offset_ms,
                     )
-                    self._precision_wait_until(execute_at)
+                    self._precision_wait_until(execute_at + timedelta(milliseconds=aim_offset_ms))
 
             # Track times that have been successfully booked to avoid conflicts
             # When a booking succeeds, we add its booked_time to this set
@@ -1379,6 +1411,7 @@ class WaldenGolfProvider(ReservationProvider):
                         use_fast_js=use_fast_booking,
                         prelocated_slot=prelocated_slots.get(req.booking_id),
                         execute_at_timestamp_ms=use_timed_for_this_booking,
+                        window_timestamp_ms=window_timestamp_ms,
                         target_date=target_date,
                     )
 
@@ -2939,6 +2972,7 @@ class WaldenGolfProvider(ReservationProvider):
         use_fast_js: bool = False,
         prelocated_slot: dict[str, Any] | None = None,
         execute_at_timestamp_ms: int | None = None,
+        window_timestamp_ms: int | None = None,
         target_date: date | None = None,
     ) -> BookingResult:
         """
@@ -2977,6 +3011,10 @@ class WaldenGolfProvider(ReservationProvider):
                             Used to skip DOM re-scanning when the slot was located before
                             the booking window opened.
             execute_at_timestamp_ms: Optional Unix timestamp in milliseconds for timed booking.
+            window_timestamp_ms: The club's stated 06:30:00, when it differs from
+                the instant above. Reporting only: every offset in the race
+                ledger is measured from here, so the aim can move without
+                starting a second scale alongside the mornings already recorded.
                             When provided, uses _stage_timed_booking_chain_js which busy-waits
                             in JavaScript until the exact timestamp before clicking Reserve.
                             This eliminates Python→Selenium→JS handoff latency at 6:30 AM.
@@ -3116,6 +3154,7 @@ class WaldenGolfProvider(ReservationProvider):
                 num_players,
                 execute_at_timestamp_ms,
                 fallback_times=fallback_times,
+                window_timestamp_ms=window_timestamp_ms,
             )
 
             if chain_result is None:
@@ -3315,6 +3354,28 @@ class WaldenGolfProvider(ReservationProvider):
                     page_text, "direct HTTP response"
                 )
                 if confirmed:
+                    # Checked even though the response said yes. "Confirmed" here
+                    # is a phrase match on a PrimeFaces partial update - 08-15
+                    # returned success on the word "thank you" - and the one
+                    # failure class that looks exactly like a win in the logs is
+                    # a chain that completed against no reservation. The check
+                    # costs a page load after the race is over, and its answer is
+                    # the only thing that separates the two.
+                    #
+                    # Reported, not enforced: a text-confirmed booking is not
+                    # thrown away because the reservations page was slow to load,
+                    # and _reservation_exists returns None rather than False when
+                    # it could not read the page at all.
+                    held = self._reservation_exists(driver, target_date, booked_time)
+                    if held is False:
+                        logger.error(
+                            "RESERVATION_CHECK: The response confirmed the booking (%s) but "
+                            "the tee time is not on the member's reservations page",
+                            verdict_detail,
+                        )
+                        self._capture_response_artifact(
+                            "direct_http_confirmed_not_listed", direct_markup
+                        )
                     return BookingResult(
                         success=True,
                         booked_time=booked_time,
@@ -4089,6 +4150,7 @@ class WaldenGolfProvider(ReservationProvider):
         num_players: int,
         execute_at_timestamp_ms: int | None,
         fallback_times: Sequence[time] = (),
+        window_timestamp_ms: int | None = None,
     ) -> dict[str, Any] | None:
         """
         Attempt the booking chain over direct HTTP instead of browser clicks.
@@ -4103,6 +4165,8 @@ class WaldenGolfProvider(ReservationProvider):
             slot_info: Slot dict from _find_target_slot_js; needs 'reserveId'
             num_players: Number of players (1-4)
             execute_at_timestamp_ms: Epoch ms to fire Reserve at, or None for now
+            window_timestamp_ms: The club's stated window, for reporting offsets
+                from. Defaults to the instant above when they are the same.
             fallback_times: Tee times to try, best first, when the club refuses
                 the slot above as held by another member
 
@@ -4148,6 +4212,12 @@ class WaldenGolfProvider(ReservationProvider):
                     if execute_at_timestamp_ms is not None
                     else (0,)
                 ),
+                # Same reasoning: overlapping the first two rungs only means
+                # anything when there is a window to bracket.
+                pipeline_opening_pair=(
+                    settings.walden_reserve_pipeline_opening_pair
+                    and execute_at_timestamp_ms is not None
+                ),
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
@@ -4165,7 +4235,11 @@ class WaldenGolfProvider(ReservationProvider):
             return None
 
         try:
-            result = booker.book(num_players, target_timestamp_ms=execute_at_timestamp_ms)
+            result = booker.book(
+                num_players,
+                target_timestamp_ms=execute_at_timestamp_ms,
+                window_timestamp_ms=window_timestamp_ms,
+            )
         except Exception as e:  # noqa: BLE001 - see above
             # book() turns its own failures into results, so anything raised
             # here is a bug. Reserve may already have been sent, so report it
@@ -4185,7 +4259,12 @@ class WaldenGolfProvider(ReservationProvider):
         # the record of what the club did, and a morning that *won* is exactly
         # as informative about where the boundary sits as one that lost.
         if settings.walden_capture_race_ledger and execute_at_timestamp_ms is not None:
-            self._capture_race_ledger(result, execute_at_timestamp_ms)
+            # The stated window, not the aim: the ledger's offsets have to stay
+            # on the scale the mornings before this one were recorded on.
+            self._capture_race_ledger(
+                result,
+                window_timestamp_ms if window_timestamp_ms is not None else execute_at_timestamp_ms,
+            )
 
         # The one line a post-mortem starts from, so everything that decides a
         # morning has to be readable in it without going back through the run.

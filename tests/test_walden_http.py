@@ -7,6 +7,7 @@ expects - not one derived from a hand-written mock.
 """
 
 import email.utils
+import threading
 import time as time_module
 import urllib.parse
 from collections.abc import Callable
@@ -1992,6 +1993,321 @@ class TestReserveTimeoutKeepsTheLadderWalking:
         assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
 
 
+class PairRecorder(ChainRecorder):
+    """Serves pages by *request* order, optionally answering some of them late.
+
+    Request order rather than answer order: the opening pair is in flight
+    together, so the sequence the club answers in is not the sequence it was
+    asked in, and indexing on replies would hand a response to whichever request
+    happened to be served first.
+    """
+
+    def __init__(
+        self,
+        pages: list[str],
+        *,
+        delay_on: set[int] | None = None,
+        delay_s: float = 0.0,
+    ) -> None:
+        """``delay_on`` holds 1-based request numbers answered after ``delay_s``."""
+        super().__init__(pages)
+        self.delay_on = delay_on or set()
+        self.delay_s = delay_s
+        self.sent_at_ms: list[int] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """Answer the ``index``-th request with the ``index``-th canned page."""
+        params = dict(urllib.parse.parse_qsl(request.content.decode()))
+        with self._lock:
+            self.requests.append(params)
+            self.sources.append(params.get("javax.faces.source", ""))
+            index = len(self.sources)
+            self.sent_at_ms.append(int(time_module.time() * 1000))
+        if index in self.delay_on:
+            time_module.sleep(self.delay_s)
+        page = self.pages[min(index - 1, len(self.pages) - 1)]
+        return httpx.Response(200, text=partial_response(page, f"vs-{index}"))
+
+
+def paired_booker(recorder: ChainRecorder, *offsets: int) -> DirectHttpBooker:
+    """A sweep booker whose first two rungs are fired together."""
+    booker = sweep_booker(recorder, *offsets)
+    booker._pipeline_opening_pair = True
+    return booker
+
+
+class TestOpeningPairIsFiredTogether:
+    """The first two rungs overlap, so the ladder can ask twice in one round trip.
+
+    Serially the ladder cannot: on 2026-08-15 the first Reserve went at -60ms and
+    its refusal did not land until +940ms, by which point the +900 rung had gone
+    and the next question could not go until +1240ms. That was tolerable while
+    the first rung was 0 and expected to fail. It is not now that the first rung
+    aims at the club's second tick - serially, a mis-measured tick would push the
+    follow-up past the offset that has actually been winning.
+    """
+
+    def test_the_second_goes_before_the_first_is_answered(self) -> None:
+        """The whole point: the pair overlaps rather than queueing."""
+        recorder = PairRecorder(
+            [blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE],
+            delay_on={1},
+            delay_s=0.4,
+        )
+        result = paired_booker(recorder, 0, 120).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        # Serialised, the second could not have left until the first was
+        # answered 400ms later. The margin is wide because only the order of
+        # magnitude is the claim.
+        assert recorder.sent_at_ms[1] - recorder.sent_at_ms[0] < 300
+
+    def test_a_grant_on_the_later_rung_is_taken(self) -> None:
+        """A refused aim point costs a rung, not the morning."""
+        recorder = PairRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = paired_booker(recorder, 1030, 1250).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert result.success, result.error
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
+
+    def test_a_grant_on_the_aim_point_is_taken(self) -> None:
+        """The rung the change exists to win on."""
+        recorder = PairRecorder([PLAYER_PAGE, blocked_sheet(*ALL_THREE), ROWS_PAGE, BOOKED_PAGE])
+        result = paired_booker(recorder, 1030, 1250).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert result.success, result.error
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        # The chain carried on from the granting response, not the refusal that
+        # came back beside it - the player count is the step after Reserve.
+        assert recorder.sources[2] == "playerGroup"
+
+    def test_both_halves_ask_only_for_the_staged_slot(self) -> None:
+        """Two requests, one tee time - the club cannot grant two holds."""
+        recorder = PairRecorder([blocked_sheet(*ALL_THREE), blocked_sheet(*ALL_THREE)])
+        paired_booker(recorder, 1030, 1250).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert recorder.sources[:2] == [RESERVE_ID, RESERVE_ID]
+
+    def test_both_refused_still_reaches_the_fallback_list(self) -> None:
+        """The pair replaces two rungs, it does not replace the ladder."""
+        recorder = PairRecorder(
+            [
+                blocked_sheet(*ALL_THREE),
+                blocked_sheet(
+                    slot_block(RESERVE_ID, "04:34 PM"),
+                    slot_block(SLOT_B_ID, "04:42 PM"),
+                    slot_block(SLOT_C_ID, "04:50 PM"),
+                ),
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                BOOKED_PAGE,
+            ]
+        )
+        result = paired_booker(recorder, 0, 60).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        # Both halves asked for the staged slot, then the run moved on to the
+        # best fallback the freshest sheet still offered.
+        assert recorder.sources[:3] == [RESERVE_ID, RESERVE_ID, SLOT_B_ID]
+
+    def test_both_refused_are_both_in_the_ledger(self) -> None:
+        """Two questions asked is two rows, or a post-mortem reads one."""
+        recorder = PairRecorder([blocked_sheet(*ALL_THREE), blocked_sheet(*ALL_THREE)])
+        result = paired_booker(recorder, 1030, 1250).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert not result.success
+        assert len(result.attempt_log) >= 2
+        assert result.timing["reserveAttempts"] >= 2
+
+    def test_neither_connecting_leaves_the_browser_chain_available(self) -> None:
+        """Nothing was submitted, so a Selenium retry cannot race our own booking.
+
+        The single-send path rolls the phase back for exactly this case, and the
+        pair has to as well: past PRE_SUBMIT_PHASES the provider stops retrying,
+        so a 6:30 that cannot open a socket would be lost outright rather than
+        handed to the chain that can still win it.
+        """
+        recorder = StallingRecorder([PLAYER_PAGE], stall_on={1, 2}, error=httpx.ConnectError)
+        booker = paired_booker(recorder, 1030, 1250)
+
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert result.phase == PHASE_RESERVE_STAGED
+        # Both halves were fired before the rollback. Serialised, the first
+        # failure would have raised on its own and this would read 1 - which is
+        # the reading that would let the pair path skip the rollback unnoticed.
+        assert len(recorder.sources) == 2
+
+    def test_one_half_landing_closes_the_fallback_list(self) -> None:
+        """A read timeout may have reached the club, so no *other* slot is asked.
+
+        The asymmetry that keeps the one-round-per-day rule: a request that never
+        connected cannot be holding anything, but one that timed out mid-flight
+        might be, and booking a second tee time on top of an invisible hold is
+        worse than losing the morning.
+        """
+        recorder = StallingRecorder([PLAYER_PAGE], stall_on={1, 2}, error=httpx.ReadTimeout)
+        booker = paired_booker(recorder, 1030, 1250)
+
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        # Not "blocked": the club never said no, so the member is not told
+        # another member took it, and the untimed retry stays shut.
+        assert not result.blocked
+        assert result.distinct_attempted_times() == [RESERVE_SLOT_TIME]
+
+
+class TestReportingStaysInTheStatedWindowFrame:
+    """The aim moved to 06:30:01; the scale everything is reported on did not.
+
+    Ten mornings of evidence are recorded as milliseconds past the club's stated
+    06:30:00 - refusals at -60, -14, -7, 0, 0, 812, 817 and grants at 1239, 1240,
+    1291. If moving the aim also moved the frame, tomorrow's ledger would read
+    "sent 0ms, accepted" and could not be compared with any of it.
+    """
+
+    def test_offsets_are_measured_from_the_window_not_the_aim(self) -> None:
+        """A run aimed 1030ms late reports 1030, not 0."""
+        recorder = PairRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        aim = window_about_to_open(20)
+        result = sweep_booker(recorder, 0).book(
+            1, target_timestamp_ms=aim, window_timestamp_ms=aim - 1030
+        )
+
+        assert result.success, result.error
+        sent = result.attempt_log[0].sent_ms_past_window
+        assert sent is not None
+        # Wide, because the wait may overshoot; the point is the ~1030 offset is
+        # present at all rather than having been zeroed out by the reframing.
+        assert 950 < sent < 1500
+        assert result.timing["reserveSentAtMs"] > 950
+
+    def test_without_a_separate_window_the_frame_is_the_target(self) -> None:
+        """The pre-existing behaviour, for every caller that passes one instant."""
+        recorder = PairRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = sweep_booker(recorder, 0).book(1, target_timestamp_ms=window_about_to_open(20))
+
+        assert result.success, result.error
+        sent = result.attempt_log[0].sent_ms_past_window
+        assert sent is not None
+        assert -50 < sent < 500
+
+
+class TestARungOurOwnLatencyOvershotStillFires:
+    """A rung reached late is still asked, unless the whole window is stale.
+
+    Rungs are reached only once the previous answer lands, so a round trip of
+    593-828ms eats whatever rung falls inside it. With the opening pair resolving
+    around aim+1000ms, the 1000 rung would fire on a fast morning and be dropped
+    on a slow one - sending the run to the fallback list with an ask still owed
+    to the tee time we actually wanted.
+
+    The grace has to stay well short of the minutes by which a later booking in a
+    batch overshoots its shared target, which is the case the discard exists for.
+    """
+
+    def test_a_rung_just_overshot_is_still_taken(self) -> None:
+        """Our own round trip must not cost a retry."""
+        from app.providers.walden_http_booker import _next_future_rung
+
+        target = int(time_module.time() * 1000) - 1500
+
+        assert _next_future_rung([1000], target) == 1000
+
+    def test_a_rung_from_a_stale_window_is_dropped(self) -> None:
+        """A later booking in a batch has no boundary left to find."""
+        from app.providers.walden_http_booker import _next_future_rung
+
+        target = int(time_module.time() * 1000) - 60_000
+
+        assert _next_future_rung([0, 250, 1000], target) is None
+
+    def test_a_rung_still_ahead_is_taken_unchanged(self) -> None:
+        """The ordinary case the grace must not disturb."""
+        from app.providers.walden_http_booker import _next_future_rung
+
+        target = int(time_module.time() * 1000) + 500
+
+        assert _next_future_rung([250, 1000], target) == 250
+
+
+class TestTheAimPointIsTheFirstRung:
+    """The precision wait sleeps to the first rung, not to the window.
+
+    Every refusal on record arrived under +1000ms and every grant over +1200ms,
+    with the club stamping its refusals inside the 06:30:00 second. Firing on the
+    instant asks the one question that has never been answered yes.
+    """
+
+    def test_the_wait_targets_the_first_rung(self) -> None:
+        """A first rung past the window delays the first request by that much."""
+        recorder = PairRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        target = window_about_to_open(10)
+        result = sweep_booker(recorder, 250, 400).book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        assert result.timing["openingOffsetMs"] == 250
+        # Slack below the rung only: the wait may overshoot, never undershoot by
+        # more than the spin window.
+        assert recorder.sent_at_ms[0] - target > 200
+
+    def test_a_zero_first_rung_still_fires_on_the_instant(self) -> None:
+        """The historical behaviour stays reachable by configuration."""
+        recorder = PairRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        target = window_about_to_open(10)
+        result = sweep_booker(recorder, 0, 300).book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        assert result.timing["openingOffsetMs"] == 0
+        # Generous, because this direction is bounded by the test runner rather
+        # than by the code: sleep_until cannot fire early, but a loaded machine
+        # can delay the send arbitrarily. Still far below the 1030ms default,
+        # which is the value it has to be distinguishable from.
+        assert recorder.sent_at_ms[0] - target < 500
+
+
+class TestDetachedSendLeavesStateAlone:
+    """Sending and adopting are separable, which is what makes the pair safe.
+
+    ``post`` folds the response into the session's form state. Two in-flight
+    requests doing that would race over the fields and ViewState the rest of the
+    chain is built from, so the pair sends detached and adopts exactly one.
+    """
+
+    def test_a_detached_send_does_not_change_the_view_state(self) -> None:
+        """The whole hazard, in one assertion."""
+        recorder = ChainRecorder([PLAYER_PAGE])
+        session = make_session(FormState.from_html(TEE_SHEET), recorder)
+        config = AbConfig(source=RESERVE_ID, form=FORM_ID, update=FORM_ID)
+        before = dict(session.form_state.fields)
+
+        response = session.send_detached(config, body=session.build_body(config))
+
+        assert response.markup
+        assert dict(session.form_state.fields) == before
+
+    def test_adopting_applies_what_the_detached_send_returned(self) -> None:
+        """And the other half: nothing is lost by deferring it."""
+        recorder = ChainRecorder([PLAYER_PAGE])
+        session = make_session(FormState.from_html(TEE_SHEET), recorder)
+        config = AbConfig(source=RESERVE_ID, form=FORM_ID, update=FORM_ID)
+        response = session.send_detached(config, body=session.build_body(config))
+
+        session.adopt(response)
+
+        assert dict(session.form_state.fields) != {}
+
+
 class TestStagingTheLadder:
     """The ladder as it arrives through the public staging path."""
 
@@ -2237,6 +2553,24 @@ class TestClockSkew:
         from app.providers.walden_http import ClockSkew
 
         assert ClockSkew(offset_ms=250, one_way_ms=200, probes=9, transitions=2).lead_ms == 450
+
+    def test_the_tick_is_pinned_tightly_enough_to_aim_at(self) -> None:
+        """The bracket bounds the offset, and so any aim taken from it.
+
+        The first sweep rung is now aimed 30ms past the club's second tick, so a
+        measurement that only located the tick to +-105ms - which 16 probes at
+        80ms did - would not be good enough to aim with. The bracket is reported
+        so that a morning where it comes out wide is legible as one.
+        """
+        session = make_session(FormState.from_html(TEE_SHEET), clock_handler(0.4))
+
+        skew = session.measure_clock_skew()
+
+        assert skew is not None
+        # Several transitions rather than the single one the old spacing yielded:
+        # the median of them is what makes the estimate better than one bracket.
+        assert skew.transitions >= 3
+        assert 0 < skew.tick_bracket_ms < 60
 
 
 class TestArrivalLead:
