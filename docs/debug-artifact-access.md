@@ -25,6 +25,10 @@ The only missing piece is a credential.
 
 ## Setting it up
 
+**Run steps 1 and 2 on your own machine, not in a remote session.** They need
+`gcloud` and an identity that can edit IAM, and a remote session has neither —
+which is the whole reason this document exists. Only step 4 runs in a session.
+
 ### 1. A read-only service account
 
 ```bash

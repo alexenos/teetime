@@ -33,7 +33,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -114,6 +114,23 @@ def list_objects(bucket: str, prefix: str, contains: str | None) -> list[dict]:
     return sorted(found, key=lambda i: i["name"])
 
 
+def _contained_destination(root: Path, object_name: str) -> Path | None:
+    """Map an object name under ``root``, or None if it would escape.
+
+    Object names are strings the bucket hands us, and GCS is happy to store one
+    containing ``../`` segments even though it forbids an object named exactly
+    ``..``. Ours never do - :meth:`WaldenProvider._upload_bytes_to_gcs` builds
+    them from a fixed prefix and a timestamp - but this writes to a real
+    filesystem on the strength of a name we did not construct, so it checks.
+    """
+    candidate = (root / object_name).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
 def download(bucket: str, name: str, destination: Path) -> int:
     """Download one object, returning bytes written."""
     token = access_token()
@@ -128,14 +145,27 @@ def download(bucket: str, name: str, destination: Path) -> int:
     return len(resp.content)
 
 
+def _as_utc_z(moment: datetime) -> str:
+    """Format an aware datetime as the RFC3339 UTC the Logging API expects.
+
+    The ``Z`` is a claim about the offset, not decoration. Formatting a Central
+    Time value with it directly tells the API 06:20 UTC when the caller meant
+    06:20 CT - a five-hour error in summer that lands the window nowhere near
+    the booking run and returns an empty result set that reads like "no logs".
+    """
+    if moment.tzinfo is None:
+        raise ValueError("refusing to guess the timezone of a naive datetime")
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def read_logs(project: str, service: str, start: datetime, end: datetime) -> list[tuple[str, str]]:
-    """Read Cloud Run log entries in a UTC window, oldest first."""
+    """Read Cloud Run log entries between two aware datetimes, oldest first."""
     token = access_token()
     log_filter = (
         'resource.type="cloud_run_revision" '
         f'AND resource.labels.service_name="{service}" '
-        f'AND timestamp>="{start.strftime("%Y-%m-%dT%H:%M:%SZ")}" '
-        f'AND timestamp<="{end.strftime("%Y-%m-%dT%H:%M:%SZ")}" '
+        f'AND timestamp>="{_as_utc_z(start)}" '
+        f'AND timestamp<="{_as_utc_z(end)}" '
         'AND textPayload!~"discord\\.gateway"'
     )
     body = {
@@ -253,16 +283,24 @@ def main() -> None:
         if not items:
             print(f"No objects matching {args.date} - nothing was written for that date.")
             return
+        root = args.out.resolve()
+        written_count = 0
         for item in items:
-            destination = args.out / item["name"]
+            destination = _contained_destination(root, item["name"])
+            if destination is None:
+                print(f"{'SKIPPED':>10}  {item['name']} - would land outside {root}")
+                continue
             written = download(args.bucket, item["name"], destination)
+            written_count += 1
             print(f"{written:>10} bytes  {destination}")
-        print(f"\n{len(items)} object(s) -> {args.out}")
+        print(f"\n{written_count} object(s) -> {root}")
 
         for item in items:
             if item["name"].endswith("ledger.jsonl"):
-                print()
-                summarize_ledger(args.out / item["name"])
+                destination = _contained_destination(root, item["name"])
+                if destination is not None and destination.exists():
+                    print()
+                    summarize_ledger(destination)
 
     elif args.command == "logs":
         day = datetime.strptime(args.date, "%Y-%m-%d")
