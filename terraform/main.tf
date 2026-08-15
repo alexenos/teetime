@@ -244,6 +244,11 @@ resource "google_cloud_run_v2_service" "teetime" {
       }
 
       env {
+        name  = "WALDEN_RESERVE_PIPELINE_OPENING_PAIR"
+        value = tostring(var.walden_reserve_pipeline_opening_pair)
+      }
+
+      env {
         name  = "WALDEN_CAPTURE_RACE_LEDGER"
         value = tostring(var.walden_capture_race_ledger)
       }

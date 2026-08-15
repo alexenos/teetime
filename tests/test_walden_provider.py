@@ -3455,6 +3455,47 @@ class TestUnconfirmedBookingResolution:
         assert result.error_message is not None
         assert "could not be checked" in result.error_message
 
+    def test_a_confirmed_response_is_still_checked_against_the_page(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ "Confirmed" is a phrase match, and the logs must not stop there.
+
+        2026-08-15 returned success on the word "thank you" in a PrimeFaces
+        partial update and never looked at the reservations page, so a run that
+        completed against no reservation - the one failure class that reads as a
+        win - would have been indistinguishable from the morning it won.
+        """
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain("<div><p>Thank you, your tee time is booked.</p></div>"),
+            reservation_exists=True,
+        )
+
+        assert result.success is True
+        reservation_check.assert_called_once_with(ANY, self.TARGET_DATE, time(8, 42))
+
+    def test_a_confirmed_response_the_page_does_not_list_still_reports_success(
+        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reported, not enforced - and deliberately so.
+
+        The member dashboard can lag a booking by seconds, and flipping a
+        text-confirmed win to a failure would feed the untimed retry, which is
+        how a second tee time gets stacked on a hold that does exist. The
+        discrepancy is loud in the logs and keeps an artifact; it does not change
+        the outcome.
+        """
+        result, reservation_check = self._book(
+            provider,
+            monkeypatch,
+            self._completed_chain("<div><p>Thank you, your tee time is booked.</p></div>"),
+            reservation_exists=False,
+        )
+
+        assert result.success is True
+        reservation_check.assert_called_once_with(ANY, self.TARGET_DATE, time(8, 42))
+
     def test_refusal_wording_is_carried_into_the_error(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3505,20 +3546,6 @@ class TestUnconfirmedBookingResolution:
         assert result.error_message is not None
         assert result.error_message.startswith("Restriction: Member: Sample, Member")
         assert "could not be checked" in result.error_message
-
-    def test_a_confirmed_response_never_reaches_the_reservations_page(
-        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The check costs the tee sheet, so it only runs when it is needed."""
-        result, reservation_check = self._book(
-            provider,
-            monkeypatch,
-            self._completed_chain("<div><h2>Your tee time is booked</h2></div>"),
-            reservation_exists=False,
-        )
-
-        assert result.success is True
-        reservation_check.assert_not_called()
 
     def test_failure_after_reserve_was_sent_checks_the_reservations_page(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch

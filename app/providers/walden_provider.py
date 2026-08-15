@@ -3315,6 +3315,28 @@ class WaldenGolfProvider(ReservationProvider):
                     page_text, "direct HTTP response"
                 )
                 if confirmed:
+                    # Checked even though the response said yes. "Confirmed" here
+                    # is a phrase match on a PrimeFaces partial update - 08-15
+                    # returned success on the word "thank you" - and the one
+                    # failure class that looks exactly like a win in the logs is
+                    # a chain that completed against no reservation. The check
+                    # costs a page load after the race is over, and its answer is
+                    # the only thing that separates the two.
+                    #
+                    # Reported, not enforced: a text-confirmed booking is not
+                    # thrown away because the reservations page was slow to load,
+                    # and _reservation_exists returns None rather than False when
+                    # it could not read the page at all.
+                    held = self._reservation_exists(driver, target_date, booked_time)
+                    if held is False:
+                        logger.error(
+                            "RESERVATION_CHECK: The response confirmed the booking (%s) but "
+                            "the tee time is not on the member's reservations page",
+                            verdict_detail,
+                        )
+                        self._capture_response_artifact(
+                            "direct_http_confirmed_not_listed", direct_markup
+                        )
                     return BookingResult(
                         success=True,
                         booked_time=booked_time,
@@ -4147,6 +4169,12 @@ class WaldenGolfProvider(ReservationProvider):
                     settings.walden_sweep_offsets_ms()
                     if execute_at_timestamp_ms is not None
                     else (0,)
+                ),
+                # Same reasoning: overlapping the first two rungs only means
+                # anything when there is a window to bracket.
+                pipeline_opening_pair=(
+                    settings.walden_reserve_pipeline_opening_pair
+                    and execute_at_timestamp_ms is not None
                 ),
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking

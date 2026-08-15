@@ -155,13 +155,52 @@ class Settings(BaseSettings):
     # four. A ladder written at that spacing reads like nine attempts and
     # delivers three.
     #
-    # These are spaced to survive a ~700ms round trip while still bracketing the
-    # known boundary: 900 sits just past the last observed refusal (817ms), 1300
-    # just past the earliest observed grant (1239ms), and the rest walk out well
-    # beyond it in case the boundary moves.
+    # The first rung is the aim point, and as of 2026-08-15 it is no longer 0.
+    # Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
+    # 817) and every grant over +1200ms (1239, 1240, 1291), and the club stamped
+    # its refusals inside the 06:30:00 second and its grant inside 06:30:01. The
+    # boundary that fits all of it is the club's own second tick: it refuses
+    # while its clock still reads 06:30:00. Firing at 0ms therefore spends the
+    # first request on a certain no, which is what every morning has done.
+    #
+    # 1030 arrives 30ms past that tick. Rungs are offsets of *arrival* on the
+    # club's clock - the lead subtracts the measured offset and flight time - so
+    # this is 30ms of margin against the tick measurement, which the tightened
+    # clock probe pins to roughly +-15ms.
+    #
+    # 1250 is kept as the second rung because it is where the club has actually
+    # granted three times. It is fired without waiting for 1030's answer (see
+    # walden_reserve_pipeline_opening_pair), so aiming earlier cannot cost the
+    # offset that has been winning.
+    #
+    # Each rung is also a measurement. The ledger records which offsets were
+    # refused and which was granted, so a morning narrows the boundary whether or
+    # not it wins - and a grant at 1030 is the first evidence that the boundary
+    # is the tick rather than something later.
+    #
+    # Spacing past the pair is bounded by how fast the club answers, not by what
+    # is written here. Rungs are slept to as absolute instants, so any rung whose
+    # moment has passed when the previous response lands is skipped - and a
+    # Reserve round trip has measured 593-828ms.
     #
     # "0" restores the historical one-shot behaviour.
-    walden_reserve_sweep_offsets_ms: str = "0,900,1300,2000,3000,4500"
+    walden_reserve_sweep_offsets_ms: str = "1030,1250,2000,3000,4500"
+
+    # Fire the first two rungs without waiting for the first one's answer.
+    #
+    # Serialised, the ladder cannot ask twice inside one round trip: 08-15 fired
+    # at -60ms, got its refusal back at +940ms, and by then the 900 rung was gone
+    # so the next question went at +1240ms. Aiming the first rung at the tick
+    # (1030) without this would make the second rung ~1780ms - later than the
+    # offset that has won three times - so a mis-measured tick would cost the
+    # morning rather than one rung.
+    #
+    # Pipelined, the pair brackets the boundary in one round trip and the run is
+    # no worse off than a serial 1250 even if 1030 is refused. Both requests are
+    # for the *same* slot, so the second cannot reserve a second tee time and
+    # collide with the one-round-per-day rule; the worst case is that the club
+    # grants the same hold twice.
+    walden_reserve_pipeline_opening_pair: bool = True
 
     # Write the per-attempt race ledger to the debug artifacts bucket.
     #

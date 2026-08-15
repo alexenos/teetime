@@ -43,6 +43,7 @@ caller treats as "fall back to the Selenium chain". Nothing here is trusted
 enough to be the only path to a booking.
 """
 
+import concurrent.futures
 import hashlib
 import logging
 import re
@@ -332,6 +333,10 @@ class DirectHttpBooker:
         # Offsets past the window to ask for the staged slot at, first to last.
         # The single 0 is the historical behaviour: one shot, on the instant.
         self._sweep_offsets_ms: tuple[int, ...] = (0,)
+        # Fire the first two rungs concurrently rather than waiting out a round
+        # trip between them. Off here so the historical one-shot default stays
+        # exactly that; prepare() turns it on.
+        self._pipeline_opening_pair: bool = False
 
     # -- staging ----------------------------------------------------------
 
@@ -344,6 +349,7 @@ class DirectHttpBooker:
         measure_skew: bool = False,
         refresh_at_window: bool = False,
         sweep_offsets_ms: Sequence[int] = (0,),
+        pipeline_opening_pair: bool = False,
     ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
@@ -362,7 +368,7 @@ class DirectHttpBooker:
                 which times are spoken for by the rest of the batch.
             measure_skew: Probe the club's clock so the Reserve can be timed to
                 *arrive* as the window opens rather than to leave then. Timed
-                bookings only - it costs ~1.3s of probing, and an immediate
+                bookings only - it costs ~5s of probing, and an immediate
                 booking has no instant to hit.
             refresh_at_window: Re-render the tee sheet at the target instant and
                 fire Reserve against that render. Off by default; see
@@ -371,6 +377,10 @@ class DirectHttpBooker:
                 at, first to last, before any fallback is tried. Timed bookings
                 only. ``(0,)`` is one shot on the instant, which is what every
                 lost morning did. See :meth:`_reserve_until_accepted`.
+            pipeline_opening_pair: Fire the first two offsets without waiting for
+                the first one's answer, so the pair brackets the refusal boundary
+                inside a single round trip. Needs at least two offsets and a
+                timed booking; ignored otherwise.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -397,9 +407,13 @@ class DirectHttpBooker:
         # is slept to absolutely, so an unordered list would sleep backwards
         # (returning instantly) and quietly collapse the sweep into a burst.
         self._sweep_offsets_ms = tuple(sorted(dict.fromkeys(sweep_offsets_ms))) or (0,)
+        # Needs a pair to pipeline. A single-rung ladder is the one-shot case,
+        # where there is nothing to overlap and a worker thread would only add a
+        # handoff to the one request that has to be fast.
+        self._pipeline_opening_pair = pipeline_opening_pair and len(self._sweep_offsets_ms) >= 2
         logger.info(
             "DIRECT_HTTP: Reserve request staged - source=%s, slot=%s, %d body bytes, "
-            "viewState=%s, sweep=%s, fallbacks=%s",
+            "viewState=%s, sweep=%s%s, fallbacks=%s",
             config.source,
             self._slot_time.strftime("%I:%M %p") if self._slot_time else "unreadable",
             len(self._reserve_body),
@@ -408,6 +422,7 @@ class DirectHttpBooker:
             # from the one staged here.
             _view_state_fingerprint(self.session),
             "+".join(str(offset) for offset in self._sweep_offsets_ms) + "ms",
+            " (first two pipelined)" if self._pipeline_opening_pair else "",
             ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
         )
         if refresh_at_window:
@@ -587,11 +602,19 @@ class DirectHttpBooker:
             result.phase = PHASE_PRECISION_WAIT
             result.timing["msUntilTarget"] = target_timestamp_ms - int(time_module.time() * 1000)
             result.timing["arrivalLeadMs"] = round(self._lead_ms)
-            # Led, so that the request *arrives* as the window opens. The drift
-            # is still reported against the lead-adjusted instant, which is the
-            # one the wait was actually aiming at.
+            # The first rung is the aim point, and it is no longer 0: the club
+            # refuses while its own clock still reads 06:30:00, so arriving on
+            # the instant asks a question that has never once been answered yes.
+            # Slept to here rather than inside the ladder because this is the
+            # wait that has to be precise - everything after it is paced by how
+            # fast the club answers.
+            opening_offset_ms = self._sweep_offsets_ms[0]
+            result.timing["openingOffsetMs"] = opening_offset_ms
+            # Led, so that the request *arrives* at the aimed-at offset. The
+            # drift is still reported against the lead-adjusted instant, which is
+            # the one the wait was actually aiming at.
             result.timing["clickDriftMs"] = sleep_until(
-                target_timestamp_ms - int(round(self._lead_ms))
+                target_timestamp_ms + opening_offset_ms - int(round(self._lead_ms))
             )
 
             # After the wait, not before: a sheet re-rendered while the window
@@ -734,6 +757,12 @@ class DirectHttpBooker:
         # Untimed bookings have no window to sweep around; the first rung is
         # already spent by the precision wait in _run_chain.
         rungs = list(self._sweep_offsets_ms[1:]) if target_timestamp_ms is not None else []
+        # The second rung leaves the ladder when it is pipelined: it is fired
+        # alongside the first rather than after it, so the loop must not also
+        # walk to it.
+        paired_rung_ms: int | None = None
+        if self._pipeline_opening_pair and target_timestamp_ms is not None and rungs:
+            paired_rung_ms = rungs.pop(0)
         max_attempts = _RESERVE_MAX_ATTEMPTS + len(rungs)
         last_reason: str | None = None
         attempt = 0
@@ -780,98 +809,136 @@ class DirectHttpBooker:
                 if target_timestamp_ms is not None
                 else None
             )
-            try:
-                response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
-            except DirectHttpConnectionError:
-                # The phase was advanced before the call because a request on the
-                # socket cannot be told from one that was answered and lost. This
-                # is the one case where it can: no connection was established, so
-                # nothing was submitted. Rolling the phase back is what keeps the
-                # browser chain available - past PRE_SUBMIT_PHASES the provider
-                # treats a retry as racing our own booking and reports instead.
-                result.phase = PHASE_RESERVE_STAGED
-                raise
-            except DirectHttpTimeoutError as exc:
-                timed_out = True
-                last_reason = str(exc)
-                # Recorded like any other attempt. The ledger previously lost the
-                # attempt that decided both mornings, so a run whose ladder was
-                # cut short read as "1 attempt, every attempt refused".
-                observation = ReserveObservation(
-                    attempt=attempt,
+            if paired_rung_ms is not None and attempt == 1:
+                assert target_timestamp_ms is not None  # paired only when timed
+                pair = self._fire_opening_pair(
+                    config,
+                    body,
+                    target_timestamp_ms=target_timestamp_ms,
+                    second_rung_ms=paired_rung_ms,
                     slot_time=slot_time,
-                    source=config.source,
                     view_state=view_state,
-                    verdict=RESERVE_TIMEDOUT,
-                    reason=str(exc),
-                    sent_ms_past_window=sent_ms_past_window,
-                    round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+                    first_sent_ms_past_window=sent_ms_past_window,
                 )
-                result.attempt_log.append(observation)
-                _log_reserve_observation(observation)
+                # Both requests are one iteration to the loop but two questions
+                # to the club, and the ledger is the record of which offsets were
+                # asked. Counting them here keeps "attempts" honest.
+                if pair.never_connected:
+                    # Neither half reached the socket, so nothing was submitted.
+                    # Same reasoning as the single-send path: rolling the phase
+                    # back is what keeps the browser chain a safe retry, and a
+                    # 6:30 that cannot open a socket can still be won by it.
+                    result.phase = PHASE_RESERVE_STAGED
+                    raise DirectHttpConnectionError(
+                        f"Neither opening Reserve for {config.source} connected: {pair.reason}"
+                    )
+                result.attempt_log.extend(pair.observations)
+                for pair_observation in pair.observations:
+                    _log_reserve_observation(pair_observation)
+                if slot_time is not None and len(pair.observations) > 1:
+                    result.attempted_times.append(slot_time)
+                attempt += len(pair.observations) - 1
+                result.timing["reserveAttempts"] = attempt
+                timed_out = timed_out or pair.timed_out
 
-                # Checked here as well as after a refusal: the refusal path is
-                # `continue`d past, and without this a run that only ever timed
-                # out would spend a full _RESERVE_TIMEOUT_S per remaining rung.
-                spent_ms = (time_module.perf_counter() - started) * 1000
-                if spent_ms >= _RESERVE_DEADLINE_MS or target_timestamp_ms is None:
-                    logger.warning(
-                        "DIRECT_HTTP: Reserve %d never answered and %dms is spent; stopping "
-                        "rather than asking for a different tee time",
+                if pair.accepted is not None:
+                    result.final_markup = pair.accepted.markup
+                    self.session.adopt(pair.accepted)
+                    result.booked_slot_time = slot_time
+                    logger.info(
+                        "DIRECT_HTTP: Reserve accepted for %s from the opening pair at +%dms "
+                        "after %dms (%s)",
+                        slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                        pair.accepted_rung_ms or 0,
+                        int((time_module.perf_counter() - started) * 1000),
+                        pair.accepted_reason or "",
+                    )
+                    return pair.accepted
+
+                if pair.carried is None:
+                    # Neither half answered. Same situation as a serial stall,
+                    # and handled the same way: the ladder's schedule is moot but
+                    # its length is still the budget for asking again.
+                    last_reason = pair.reason
+                    spent_ms = (time_module.perf_counter() - started) * 1000
+                    if spent_ms >= _RESERVE_DEADLINE_MS or not rungs:
+                        logger.warning(
+                            "DIRECT_HTTP: Neither opening Reserve answered after %dms; stopping "
+                            "rather than asking for a different tee time",
+                            int(spent_ms),
+                        )
+                        break
+                    stall_rung_ms = rungs.pop(0)
+                    logger.info(
+                        "DIRECT_HTTP: Neither opening Reserve answered after %dms; asking again "
+                        "for %s at +%dms (same slot only - the club may already be holding it)",
+                        int(spent_ms),
+                        slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                        stall_rung_ms,
+                    )
+                    sleep_until(target_timestamp_ms + stall_rung_ms - int(round(self._lead_ms)))
+                    continue
+
+                # Refused, both times. Carry the later response forward: it is
+                # the freshest view of the sheet, which is what any fallback has
+                # to be relocated in.
+                self.session.adopt(pair.carried)
+                result.final_markup = pair.carried.markup
+                response = pair.carried
+                document = pair.carried_document
+                observation = pair.carried_observation
+                assert document is not None and observation is not None
+            else:
+                response, document, observation, stalled = self._fire_single_reserve(
+                    config,
+                    body,
+                    target_timestamp_ms=target_timestamp_ms,
+                    slot_time=slot_time,
+                    view_state=view_state,
+                    sent_ms_past_window=sent_ms_past_window,
+                    attempt=attempt,
+                    result=result,
+                )
+                if stalled is not None:
+                    timed_out = True
+                    last_reason = stalled
+                    spent_ms = (time_module.perf_counter() - started) * 1000
+                    if spent_ms >= _RESERVE_DEADLINE_MS or target_timestamp_ms is None:
+                        logger.warning(
+                            "DIRECT_HTTP: Reserve %d never answered and %dms is spent; stopping "
+                            "rather than asking for a different tee time",
+                            attempt,
+                            int(spent_ms),
+                        )
+                        break
+                    # Deliberately not _next_future_rung. A stall of seconds has
+                    # already carried us past every offset the ladder was there
+                    # to explore, so its *schedule* is moot - but its length is
+                    # still the budget for how many more times to ask. Take the
+                    # next rung whether or not its instant has passed;
+                    # sleep_until no-ops on one already gone, which fires the
+                    # retry at once. That is the right move anyway: the club
+                    # granted at ~1.24s on 08-08 and 08-12, and a stall leaves us
+                    # well past that.
+                    if not rungs:
+                        logger.warning(
+                            "DIRECT_HTTP: Reserve %d never answered and the ladder is spent; "
+                            "stopping rather than asking for a different tee time",
+                            attempt,
+                        )
+                        break
+                    stall_rung_ms = rungs.pop(0)
+                    logger.info(
+                        "DIRECT_HTTP: Reserve %d never answered after %dms; asking again for %s "
+                        "at +%dms (same slot only - the club may already be holding it)",
                         attempt,
                         int(spent_ms),
+                        slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                        stall_rung_ms,
                     )
-                    break
-
-                # Deliberately not _next_future_rung. A stall of seconds has
-                # already carried us past every offset the ladder was there to
-                # explore, so its *schedule* is moot - but its length is still
-                # the budget for how many more times to ask. Take the next rung
-                # whether or not its instant has passed; sleep_until no-ops on
-                # one already gone, which fires the retry at once. That is the
-                # right move anyway: the club granted at ~1.24s on 08-08 and
-                # 08-12, and a stall leaves us well past that.
-                if not rungs:
-                    logger.warning(
-                        "DIRECT_HTTP: Reserve %d never answered and the ladder is spent; "
-                        "stopping rather than asking for a different tee time",
-                        attempt,
-                    )
-                    break
-                stall_rung_ms = rungs.pop(0)
-                # Re-staged from nothing: there is no response to relocate the
-                # button in, so the previously staged config and body are sent
-                # again unchanged. Same slot, same ViewState - which is exactly
-                # the request 08-08 and 08-12 had accepted a rung later.
-                logger.info(
-                    "DIRECT_HTTP: Reserve %d never answered after %dms; asking again for %s "
-                    "at +%dms (same slot only - the club may already be holding it)",
-                    attempt,
-                    int(spent_ms),
-                    slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
-                    stall_rung_ms,
-                )
-                sleep_until(target_timestamp_ms + stall_rung_ms - int(round(self._lead_ms)))
-                continue
-            result.final_markup = response.markup
-
-            # One parse, three questions now. At ~190ms for a 500KB sheet this
-            # is the largest single cost in the loop, and the verdict, the
-            # ledger row and the next candidate's handler all come out of it.
-            document = parse_html(response.markup)
-            observation = observe_reserve_response(
-                attempt=attempt,
-                slot_time=slot_time,
-                source=config.source,
-                view_state=view_state,
-                response=response,
-                document=document,
-                markup=response.markup,
-                target_timestamp_ms=target_timestamp_ms,
-            )
-            result.attempt_log.append(observation)
-            _log_reserve_observation(observation)
-
+                    sleep_until(target_timestamp_ms + stall_rung_ms - int(round(self._lead_ms)))
+                    continue
+                assert response is not None and document is not None and observation is not None
             if observation.verdict != RESERVE_REFUSED:
                 result.booked_slot_time = slot_time
                 if attempt > 1:
@@ -966,6 +1033,199 @@ class DirectHttpBooker:
             "; at least one Reserve never answered, so the outcome is unknown" if timed_out else "",
         )
         return None
+
+    def _fire_single_reserve(
+        self,
+        config: AbConfig,
+        body: bytes,
+        *,
+        target_timestamp_ms: int | None,
+        slot_time: time | None,
+        view_state: str,
+        sent_ms_past_window: int | None,
+        attempt: int,
+        result: DirectBookingResult,
+    ) -> "tuple[PartialResponse | None, Node | None, ReserveObservation | None, str | None]":
+        """Send one Reserve and observe the answer.
+
+        Extracted from :meth:`_reserve_until_accepted` when the opening pair grew
+        a second way of sending, so both paths hand the loop the same three
+        things and the loop keeps one copy of what to do with them.
+
+        Returns:
+            ``(response, document, observation, None)`` when the club answered,
+            or ``(None, None, None, reason)`` when it did not. The stall reason
+            is the caller's signal to walk the ladder rather than the sheet.
+        """
+        try:
+            response = self.session.post(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+        except DirectHttpConnectionError:
+            # The phase was advanced before the call because a request on the
+            # socket cannot be told from one that was answered and lost. This is
+            # the one case where it can: no connection was established, so
+            # nothing was submitted. Rolling the phase back is what keeps the
+            # browser chain available - past PRE_SUBMIT_PHASES the provider
+            # treats a retry as racing our own booking and reports instead.
+            result.phase = PHASE_RESERVE_STAGED
+            raise
+        except DirectHttpTimeoutError as exc:
+            # Recorded like any other attempt. The ledger previously lost the
+            # attempt that decided both mornings, so a run whose ladder was cut
+            # short read as "1 attempt, every attempt refused".
+            observation = ReserveObservation(
+                attempt=attempt,
+                slot_time=slot_time,
+                source=config.source,
+                view_state=view_state,
+                verdict=RESERVE_TIMEDOUT,
+                reason=str(exc),
+                sent_ms_past_window=sent_ms_past_window,
+                round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+            )
+            result.attempt_log.append(observation)
+            _log_reserve_observation(observation)
+            return None, None, None, str(exc)
+
+        result.final_markup = response.markup
+        # One parse, three questions now. At ~190ms for a 500KB sheet this is the
+        # largest single cost in the loop, and the verdict, the ledger row and
+        # the next candidate's handler all come out of it.
+        document = parse_html(response.markup)
+        observation = observe_reserve_response(
+            attempt=attempt,
+            slot_time=slot_time,
+            source=config.source,
+            view_state=view_state,
+            response=response,
+            document=document,
+            markup=response.markup,
+            target_timestamp_ms=target_timestamp_ms,
+        )
+        result.attempt_log.append(observation)
+        _log_reserve_observation(observation)
+        return response, document, observation, None
+
+    def _fire_opening_pair(
+        self,
+        config: AbConfig,
+        body: bytes,
+        *,
+        target_timestamp_ms: int,
+        second_rung_ms: int,
+        slot_time: time | None,
+        view_state: str,
+        first_sent_ms_past_window: int | None,
+    ) -> "_OpeningPair":
+        """Ask for the same slot at the first two offsets without waiting between.
+
+        Serially the ladder cannot ask twice inside one round trip. On 2026-08-15
+        the first Reserve went at -60ms and its refusal landed at +940ms, by
+        which point the +900 rung was gone and the next question could not go
+        until +1240ms. That is fine when the first rung is 0 and expected to
+        fail, but the first rung is now aimed at the club's second tick - and
+        aiming there serially would push the follow-up to ~+1780ms, later than
+        the +1240ms that has been granted three times. Overlapping them means a
+        mis-measured tick costs one rung rather than the morning.
+
+        Both requests are for the *same* slot, so neither can reserve a second
+        tee time and collide with the one-round-per-day rule; the worst case is
+        that the club grants the same hold twice and the later grant is dropped.
+
+        Sent detached, because :meth:`PrimeFacesSession.post` folds the response
+        into the session's form state and two in-flight requests doing that would
+        race over the fields the rest of the chain is built from. The caller
+        adopts exactly one.
+        """
+        lead_ms = int(round(self._lead_ms))
+
+        def send(
+            rung_ms: int, wait: bool
+        ) -> tuple[int, int, PartialResponse | None, Exception | None]:
+            if wait:
+                sleep_until(target_timestamp_ms + rung_ms - lead_ms)
+            sent_ms = int(time_module.time() * 1000) - target_timestamp_ms
+            try:
+                sent = self.session.send_detached(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+            except (DirectHttpError, ViewExpiredError) as exc:
+                return rung_ms, sent_ms, None, exc
+            return rung_ms, sent_ms, sent, None
+
+        # The first request goes on this thread: it is the one the whole morning
+        # is timed around, and handing it to a pool would put a scheduling hop in
+        # front of the only send that has to be exact. The worker takes the later
+        # rung, where a hundred microseconds does not matter.
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="reserve-pair"
+        ) as pool:
+            deferred = pool.submit(send, second_rung_ms, True)
+            first = send(self._sweep_offsets_ms[0], False)
+            second = deferred.result()
+
+        pair = _OpeningPair(observations=[])
+        # Only counts when *nothing* was sent. A read or write timeout may have
+        # landed at the club, and treating that as "never happened" is what would
+        # let the run book a second tee time on top of a hold it cannot see.
+        never_connected = True
+        for index, (rung_ms, sent_ms, response, exc) in enumerate((first, second)):
+            attempt_number = index + 1
+            if exc is not None:
+                if not isinstance(exc, DirectHttpConnectionError):
+                    never_connected = False
+                    pair.timed_out = True
+                pair.reason = str(exc)
+                pair.observations.append(
+                    ReserveObservation(
+                        attempt=attempt_number,
+                        slot_time=slot_time,
+                        source=config.source,
+                        view_state=view_state,
+                        verdict=RESERVE_TIMEDOUT,
+                        reason=str(exc),
+                        sent_ms_past_window=sent_ms,
+                        round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+                    )
+                )
+                continue
+
+            never_connected = False
+            assert response is not None
+            document = parse_html(response.markup)
+            observation = observe_reserve_response(
+                attempt=attempt_number,
+                slot_time=slot_time,
+                source=config.source,
+                view_state=view_state,
+                response=response,
+                document=document,
+                markup=response.markup,
+                target_timestamp_ms=target_timestamp_ms,
+            )
+            pair.observations.append(observation)
+            if observation.verdict != RESERVE_REFUSED and pair.accepted is None:
+                # First grant in rung order wins. A second grant for the same
+                # slot is the same hold said twice, and adopting the later one
+                # would only throw away the earlier view for nothing.
+                pair.accepted = response
+                pair.accepted_rung_ms = rung_ms
+                pair.accepted_reason = observation.reason
+            elif observation.verdict == RESERVE_REFUSED:
+                pair.reason = observation.reason
+                # Latest refusal wins as the one carried forward: it is the
+                # freshest sheet, and a fallback has to be relocated in it.
+                pair.carried = response
+                pair.carried_document = document
+                pair.carried_observation = observation
+
+        pair.never_connected = never_connected
+        # first_sent_ms_past_window is read for the log line only; the ledger
+        # takes each request's own send time from the exchange above.
+        logger.info(
+            "DIRECT_HTTP: Opening pair fired at +%dms and +%dms (aimed from %sms)",
+            first[0],
+            second[0],
+            first_sent_ms_past_window if first_sent_ms_past_window is not None else "?",
+        )
+        return pair
 
     def _next_candidate(
         self,
@@ -1674,6 +1934,36 @@ class ReserveObservation:
             "evalText": self.eval_text[:2000],
             "callbackArgs": self.callback_args,
         }
+
+
+@dataclass
+class _OpeningPair:
+    """What the two overlapped opening Reserves came back with.
+
+    ``accepted`` is the first grant in rung order; ``carried`` is the latest
+    refusal, which is the response the chain continues against when neither was
+    granted - it holds the freshest sheet for relocating a fallback in. Both are
+    detached: exactly one must be adopted before the chain goes on.
+
+    Defined here rather than beside :class:`DirectHttpBooker` because it names
+    :class:`ReserveObservation`, which the module resolves at class-creation
+    time.
+    """
+
+    observations: list[ReserveObservation]
+    accepted: PartialResponse | None = None
+    accepted_rung_ms: int | None = None
+    accepted_reason: str | None = None
+    carried: PartialResponse | None = None
+    carried_document: Node | None = None
+    carried_observation: ReserveObservation | None = None
+    # A read or write timeout, which may have reached the club. Closes the
+    # fallback list for the rest of the run.
+    timed_out: bool = False
+    # Every request failed before a byte left, so nothing was submitted and the
+    # browser chain is still a safe retry.
+    never_connected: bool = False
+    reason: str | None = None
 
 
 def observe_reserve_response(

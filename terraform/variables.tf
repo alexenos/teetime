@@ -258,23 +258,34 @@ variable "walden_reserve_sweep_offsets_ms" {
     still open an hour later. Asking once on the instant is therefore the single
     worst-timed question we can ask.
 
-    Each rung doubles as a measurement - the race ledger records which offsets
-    were refused and which was granted - so a morning narrows the boundary to the
-    rung spacing whether or not it wins. Once it is known, collapse this to one
-    well-chosen offset.
+    The first offset is the aim point, and as of 2026-08-15 it is no longer 0.
+    Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812, 817)
+    and every grant over +1200ms (1239, 1240, 1291), and the club stamped its
+    refusals inside the 06:30:00 second and its one grant inside 06:30:01. The
+    boundary that fits all of it is the club's own second tick: it refuses while
+    its clock still reads 06:30:00. 1030 arrives 30ms past that tick, which is
+    margin against a tick measurement good to roughly +-15ms.
 
-    Spacing is bounded by how fast the club answers, not by what is set here.
-    Rungs are slept to as absolute instants, so one whose moment has already
-    passed when the previous response lands is skipped - and a Reserve round trip
-    has measured 593ms and 647ms on the two lost mornings and 828ms on an
-    uncontested ad-hoc booking. The previous 150/300/500/750 rungs never once
-    fired: attempt 1's answer arrived ~860ms in, past all four. Rungs spaced
-    tighter than a round trip make the ladder read longer than it runs.
+    1250 is kept as the second offset because it is where the club has actually
+    granted three times, and walden_reserve_pipeline_opening_pair fires it
+    without waiting for 1030's answer - so aiming earlier cannot cost the offset
+    that has been winning.
+
+    Each rung doubles as a measurement - the race ledger records which offsets
+    were refused and which was granted - so a morning narrows the boundary
+    whether or not it wins. A grant at 1030 is the first evidence that the
+    boundary is the tick rather than something later.
+
+    Spacing past the pair is bounded by how fast the club answers, not by what is
+    set here. Rungs are slept to as absolute instants, so one whose moment has
+    already passed when the previous response lands is skipped - and a Reserve
+    round trip has measured 593-828ms. Rungs spaced tighter than a round trip
+    make the ladder read longer than it runs.
 
     "0" restores the historical single shot on the instant.
   EOT
   type        = string
-  default     = "0,900,1300,2000,3000,4500"
+  default     = "1030,1250,2000,3000,4500"
 
   validation {
     # Whitespace is tolerated because the parser in app/config.py strips it, and
@@ -286,6 +297,30 @@ variable "walden_reserve_sweep_offsets_ms" {
     condition     = can(regex("^[0-9]+( *, *[0-9]+)*$", var.walden_reserve_sweep_offsets_ms))
     error_message = "Must be non-negative whole milliseconds, comma-separated, e.g. \"0,150,300\"."
   }
+}
+
+variable "walden_reserve_pipeline_opening_pair" {
+  description = <<-EOT
+    Fire the first two sweep offsets without waiting for the first one's answer.
+
+    Serialised, the ladder cannot ask twice inside one round trip. On 2026-08-15
+    the first Reserve went at -60ms, its refusal landed at +940ms, and by then
+    the +900 rung was gone - so the next question could not go until +1240ms.
+    That is harmless when the first rung is 0 and expected to fail, but the first
+    rung now aims at the club's second tick, and aiming there serially would push
+    the follow-up to ~+1780ms, later than the +1240ms that has been granted three
+    times.
+
+    Pipelined, the pair brackets the boundary inside one round trip and the run
+    is no worse off than a serial 1250 even when the tick estimate is wrong. Both
+    requests are for the same slot, so neither can reserve a second tee time and
+    collide with the club's one-round-per-day rule; the worst case is the club
+    granting the same hold twice.
+
+    Needs at least two offsets and a timed booking; ignored otherwise.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "walden_capture_race_ledger" {

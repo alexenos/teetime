@@ -140,23 +140,30 @@ class TestStaleMessagesLaterInTheChain:
 class TestSweepLadder:
     """The offsets the Reserve is asked at, parsed from configuration."""
 
-    def test_the_default_ladder_starts_on_the_instant_and_climbs(
+    def test_the_default_ladder_aims_past_the_clubs_second_tick(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """0ms is still asked first - the sweep adds rungs, it does not delay.
+        """The first rung clears +1000ms, and the ladder still reaches the grants.
+
+        Every refusal on record arrived under +1000ms and every grant over
+        +1200ms, with the club stamping refusals inside the 06:30:00 second and
+        its grant inside 06:30:01. Aiming the first question at 0ms spent it on a
+        certain no; this pins that it is no longer aimed there.
 
         Isolated from the environment: terraform sets this variable on the
         deployed service, so a shell mirroring the deployment would make this
-        assert what is configured rather than what ships. The two tests below
-        need no such care - an explicit init argument outranks both sources.
+        assert what is configured rather than what ships. The tests below need no
+        such care - an explicit init argument outranks both sources.
         """
         monkeypatch.delenv("WALDEN_RESERVE_SWEEP_OFFSETS_MS", raising=False)
         ladder = Settings(_env_file=None).walden_sweep_offsets_ms()
 
-        assert ladder[0] == 0
+        assert ladder[0] > 1000
         assert list(ladder) == sorted(ladder)
-        # 08-08 was granted at +1291ms and 08-12 at +1239ms, so a ladder that
-        # stopped short of those would have measured nothing on either morning.
+        # 08-08 was granted at +1291ms, 08-12 at +1239ms and 08-15 at +1240ms, so
+        # a ladder that stopped short of those would give up the offset that has
+        # actually been winning while the new aim point is still unproven.
+        assert ladder[1] >= 1239
         assert ladder[-1] >= 1300
 
     def test_a_malformed_ladder_degrades_to_one_shot(self) -> None:
