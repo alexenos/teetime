@@ -56,18 +56,50 @@ and is idempotent. Point the environment's setup-script setting at it.
 
 ### What the CLI still cannot do here
 
-`gcloud run revisions list` — the step a post-mortem wants for "which code
-actually ran" — fails with `Permission 'run.revisions.list' denied`. That is
-this account's IAM, not the network: the grant below is storage and logging
-only. Adding `roles/run.viewer` would close it:
+`gcloud run revisions list` — the step §1 of the post-mortem skill wants for
+"which code actually ran" — fails with `Permission 'run.revisions.list' denied`.
+That is this account's IAM, not the network: the grant above is storage and
+logging only, and Cloud Run's admin API is neither.
+
+Adding `roles/run.viewer` closes it. **Run this on your own machine**, like
+steps 1 and 2 — the post-mortem account cannot grant itself a role:
 
 ```bash
+PROJECT=gen-lang-client-0822973627
+SA=teetime-artifact-reader@$PROJECT.iam.gserviceaccount.com
+
 gcloud projects add-iam-policy-binding $PROJECT \
   --member=serviceAccount:$SA --role=roles/run.viewer
 ```
 
-Without it, the logs still name the revision that served a run, in
-`resource.labels.revision_name`.
+Then, from a session, `gcloud run revisions list --service=teetime
+--region=us-central1 --limit=5` should list revisions instead of erroring.
+
+**What that grant exposes.** `roles/run.viewer` is read-only over Cloud Run —
+it cannot deploy, update traffic, or delete — but it does read service
+*configuration*, which includes the environment block. That would matter if
+secrets were set as literal env values. They are not: every secret in
+`terraform/main.tf` is injected through `value_source.secret_key_ref`, so the
+service config carries secret *names* and versions while the values stay in
+Secret Manager, behind `roles/secretmanager.secretAccessor` that this account
+does not have. The plain `env` entries are booking flags and timezone. So the
+grant adds revision and service metadata and no credential material.
+
+If you would rather grant the single permission than the role, a custom role
+does it:
+
+```bash
+gcloud iam roles create teetimeRevisionReader --project=$PROJECT \
+  --title="List Cloud Run revisions for post-mortems" \
+  --permissions=run.revisions.list,run.revisions.get
+gcloud projects add-iam-policy-binding $PROJECT \
+  --member=serviceAccount:$SA --role=projects/$PROJECT/roles/teetimeRevisionReader
+```
+
+None of this is load-bearing: without it the logs still name the revision that
+served a run, in `resource.labels.revision_name`, and commit timestamps plus the
+run's own logged behaviour bound which code was deployed. It saves a step in §1
+rather than enabling anything new.
 
 ## Setting it up
 
