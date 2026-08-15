@@ -2871,7 +2871,16 @@ class TestBatchBookingPreparation:
         # The 6:30 gate lives in the fast chain's JS/HTTP precision wait. With
         # the chain off, Python has to hold the window itself or the batch races
         # a locked tee sheet - the bug #122 fixed, re-entering by the back door.
-        precision_wait.assert_called_once_with(datetime(2026, 2, 19, 6, 30, 0))
+        #
+        # Shifted, where this used to assert the stated 06:30:00. That assertion
+        # encoded a time we now know the club refuses: this path reads execute_at
+        # rather than execute_at_timestamp_ms, so it was the one route still
+        # firing at the stated window while the other two aimed at the open.
+        aim = timedelta(
+            milliseconds=settings.walden_window_opens_offset_ms
+            + settings.walden_reserve_aim_margin_ms
+        )
+        precision_wait.assert_called_once_with(datetime(2026, 2, 19, 6, 30, 0) + aim)
 
     def test_untimed_batch_uses_the_fast_chain(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch

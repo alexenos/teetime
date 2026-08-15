@@ -1342,11 +1342,19 @@ class WaldenGolfProvider(ReservationProvider):
                     # batch back and it would race a still-locked tee sheet.
                     # Wait in Python instead: coarser, but a kill switch that
                     # silently drops the window gate is worse than a slow one.
+                    #
+                    # Shifted by the same offset as the other two chains. This
+                    # path reads execute_at rather than execute_at_timestamp_ms,
+                    # so without this it would be the one route still firing at
+                    # the stated window - the arrival the offset exists to avoid,
+                    # and a silent disagreement about when the window opens
+                    # sitting behind a kill switch nobody exercises.
                     logger.info(
                         "BATCH_BOOKING: Fast chain disabled - waiting for the booking "
-                        "window in Python before the Selenium flow"
+                        "window (+%dms) in Python before the Selenium flow",
+                        aim_offset_ms,
                     )
-                    self._precision_wait_until(execute_at)
+                    self._precision_wait_until(execute_at + timedelta(milliseconds=aim_offset_ms))
 
             # Track times that have been successfully booked to avoid conflicts
             # When a booking succeeds, we add its booked_time to this set
