@@ -4,6 +4,14 @@ version = "0.1.0"
 description = "Golf tee time reservation application with SMS interface and LLM-powered natural language understanding"
 authors = ["Devin AI <devin@cognition.ai>"]
 readme = "README.md"
+# The project is named teetime but the code lives in app/, so Poetry has no
+# package to install for the root project. Poetry 1.7.1 - what the Dockerfile
+# and CI pin - treats that as a warning and exits 0, which is the only reason
+# `poetry install` in the CI "Install project" step passes today. Poetry 1.8+
+# makes it a hard error, so without this line CI turns red on every PR the
+# moment the pin moves, with a message about packaging rather than the bump.
+# Naming the real package fixes it on both: verified exit 0 on 1.7.1 and 2.3.3.
+packages = [{ include = "app" }]
 
 [tool.poetry.dependencies]
 python = "^3.11"
