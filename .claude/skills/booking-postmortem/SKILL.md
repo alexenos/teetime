@@ -173,7 +173,7 @@ The run has a fixed shape. Walk it and note where it diverges:
 | Clock | `Clock skew measured` | probes, transitions, offset, one-way |
 | Lead | `Reserve will be sent Nms early` | Should be tens of ms, not hundreds |
 | Fire | `Firing Reserve k/N ... Nms past the window` | Attempt 1 should land on the first rung — **≈ +1030ms** since #150, not ≈ 0ms |
-| Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot |
+| Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot, and **`round trip`** against the 3.0s budget (§7b) |
 | Boundary | `RACE_LEDGER: club granted ... at +Nms` | Which rung won, and the last that lost |
 | Outcome | `Chain finished - phase=..., success=..., blocked=...` | Phase says how far it got |
 
@@ -399,10 +399,21 @@ the split holds across every morning on record: refused at −60, −14, −7, 0
 812, 817; granted at 1239, 1240, 1291. The sheet opens at 06:30:01, so every
 first Reserve ever sent at ~0ms was spent on a certain no.
 
-#150 acted on this: the first rung is now 1030ms rather than 0, the ladder is
-`1030,1250,2000,3000,4500`, the precision wait sleeps to the first rung rather
-than to the window, and the clock probe is budget-bounded at 5s with 20ms
-spacing so the tick is bracketed tightly enough to aim 30ms past it.
+#150 acted on this: the first rung is now 1030ms rather than 0, the precision
+wait sleeps to the first rung rather than to the window, and the clock probe is
+budget-bounded at 5s with 20ms spacing so the tick is bracketed tightly enough
+to aim 30ms past it.
+
+The ladder itself is configured as offsets past that **aim point**, not past the
+stated window: `walden_reserve_sweep_offsets_ms` defaults to `0,250,1000`, which
+the staging line logs as `sweep=0+250+1000ms` and which lands at +1030, +1280 and
++2030ms in the frame the ledger reports. Read the two frames apart before calling
+a rung missed. Spacing is also a floor rather than a schedule — a rung is reached
+only once the previous answer lands, so served serially the three asks fall
+nearer +1030, +1770 and +2510ms. `walden_reserve_pipeline_opening_pair` would
+fire the first two together and is **off by default**, deliberately; a run whose
+staging line lacks `(first two pipelined)` is behaving as configured, not
+misfiring.
 
 **Read `serverMsPastWindow` as ±1s, not as a millisecond figure.** The HTTP
 `Date` header is whole-second resolution and the parser multiplies seconds by
@@ -432,6 +443,39 @@ certain no.
 What is still open is narrower: whether the 06:30:01 boundary is fixed or drifts
 morning to morning. The ladder brackets it either way, and `serverMsPastWindow`
 on the granted row records which second won.
+
+## 7b. The margin 08-16 spent, and what to watch
+
+The same 2935ms that blurred the boundary is a risk in its own right, and it is
+the one thing worth checking on every future race. `_RESERVE_TIMEOUT_S` is
+**3.0s**, so the winning Reserve came back with 65ms to spare. Round trips on
+record, from the ledgers:
+
+| morning | kind | roundTripMs |
+|---|---|---|
+| 08-13 | race | 593 |
+| 08-14 | race | 647 |
+| 08-14 | ad-hoc | 956 |
+| 08-15 | race | 741 / 754 |
+| 08-15 | ad-hoc | 942 |
+| **08-16** | **race** | **2935** |
+
+3.1x the previous worst on record and 3.9x the previous *race* worst. The
+timeout was sized at "~3.6x a quiet-day round trip" against a 593–828ms sample,
+and 08-16 is outside the sample that sized it. Note also that the club stamped
+its answer at 06:30:03 for a request sent at 06:30:01.022, so most of the delay
+was on the club's side rather than the return leg — consistent with race-morning
+load, and therefore likely to recur on exactly the mornings that matter.
+
+Had it crossed 3.0s the run would have abandoned a Reserve the club had already
+granted, and per the ladder's own rule a timeout closes the fallback list for the
+rest of the run. So the failure this nearly produced is the `success=True` /
+no-reservation class in §6 — the one that reads like a win.
+
+**So read `roundTripMs` on every race ledger, not just when the boundary is in
+question.** A second morning near 3s makes raising `_RESERVE_TIMEOUT_S` the
+cheapest fix; a single one does not, and one data point is not a trend. This
+needs no morning to test — it is a number already in the ledger.
 
 ## 8. Report
 

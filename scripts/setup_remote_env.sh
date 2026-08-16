@@ -179,12 +179,33 @@ if command -v poetry > /dev/null 2>&1; then
     have_python=yes
   else
     log "installing python dependencies (this takes a few minutes on a cold container)"
-    if poetry install --no-root --no-interaction > /dev/null 2>&1 \
-       && poetry run python -c "import google.auth, httpx" > /dev/null 2>&1; then
-      log "dependencies installed"
-      have_python=yes
-    else
-      log "WARNING: poetry install did not produce a usable venv; run it by hand"
+    # Twice, and kept rather than discarded.
+    #
+    # On 2026-08-16 the cold install failed here and the session reported
+    # PARTIAL; a plain `poetry install` run by hand immediately afterwards
+    # succeeded with one package left to fetch, which is a transient download
+    # rather than a broken lock file. One retry covers that.
+    #
+    # The output went to /dev/null, so the warning below named nothing and the
+    # cause had to be guessed - the same failure mode this script exists to fix
+    # for the key file (see the header). Keep it on disk and say where.
+    install_log="${TMPDIR:-/tmp}/poetry-install.log"
+    for attempt in 1 2; do
+      if poetry install --no-root --no-interaction > "$install_log" 2>&1 \
+         && poetry run python -c "import google.auth, httpx" > /dev/null 2>&1; then
+        log "dependencies installed"
+        have_python=yes
+        break
+      fi
+      if [ "$attempt" = 1 ]; then
+        log "poetry install failed; retrying once"
+      fi
+    done
+    if [ "$have_python" != yes ]; then
+      log "WARNING: poetry install did not produce a usable venv; see $install_log"
+      tail -n 5 "$install_log" 2>/dev/null | while IFS= read -r line; do
+        log "  | $line"
+      done
     fi
   fi
 else
