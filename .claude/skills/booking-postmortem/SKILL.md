@@ -410,6 +410,25 @@ spacing so the tick is bracketed tightly enough to aim 30ms past it.
 second", not "1ms past". It is precise enough to say which second the club was
 in — which is the whole question — and not precise enough for anything finer.
 
+**And read it against `roundTripMs`, because it is stamped when the club
+*answers*, not when it receives.** The two are near enough to interchange at a
+700ms round trip and not at a slow one. 2026-08-16 fired at +1023ms and the row
+says `serverMsPastWindow: 3001` — which is not three seconds of lateness and not
+a two-second clock difference, but a `2935ms` round trip putting the answer at
+06:30:03 for a request sent at 06:30:01.022. The club's receipt is only bounded
+to `[sent, sent+roundTripMs]`; when that span is seconds wide, the row cannot
+place the boundary at all. This is why 08-15 could carry the boundary argument
+and 08-16 cannot: 08-15's 741ms round trip bracketed the refusal inside the
+06:30:00 second, and a 2935ms one brackets nothing. Check the round trip before
+reading anything into the second.
+
+**#150 works.** 2026-08-16 was the first race on it: one Reserve, fired at
++1023ms with a tick pinned to ±23ms, accepted first try, and
+`RESERVATION_CHECK` found `08/23/2026 08:00 AM RESERVED` on the member's page —
+a prime Sunday-morning slot, and the first morning with no refusal in the ledger
+at all. Every earlier win came from a later rung after attempt 1 was spent on a
+certain no.
+
 What is still open is narrower: whether the 06:30:01 boundary is fixed or drifts
 morning to morning. The ladder brackets it either way, and `serverMsPastWindow`
 on the granted row records which second won.
