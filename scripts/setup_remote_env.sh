@@ -37,7 +37,15 @@ log() { printf '[setup] %s\n' "$*"; }
 if [ -s "$KEY_FILE" ]; then
   log "credentials already present at $KEY_FILE"
 elif [ -n "${GCP_KEY_B64:-}" ]; then
-  if printf '%s' "$GCP_KEY_B64" | base64 -d > "$KEY_FILE" 2>/dev/null && [ -s "$KEY_FILE" ]; then
+  # umask in a subshell, not chmod afterwards. A redirect creates a *new* file
+  # under the caller's umask - 0644 by default - so `> key; chmod 600 key`
+  # leaves a private key world-readable for the width of the decode. It does
+  # not show up in the environment this was written for, because there the
+  # file is pre-created 0600 and a redirect onto an existing file keeps its
+  # mode; it appears the moment GOOGLE_APPLICATION_CREDENTIALS points
+  # somewhere new. The chmod stays for that pre-existing case, where the mode
+  # is whatever someone else set.
+  if (umask 077; printf '%s' "$GCP_KEY_B64" | base64 -d > "$KEY_FILE") 2>/dev/null && [ -s "$KEY_FILE" ]; then
     chmod 600 "$KEY_FILE"
     log "decoded GCP_KEY_B64 -> $KEY_FILE"
   else

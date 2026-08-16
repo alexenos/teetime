@@ -155,9 +155,13 @@ file's existence passed while every read failed with an ADC error that named
 nothing. If you are doing it by hand, test `-s`, not `-f`:
 
 ```bash
-[ -s /tmp/gcp-key.json ] || printf '%s' "$GCP_KEY_B64" | base64 -d > /tmp/gcp-key.json
+[ -s /tmp/gcp-key.json ] || (umask 077; printf '%s' "$GCP_KEY_B64" | base64 -d > /tmp/gcp-key.json)
 chmod 600 /tmp/gcp-key.json
 ```
+
+The `umask` matters when the target does not already exist: a redirect creates
+the file under the caller's umask, so the plain `> file; chmod 600 file` form
+leaves a private key world-readable for the width of the decode.
 
 Set `GOOGLE_APPLICATION_CREDENTIALS` as an environment variable rather than
 exporting it from the setup script. The agent's shell does not inherit the
