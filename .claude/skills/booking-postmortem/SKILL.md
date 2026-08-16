@@ -162,7 +162,7 @@ The run has a fixed shape. Walk it and note where it diverges:
 | Pre-locate | `JS slot finder found slot` | `exact=True`, and **how many fallbacks** it kept |
 | Clock | `Clock skew measured` | probes, transitions, offset, one-way |
 | Lead | `Reserve will be sent Nms early` | Should be tens of ms, not hundreds |
-| Fire | `Firing Reserve k/N ... Nms past the window` | Attempt 1 should be ≈ 0ms or slightly negative |
+| Fire | `Firing Reserve k/N ... Nms past the window` | Attempt 1 should land on the first rung — **≈ +1030ms** since #150, not ≈ 0ms |
 | Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot |
 | Boundary | `RACE_LEDGER: club granted ... at +Nms` | Which rung won, and the last that lost |
 | Outcome | `Chain finished - phase=..., success=..., blocked=...` | Phase says how far it got |
@@ -323,13 +323,18 @@ a past morning can be answered there without touching GCS or a booking.
 
 ## 6. Classify
 
-- **Lost on the clock** — attempt 1 fired hundreds of ms past the window, or
-  `Clock skew unmeasurable`. Look at the probe target and RTTs.
+- **Lost on the clock** — attempt 1 did not land on its rung. Since #150 the aim
+  point is +1030ms, i.e. 30ms past the club's 06:30:01 tick, so "early" now means
+  *near zero* and not the other way round. Read `Clock skew measured` for the
+  tick bracket: a wide one (the probe is budget-bounded at 5s with 20ms spacing
+  and should yield several transitions) means the 30ms of margin was aimed with
+  a ruler that could not see it. `Clock skew unmeasurable` is the same class.
 - **Lost on the slot list** — few or zero fallbacks kept, or the scan dropped
   everything. Check the `dropped course=/window=` split.
-- **Refused at Reserve inside the first second** — every rung of the sweep so
-  far past the window was refused. This is the standing failure, and it is a
-  *boundary*, not contention: see below.
+- **Refused at Reserve inside the first second** — was the standing failure
+  before #150, when attempt 1 went at ~0ms and was spent on a certain no. It is
+  a *boundary*, not contention (§7a). A run that still shows this after #150 is
+  not aiming where it thinks it is: check the rung offsets, not the club.
 - **Refused at Reserve all the way out** — refusals continue past ~2s. That
   would be new, and is the first evidence that would make contention real.
 - **Granted, then lost later** — `ledger.jsonl` has an `accepted` row but the

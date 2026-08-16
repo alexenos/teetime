@@ -26,7 +26,26 @@
 set -uo pipefail
 
 SDK_ROOT="${GCLOUD_SDK_ROOT:-/opt/google-cloud-sdk}"
-SDK_TARBALL="https://storage.googleapis.com/cloud-sdk-release/google-cloud-cli-linux-x86_64.tar.gz"
+
+# Pinned rather than the rolling google-cloud-cli-linux-x86_64.tar.gz, because
+# this script runs unattended, installs executables under /opt and links them
+# into /usr/local/bin. TLS authenticates the host, not the object: on the
+# rolling URL the bytes can change under a URL that never does, and nothing
+# here would notice. A pinned version plus a recorded digest turns that into a
+# loud failure.
+#
+# The digest was taken from the versioned archive and cross-checked three ways
+# before being recorded: the download's size and MD5 match what the GCS JSON
+# API reports for the object server-side, and the extracted tree reports
+# "Google Cloud SDK 580.0.0". That establishes the bytes are the object Google
+# is serving; the value's job from here is to detect it ever changing.
+#
+# The cost is explicit upgrades. To move: bump SDK_VERSION, download the new
+# archive, verify it the same way, and record its sha256 in one reviewed
+# change. Nothing auto-updates it.
+SDK_VERSION="${GCLOUD_SDK_VERSION:-580.0.0}"
+SDK_TARBALL="https://storage.googleapis.com/cloud-sdk-release/google-cloud-cli-${SDK_VERSION}-linux-x86_64.tar.gz"
+SDK_SHA256="${GCLOUD_SDK_SHA256:-e580c04b45dfa2e537b8dc0cf7c828e46a65bc77ef61de69161e1f3a124d7480}"
 PROJECT="${GCP_PROJECT:-gen-lang-client-0822973627}"
 KEY_FILE="${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gcp-key.json}"
 
@@ -62,13 +81,28 @@ if command -v gcloud > /dev/null 2>&1; then
 elif [ -x "$SDK_ROOT/bin/gcloud" ]; then
   log "gcloud already installed at $SDK_ROOT"
 else
-  log "installing the gcloud CLI from the cloud-sdk-release bucket"
-  if curl -sS --max-time 600 -o /tmp/gcloud.tar.gz "$SDK_TARBALL"; then
-    mkdir -p "$(dirname "$SDK_ROOT")"
-    tar -xzf /tmp/gcloud.tar.gz -C "$(dirname "$SDK_ROOT")" && log "unpacked to $SDK_ROOT"
+  log "installing the gcloud CLI $SDK_VERSION from the cloud-sdk-release bucket"
+  # --fail matters more than it looks. Without it curl writes the server's
+  # error body to the output file and still exits 0, so a proxy 403 or a
+  # renamed object lands a 200-byte XML document named gcloud.tar.gz, tar
+  # fails, and the failure is silent - which is the opposite of the degraded
+  # path this script is supposed to provide.
+  if ! curl -sS --fail --max-time 600 -o /tmp/gcloud.tar.gz "$SDK_TARBALL"; then
+    log "WARNING: could not download the SDK $SDK_VERSION; falling back to scripts/fetch_debug_artifacts.py"
+    rm -f /tmp/gcloud.tar.gz
+  elif ! printf '%s  /tmp/gcloud.tar.gz\n' "$SDK_SHA256" | sha256sum -c - > /dev/null 2>&1; then
+    log "WARNING: SDK checksum mismatch - expected $SDK_SHA256,"
+    log "         got $(sha256sum /tmp/gcloud.tar.gz 2>/dev/null | cut -d' ' -f1). NOT installing."
+    log "         If Google published a new $SDK_VERSION build, verify it and update SDK_SHA256."
     rm -f /tmp/gcloud.tar.gz
   else
-    log "WARNING: could not download the SDK; use scripts/fetch_debug_artifacts.py instead"
+    mkdir -p "$(dirname "$SDK_ROOT")"
+    if tar -xzf /tmp/gcloud.tar.gz -C "$(dirname "$SDK_ROOT")"; then
+      log "verified and unpacked to $SDK_ROOT"
+    else
+      log "WARNING: SDK archive downloaded and verified but would not extract"
+    fi
+    rm -f /tmp/gcloud.tar.gz
   fi
 fi
 
