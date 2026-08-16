@@ -58,6 +58,21 @@ KEY_FILE="${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gcp-key.json}"
 
 log() { printf '[setup] %s\n' "$*"; }
 
+# Anchor to the repository root rather than trusting the caller's directory.
+#
+# The setup-script setting does not promise a working directory, and step 3
+# below runs `poetry install`, which resolves pyproject.toml from the cwd. Run
+# from anywhere else that step fails with "could not find a pyproject.toml file",
+# which reads like a broken checkout rather than the wrong directory - and the
+# summary would report PARTIAL for a reason that has nothing to do with the
+# venv. Anchoring here means the setting can be a bare path to this file.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2> /dev/null && pwd)"
+if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  cd "$REPO_ROOT" || log "WARNING: could not enter $REPO_ROOT; running from $PWD"
+else
+  log "WARNING: no pyproject.toml above this script; running from $PWD"
+fi
+
 # mktemp rather than a fixed /tmp name: these are world-writable paths and a
 # predictable one is pre-creatable as a symlink by anything else on the box.
 SCRATCH=""
