@@ -34,13 +34,31 @@ and `gsutil` included, with its own bundled Python, so the
 `python3.13: command not found` that breaks gsutil locally does not apply:
 
 ```bash
-curl -sS -o /tmp/gcloud.tar.gz \
-  https://storage.googleapis.com/cloud-sdk-release/google-cloud-cli-linux-x86_64.tar.gz
-tar -xzf /tmp/gcloud.tar.gz -C /opt
-ln -sf /opt/google-cloud-sdk/bin/{gcloud,gsutil,bq} /usr/local/bin/
+VERSION=580.0.0
+SHA256=e580c04b45dfa2e537b8dc0cf7c828e46a65bc77ef61de69161e1f3a124d7480
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+
+curl -sS --fail --max-time 600 -o "$TMP/gcloud.tar.gz" \
+  "https://storage.googleapis.com/cloud-sdk-release/google-cloud-cli-$VERSION-linux-x86_64.tar.gz" \
+  && printf '%s  %s\n' "$SHA256" "$TMP/gcloud.tar.gz" | sha256sum -c - \
+  && mkdir -p /opt/google-cloud-sdk \
+  && tar -xzf "$TMP/gcloud.tar.gz" -C /opt/google-cloud-sdk --strip-components=1 \
+  && ln -sf /opt/google-cloud-sdk/bin/{gcloud,gsutil,bq} /usr/local/bin/
+
 gcloud config set component_manager/disable_update_check true
 gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
 ```
+
+Four things in there are load-bearing, and the obvious shorter version has a
+bug in each: `--fail`, because without it curl writes the server's error body
+to the output file and *still exits 0*, so a proxy 403 becomes a 200-byte XML
+document named like an archive; the pinned version and digest, because the
+rolling `google-cloud-cli-linux-x86_64.tar.gz` can change under a URL that
+never does and TLS authenticates the host rather than the object; `mktemp`,
+because a fixed `/tmp` name is pre-creatable as a symlink by anything else on
+the machine; and `&&` throughout, so a failure at any step stops rather than
+extracting an unverified archive. `scripts/setup_remote_env.sh` does all of
+this, and is the path to prefer.
 
 Verified 2026-08-15: `gcloud storage ls` and `gcloud logging read` both work
 against this project, cold install to working command in about 16 seconds.
@@ -155,13 +173,22 @@ file's existence passed while every read failed with an ADC error that named
 nothing. If you are doing it by hand, test `-s`, not `-f`:
 
 ```bash
-[ -s /tmp/gcp-key.json ] || (umask 077; printf '%s' "$GCP_KEY_B64" | base64 -d > /tmp/gcp-key.json)
+if [ ! -s /tmp/gcp-key.json ]; then
+  TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+  (umask 077; printf '%s' "$GCP_KEY_B64" | base64 -d > "$TMP/key.json") \
+    && python3 -c "import json;json.load(open('$TMP/key.json'))['client_email']" \
+    && (umask 077; cat "$TMP/key.json" > /tmp/gcp-key.json)
+fi
 chmod 600 /tmp/gcp-key.json
 ```
 
-The `umask` matters when the target does not already exist: a redirect creates
-the file under the caller's umask, so the plain `> file; chmod 600 file` form
-leaves a private key world-readable for the width of the decode.
+Longer than it looks like it needs to be, for two reasons. The `umask` matters
+when the target does not already exist: a redirect creates the file under the
+caller's umask, so the plain `> file; chmod 600 file` form leaves a private key
+world-readable for the width of the decode. And the decode goes to scratch and
+is *parsed* before being moved into place, because a partial decode otherwise
+leaves a non-empty file that passes the `-s` test on every later run — a
+corrupt key that looks permanently like a present one.
 
 Set `GOOGLE_APPLICATION_CREDENTIALS` as an environment variable rather than
 exporting it from the setup script. The agent's shell does not inherit the

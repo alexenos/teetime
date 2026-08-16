@@ -7,8 +7,9 @@ description: Diagnose why the morning's TeeTime booking run failed. Use when the
 
 The booking job fires at 06:28 CT. The window nominally opens at 06:30:00 CT,
 but the club's sheet actually opens at 06:30:01 — see §7a, which is why the run
-no longer aims at 06:30:00.000. Every morning it loses, the question is the
-same: did we lose the race, or did we refuse ourselves? This skill is the
+no longer aims at 06:30:00.000. The bot first won the race on 2026-08-15, so
+losing is no longer the default — but when a morning does lose, the question is
+the same: did we lose the race, or did we refuse ourselves? This skill is the
 repeatable path to that answer.
 
 ## 0. Set the session up
@@ -19,11 +20,20 @@ idempotent, and takes about 16 seconds cold:
 
 ```bash
 bash scripts/setup_remote_env.sh
-gcloud storage ls gs://gen-lang-client-0822973627-teetime-debug-artifacts/walden/race/
 ```
 
-A listing means every command in this skill works. Point the environment's
-setup-script setting at that file and it happens before you are asked anything.
+Its last line is the answer: `READY` means both access paths work, `PARTIAL`
+names the one that does, and `NOT READY` means neither and the warnings above
+it say why. Point the environment's setup-script setting at that file and this
+happens before you are asked anything.
+
+Check whichever path you are about to use, because they fail independently —
+a `gcloud` listing says nothing about whether the venv installed:
+
+```bash
+gcloud storage ls gs://gen-lang-client-0822973627-teetime-debug-artifacts/walden/race/
+poetry run python scripts/fetch_debug_artifacts.py list --date "$(date -u +%Y%m%d)"
+```
 
 Two things worth knowing, because the earlier version of this skill got both
 wrong and cost a post-mortem each:
@@ -307,6 +317,7 @@ a refusal comes back `unknown` — the failure is silent and reads like a findin
 Unwrap it first, which also gives you the `<eval>` scripts:
 
 ```python
+from pathlib import Path
 from app.providers.walden_http import parse_html, parse_partial_response
 from app.providers.walden_http_booker import classify_reserve_response
 response = parse_partial_response(Path("attempt_01_refused.xml").read_text(errors="replace"))
