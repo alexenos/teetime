@@ -66,11 +66,20 @@ log() { printf '[setup] %s\n' "$*"; }
 # which reads like a broken checkout rather than the wrong directory - and the
 # summary would report PARTIAL for a reason that has nothing to do with the
 # venv. Anchoring here means the setting can be a bare path to this file.
+#
+# have_repo_root gates step 3 rather than only warning. Warning and carrying on
+# left `poetry install` to run against whatever directory the caller happened to
+# be in - which either installs into an unrelated project or fails with the same
+# "no pyproject.toml" message this anchoring exists to prevent, and the summary
+# would blame the venv either way.
+have_repo_root=no
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2> /dev/null && pwd)"
-if [ -n "$REPO_ROOT" ] && [ -f "$REPO_ROOT/pyproject.toml" ]; then
-  cd "$REPO_ROOT" || log "WARNING: could not enter $REPO_ROOT; running from $PWD"
+if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/pyproject.toml" ]; then
+  log "WARNING: no pyproject.toml above this script; skipping the venv step"
+elif ! cd "$REPO_ROOT"; then
+  log "WARNING: could not enter $REPO_ROOT; skipping the venv step"
 else
-  log "WARNING: no pyproject.toml above this script; running from $PWD"
+  have_repo_root=yes
 fi
 
 # mktemp rather than a fixed /tmp name: these are world-writable paths and a
@@ -188,7 +197,9 @@ fi
 # --- 3. The venv -------------------------------------------------------------
 # fetch_debug_artifacts.py needs google.auth + httpx, and the classifier needs
 # the app package. Both come from the project venv, which starts empty.
-if command -v poetry > /dev/null 2>&1; then
+if [ "$have_repo_root" != yes ]; then
+  log "WARNING: no repository root; scripts/fetch_debug_artifacts.py will not run"
+elif command -v poetry > /dev/null 2>&1; then
   if poetry run python -c "import google.auth, httpx" > /dev/null 2>&1; then
     log "python dependencies already installed"
     have_python=yes
@@ -207,7 +218,7 @@ if command -v poetry > /dev/null 2>&1; then
     install_log="${TMPDIR:-/tmp}/poetry-install.log"
     for attempt in 1 2; do
       if poetry install --no-root --no-interaction > "$install_log" 2>&1 \
-         && poetry run python -c "import google.auth, httpx" > /dev/null 2>&1; then
+         && poetry run python -c "import google.auth, httpx" >> "$install_log" 2>&1; then
         log "dependencies installed"
         have_python=yes
         break

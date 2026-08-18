@@ -100,7 +100,7 @@ run logs what the deployed code did, so a field the newest commit introduced —
 or a constant it changed — settles which side of the deploy you are on. On
 2026-08-15 the ledger's `targetTimestampMs` decoded to 06:29:59.999 CT and no
 `RESERVATION_CHECK` line appeared, both of which place the morning run before
-#150 (merged 16:32 CT the same day) without ever listing a revision.
+PR #150 (merged 16:32 CT the same day) without ever listing a revision.
 
 ## 2. Pull the run
 
@@ -399,8 +399,9 @@ the split holds across every morning on record: refused at −60, −14, −7, 0
 812, 817; granted at 1239, 1240, 1291. The sheet opens at 06:30:01, so every
 first Reserve ever sent at ~0ms was spent on a certain no.
 
-#150 acted on this: the first rung is now 1030ms rather than 0, the precision
-wait sleeps to the first rung rather than to the window, and the clock probe is
+PR #150 acted on this: the first rung is now 1030ms rather than 0, the
+precision wait sleeps to the first rung rather than to the window, and the
+clock probe is
 budget-bounded at 5s with 20ms spacing so the tick is bracketed tightly enough
 to aim 30ms past it.
 
@@ -460,9 +461,18 @@ record, from the ledgers:
 | 08-15 | ad-hoc | 942 |
 | **08-16** | **race** | **2935** |
 
-3.1x the previous worst on record and 3.9x the previous *race* worst. The
-timeout was sized at "~3.6x a quiet-day round trip" against a 593–828ms sample,
-and 08-16 is outside the sample that sized it. Note also that the club stamped
+3.1x the previous worst on record and 3.9x the previous *race* worst, and
+outside the sample the timeout was sized against either way.
+
+**A caveat on that sample, because the numbers do not agree.** The sizing
+rationale in `walden_http_booker.py` cites "593-828ms measured" and sizes
+`_RUNG_LATE_GRACE_MS` "above the slowest Reserve round trip measured (828ms)".
+The table above is every `roundTripMs` in every ledger in the bucket, and no row
+reads 828: the 08-14 ad-hoc booking that comment describes - "no race, quiet
+server, warm connection" - records **956**. So 828 is either a figure taken
+before the ledger existed or one measuring something narrower, and the slowest
+quiet-day round trip actually on record is 956ms rather than 828ms. Cite the
+table, not the comment, until someone reconciles them. Note also that the club stamped
 its answer at 06:30:03 for a request sent at 06:30:01.022, so most of the delay
 was on the club's side rather than the return leg — consistent with race-morning
 load, and therefore likely to recur on exactly the mornings that matter.
