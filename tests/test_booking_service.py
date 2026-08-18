@@ -3212,3 +3212,85 @@ class TestAdhocBookingsRunTheTimedPath:
         assert len(reported) == 1
         assert reported[0].args[1] is refusal, "the club's own refusal is what the member hears"
         booking_service._try_notify_unreported_booking.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+class TestNotifyUnreportedBookings:
+    """The scheduled job leans on this to report a batch it could not account for.
+
+    Its branches were only ever reached through the ad-hoc path, whose tests mock
+    the helper out entirely, so the re-read that decides success-vs-failure had no
+    direct coverage before the 06:30 job started depending on it.
+    """
+
+    @staticmethod
+    def _booking(status: BookingStatus, booking_id: str = "b1") -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id=booking_id,
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2026, 8, 25),
+                requested_time=time(8, 2),
+                num_players=4,
+            ),
+            status=status,
+        )
+
+    @pytest.mark.asyncio
+    async def test_success_persisted_after_the_timeout_is_reported_as_success(
+        self, booking_service: BookingService
+    ) -> None:
+        """The Selenium thread outlives the cancelled await and can still win.
+
+        Reporting the in-memory row would tell the member their booking failed
+        while the reservation actually stands.
+        """
+        stale = self._booking(BookingStatus.IN_PROGRESS)
+        persisted = self._booking(BookingStatus.SUCCESS)
+        persisted.actual_booked_time = time(8, 2)
+        persisted.confirmation_number = "CONF999"
+
+        booking_service.get_booking = AsyncMock(return_value=persisted)  # type: ignore[method-assign]
+        booking_service._notify_booking_result = AsyncMock()  # type: ignore[method-assign]
+
+        await booking_service.notify_unreported_bookings([stale], "timed out")
+
+        booking_service._notify_booking_result.assert_awaited_once()  # type: ignore[attr-defined]
+        _, result = booking_service._notify_booking_result.await_args.args  # type: ignore[attr-defined]
+        assert result.success is True
+        assert result.confirmation_number == "CONF999"
+
+    @pytest.mark.asyncio
+    async def test_in_progress_row_is_reported_as_failed_with_the_given_error(
+        self, booking_service: BookingService
+    ) -> None:
+        """A row still mid-attempt is the case the timeout branch actually hits."""
+        booking = self._booking(BookingStatus.IN_PROGRESS)
+
+        booking_service.get_booking = AsyncMock(return_value=booking)  # type: ignore[method-assign]
+        booking_service._notify_booking_result = AsyncMock()  # type: ignore[method-assign]
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock()
+            await booking_service.notify_unreported_bookings([booking], "did not finish")
+
+        booking_service._notify_booking_result.assert_awaited_once()  # type: ignore[attr-defined]
+        _, result = booking_service._notify_booking_result.await_args.args  # type: ignore[attr-defined]
+        assert result.success is False
+        assert result.error_message == "did not finish"
+
+    @pytest.mark.asyncio
+    async def test_every_booking_is_reported_even_when_one_send_raises(
+        self, booking_service: BookingService
+    ) -> None:
+        """One member's failed send must not strand the rest of the batch."""
+        first = self._booking(BookingStatus.SUCCESS, "b1")
+        second = self._booking(BookingStatus.SUCCESS, "b2")
+
+        booking_service.get_booking = AsyncMock(side_effect=[first, second])  # type: ignore[method-assign]
+        booking_service._notify_booking_result = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[RuntimeError("discord down"), None]
+        )
+
+        await booking_service.notify_unreported_bookings([first, second], "timed out")
+
+        assert booking_service._notify_booking_result.await_count == 2  # type: ignore[attr-defined]

@@ -11,7 +11,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.jobs import JobExecutionItem, JobExecutionResult, JobExecutionStatus
+from app.api.jobs import (
+    TIMEOUT_NOTIFICATION_MESSAGE,
+    JobExecutionItem,
+    JobExecutionResult,
+    JobExecutionStatus,
+)
 from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
 from app.providers.base import BookingResult
 
@@ -399,6 +404,7 @@ class TestJobsExecuteDueBookings:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
+                mock_service.notify_unreported_bookings = AsyncMock()
                 mock_service.execute_bookings_batch = AsyncMock(
                     side_effect=Exception("Selenium crashed")
                 )
@@ -417,6 +423,13 @@ class TestJobsExecuteDueBookings:
                 assert data["results"][0]["booking_id"] == "test1234"
                 assert data["results"][0]["status"] == "error"
                 assert "Selenium crashed" in data["results"][0]["error"]
+
+                # And the member is told, rather than the error only reaching
+                # the log - the same gap the timeout branch had.
+                mock_service.notify_unreported_bookings.assert_awaited_once()
+                reported, message = mock_service.notify_unreported_bookings.await_args.args
+                assert reported == [sample_booking]
+                assert message == "Selenium crashed"
 
     def test_booking_failure_sms_includes_booking_details(
         self,
@@ -596,6 +609,7 @@ class TestJobsTimeout:
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
+                mock_service.notify_unreported_bookings = AsyncMock()
                 mock_service.execute_bookings_batch = AsyncMock(
                     return_value=[
                         (
@@ -623,6 +637,14 @@ class TestJobsTimeout:
                     assert len(data["results"]) == 1
                     assert data["results"][0]["status"] == "timeout"
                     assert "timed out" in data["results"][0]["error"]
+
+                    # The member hears about it. A timed-out batch used to
+                    # return silently, which is how 2026-08-18's missed
+                    # booking went unreported.
+                    mock_service.notify_unreported_bookings.assert_awaited_once()
+                    reported, message = mock_service.notify_unreported_bookings.await_args.args
+                    assert reported == [sample_booking]
+                    assert message == TIMEOUT_NOTIFICATION_MESSAGE
 
 
 class TestJobExecutionModels:

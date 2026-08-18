@@ -28,6 +28,14 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 BOOKING_EXECUTION_TIMEOUT_SECONDS = 300
 
+# What the member is told when the batch runs out of time. Deliberately plain:
+# it reaches them as a message, not as a log line, and "Batch execution timed
+# out" says nothing about their tee time. The timeout does not mean no Reserve
+# was sent, only that this endpoint stopped waiting to hear - so the wording
+# claims no more than that, and notify_unreported_bookings re-reads the row and
+# reports a success instead if one landed.
+TIMEOUT_NOTIFICATION_MESSAGE = "The booking attempt did not finish in time."
+
 
 class JobExecutionStatus(str, Enum):
     SUCCESS = "success"
@@ -228,6 +236,10 @@ async def execute_due_bookings(
                     error="Batch execution timed out",
                 )
             )
+        # Every other path out of this endpoint ends in a message per booking.
+        # This one did not, so a batch that ran out of time was indistinguishable
+        # to the member from one that never fired at all.
+        await booking_service.notify_unreported_bookings(due_bookings, TIMEOUT_NOTIFICATION_MESSAGE)
         return JobExecutionResult(
             executed_at=now,
             total_due=len(due_bookings),
@@ -249,6 +261,8 @@ async def execute_due_bookings(
                     error=str(e),
                 )
             )
+        # Same reasoning as the timeout branch above.
+        await booking_service.notify_unreported_bookings(due_bookings, str(e))
         return JobExecutionResult(
             executed_at=now,
             total_due=len(due_bookings),

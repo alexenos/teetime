@@ -58,6 +58,30 @@ KEY_FILE="${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gcp-key.json}"
 
 log() { printf '[setup] %s\n' "$*"; }
 
+# Anchor to the repository root rather than trusting the caller's directory.
+#
+# The setup-script setting does not promise a working directory, and step 3
+# below runs `poetry install`, which resolves pyproject.toml from the cwd. Run
+# from anywhere else that step fails with "could not find a pyproject.toml file",
+# which reads like a broken checkout rather than the wrong directory - and the
+# summary would report PARTIAL for a reason that has nothing to do with the
+# venv. Anchoring here means the setting can be a bare path to this file.
+#
+# have_repo_root gates step 3 rather than only warning. Warning and carrying on
+# left `poetry install` to run against whatever directory the caller happened to
+# be in - which either installs into an unrelated project or fails with the same
+# "no pyproject.toml" message this anchoring exists to prevent, and the summary
+# would blame the venv either way.
+have_repo_root=no
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2> /dev/null && pwd)"
+if [ -z "$REPO_ROOT" ] || [ ! -f "$REPO_ROOT/pyproject.toml" ]; then
+  log "WARNING: no pyproject.toml above this script; skipping the venv step"
+elif ! cd "$REPO_ROOT"; then
+  log "WARNING: could not enter $REPO_ROOT; skipping the venv step"
+else
+  have_repo_root=yes
+fi
+
 # mktemp rather than a fixed /tmp name: these are world-writable paths and a
 # predictable one is pre-creatable as a symlink by anything else on the box.
 SCRATCH=""
@@ -173,18 +197,41 @@ fi
 # --- 3. The venv -------------------------------------------------------------
 # fetch_debug_artifacts.py needs google.auth + httpx, and the classifier needs
 # the app package. Both come from the project venv, which starts empty.
-if command -v poetry > /dev/null 2>&1; then
+if [ "$have_repo_root" != yes ]; then
+  log "WARNING: no repository root; scripts/fetch_debug_artifacts.py will not run"
+elif command -v poetry > /dev/null 2>&1; then
   if poetry run python -c "import google.auth, httpx" > /dev/null 2>&1; then
     log "python dependencies already installed"
     have_python=yes
   else
     log "installing python dependencies (this takes a few minutes on a cold container)"
-    if poetry install --no-root --no-interaction > /dev/null 2>&1 \
-       && poetry run python -c "import google.auth, httpx" > /dev/null 2>&1; then
-      log "dependencies installed"
-      have_python=yes
-    else
-      log "WARNING: poetry install did not produce a usable venv; run it by hand"
+    # Twice, and kept rather than discarded.
+    #
+    # On 2026-08-16 the cold install failed here and the session reported
+    # PARTIAL; a plain `poetry install` run by hand immediately afterwards
+    # succeeded with one package left to fetch, which is a transient download
+    # rather than a broken lock file. One retry covers that.
+    #
+    # The output went to /dev/null, so the warning below named nothing and the
+    # cause had to be guessed - the same failure mode this script exists to fix
+    # for the key file (see the header). Keep it on disk and say where.
+    install_log="${TMPDIR:-/tmp}/poetry-install.log"
+    for attempt in 1 2; do
+      if poetry install --no-root --no-interaction > "$install_log" 2>&1 \
+         && poetry run python -c "import google.auth, httpx" >> "$install_log" 2>&1; then
+        log "dependencies installed"
+        have_python=yes
+        break
+      fi
+      if [ "$attempt" = 1 ]; then
+        log "poetry install failed; retrying once"
+      fi
+    done
+    if [ "$have_python" != yes ]; then
+      log "WARNING: poetry install did not produce a usable venv; see $install_log"
+      tail -n 5 "$install_log" 2>/dev/null | while IFS= read -r line; do
+        log "  | $line"
+      done
     fi
   fi
 else

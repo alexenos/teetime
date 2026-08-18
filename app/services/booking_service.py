@@ -1081,6 +1081,22 @@ class BookingService:
             merged.append((booking_id, retry))
         return merged
 
+    async def notify_unreported_bookings(self, bookings: list[TeeTimeBooking], error: str) -> None:
+        """Report bookings a caller ran but could not account for itself.
+
+        The scheduled job bounds the batch with asyncio.wait_for, so a slow
+        morning leaves it holding no results at all. Before this it returned
+        from that branch without sending anything, which is how 2026-08-18's
+        missed booking reached the member as silence - the one outcome every
+        batch path in this module is written to rule out.
+
+        Each row is re-read rather than assumed failed: cancelling the await
+        does not stop the Selenium thread behind it, so a booking may have been
+        persisted as a success on its way out and must be reported as one.
+        """
+        for booking in bookings:
+            await self._try_notify_unreported_booking(booking, error)
+
     async def _try_notify_booking_result(
         self, booking: TeeTimeBooking, result: BookingResult
     ) -> None:
