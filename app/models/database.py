@@ -110,11 +110,16 @@ class SessionRecord(Base):
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
-_database_url = (
-    settings.database_url.replace("sqlite://", "sqlite+aiosqlite://")
-    if settings.database_url.startswith("sqlite://")
-    else settings.database_url
-)
+def _normalize_database_url(url: str) -> str:
+    """Point a bare sqlite:// URL at the async driver, leaving others alone."""
+    # Count of 1: only the scheme is being rewritten. A database path may itself
+    # contain "sqlite://", and replacing every occurrence would corrupt it.
+    if url.startswith("sqlite://"):
+        return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    return url
+
+
+_database_url = _normalize_database_url(settings.database_url)
 
 
 # This service is idle almost all day: the 06:28 booking job is often its only

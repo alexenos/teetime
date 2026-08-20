@@ -11,7 +11,7 @@ tests pin the pool settings that keep that from recurring.
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.models.database import _pool_options_for, engine
+from app.models.database import _normalize_database_url, _pool_options_for, engine
 
 POSTGRES_URL = "postgresql+asyncpg://user:pw@host/db"
 
@@ -40,6 +40,31 @@ class TestPoolOptionsForUrl:
         memory_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
         assert isinstance(memory_engine.sync_engine.pool, StaticPool)
+
+
+class TestNormalizeDatabaseUrl:
+    """A bare sqlite:// URL is pointed at the async driver."""
+
+    def test_bare_sqlite_url_gets_the_async_driver(self):
+        assert (
+            _normalize_database_url("sqlite:///./teetime.db") == "sqlite+aiosqlite:///./teetime.db"
+        )
+
+    def test_only_the_scheme_is_rewritten(self):
+        """A path may contain the scheme text; replacing every match corrupts it."""
+        assert (
+            _normalize_database_url("sqlite:///./data/sqlite:///backup.db")
+            == "sqlite+aiosqlite:///./data/sqlite:///backup.db"
+        )
+
+    def test_non_sqlite_urls_are_untouched(self):
+        assert _normalize_database_url(POSTGRES_URL) == POSTGRES_URL
+
+    def test_an_already_async_sqlite_url_is_untouched(self):
+        """It does not start with the bare scheme, so nothing is rewritten."""
+        url = "sqlite+aiosqlite:///:memory:"
+
+        assert _normalize_database_url(url) == url
 
 
 class TestOptionsReachThePool:
