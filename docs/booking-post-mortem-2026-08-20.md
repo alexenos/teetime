@@ -86,9 +86,15 @@ leave the 3.0s timeout alone.** Keep reading the field; a second morning above
 ## The two mornings before this one
 
 Both were found while collecting round trips for the table above. Neither was
-noticed at the time, and neither is about the club.
+noticed at the time, and neither is about the club. Only one of them cost a tee
+time: 08-18. 08-19 had nothing scheduled, and the failure there is a latent bug
+rather than a loss.
 
 ### 2026-08-19 — the job 500'd before it ever looked for a booking
+
+**Nothing was lost.** The member confirms no booking was scheduled for that
+morning, and the daily job is a no-op on those days. What follows is a latent
+bug that surfaced on the one kind of day where it cost nothing.
 
 ```
 11:28:04 POST /jobs/execute-due-bookings HTTP/1.1" 500 Internal Server Error
@@ -97,8 +103,10 @@ asyncpg.exceptions._base.InterfaceError: connection is closed
   → app/services/database_service.py:246   result = await db.execute(query)
 ```
 
-The failure is on the job's **first** DB query. Nothing else ran that morning —
-the logs from 06:20 to 12:00 contain that one request and no retry.
+Cloud Scheduler fires this endpoint every morning whether or not anything is
+due. The failure is on the job's **first** DB query, so it died before it could
+determine there was nothing to do. Nothing else ran that morning — the logs from
+06:20 to 12:00 contain that one request and no retry.
 
 **Root cause, established from the code:** `app/models/database.py:113` builds
 the engine with neither `pool_pre_ping` nor `pool_recycle`:
@@ -110,19 +118,26 @@ engine = create_async_engine(
 )
 ```
 
-The Cloud Run instance sits idle roughly 24h between 06:28 firings. Postgres (or
-an intermediary) drops the pooled connection in that gap, SQLAlchemy hands out
-the dead one, and the first query of the morning raises `connection is closed`.
-There is no pre-ping to detect it and no retry above it, so the whole morning is
-lost to a connection that went stale overnight.
+Postgres (or an intermediary) drops the pooled connection while the instance is
+idle, SQLAlchemy hands out the dead one, and the first query raises `connection
+is closed`. There is no pre-ping to detect it and no retry above it.
+
+**The idle gap was ~9h19m, not overnight.** Last DB activity was 02:09 UTC
+(21:09 CT on 08-18), when the member booked 2026-08-23 ad-hoc over Discord — the
+`20260819_020906` ledger. Between 02:10 and 11:28 UTC the logs are empty. So the
+connection died inside a nine-hour gap, which is well within ordinary
+idle-timeout territory and does not need a 24-hour story.
+
+**It is rare, not chronic.** Across 29 scheduler invocations from 07-22 to
+08-20, this is the only failure — 28 × `200 OK`, one `500`, and `connection is
+closed` appears exactly once in a month of logs. Treat it as an intermittent
+stale-connection race, not a daily hazard.
 
 **Fix:** `pool_pre_ping=True` (and a `pool_recycle` shorter than the idle gap).
 One line, no morning needed to test it — this is a pool behaviour, not club
-behaviour.
-
-**Not established:** whether a booking was actually due on 08-19. The query that
-would have said so is the one that failed. If one was, the member got nothing
-and no message.
+behaviour. Cheap insurance rather than an emergency: rare, but the failure mode
+is total, and on a morning that *did* have a booking it would have killed the
+run before the browser ever opened.
 
 ### 2026-08-18 — a booking was due, and the window passed during login
 
@@ -178,8 +193,10 @@ run, never this field.**
 ## Recommendations
 
 1. **`pool_pre_ping=True` on the engine** (`app/models/database.py:113`), plus a
-   `pool_recycle` below the overnight idle gap. Fixes the 08-19 class outright.
-   Cheapest fix on this page and costs no morning to validate.
+   `pool_recycle` below the observed idle gap. Fixes the 08-19 class outright.
+   Cheapest fix on this page and costs no morning to validate. Not urgent — one
+   occurrence in 29 invocations, and that one cost nothing — but the failure
+   mode is total, so it is worth doing before it lands on a booking morning.
 2. **Alert on a job that does not reach `BATCH_JOB:` or `BATCH COMPLETE`.** Both
    08-18 and 08-19 failed silently; this morning's win was found because it was
    asked about, and those two losses only because a round-trip table needed
