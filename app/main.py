@@ -156,7 +156,7 @@ async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> 
 app = FastAPI(
     title="TeeTime",
     description="Golf tee time reservation assistant with SMS interface",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
