@@ -31,7 +31,7 @@ are the reason this document is longer than one paragraph.
 The `<eval>` on the accepted response is the accept signature and carries no
 `.show()`:
 
-```
+```javascript
 executeHoldTimeTimer('300');;stopSheetTimers();;scrollToElement('.tee-time-flag', 50);;
 ```
 
@@ -76,7 +76,7 @@ way.
 | **08-20** | **race** | **456** |
 
 456ms is the **fastest round trip on record**, race or ad-hoc. 08-16's 2935ms
-now stands alone against seven values between 456 and 956, so it reads as a
+now stands alone against eight values from 456 through 956, so it reads as a
 one-off rather than a drift toward `_RESERVE_TIMEOUT_S`. **Recommendation:
 leave the 3.0s timeout alone.** Keep reading the field; a second morning above
 ~2s would change the answer, and one still has not appeared.
@@ -96,7 +96,7 @@ rather than a loss.
 morning, and the daily job is a no-op on those days. What follows is a latent
 bug that surfaced on the one kind of day where it cost nothing.
 
-```
+```text
 11:28:04 POST /jobs/execute-due-bookings HTTP/1.1" 500 Internal Server Error
 asyncpg.exceptions._base.InterfaceError: connection is closed
   → app/api/jobs.py:194   due_bookings = await booking_service.get_due_bookings(...)
@@ -143,7 +143,7 @@ run before the browser ever opened.
 
 One booking due (2026-08-25). It never reached a Reserve:
 
-```
+```text
 11:28:08  STARTING BATCH BOOKING  date=2026-08-25, num_requests=1
 11:28:18  Step 1 - Logging in
 11:29:06  Entering credentials...          (48s just to load the login page)

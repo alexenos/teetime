@@ -61,8 +61,9 @@ a single Reserve sent at −7ms and −14ms; the change that separates them is b
 
 ### Changed
 
-- Version bumped from the Poetry default `0.1.0`. This is the project's first
-  tagged release; `0.1.0` was never released.
+- Version bumped from the Poetry default `0.1.0`, which was never released.
+  `v0.2.0` is the project's first tag, cut against the merge commit that lands
+  this entry — so the release link below resolves once that tag exists.
 
 ### Known issues
 

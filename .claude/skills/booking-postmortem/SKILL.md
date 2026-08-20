@@ -476,8 +476,8 @@ record, from the ledgers:
 outside the sample the timeout was sized against either way.
 
 **Two mornings on, 08-16 still stands alone.** 08-20's race came back in 456ms —
-the fastest round trip on record, race or ad-hoc — against seven values between
-456 and 956ms. Read 2935 as a one-off rather than a drift toward the timeout,
+the fastest round trip on record, race or ad-hoc — against eight values from
+456 through 956ms (the 08-15 race row carries two). Read 2935 as a one-off rather than a drift toward the timeout,
 and leave `_RESERVE_TIMEOUT_S` at 3.0s until a second morning clears ~2s. Keep
 reading the field on every race; the point of the table is that it takes no
 morning to extend.
