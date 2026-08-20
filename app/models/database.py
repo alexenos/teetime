@@ -110,11 +110,43 @@ class SessionRecord(Base):
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
-engine = create_async_engine(
+_database_url = (
     settings.database_url.replace("sqlite://", "sqlite+aiosqlite://")
     if settings.database_url.startswith("sqlite://")
-    else settings.database_url,
+    else settings.database_url
+)
+
+
+# This service is idle almost all day: the 06:28 booking job is often its only
+# caller between one morning and the next, and Cloud Run gives an idle instance
+# no CPU between requests. A pooled Postgres connection does not reliably
+# survive a gap that long - the Cloud SQL socket is gone by the time the next
+# request wakes the container - so the pool hands the job a dead connection and
+# its first query raises "connection is closed" before anything can retry. That
+# is the 2026-08-19 failure; see docs/booking-post-mortem-2026-08-20.md.
+#
+#   pre_ping  - round-trips a cheap SELECT 1 and transparently reconnects on a
+#               dead connection. This is the setting that closes the failure.
+#   recycle   - retires connections after 30 minutes so long-lived ones are
+#               replaced on a normal request rather than discovered dead on the
+#               one request of the day that is racing a clock. Follows Google's
+#               documented Cloud SQL guidance; no specific server-side idle
+#               timeout is known to apply on the unix-socket path this uses.
+#
+# SQLite gets neither: it is a local file or an in-memory database with no
+# connection to go stale, and :memory: is served by a StaticPool where recycling
+# would discard the schema along with the connection.
+def _pool_options_for(url: str) -> dict[str, Any]:
+    """Return the connection-pool keyword arguments to use for a database URL."""
+    if url.startswith("sqlite"):
+        return {}
+    return {"pool_pre_ping": True, "pool_recycle": 1800}
+
+
+engine = create_async_engine(
+    _database_url,
     echo=False,
+    **_pool_options_for(_database_url),
 )
 
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

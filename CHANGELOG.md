@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Stale pooled database connections no longer kill the morning job.** The
+  engine now sets `pool_pre_ping=True` and `pool_recycle=1800` for Postgres, so
+  a connection that died during an idle gap is detected and replaced instead of
+  being handed to the first query of the day. This is the 2026-08-19 failure in
+  the 0.2.0 known issues: the service is idle almost all day, the 06:28 booking
+  job is often its only caller between one morning and the next, and Cloud Run
+  gives an idle instance no CPU in between. `pool_pre_ping` is what closes the
+  failure; recycling is hygiene, so long-lived connections retire on an ordinary
+  request rather than on the one request that is racing a clock. SQLite is
+  deliberately excluded — it has no connection to go stale, and `:memory:` is
+  served by a `StaticPool` where recycling would discard the schema.
+
 ## [0.2.0] - 2026-08-20
 
 The release in which the bot started winning the 06:30 race.
@@ -67,13 +83,15 @@ a single Reserve sent at −7ms and −14ms; the change that separates them is b
 
 ### Known issues
 
-Carried from `docs/booking-post-mortem-2026-08-20.md`, neither fixed here:
+Carried from `docs/booking-post-mortem-2026-08-20.md`, neither fixed in this
+release:
 
 - **Stale pooled DB connection.** The engine sets neither `pool_pre_ping` nor
   `pool_recycle`, so a connection dropped during an idle gap is handed out dead
   and the scheduled job dies on its first query. Seen once in 29 invocations
   (2026-08-19), on a morning with nothing scheduled, so it cost nothing — but the
   failure mode is total and there is no retry or alert above it.
+  *(Fixed after this release — see Unreleased.)*
 - **No alerting on a job that never completes.** Both 2026-08-18 (window missed
   during a 3m58s login) and 2026-08-19 failed silently in the logs.
 
