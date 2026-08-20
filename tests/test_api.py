@@ -60,7 +60,7 @@ class TestHealthEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["service"] == "TeeTime - Golf Reservation Assistant"
-        assert data["version"] == "0.1.0"
+        assert data["version"] == "0.2.0"
         assert "endpoints" in data
         assert data["endpoints"]["health"] == "/health"
         assert data["endpoints"]["webhooks"] == "/webhooks/twilio/sms"

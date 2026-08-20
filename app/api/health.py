@@ -12,7 +12,7 @@ async def health_check() -> dict[str, str]:
 async def root() -> dict[str, str | dict[str, str]]:
     return {
         "service": "TeeTime - Golf Reservation Assistant",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "endpoints": {
             "health": "/health",
             "webhooks": "/webhooks/twilio/sms",
