@@ -98,9 +98,18 @@ git log --format="%h %ad %s" --date=iso -8
 Any commit dated after the run was not in it. Confirm rather than assume: the
 run logs what the deployed code did, so a field the newest commit introduced —
 or a constant it changed — settles which side of the deploy you are on. On
-2026-08-15 the ledger's `targetTimestampMs` decoded to 06:29:59.999 CT and no
-`RESERVATION_CHECK` line appeared, both of which place the morning run before
-PR #150 (merged 16:32 CT the same day) without ever listing a revision.
+2026-08-15 no `RESERVATION_CHECK` line appeared, which places the morning run
+before PR #150 (merged 16:32 CT the same day) without ever listing a revision.
+
+**Date a run by `RESERVATION_CHECK` and the rung offsets, never by the ledger's
+`targetTimestampMs`.** Corrected 2026-08-20: that field records the *stated
+window* on every run by design, so the aim can move without rescaling ten
+mornings of offsets (`walden_provider.py` — "The stated window, not the aim").
+It decodes to 06:29:59.999 CT on post-#150 code exactly as it did on 08-15, and
+the earlier reading of it as pre-#150 evidence is withdrawn. The ≤1ms shortfall
+against a true 06:30:00.000 is double truncation in
+`window_timestamp_ms = int(time.time() * 1000) + delay_ms`, not an offset; the
+Step 7 log prints the true target, which is why the two disagree.
 
 ## 2. Pull the run
 
@@ -460,9 +469,18 @@ record, from the ledgers:
 | 08-15 | race | 741 / 754 |
 | 08-15 | ad-hoc | 942 |
 | **08-16** | **race** | **2935** |
+| 08-18 | ad-hoc | 522 |
+| 08-20 | race | 456 |
 
 3.1x the previous worst on record and 3.9x the previous *race* worst, and
 outside the sample the timeout was sized against either way.
+
+**Two mornings on, 08-16 still stands alone.** 08-20's race came back in 456ms —
+the fastest round trip on record, race or ad-hoc — against seven values between
+456 and 956ms. Read 2935 as a one-off rather than a drift toward the timeout,
+and leave `_RESERVE_TIMEOUT_S` at 3.0s until a second morning clears ~2s. Keep
+reading the field on every race; the point of the table is that it takes no
+morning to extend.
 
 **A caveat on that sample, because the numbers do not agree.** The sizing
 rationale in `walden_http_booker.py` cites "593-828ms measured" and sizes
