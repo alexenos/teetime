@@ -6,11 +6,13 @@ description: Diagnose why the morning's TeeTime booking run failed. Use when the
 # Morning booking post-mortem
 
 The booking job fires at 06:28 CT. The window nominally opens at 06:30:00 CT,
-but the club's sheet actually opens at 06:30:01 — see §7a, which is why the run
-no longer aims at 06:30:00.000. The bot first won the race on 2026-08-15, so
-losing is no longer the default — but when a morning does lose, the question is
-the same: did we lose the race, or did we refuse ourselves? This skill is the
-repeatable path to that answer.
+but the club's sheet actually opens a second or so later — usually 06:30:01,
+and on 2026-08-21 not until 06:30:02. That is why the run no longer aims at
+06:30:00.000, and why §7a is about a boundary that *moves* rather than a fixed
+one. The bot first won the race on 2026-08-15, so losing is no longer the
+default — but when a morning does lose, the question is the same: did we lose
+the race, or did we refuse ourselves? This skill is the repeatable path to that
+answer.
 
 ## 0. Set the session up
 
@@ -450,9 +452,36 @@ a prime Sunday-morning slot, and the first morning with no refusal in the ledger
 at all. Every earlier win came from a later rung after attempt 1 was spent on a
 certain no.
 
-What is still open is narrower: whether the 06:30:01 boundary is fixed or drifts
-morning to morning. The ladder brackets it either way, and `serverMsPastWindow`
-on the granted row records which second won.
+**The boundary drifts. Settled 2026-08-21.** That was the open question above, and
+the answer is that 06:30:01 is not fixed. Read it from `disable-div` on the
+`teeTimeSlots` datascroller, which is the club's own "this sheet is not open"
+marker and is **live** — unlike the countdown beside it:
+
+| morning | first Reserve | club second | sheet in reply | verdict |
+|---|---|---|---|---|
+| 08-15 | −60ms | 06:30:00 | `disable-div` | refused |
+| 08-20 | +1006ms | 06:30:01 | (booking form) | **accepted** |
+| 08-21 | +1015ms | 06:30:01 | `disable-div` | refused |
+| 08-21 | +2048ms | 06:30:02 | enabled | refused |
+
+On 08-20 the club accepted while its own clock read 06:30:01; on 08-21, at the
+same club-second, it still rendered the sheet closed. So the open moment moved
+about a second later, and a first Reserve aimed at +1030ms can arrive early
+through no fault of the clock probe. **On any refused attempt 1, check
+`disable-div` before reaching for a contention story** — it separates "we were
+early" from "someone beat us" outright, and nothing else does.
+
+Do not chase the drift with the aim. 08-16 and 08-20 won on attempt 1 at +1023
+and +1006; moving the aim to cover 08-21 forfeits those. The ladder is what
+brackets a moving boundary — see 7c for why it was not bracketing it quickly.
+
+**A refusal's slot rows are echoed, not live.** Established 2026-08-21 by diffing
+two 670KB refusals four seconds apart: the *only* changes in the whole document
+were the countdown div and the `disable-div` class. Not one slot row moved, on a
+live morning with an open window. So `sheetRows` and `reserveButtons` — and the
+presence of a `reserve_button` on the slot you just lost — say **nothing** about
+who holds it. This is the same trap as the countdown and the popup, one level
+deeper: the payload is re-rendered chrome around a cached row block.
 
 ## 7b. The margin 08-16 spent, and what to watch
 
@@ -504,6 +533,48 @@ no-reservation class in §6 — the one that reads like a win.
 question.** A second morning near 3s makes raising `_RESERVE_TIMEOUT_S` the
 cheapest fix; a single one does not, and one data point is not a trend. This
 needs no morning to test — it is a number already in the ledger.
+
+## 7c. Where the race budget actually goes
+
+Established 2026-08-21, and it reframes what "too slow" means. On that morning
+fire-to-accept was 4280ms across five attempts:
+
+| Component | ms | share |
+|---|---|---|
+| Network + body download (`roundTripMs`) | 2278 | 53% |
+| Post-response processing | **1903** | **44%** |
+| Ladder scheduling | 17 | 0.4% |
+
+Two consequences worth knowing before diagnosing a slow chain:
+
+**The configured sweep offsets may be doing nothing.** `sweep=0+250+1000ms` should
+put rungs at +1030/+1280/+2030; on 08-21 they landed at +1015/+2048/+3243, because
+every rung's instant had already passed when the previous answer arrived and
+`sleep_until` no-opped (the code says so at `walden_http_booker.py:960-966`).
+Inter-attempt gaps were 3–5ms. **Check the gaps before proposing a spacing change**
+— if they are single-digit ms, the ladder is not what is pacing the race.
+
+**`roundTripMs` hides the post-response cost.** It is stamped after
+`client.post()` returns, which for non-streaming httpx is after the body is read
+(`walden_http.py:1114`). Anything after that — `parse_html`, the ledger-field DOM
+walks, re-staging — is invisible in the ledger and must be reconstructed from the
+gap between the httpx `POST … 200 OK` line and the `Reserve k -> …` line. On
+08-21 that gap ran 187–704ms per refusal for work benchmarked at **~54ms** on an
+idle container (36.9ms `parse_html` + 11.1ms observe + 0.9ms re-stage + 1.5ms
+envelope). A 3.5–13× starvation, cause not yet established; Chrome is still
+resident on the tee sheet page with live JS timers throughout the race, which is
+the leading suspect but is unconfirmed.
+
+The verdict itself needs none of that work: `parse_partial_response` yields the
+`<eval>` in ~2ms, and `PF('teeSheetValidationErrorPopupVar').show()` vs
+`executeHoldTimeTimer(...)` is the whole classification.
+
+**A trap when reading the fire times from logs.** `Firing Reserve k/N … Nms past
+the window` is in the window frame **only for attempt 1**. For attempts 2+ it
+prints `perf_counter() - started`, elapsed since the chain began, while still
+saying "past the window" (`walden_http_booker.py:810-831`). On 08-21 attempt 3
+logged "2228ms past the window" against a true +3243ms. **Take rung offsets from
+the ledger's `sentMsPastWindow`, never from the log line.**
 
 ## 8. Report
 
