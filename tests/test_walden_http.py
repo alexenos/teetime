@@ -636,6 +636,61 @@ BLOCKED_AT_BOOK_NOW = (
     "That time is already reserved</div></form>"
 )
 
+# 2026-08-22: the club refused Book Now over an unset per-player Resource
+# (cart/walk) dropdown, in a "Reservation Alert:" dialog no message container
+# this chain recognized - so the response looked like ordinary progress and
+# the chain walked straight to COMPLETE. This is the shape of that response:
+# Book Now is still present, and so is the row's select, still on its own
+# placeholder (no option carries `selected`, and the first option's label
+# starts with "--", exactly like the real "--Select Transport--").
+ROWS_PAGE_WITH_UNSET_SELECT = f"""
+<form id="{FORM_ID}" action="/post">
+  <input type="hidden" name="javax.faces.ViewState" value="vs">
+  <table id="playersTable"><tbody>
+    <tr data-ri="0"><td>
+      <select id="resourceCol_input" name="resourceCol_input"
+        onchange='PrimeFaces.ab({{s:"resourceCol",f:"{FORM_ID}",e:"change",u:"{FORM_ID}"}});'>
+        <option value="placeholder-id">--Select Transport--</option>
+        <option value="cart-id">Cart</option>
+        <option value="walk-id">Walk</option>
+      </select>
+    </td></tr>
+    <tr data-ri="1"><td><a id="tbd1"
+      onclick='PrimeFaces.ab({{s:"tbd1",f:"{FORM_ID}",u:"{FORM_ID}"}});'>TBD</a></td></tr>
+    <tr data-ri="2"><td><a id="tbd2"
+      onclick='PrimeFaces.ab({{s:"tbd2",f:"{FORM_ID}",u:"{FORM_ID}"}});'>TBD</a></td></tr>
+    <tr data-ri="3"><td><a id="tbd3"
+      onclick='PrimeFaces.ab({{s:"tbd3",f:"{FORM_ID}",u:"{FORM_ID}"}});'>TBD</a></td></tr>
+  </tbody></table>
+  <a id="bookTeeTimeAction"
+     onclick='PrimeFaces.ab({{s:"bookTeeTimeAction",f:"{FORM_ID}",u:"{FORM_ID}"}});'>Book Now</a>
+</form>
+"""
+
+# Same shape, but the select carries no onchange/id PrimeFaces could replay -
+# an unset field the chain has no way to act on.
+ROWS_PAGE_WITH_UNRESOLVABLE_SELECT = f"""
+<form id="{FORM_ID}" action="/post">
+  <input type="hidden" name="javax.faces.ViewState" value="vs">
+  <table id="playersTable"><tbody>
+    <tr data-ri="0"><td>
+      <select>
+        <option value="placeholder-id">--Select Transport--</option>
+        <option value="cart-id">Cart</option>
+      </select>
+    </td></tr>
+    <tr data-ri="1"><td><a id="tbd1"
+      onclick='PrimeFaces.ab({{s:"tbd1",f:"{FORM_ID}",u:"{FORM_ID}"}});'>TBD</a></td></tr>
+    <tr data-ri="2"><td><a id="tbd2"
+      onclick='PrimeFaces.ab({{s:"tbd2",f:"{FORM_ID}",u:"{FORM_ID}"}});'>TBD</a></td></tr>
+    <tr data-ri="3"><td><a id="tbd3"
+      onclick='PrimeFaces.ab({{s:"tbd3",f:"{FORM_ID}",u:"{FORM_ID}"}});'>TBD</a></td></tr>
+  </tbody></table>
+  <a id="bookTeeTimeAction"
+     onclick='PrimeFaces.ab({{s:"bookTeeTimeAction",f:"{FORM_ID}",u:"{FORM_ID}"}});'>Book Now</a>
+</form>
+"""
+
 
 class TestFindResponseMessage:
     """Reading the site's own message containers out of a partial response."""
@@ -882,6 +937,93 @@ class TestDirectHttpBooker:
         assert result.blocked
         assert result.phase == PHASE_BOOK_NOW
         assert result.error is not None and "already reserved" in result.error
+
+    def test_unset_required_field_is_filled_and_book_now_retried(self) -> None:
+        """2026-08-22: a lost slot from an unset dropdown gets a second try.
+
+        The club refused Book Now over an unset per-player Resource field, in
+        a dialog no message container recognized - so the response looked
+        like ordinary progress. The fix does not know or care that the field
+        is called "Resource": it notices Book Now's own response still shows
+        its action and a player row on its own placeholder, best-guesses the
+        first real option, and asks again.
+        """
+        recorder = ChainRecorder(
+            [
+                PLAYER_PAGE,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,  # Book Now refused; form re-rendered unresolved
+                ROWS_PAGE,  # the field is set now - no select left to fill
+                BOOKED_PAGE,  # Book Now retried and accepted
+            ]
+        )
+        result = make_booker(recorder).book(4)
+
+        assert result.success, result.error
+        assert result.phase == "complete"
+        assert recorder.sources == [
+            RESERVE_ID,
+            "playerGroup",
+            "tbd1",
+            "tbd2",
+            "tbd3",
+            "bookTeeTimeAction",
+            "resourceCol",
+            "bookTeeTimeAction",
+        ]
+        # The guess is the dropdown's own first real option, never the placeholder.
+        assert recorder.requests[6]["resourceCol_input"] == "cart-id"
+
+    def test_still_refused_after_the_best_guess_is_reported_blocked(self) -> None:
+        """A best guess is not a guarantee - a real refusal is still reported."""
+        recorder = ChainRecorder(
+            [
+                PLAYER_PAGE,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,
+                ROWS_PAGE_WITH_UNSET_SELECT,  # Book Now refused
+                ROWS_PAGE,  # field filled
+                BLOCKED_AT_BOOK_NOW,  # retried and refused for a different reason
+            ]
+        )
+        result = make_booker(recorder).book(4)
+
+        assert not result.success
+        assert result.blocked
+        assert result.phase == PHASE_BOOK_NOW
+        assert result.error is not None and "already reserved" in result.error
+        assert recorder.sources[-1] == "bookTeeTimeAction"
+
+    def test_unresolvable_unset_field_does_not_loop_or_crash(self) -> None:
+        """A field the chain cannot act on is left alone, not spun on forever."""
+        recorder = ChainRecorder(
+            [
+                PLAYER_PAGE,
+                ROWS_PAGE_WITH_UNRESOLVABLE_SELECT,
+                ROWS_PAGE_WITH_UNRESOLVABLE_SELECT,
+                ROWS_PAGE_WITH_UNRESOLVABLE_SELECT,
+                ROWS_PAGE_WITH_UNRESOLVABLE_SELECT,
+                ROWS_PAGE_WITH_UNRESOLVABLE_SELECT,
+            ]
+        )
+        result = make_booker(recorder).book(4)
+
+        # No handler to replay means no retry was attempted; the chain falls
+        # through to its ordinary (unresolved) outcome rather than raising.
+        assert recorder.sources == [
+            RESERVE_ID,
+            "playerGroup",
+            "tbd1",
+            "tbd2",
+            "tbd3",
+            "bookTeeTimeAction",
+        ]
+        assert result.phase == "complete"
 
     def test_book_now_refusal_text_is_carried_off_the_chain(self) -> None:
         """A refusal with no known phrase still reaches the caller as words.
