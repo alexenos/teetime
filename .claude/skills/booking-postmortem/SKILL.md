@@ -561,9 +561,24 @@ walks, re-staging — is invisible in the ledger and must be reconstructed from 
 gap between the httpx `POST … 200 OK` line and the `Reserve k -> …` line. On
 08-21 that gap ran 187–704ms per refusal for work benchmarked at **~54ms** on an
 idle container (36.9ms `parse_html` + 11.1ms observe + 0.9ms re-stage + 1.5ms
-envelope). A 3.5–13× starvation, cause not yet established; Chrome is still
-resident on the tee sheet page with live JS timers throughout the race, which is
-the leading suspect but is unconfirmed.
+envelope). A 3.5–13× gap with no algorithmic explanation.
+
+**Ruled out 08-21: the bytes→str decode.** `received_at_ms` is stamped before
+`parse_partial_response(http_response.text)`, so httpx's charset detection on a
+670KB body lands inside the unmeasured segment and looks like a good suspect. It
+is not: `bytes.decode('utf-8')` is 0.03ms and full `charset_normalizer` detection
+is 4.07ms on the real payload. Don't re-test it.
+
+**How to tell what the gap actually is — read wall time against CPU time.**
+Elapsed time alone only restates the mystery. `time.process_time()` costs 0.33µs
+and the ratio discriminates outright: `cpu/wall ≈ 1.0` means the cycles were
+genuinely burned (a slower or throttled vCPU, or more work than benchmarked),
+while `cpu/wall ≈ 0.1` means the process was **descheduled** and something took
+the CPU away. A `/proc/stat` total-CPU delta over the same span (13µs) finishes
+the job: container CPU far exceeding this process's implicates a co-resident
+process, and Chrome — still on the tee sheet page with live JS timers, driver not
+closed until 06:30:16 — is the standing suspect. Confirm it that way rather than
+by shipping a fix and watching the number.
 
 The verdict itself needs none of that work: `parse_partial_response` yields the
 `<eval>` in ~2ms, and `PF('teeSheetValidationErrorPopupVar').show()` vs

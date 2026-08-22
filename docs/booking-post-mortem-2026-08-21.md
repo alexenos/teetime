@@ -197,6 +197,21 @@ produced the same request it already had.
 Had post-response cost been the ~54ms it should be, attempt 5 would have fired at
 roughly **+3.0s instead of +4.87s**.
 
+**One candidate cause tested and ruled out.** `received_at_ms` is stamped before
+`parse_partial_response(http_response.text)`, and `http_response.text` decodes
+670KB of bytes to `str` — with `charset_normalizer` installed, httpx runs
+*charset detection* on that body whenever the response declares no charset, which
+is a plausible way to lose hundreds of milliseconds outside the benchmark above
+(the benchmark was handed an already-decoded string, so it never covered this
+step). Measured against the real payload: `bytes.decode('utf-8')` is **0.03ms**
+and full `charset_normalizer` detection is **4.07ms**. Neither explains the gap.
+The decode is not the cause; do not spend another session on it.
+
+So the ~54ms benchmark stands as essentially complete, and the gap is
+**environmental rather than algorithmic** — nothing in the code path accounts for
+it. Which of the two environmental worlds it is remains open; O2′ in §5 is the
+instrument that settles it.
+
 ---
 
 ## 4. Established vs hypothesis
@@ -264,16 +279,21 @@ observed 3.5–13× starvation is **~190–620ms per refusal, ~1.5–1.9s over t
 chain**. Answerable offline against `tests/fixtures/reserve_responses/` — no
 morning required. **This is the highest-value change on the page.**
 
-**T2 — Find the 3.5–13× CPU starvation.** *Hypothesis, do not implement blind.*
-The leading candidate is that Chrome is still resident on the tee sheet page
-throughout the race — the driver is not closed until 06:30:16, and the accept
-eval calls `stopSheetTimers()`, so that page runs live JS timers. Candidate fix:
-after the HTTP session adopts the browser's cookies at 06:28:53, navigate the
-browser to `about:blank` (session and cookies survive; `RESERVATION_CHECK` later
-navigates to the reservations page anyway).
-*Race cost: zero* — it would run ~67s before the window. But **do not do this
-until O2 confirms where the time goes**; the starvation is measured, its cause is
-not.
+**T2 — Park the browser before the race.** *Candidate fix for one hypothesis. Not
+a diagnostic, and not yet actionable — see O2′.* If the 3.5–13× gap turns out to
+be CPU contention, the leading suspect is that Chrome stays resident on the tee
+sheet page throughout the race: the driver is not closed until 06:30:16, and the
+accept eval calls `stopSheetTimers()`, so that page is running live JS timers
+while the race is in flight. The fix would be to navigate the browser to
+`about:blank` once the HTTP session has adopted its cookies at 06:28:53 (session
+and cookies survive; `RESERVATION_CHECK` navigates to the reservations page
+later anyway).
+*Race cost: zero* — it would run ~67s before the window.
+**But this explains nothing on its own.** Shipping it and watching the number
+move is not a diagnosis; it is a guess with a deploy attached. It becomes
+actionable only if O2′ reports the descheduled pattern *and* its `/proc` delta
+points at a co-resident process. Until then it is a hypothesis, listed here so
+the next post-mortem does not have to rediscover it.
 
 **T3 — Consider advancing off a slot sooner once the sheet is confirmed open.**
 *Hypothesis, do not implement yet.* Rungs 2 and 3 re-asked 08:38 at +2048 and
@@ -286,8 +306,11 @@ tell those apart (§4), so this waits on O1 data across several mornings.
 **T4 — Do not raise the aim to +2030ms.** Today's boundary was late, but 08-16 and
 08-20 won on attempt 1 at +1023 and +1006. Chasing one morning would forfeit the
 mornings that currently win outright. The better answer to a drifting boundary is
-T1+T2: make the cycle cheap enough that rungs 2 and 3 land at ~+1.3s and ~+1.6s
+T1: make the cycle cheap enough that rungs 2 and 3 land at ~+1.3s and ~+1.6s
 instead of +2.0s and +3.2s, bracketing the drift without giving up the early aim.
+T1 is worth doing in either world O2′ reports — if we are starved, cutting 54ms
+of work to ~2ms cuts the starved multiple with it; if the CPU is merely slow, it
+cuts the cost directly.
 *Race cost: none — this is a decision not to change.*
 
 ### Observability
@@ -298,11 +321,31 @@ Implementation is `'disable-div' in markup` on a string already in memory.
 *Measured cost: **0.02ms**.* Effectively free, and it is the field that settles
 §4's open question.
 
-**O2 — Split post-response time out of `roundTripMs`.** Add `verdictAtMs` or
-`postProcessMs`. The 44%-of-race finding had to be reconstructed by hand from log
-line timestamps; `roundTripMs` alone hides it completely, because it stops when
-the body lands.
-*Cost: zero* — two monotonic reads. Prerequisite for acting on T2.
+**O2′ — Record post-response *wall time and CPU time* per attempt.** Not just the
+elapsed span: the pair. `roundTripMs` hides this segment entirely because it
+stops when the body lands, and elapsed time alone only restates the mystery —
+it says the work took 564ms without saying why.
+
+The ratio is what discriminates, and it settles the question in one morning:
+
+| observed | cpu/wall | meaning | fix that follows |
+|---|---|---|---|
+| wall ~564ms, cpu ~550ms | **≈1.0** | we genuinely burned the cycles — the Cloud Run vCPU is far slower than a dev container, or the work is larger than benchmarked | reduce the work (T1), or raise the CPU allocation |
+| wall ~564ms, cpu ~54ms | **≈0.1** | we were **descheduled** for half a second — something took the CPU away | find the thief, which is where T2 becomes actionable |
+
+Add a `/proc/stat` total-CPU delta over the same span and the second half falls
+out too: if the container burned far more CPU than this process did, a
+co-resident process — Chrome — is the thief, which implicates T2 directly rather
+than by hand-waving.
+
+*Measured cost: `time.process_time()` **0.33µs** per call, `/proc/stat` read
+**13µs**.* Effectively free.
+
+**This, not T2, is the thing that explains the 44%.** One caveat kept honest: it
+tells us which of the two worlds we are in, not the whole answer. A cpu/wall of
+≈1.0 would confirm the cycles were real but still leave *why the same work costs
+10× there* open — most likely a throttled or slower vCPU, which would point at
+the Cloud Run CPU setting rather than at any code in this repository.
 
 **O3 — Fix the `Firing Reserve k/N … Nms past the window` label.** For attempt 1 it
 prints the true window-frame offset; for attempts 2+ it prints
@@ -374,3 +417,8 @@ Three things this morning establishes that `SKILL.md` should carry:
 3. **The `Firing Reserve` log line is not in the window frame after attempt 1.**
    Read `sentMsPastWindow` from the ledger; the log understates later rungs by the
    first rung's offset.
+4. **Diagnose an unexplained time gap by wall-versus-CPU, not by shipping a fix.**
+   `cpu/wall ≈ 1.0` means the cycles were burned; `≈0.1` means the process was
+   descheduled. Two counter reads, 0.33µs. Also record that the bytes→str decode
+   is ruled out (0.03ms plain, 4.07ms with charset detection) so it is not
+   re-tested.
