@@ -46,6 +46,7 @@ from app.providers.walden_http_booker import (
     RESERVE_REFUSED,
     RESERVE_TIMEDOUT,
     DirectHttpBooker,
+    backfill_reserve_telemetry,
     container_message_text,
 )
 from app.utils.timezone import CTDateTime
@@ -5577,6 +5578,9 @@ class WaldenGolfProvider(ReservationProvider):
         attempts = getattr(result, "attempt_log", None)
         if not attempts:
             return
+
+        # The fields the race skipped, read now that nothing is racing a clock.
+        backfill_reserve_telemetry(attempts)
 
         bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")

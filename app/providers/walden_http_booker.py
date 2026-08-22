@@ -65,6 +65,7 @@ from app.providers.walden_http import (
     ViewExpiredError,
     find_ab_for_element,
     parse_html,
+    parse_partial_response,
     sleep_until,
 )
 
@@ -817,17 +818,25 @@ class DirectHttpBooker:
                 # this one reported - "1030ms past the window", not "0ms past
                 # the thing we decided to aim at".
                 result.timing["reserveSentAtMs"] = int(time_module.time() * 1000) - window_frame_ms
+            # Attempt 1 is in the window frame; later attempts are elapsed since
+            # the chain started. Those are different clocks, and until
+            # 2026-08-21 both were labelled "past the window" - which understated
+            # that morning's attempt 3 as "2228ms past the window" when the
+            # ledger's truth was +3243ms, compressing the whole tail of the race
+            # by the first rung's offset for anyone reading logs alone. Say which
+            # frame each number is in.
             logger.info(
-                "DIRECT_HTTP: Firing Reserve %d/%d for %s - source=%s, viewState=%s, "
-                "%sms past the window",
+                "DIRECT_HTTP: Firing Reserve %d/%d for %s - source=%s, viewState=%s, %s",
                 attempt,
                 max_attempts,
                 slot_time.strftime("%I:%M %p") if slot_time else "an unreadable slot",
                 config.source,
                 _view_state_fingerprint(self.session),
-                result.timing.get("reserveSentAtMs", "n/a - untimed")
+                f"{result.timing['reserveSentAtMs']}ms past the window"
+                if attempt == 1 and "reserveSentAtMs" in result.timing
+                else "untimed"
                 if attempt == 1
-                else int((time_module.perf_counter() - started) * 1000),
+                else f"{int((time_module.perf_counter() - started) * 1000)}ms into the chain",
             )
 
             # Advance before the call, not after. Once the request is handed to
@@ -1138,9 +1147,21 @@ class DirectHttpBooker:
             return None, None, None, str(exc)
 
         result.final_markup = response.markup
-        # One parse, three questions now. At ~190ms for a 500KB sheet this is the
-        # largest single cost in the loop, and the verdict, the ledger row and
-        # the next candidate's handler all come out of it.
+        # One parse, three questions: the verdict, the ledger row and the next
+        # candidate's handler all come out of it. It is the largest single cost
+        # in the loop - 36.9ms for a 670KB sheet on an idle container, and
+        # 187-704ms in production on 2026-08-21, which is the gap the counters
+        # below exist to explain.
+        #
+        # Measured as a pair rather than as elapsed time, because elapsed time
+        # alone only restates the mystery. cpu/wall near 1.0 means the cycles
+        # were genuinely burned - a slower or throttled vCPU, or more work than
+        # benchmarked. Near 0.1 means this process was descheduled and something
+        # else took the CPU. See docs/booking-post-mortem-2026-08-21.md.
+        wall_start = time_module.perf_counter()
+        cpu_start = time_module.process_time()
+        container_cpu_start = _container_cpu_ms()
+
         document = parse_html(response.markup)
         observation = observe_reserve_response(
             attempt=attempt,
@@ -1151,7 +1172,14 @@ class DirectHttpBooker:
             document=document,
             markup=response.markup,
             target_timestamp_ms=window_frame_ms,
+            defer_telemetry=True,
         )
+        observation.post_response_wall_ms = int((time_module.perf_counter() - wall_start) * 1000)
+        observation.post_response_cpu_ms = int((time_module.process_time() - cpu_start) * 1000)
+        if container_cpu_start is not None:
+            container_cpu_end = _container_cpu_ms()
+            if container_cpu_end is not None:
+                observation.container_cpu_ms = container_cpu_end - container_cpu_start
         result.attempt_log.append(observation)
         _log_reserve_observation(observation)
         return response, document, observation, None
@@ -1245,6 +1273,16 @@ class DirectHttpBooker:
 
             never_connected = False
             assert response is not None
+            # Same accounting as the single-Reserve path: this is still the
+            # critical path when the opening pair is enabled, so the telemetry
+            # walks wait and the post-response segment is measured as a
+            # wall/CPU pair. Without this the pipelined mode was the one booking
+            # mode still paying for telemetry mid-race, and the only one whose
+            # ledger rows carried no timing at all.
+            wall_start = time_module.perf_counter()
+            cpu_start = time_module.process_time()
+            container_cpu_start = _container_cpu_ms()
+
             document = parse_html(response.markup)
             observation = observe_reserve_response(
                 attempt=attempt_number,
@@ -1255,7 +1293,16 @@ class DirectHttpBooker:
                 document=document,
                 markup=response.markup,
                 target_timestamp_ms=frame_ms,
+                defer_telemetry=True,
             )
+            observation.post_response_wall_ms = int(
+                (time_module.perf_counter() - wall_start) * 1000
+            )
+            observation.post_response_cpu_ms = int((time_module.process_time() - cpu_start) * 1000)
+            if container_cpu_start is not None:
+                container_cpu_end = _container_cpu_ms()
+                if container_cpu_end is not None:
+                    observation.container_cpu_ms = container_cpu_end - container_cpu_start
             pair.observations.append(observation)
             if observation.verdict != RESERVE_REFUSED and pair.accepted is None:
                 # First grant in rung order wins. A second grant for the same
@@ -1879,6 +1926,76 @@ _RESERVATION_FORM_RE = re.compile(
 # which is what a refusal looks like and what an acceptance never does.
 _SHEET_ROW_RE = re.compile(r"teeTimeSlots:(\d+):")
 _RESERVE_BUTTON_RE = re.compile(r"reserve_button")
+# The club's own "this sheet is not open for booking yet" marker, on the
+# datascroller that holds the slot rows. Established 2026-08-21: diffing a
+# refusal at +1015ms against one at +4009ms changed exactly two things in 670KB
+# - the countdown div, and this class going away. Unlike the countdown beside it,
+# which is frozen at whatever the pre-window staging saw, this one is live, and
+# it is the only direct read of whether the club was open when it answered.
+_SHEET_SCROLLER_RE = re.compile(r'id="[^"]*teeTimeSlots"[^>]*\sclass="([^"]*)"', re.IGNORECASE)
+_SHEET_DISABLED_CLASS = "disable-div"
+
+
+def _sheet_open_in(markup: str) -> bool | None:
+    """Whether the club rendered its tee sheet as open, or None if it sent none.
+
+    A substring test on markup already in memory - 0.02ms against a 670KB sheet,
+    which is why this can sit on the race's critical path at all.
+    """
+    match = _SHEET_SCROLLER_RE.search(markup)
+    if match is None:
+        return None
+    return _SHEET_DISABLED_CLASS not in match.group(1).lower()
+
+
+# Cumulative CPU consumed by this cgroup, which on Cloud Run is the container.
+# v2 reports microseconds in a key/value file; v1 reports nanoseconds in a bare
+# one, and the controller can be mounted under either name.
+_CGROUP_V2_CPU_STAT = "/sys/fs/cgroup/cpu.stat"
+_CGROUP_V1_CPU_USAGE = (
+    "/sys/fs/cgroup/cpuacct/cpuacct.usage",
+    "/sys/fs/cgroup/cpu/cpuacct.usage",
+)
+
+
+def _container_cpu_ms() -> int | None:
+    """CPU milliseconds burned by *every* process in this container, or None.
+
+    Read alongside this process's own CPU time it answers the second half of the
+    2026-08-21 question. If the container burned far more than we did over the
+    same span, another process took the CPU - and Chrome is the standing
+    suspect, since the driver stays open on the tee sheet page, with its own JS
+    timers running, until well after the race is decided.
+
+    Read from the cgroup rather than from /proc/stat, which was the first
+    attempt and was wrong twice over. /proc/stat is host-wide, so its delta
+    counts processes this container has nothing to do with; and its columns
+    include *idle*, so summing them advances by roughly wall-clock x CPU-count
+    no matter how little work is done. On a 4-CPU box that turns a 564ms span
+    into ~2256ms of apparent CPU - which would have read as heavy contention on
+    an idle machine, in the one field built to tell contention from a slow
+    vCPU. A diagnostic that manufactures its own answer is worse than none.
+
+    Best-effort by design: cgroup layouts vary and this must never be the reason
+    a booking fails, so every failure reads as "no measurement" rather than
+    raising into the race.
+    """
+    try:
+        with open(_CGROUP_V2_CPU_STAT, encoding="ascii") as handle:
+            for line in handle:
+                key, _, value = line.partition(" ")
+                if key == "usage_usec":
+                    return int(value) // 1000
+    except (OSError, ValueError):
+        pass
+
+    for path in _CGROUP_V1_CPU_USAGE:
+        try:
+            with open(path, encoding="ascii") as handle:
+                return int(handle.read().strip()) // 1_000_000
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def _reservation_form_slot(markup: str) -> str | None:
@@ -1957,6 +2074,22 @@ class ReserveObservation:
     reservation_form_slot: str | None = None
     countdown_s: int | None = None
     popup_present: bool = False
+    # Whether the club considered its own sheet open when it answered. The
+    # decisive field of 2026-08-21: attempt 1 was refused at +1015ms with the
+    # sheet still rendered closed, which is a boundary refusal rather than a
+    # slot lost to another member, and establishing that took hand-diffing two
+    # 670KB payloads. None means the response carried no sheet to read it from,
+    # which is what an acceptance looks like.
+    sheet_open: bool | None = None
+    # Set while ``countdown_s`` and ``popup_present`` are still waiting on
+    # backfill, so a ledger row written without it is recognisable as unread
+    # rather than as a sheet with no countdown and no popup.
+    telemetry_deferred: bool = False
+    # Where the time between "body in hand" and "verdict known" actually goes.
+    # Wall and CPU are a pair on purpose - see _fire_single_reserve.
+    post_response_wall_ms: int | None = None
+    post_response_cpu_ms: int | None = None
+    container_cpu_ms: int | None = None
     # The parts of the payload that were dropped before they could be read. The
     # dialog is opened by script, so if anything distinguishes a shown popup
     # from a re-rendered one, it is in here.
@@ -1987,6 +2120,14 @@ class ReserveObservation:
             "reservationFormSlot": self.reservation_form_slot,
             "countdownS": self.countdown_s,
             "popupPresent": self.popup_present,
+            "sheetOpen": self.sheet_open,
+            # True means countdownS and popupPresent were never read, not that
+            # the sheet had neither. Without it a failed backfill is
+            # indistinguishable in the ledger from a clean response.
+            "telemetryDeferred": self.telemetry_deferred,
+            "postResponseWallMs": self.post_response_wall_ms,
+            "postResponseCpuMs": self.post_response_cpu_ms,
+            "containerCpuMs": self.container_cpu_ms,
             "evalText": self.eval_text[:2000],
             "callbackArgs": self.callback_args,
         }
@@ -2032,8 +2173,18 @@ def observe_reserve_response(
     document: Node,
     markup: str,
     target_timestamp_ms: int | None,
+    defer_telemetry: bool = False,
 ) -> ReserveObservation:
-    """Build the ledger row for one Reserve exchange."""
+    """Build the ledger row for one Reserve exchange.
+
+    ``defer_telemetry`` leaves the two fields that need their own walk of the
+    parsed sheet - the countdown and the popup flag - unset, to be filled in by
+    :func:`backfill_reserve_telemetry` once the race is over. Neither feeds a
+    decision: they are read by post-mortems, off a ledger written after the last
+    Reserve, so computing them between the club's answer and the next rung buys
+    nothing and costs ~11ms of the ~54ms post-response path. The verdict, which
+    *is* a decision, is never deferred.
+    """
     verdict, reason = classify_reserve_response(document, markup)
 
     sent_past = received_past = None
@@ -2062,8 +2213,10 @@ def observe_reserve_response(
         sheet_rows=len(set(_SHEET_ROW_RE.findall(markup))),
         reserve_buttons=len(_RESERVE_BUTTON_RE.findall(markup)),
         reservation_form_slot=_reservation_form_slot(markup),
-        countdown_s=_countdown_in(document),
-        popup_present=_find_blocked_message_in(document) is not None,
+        countdown_s=None if defer_telemetry else _countdown_in(document),
+        popup_present=False if defer_telemetry else _find_blocked_message_in(document) is not None,
+        telemetry_deferred=defer_telemetry,
+        sheet_open=_sheet_open_in(markup),
         eval_text=response.eval_text,
         callback_args=response.callback_args,
         raw_xml=response.raw_xml,
@@ -2136,6 +2289,55 @@ def _find_new_blocked_message(response: PartialResponse, stale: str | None) -> s
     return found
 
 
+def backfill_reserve_telemetry(observations: list[ReserveObservation]) -> None:
+    """Fill in the ledger fields that were skipped during the race.
+
+    Call once the chain is done and before the ledger is written. Re-parses each
+    deferred response from the markup the observation is still holding, which
+    costs a parse per attempt at a point where nothing is racing a clock.
+
+    Best-effort: a row that cannot be re-read keeps its unset values and stays
+    flagged, because losing a telemetry field must never turn into losing a
+    booking that already succeeded.
+    """
+    for observation in observations:
+        if not observation.telemetry_deferred or not observation.raw_xml:
+            continue
+        try:
+            markup = parse_partial_response(observation.raw_xml).markup
+            document = parse_html(markup)
+            observation.countdown_s = _countdown_in(document)
+            observation.popup_present = _find_blocked_message_in(document) is not None
+            observation.telemetry_deferred = False
+        except Exception:  # noqa: BLE001 - telemetry must not break a booking
+            logger.warning(
+                "DIRECT_HTTP: could not backfill telemetry for Reserve %d; "
+                "its countdown and popup fields stay unread",
+                observation.attempt,
+                exc_info=True,
+            )
+
+
+def _post_response_phrase(observation: ReserveObservation) -> str:
+    """Wall and CPU for the post-response segment, with the ratio spelled out.
+
+    The ratio is the whole point, so it is stated rather than left for a reader
+    to divide: near 1.0 the cycles were genuinely burned, near 0 this process
+    was descheduled and something else had the CPU.
+    """
+    wall = observation.post_response_wall_ms
+    cpu = observation.post_response_cpu_ms
+    if wall is None or cpu is None:
+        return "unmeasured"
+    phrase = f"wall {wall}ms / cpu {cpu}ms"
+    if wall > 0:
+        ratio = cpu / wall
+        phrase += f" (cpu/wall {ratio:.2f} - {'burned' if ratio >= 0.6 else 'descheduled'})"
+    if observation.container_cpu_ms is not None:
+        phrase += f", container cpu {observation.container_cpu_ms}ms"
+    return phrase
+
+
 def _log_reserve_observation(observation: ReserveObservation) -> None:
     """Log one Reserve exchange as a single, greppable line.
 
@@ -2146,7 +2348,7 @@ def _log_reserve_observation(observation: ReserveObservation) -> None:
     logger.info(
         "DIRECT_HTTP: Reserve %d -> %s (%s) - sent %sms past the window, club clock %sms "
         "past, round trip %sms, %d bytes, %d sheet row(s), %d Reserve button(s), "
-        "form=%s, countdown=%s, popup=%s",
+        "form=%s, countdown=%s, popup=%s, sheet=%s, post-response %s",
         observation.attempt,
         observation.verdict,
         observation.reason,
@@ -2161,6 +2363,12 @@ def _log_reserve_observation(observation: ReserveObservation) -> None:
         observation.reservation_form_slot or "none",
         observation.countdown_s if observation.countdown_s is not None else "none",
         observation.popup_present,
+        "open"
+        if observation.sheet_open
+        else "closed"
+        if observation.sheet_open is False
+        else "none",
+        _post_response_phrase(observation),
     )
     # The dialog is opened by script, not by markup, so whatever separates a
     # shown popup from a re-rendered one lives here. Logged in full the first
