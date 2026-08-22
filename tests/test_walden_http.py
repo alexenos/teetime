@@ -37,6 +37,7 @@ from app.providers.walden_http_booker import (
     PHASE_VIEW_REFRESH,
     PRE_SUBMIT_PHASES,
     DirectHttpBooker,
+    _first_real_option_value,
     _parse_slot_time,
     _relocate_reserve,
     find_response_message,
@@ -667,6 +668,56 @@ ROWS_PAGE_WITH_UNSET_SELECT = f"""
 </form>
 """
 
+# Two unset selects on one Book Now response - row 0's is resolvable, row 1's
+# is not. Regression coverage for filling row 0 alone being mistaken for the
+# form being ready to resubmit.
+TWO_UNSET_SELECTS_PAGE = f"""
+<form id="{FORM_ID}" action="/post">
+  <input type="hidden" name="javax.faces.ViewState" value="vs">
+  <table id="playersTable"><tbody>
+    <tr data-ri="0"><td>
+      <select id="resourceCol0_input" name="resourceCol0_input"
+        onchange='PrimeFaces.ab({{s:"resourceCol0",f:"{FORM_ID}",e:"change",u:"{FORM_ID}"}});'>
+        <option value="placeholder-id">--Select Transport--</option>
+        <option value="cart-id">Cart</option>
+      </select>
+    </td></tr>
+    <tr data-ri="1"><td>
+      <select>
+        <option value="placeholder-id">--Select Transport--</option>
+        <option value="cart-id">Cart</option>
+      </select>
+    </td></tr>
+  </tbody></table>
+  <a id="bookTeeTimeAction"
+     onclick='PrimeFaces.ab({{s:"bookTeeTimeAction",f:"{FORM_ID}",u:"{FORM_ID}"}});'>Book Now</a>
+</form>
+"""
+
+# Same shape after row 0's field is set - only the unresolvable row 1 select
+# is still unset.
+ROW_0_FIXED_ROW_1_STILL_UNRESOLVABLE_PAGE = f"""
+<form id="{FORM_ID}" action="/post">
+  <input type="hidden" name="javax.faces.ViewState" value="vs">
+  <table id="playersTable"><tbody>
+    <tr data-ri="0"><td>
+      <select id="resourceCol0_input" name="resourceCol0_input">
+        <option value="placeholder-id">--Select Transport--</option>
+        <option value="cart-id" selected>Cart</option>
+      </select>
+    </td></tr>
+    <tr data-ri="1"><td>
+      <select>
+        <option value="placeholder-id">--Select Transport--</option>
+        <option value="cart-id">Cart</option>
+      </select>
+    </td></tr>
+  </tbody></table>
+  <a id="bookTeeTimeAction"
+     onclick='PrimeFaces.ab({{s:"bookTeeTimeAction",f:"{FORM_ID}",u:"{FORM_ID}"}});'>Book Now</a>
+</form>
+"""
+
 # Same shape, but the select carries no onchange/id PrimeFaces could replay -
 # an unset field the chain has no way to act on.
 ROWS_PAGE_WITH_UNRESOLVABLE_SELECT = f"""
@@ -1024,6 +1075,56 @@ class TestDirectHttpBooker:
             "bookTeeTimeAction",
         ]
         assert result.phase == "complete"
+
+    def test_partial_fill_with_a_second_unresolvable_field_does_not_retry(self) -> None:
+        """Fixing one of two unset fields is not the same as being ready.
+
+        Regression: filling row 0's select used to be enough to hand the
+        response back as "ready to resubmit" even though row 1's was still
+        unset and unresolvable - so Book Now would have been retried with a
+        required field still missing, spending the one retry on a request
+        that could only be refused again.
+        """
+        recorder = ChainRecorder(
+            [
+                PLAYER_PAGE,
+                ROWS_PAGE,
+                ROWS_PAGE,
+                ROWS_PAGE,
+                ROWS_PAGE,
+                TWO_UNSET_SELECTS_PAGE,  # Book Now refused; two fields unset
+                ROW_0_FIXED_ROW_1_STILL_UNRESOLVABLE_PAGE,
+            ]
+        )
+        result = make_booker(recorder).book(4)
+
+        assert result.phase == "complete"
+        # Row 0's field was set once; Book Now was never retried, because
+        # row 1 was still unresolved after it.
+        assert recorder.sources == [
+            RESERVE_ID,
+            "playerGroup",
+            "tbd1",
+            "tbd2",
+            "tbd3",
+            "bookTeeTimeAction",
+            "resourceCol0",
+        ]
+
+    def test_first_real_option_skips_a_disabled_choice(self) -> None:
+        """A disabled option is the club saying it can't be chosen right now.
+
+        Not a value to submit as a best guess - the retry would just trade
+        one refusal for another.
+        """
+        document = parse_html(
+            '<select><option value="ph">--Select--</option>'
+            '<option value="sold-out" disabled>Cart</option>'
+            '<option value="ok">Walk</option></select>'
+        )
+        select = document.find_all("select")[0]
+
+        assert _first_real_option_value(select) == "ok"
 
     def test_book_now_refusal_text_is_carried_off_the_chain(self) -> None:
         """A refusal with no known phrase still reaches the caller as words.

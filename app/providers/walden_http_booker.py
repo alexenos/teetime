@@ -1617,8 +1617,10 @@ class DirectHttpBooker:
         because setting one can change what the next response renders.
 
         Returns:
-            The response after the last field set, or None if nothing was
-            unset - in which case the caller has no reason to resubmit.
+            The response after every unset field was set, or None if nothing
+            was unset, or if any field could not be resolved to a request -
+            in which case the caller has no reason to retry Book Now, because
+            the form would still be short one required field.
         """
         filled_any = False
         # A handful of fields per player, not an unbounded loop; if a field
@@ -1633,12 +1635,15 @@ class DirectHttpBooker:
             name = select.attrs.get("name") or select.id
             config = find_ab_for_element(select, response.markup)
             if value is None or not name or config is None:
+                # Filling every *other* field and retrying Book Now would
+                # still be refused over this one, so there is nothing to gain
+                # from handing back a partly-fixed response.
                 logger.warning(
                     "DIRECT_HTTP: %s is unset but has no resolvable option/handler; "
                     "leaving it as-is",
                     select.id,
                 )
-                break
+                return None
             self.session.form_state.set_field(name, value)
             logger.info(
                 "DIRECT_HTTP: %s still unset at Book Now; best-guessing %s and resubmitting",
@@ -1647,7 +1652,14 @@ class DirectHttpBooker:
             )
             response = self.session.post(config)
             filled_any = True
-        return response if filled_any else None
+
+        if not filled_any:
+            return None
+        if _find_unset_player_selects(parse_html(response.markup)):
+            # The loop ran out of iterations before clearing every field -
+            # same reasoning as above: a retry now would still be short one.
+            return None
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -1871,8 +1883,15 @@ def _is_unset_select(select: Node) -> bool:
 
 
 def _first_real_option_value(select: Node) -> str | None:
-    """The first non-placeholder ``<option>``'s value, or None if there is none."""
+    """The first selectable, non-placeholder ``<option>``'s value.
+
+    None if there is no such option - including when every real option is
+    disabled, which is the club's own way of saying a choice cannot be made
+    right now, not a value to submit as a best guess.
+    """
     for option in select.find_all("option"):
+        if "disabled" in option.attrs:
+            continue
         label = option.text_content().strip()
         if label and not label.startswith("--"):
             return option.attrs.get("value")
