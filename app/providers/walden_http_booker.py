@@ -719,6 +719,31 @@ class DirectHttpBooker:
             result.error = blocked_reason
             return result
 
+        # A response that still renders the Book Now action alongside a player
+        # row on its own placeholder value means the club silently declined to
+        # advance rather than accepted - 2026-08-22 lost a granted slot exactly
+        # this way, refused at Book Now over an unset Resource (cart/walk)
+        # field, in a dialog this chain has no pattern for and never even
+        # named to the member. There is no signal for which real value the
+        # golfer wants, so this takes the club's own first listed option for
+        # every field still unset and asks once more - a wrong cart choice is
+        # fixable with a phone call, a lost tee time is not.
+        if _book_now_still_pending(parse_html(response.markup)):
+            retried = self._fill_placeholder_selects(response)
+            if retried is not None:
+                response = retried
+                result.final_markup = response.markup
+                result.phase = PHASE_BOOK_NOW
+                response = self._click_book_now(response)
+                result.final_markup = response.markup
+                result.timing["bookNowRetryMs"] = elapsed_ms()
+
+                blocked_reason = _find_new_blocked_message(response, stale_message)
+                if blocked_reason is not None:
+                    result.blocked = True
+                    result.error = blocked_reason
+                    return result
+
         # Whatever the site rendered in its message containers rides along, so a
         # refusal for a reason we have no pattern for still reaches the member
         # instead of being reported as an unexplained non-confirmation.
@@ -1582,6 +1607,60 @@ class DirectHttpBooker:
         logger.info("DIRECT_HTTP: Clicking Book Now via %s", config.source)
         return self.session.post(config)
 
+    def _fill_placeholder_selects(self, response: PartialResponse) -> PartialResponse | None:
+        """Best-guess every player-row ``<select>`` still on its placeholder.
+
+        Generic on purpose: this does not look for "Resource" by name, only
+        for any player-row dropdown the site itself renders unset. Whatever
+        the club decides to require next, its first real option is guessed
+        the same way. One field at a time, like :meth:`_add_tbd_guests`,
+        because setting one can change what the next response renders.
+
+        Returns:
+            The response after every unset field was set, or None if nothing
+            was unset, or if any field could not be resolved to a request -
+            in which case the caller has no reason to retry Book Now, because
+            the form would still be short one required field.
+        """
+        filled_any = False
+        # A handful of fields per player, not an unbounded loop; if a field
+        # can't be resolved to a request the loop stops rather than spin.
+        for _ in range(_MAX_PLAYERS * 2):
+            document = parse_html(response.markup)
+            selects = _find_unset_player_selects(document)
+            if not selects:
+                break
+            select = selects[0]
+            value = _first_real_option_value(select)
+            name = select.attrs.get("name") or select.id
+            config = find_ab_for_element(select, response.markup)
+            if value is None or not name or config is None:
+                # Filling every *other* field and retrying Book Now would
+                # still be refused over this one, so there is nothing to gain
+                # from handing back a partly-fixed response.
+                logger.warning(
+                    "DIRECT_HTTP: %s is unset but has no resolvable option/handler; "
+                    "leaving it as-is",
+                    select.id,
+                )
+                return None
+            self.session.form_state.set_field(name, value)
+            logger.info(
+                "DIRECT_HTTP: %s still unset at Book Now; best-guessing %s and resubmitting",
+                select.id,
+                value,
+            )
+            response = self.session.post(config)
+            filled_any = True
+
+        if not filled_any:
+            return None
+        if _find_unset_player_selects(parse_html(response.markup)):
+            # The loop ran out of iterations before clearing every field -
+            # same reasoning as above: a retry now would still be short one.
+            return None
+        return response
+
 
 # ---------------------------------------------------------------------------
 # Element lookups - the HTTP-side counterparts of the chain's DOM queries
@@ -1784,6 +1863,70 @@ def _find_book_now(document: Node) -> Node | None:
         if node.text_content().strip().lower() in ("book now", "book"):
             return node
     return None
+
+
+def _is_unset_select(select: Node) -> bool:
+    """Report whether a ``<select>`` is still on its own placeholder option.
+
+    The site marks no ``<option>`` as ``selected`` when a field is unset,
+    which a browser defaults to showing the first one - and every such field
+    seen on this site labels that first option "--Select ...--". A select
+    with an explicit ``selected`` option, or whose first option is a real
+    choice rather than a placeholder, was not left unset by this chain.
+    """
+    options = select.find_all("option")
+    if not options:
+        return False
+    if any(option.attrs.get("selected") is not None for option in options):
+        return False
+    return options[0].text_content().strip().startswith("--")
+
+
+def _first_real_option_value(select: Node) -> str | None:
+    """The first selectable, non-placeholder ``<option>``'s value.
+
+    None if there is no such option - including when every real option is
+    disabled, which is the club's own way of saying a choice cannot be made
+    right now, not a value to submit as a best guess.
+    """
+    for option in select.find_all("option"):
+        if "disabled" in option.attrs:
+            continue
+        label = option.text_content().strip()
+        if label and not label.startswith("--"):
+            return option.attrs.get("value")
+    return None
+
+
+def _find_unset_player_selects(document: Node) -> list[Node]:
+    """Every ``<select>`` in a rendered player row still on its placeholder.
+
+    Scoped to player rows, not the whole document, so this cannot pick up an
+    unrelated dropdown elsewhere on the page (the course/date pickers, the
+    time-period filter) that happens to share the same "--Select ...--"
+    convention.
+    """
+    selects = []
+    for row in _find_player_rows(document):
+        for node in row.descendants():
+            if node.tag == "select" and _is_unset_select(node):
+                selects.append(node)
+    return selects
+
+
+def _book_now_still_pending(document: Node) -> bool:
+    """Report whether a Book Now response left the booking form in place.
+
+    A genuine submission moves the view past this form; one that still
+    renders the Book Now action itself, alongside a player-row field the
+    chain never set, is the club silently declining to advance rather than
+    an accepted booking - see 2026-08-22, where this was the only structural
+    sign of a refusal the club described in prose but never surfaced through
+    a message container this chain recognized.
+    """
+    if _find_book_now(document) is None:
+        return False
+    return bool(_find_unset_player_selects(document))
 
 
 def find_response_message(markup: str) -> str | None:
