@@ -17,6 +17,7 @@ See docs/booking-post-mortem-2026-08-21.md.
 """
 
 import gzip
+import time
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,17 @@ class TestDeferredTelemetry:
         )
         backfill_reserve_telemetry([broken])  # must not raise
         assert broken.verdict == RESERVE_REFUSED
+        # Still flagged, and the flag reaches the ledger - otherwise the row is
+        # indistinguishable from a sheet that genuinely had no countdown.
+        assert broken.telemetry_deferred is True
+        assert broken.as_row()["telemetryDeferred"] is True
+
+    def test_a_successful_backfill_clears_the_flag_in_the_ledger(self) -> None:
+        """The read-it-later marker must not outlive the read."""
+        deferred = self._observe("20260821_refused_sheet_open", defer=True)
+        assert deferred.as_row()["telemetryDeferred"] is True
+        backfill_reserve_telemetry([deferred])
+        assert deferred.as_row()["telemetryDeferred"] is False
 
     def test_a_row_with_no_payload_is_left_alone(self) -> None:
         """A timed-out attempt has no markup to re-read."""
@@ -187,6 +199,37 @@ class TestPostResponseAccounting:
         """Best-effort by design: a number, or None, never an exception."""
         value = _container_cpu_ms()
         assert value is None or value > 0
+
+    def test_container_cpu_counts_work_rather_than_idle(self) -> None:
+        """The counter must not advance with wall-clock on an idle container.
+
+        Guards the bug this replaced: the first version summed every /proc/stat
+        column, idle included, so on a 4-CPU box it advanced by roughly
+        wall-clock x CPU-count no matter how little work was done - reading as
+        heavy contention on an idle machine, in the one field meant to tell
+        contention from a slow vCPU.
+
+        Sleeping burns wall time and no CPU, so a counter of real usage must
+        advance by far less than the sleep.
+        """
+        before = _container_cpu_ms()
+        if before is None:
+            pytest.skip("no cgroup CPU accounting available here")
+        time.sleep(0.3)
+        after = _container_cpu_ms()
+        assert after is not None
+        # Generous: other processes share this container. The broken version
+        # would have advanced by ~1200ms here, so anything near the sleep fails.
+        assert after - before < 250
+
+    def test_container_cpu_is_monotonic(self) -> None:
+        """A cumulative counter, so a delta is meaningful."""
+        first = _container_cpu_ms()
+        if first is None:
+            pytest.skip("no cgroup CPU accounting available here")
+        second = _container_cpu_ms()
+        assert second is not None
+        assert second >= first
 
     def test_burned_cycles_read_as_burned(self) -> None:
         """cpu/wall near 1.0 means the work really cost that much CPU."""

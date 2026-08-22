@@ -1273,6 +1273,16 @@ class DirectHttpBooker:
 
             never_connected = False
             assert response is not None
+            # Same accounting as the single-Reserve path: this is still the
+            # critical path when the opening pair is enabled, so the telemetry
+            # walks wait and the post-response segment is measured as a
+            # wall/CPU pair. Without this the pipelined mode was the one booking
+            # mode still paying for telemetry mid-race, and the only one whose
+            # ledger rows carried no timing at all.
+            wall_start = time_module.perf_counter()
+            cpu_start = time_module.process_time()
+            container_cpu_start = _container_cpu_ms()
+
             document = parse_html(response.markup)
             observation = observe_reserve_response(
                 attempt=attempt_number,
@@ -1283,7 +1293,16 @@ class DirectHttpBooker:
                 document=document,
                 markup=response.markup,
                 target_timestamp_ms=frame_ms,
+                defer_telemetry=True,
             )
+            observation.post_response_wall_ms = int(
+                (time_module.perf_counter() - wall_start) * 1000
+            )
+            observation.post_response_cpu_ms = int((time_module.process_time() - cpu_start) * 1000)
+            if container_cpu_start is not None:
+                container_cpu_end = _container_cpu_ms()
+                if container_cpu_end is not None:
+                    observation.container_cpu_ms = container_cpu_end - container_cpu_start
             pair.observations.append(observation)
             if observation.verdict != RESERVE_REFUSED and pair.accepted is None:
                 # First grant in rung order wins. A second grant for the same
@@ -1929,6 +1948,16 @@ def _sheet_open_in(markup: str) -> bool | None:
     return _SHEET_DISABLED_CLASS not in match.group(1).lower()
 
 
+# Cumulative CPU consumed by this cgroup, which on Cloud Run is the container.
+# v2 reports microseconds in a key/value file; v1 reports nanoseconds in a bare
+# one, and the controller can be mounted under either name.
+_CGROUP_V2_CPU_STAT = "/sys/fs/cgroup/cpu.stat"
+_CGROUP_V1_CPU_USAGE = (
+    "/sys/fs/cgroup/cpuacct/cpuacct.usage",
+    "/sys/fs/cgroup/cpu/cpuacct.usage",
+)
+
+
 def _container_cpu_ms() -> int | None:
     """CPU milliseconds burned by *every* process in this container, or None.
 
@@ -1938,19 +1967,35 @@ def _container_cpu_ms() -> int | None:
     suspect, since the driver stays open on the tee sheet page, with its own JS
     timers running, until well after the race is decided.
 
-    Best-effort by design: /proc is Linux-only and this must never be the reason
+    Read from the cgroup rather than from /proc/stat, which was the first
+    attempt and was wrong twice over. /proc/stat is host-wide, so its delta
+    counts processes this container has nothing to do with; and its columns
+    include *idle*, so summing them advances by roughly wall-clock x CPU-count
+    no matter how little work is done. On a 4-CPU box that turns a 564ms span
+    into ~2256ms of apparent CPU - which would have read as heavy contention on
+    an idle machine, in the one field built to tell contention from a slow
+    vCPU. A diagnostic that manufactures its own answer is worse than none.
+
+    Best-effort by design: cgroup layouts vary and this must never be the reason
     a booking fails, so every failure reads as "no measurement" rather than
     raising into the race.
     """
     try:
-        with open("/proc/stat", encoding="ascii") as handle:
-            fields = handle.readline().split()
-        if not fields or fields[0] != "cpu":
-            return None
-        # USER_HZ is 100 on every platform this runs on, so jiffies -> ms is x10.
-        return sum(int(field) for field in fields[1:]) * 10
+        with open(_CGROUP_V2_CPU_STAT, encoding="ascii") as handle:
+            for line in handle:
+                key, _, value = line.partition(" ")
+                if key == "usage_usec":
+                    return int(value) // 1000
     except (OSError, ValueError):
-        return None
+        pass
+
+    for path in _CGROUP_V1_CPU_USAGE:
+        try:
+            with open(path, encoding="ascii") as handle:
+                return int(handle.read().strip()) // 1_000_000
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def _reservation_form_slot(markup: str) -> str | None:
@@ -2076,6 +2121,10 @@ class ReserveObservation:
             "countdownS": self.countdown_s,
             "popupPresent": self.popup_present,
             "sheetOpen": self.sheet_open,
+            # True means countdownS and popupPresent were never read, not that
+            # the sheet had neither. Without it a failed backfill is
+            # indistinguishable in the ledger from a clean response.
+            "telemetryDeferred": self.telemetry_deferred,
             "postResponseWallMs": self.post_response_wall_ms,
             "postResponseCpuMs": self.post_response_cpu_ms,
             "containerCpuMs": self.container_cpu_ms,
