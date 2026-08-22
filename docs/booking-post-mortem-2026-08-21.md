@@ -267,17 +267,50 @@ is returned.
 
 ### Timing
 
-**T1 — Classify refusals from `<eval>` alone; defer the full parse until after the
-chain.** The verdict is fully determined by the eval script
-(`PF('teeSheetValidationErrorPopupVar').show()` vs `executeHoldTimeTimer(...)`),
-which `parse_partial_response` yields in **~2ms** versus ~54ms for the full path —
-verified this session against all three stored envelopes. Keep each refusal's
-markup in memory (670KB × 4 ≈ 2.7MB) and build the ledger rows after the race, so
-no field is lost.
-*Race cost: strictly negative.* Saves ~48ms of work per refusal, which at today's
-observed 3.5–13× starvation is **~190–620ms per refusal, ~1.5–1.9s over the
-chain**. Answerable offline against `tests/fixtures/reserve_responses/` — no
-morning required. **This is the highest-value change on the page.**
+**T1 — Take the deferrable work off the critical path.** *Revised down while
+implementing; the first version of this recommendation was wrong and the
+correction is the useful part.*
+
+The original claim was that a refusal could be classified from its `<eval>`
+alone — `PF('teeSheetValidationErrorPopupVar').show()` versus
+`executeHoldTimeTimer(...)`, which `parse_partial_response` yields in ~2ms
+against ~54ms for the full path — and that skipping `parse_html` would therefore
+save ~1.5–1.9s over the chain.
+
+**It would not, because the parse is load-bearing.** Both paths a refusal can
+take need the parsed document, not just the verdict:
+
+- retrying the same slot re-stages through `_relocate_reserve_in(document, …)`,
+  which walks nodes and resolves a PrimeFaces handler
+  (`walden_http_booker.py:1644`);
+- falling back to another slot goes through `_next_candidate(document, …)`
+  (`walden_http_booker.py:1052`).
+
+So on the path that actually dominates a losing morning, the parse cannot be
+skipped — only moved. What *is* safely deferrable is the telemetry: `countdown_s`
+and `popup_present` each cost their own walk of the parsed sheet, feed no
+decision, and are read off a ledger written after the last Reserve. That is
+**~11ms of the ~54ms**, or roughly 40–140ms per refusal at the observed
+multiple. Real, free, and an order of magnitude less than first claimed.
+*Race cost: strictly negative.*
+
+**What would remove the parse from the critical path**, and is deliberately not
+proposed yet:
+
+- *Memoize the relocation by markup hash.* Identical bytes provably relocate
+  identically, so a refusal whose sheet matches one already parsed could reuse
+  the config for a 0.40ms sha1 instead of a 37ms parse. On 08-21 attempts 2, 3
+  and 4 all reported `responseBytes: 670775`, so this plausibly covers two of
+  four refusals — but attempts 2 and 3 were never uploaded (they were dropped as
+  "repeats"), so **it cannot be verified from the artifacts that exist.** O4
+  would close that gap first.
+- *Pipeline the parse against the next request's flight time.* Fire the next
+  rung on the fast verdict, parse while the network is busy. Strictly better on
+  paper, and a concurrency change to the one loop that must not misfire.
+
+Both wait on O2′: if the gap turns out to be a descheduled process rather than
+burned cycles, cutting CPU work buys proportionally less than it looks, and the
+fix is elsewhere entirely.
 
 **T2 — Park the browser before the race.** *Candidate fix for one hypothesis. Not
 a diagnostic, and not yet actionable — see O2′.* If the 3.5–13× gap turns out to
