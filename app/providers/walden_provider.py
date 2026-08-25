@@ -15,6 +15,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from selenium import webdriver
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
+    ElementNotInteractableException,
     NoSuchElementException,
     StaleElementReferenceException,
     TimeoutException,
@@ -1562,17 +1563,20 @@ class WaldenGolfProvider(ReservationProvider):
 
     def _select_course_sync(self, driver: webdriver.Chrome, course_name: str) -> bool:
         """
-        Select the course from the multi-select checkbox dropdown.
+        Ensure the tee sheet is showing the target course, narrowing it if needed.
 
-        The Walden Golf tee time page uses a multi-select dropdown with checkboxes
-        for course selection. By default, both Northgate and Walden on Lake Conroe
+        The Walden Golf tee time page uses a multi-select checkbox dropdown for
+        course selection. By default, both Northgate and Walden on Lake Conroe
         are selected, showing tee times for both courses in separate columns.
+        Narrowing that to Northgate only is an optimization - fewer rows to
+        scroll and scan - not a correctness requirement: the slot finder already
+        filters candidates by course on its own (see the "dropped ... course=N"
+        counts in BOOKING_DEBUG's slot-scan log line), so a booking never goes
+        to the wrong course even when both are showing.
 
-        To prevent accidental bookings at the wrong course, this method:
-        1. Opens the course selection dropdown
-        2. Ensures the target course (Northgate) is checked
-        3. Unchecks other courses (Walden on Lake Conroe) to show only Northgate times
-        4. Closes the dropdown and verifies the selection
+        Given that, this method checks whether we're already on the target
+        course first and only touches the dropdown - the more fragile of the
+        two paths - when verification says we actually need to.
 
         Args:
             driver: The WebDriver instance
@@ -1581,19 +1585,19 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             True if the correct course is selected/verified, False otherwise
         """
+        if self._verify_course_selection(driver, course_name):
+            logger.info(f"Verified: Currently on {course_name} course page")
+            return True
+
         walden_course_name = "Walden on Lake Conroe"
 
         try:
             if self._select_course_via_checkbox_dropdown(driver, course_name, walden_course_name):
                 logger.info(f"Successfully configured course selection for {course_name} only")
+            elif self._select_course_via_standard_dropdown(driver, course_name):
+                logger.info(f"Selected course via standard dropdown: {course_name}")
             else:
-                if self._select_course_via_standard_dropdown(driver, course_name):
-                    logger.info(f"Selected course via standard dropdown: {course_name}")
-                else:
-                    logger.warning(
-                        f"No course dropdown found - attempting to verify "
-                        f"current course is {course_name}"
-                    )
+                logger.warning(f"No course dropdown found for {course_name}")
         except Exception as e:
             logger.warning(f"Error during course selection: {e}")
 
@@ -1714,16 +1718,31 @@ class WaldenGolfProvider(ReservationProvider):
                     elif checkbox and not checkbox.is_selected():
                         logger.info(f"'{course_to_deselect}' already unchecked")
 
+            # Closing the dropdown is tidiness, not correctness - the checkbox
+            # state above is already set regardless of whether this succeeds,
+            # and a stuck-open dropdown has not been observed to block Step 4.
+            # The CSS selector here is broad enough to occasionally match a
+            # close icon that belongs to some other, non-interactable element
+            # on the page, which raises ElementNotInteractableException rather
+            # than NoSuchElementException - so every attempt in this chain is
+            # best-effort and none of them may raise past this block.
             try:
                 close_button = driver.find_element(
                     By.CSS_SELECTOR, "[class*='close'], .x, button[aria-label='close']"
                 )
                 close_button.click()
-            except NoSuchElementException:
+            except (
+                NoSuchElementException,
+                ElementNotInteractableException,
+                ElementClickInterceptedException,
+            ):
                 try:
                     dropdown_trigger.click()
                 except Exception:
-                    driver.find_element(By.TAG_NAME, "body").click()
+                    try:
+                        driver.find_element(By.TAG_NAME, "body").click()
+                    except Exception:
+                        pass
 
             self.wait_strategy.simple_wait(fixed_duration=0.5, event_driven_duration=0.1)
 
