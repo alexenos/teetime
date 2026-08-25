@@ -952,31 +952,44 @@ class PrimeFacesSession:
         round_trips: list[float] = []
         deadline = time_module.monotonic() + _SKEW_PROBE_BUDGET_S
         attempted = 0
-        for probe in range(_SKEW_PROBE_MAX):
-            if probe:
-                if time_module.monotonic() >= deadline:
-                    break
-                time_module.sleep(_SKEW_PROBE_SPACING_S)
-            attempted += 1
-            sent = time_module.time()
-            try:
-                response = self._client.head(probe_url)
-            except httpx.HTTPError as exc:
-                # One failed probe is not worth abandoning the measurement, and
-                # is not worth a warning each: the summary below reports how
-                # many landed, which is the number that matters.
-                logger.debug("DIRECT_HTTP: Clock probe %d failed (%s)", probe, exc)
-                continue
-            received = time_module.time()
 
-            round_trip = received - sent
-            if round_trip > _SKEW_MAX_PROBE_RTT_S:
-                continue
-            server_second = _parse_http_date(response.headers.get("Date"))
-            if server_second is None:
-                continue
-            round_trips.append(round_trip)
-            samples.append(((sent + received) / 2, server_second))
+        # httpx logs "HTTP Request: ..." at INFO for every call, which turns
+        # this loop's ~100 identical HEAD probes into that many log lines with
+        # no diagnostic value beyond the summary below - only the POST
+        # requests later in the chain (Reserve, Book Now) are worth reading
+        # individually, so this is scoped to the probe loop rather than
+        # silenced globally.
+        httpx_logger = logging.getLogger("httpx")
+        previous_httpx_level = httpx_logger.level
+        httpx_logger.setLevel(logging.WARNING)
+        try:
+            for probe in range(_SKEW_PROBE_MAX):
+                if probe:
+                    if time_module.monotonic() >= deadline:
+                        break
+                    time_module.sleep(_SKEW_PROBE_SPACING_S)
+                attempted += 1
+                sent = time_module.time()
+                try:
+                    response = self._client.head(probe_url)
+                except httpx.HTTPError as exc:
+                    # One failed probe is not worth abandoning the measurement, and
+                    # is not worth a warning each: the summary below reports how
+                    # many landed, which is the number that matters.
+                    logger.debug("DIRECT_HTTP: Clock probe %d failed (%s)", probe, exc)
+                    continue
+                received = time_module.time()
+
+                round_trip = received - sent
+                if round_trip > _SKEW_MAX_PROBE_RTT_S:
+                    continue
+                server_second = _parse_http_date(response.headers.get("Date"))
+                if server_second is None:
+                    continue
+                round_trips.append(round_trip)
+                samples.append(((sent + received) / 2, server_second))
+        finally:
+            httpx_logger.setLevel(previous_httpx_level)
 
         if len(samples) < 2:
             logger.warning(
