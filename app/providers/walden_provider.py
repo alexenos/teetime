@@ -1939,12 +1939,66 @@ class WaldenGolfProvider(ReservationProvider):
 
         return False
 
+    def _read_course_checkbox_state(
+        self, driver: webdriver.Chrome, course_name: str
+    ) -> bool | None:
+        """
+        Read whether the course-selection checkbox for course_name is checked.
+
+        This does not open the dropdown first: WebElement.is_selected()
+        reports a checkbox input's real state regardless of whether its
+        containing panel is visible - only .click() requires true
+        interactability, which is why _select_course_via_checkbox_dropdown
+        opens the panel before touching anything.
+
+        Returns:
+            True/False for the checkbox's actual state, or None if no
+            matching checkbox could be found at all - callers should fall
+            back to a different signal in that case rather than reading
+            "no checkbox" as "not selected".
+        """
+        try:
+            checkbox_items = driver.find_elements(
+                By.CSS_SELECTOR,
+                "input[type='checkbox'], "
+                "li[class*='option'], "
+                "div[class*='option'], "
+                "label[class*='checkbox']",
+            )
+            if not checkbox_items:
+                checkbox_items = driver.find_elements(
+                    By.XPATH,
+                    "//li[.//input[@type='checkbox']] | "
+                    "//div[contains(@class, 'option')] | "
+                    "//label[contains(@class, 'check')]",
+                )
+
+            course_name_lower = course_name.lower()
+            for item in checkbox_items:
+                item_text = item.text.lower() if item.text else ""
+                if not item_text:
+                    item_text = (item.get_attribute("textContent") or "").lower()
+                if course_name_lower not in item_text:
+                    continue
+                checkbox = self._find_checkbox_in_element(driver, item, course_name)
+                if checkbox is None:
+                    continue
+                return checkbox.is_selected()
+        except Exception as e:
+            logger.debug(f"Could not read course checkbox state for '{course_name}': {e}")
+
+        return None
+
     def _verify_course_selection(self, driver: webdriver.Chrome, course_name: str) -> bool:
         """
         Verify that the correct course is currently selected/displayed.
 
-        Checks multiple indicators on the page to confirm we're viewing
-        the correct course's tee times.
+        Prefers the checkbox's own checked state over page text: text
+        matching only proves "Northgate" appears somewhere in the DOM
+        (which can be true even while Walden on Lake Conroe is also
+        showing, e.g. as the checkbox's own label), not that the course is
+        actually narrowed to it. When the checkbox itself can be read, its
+        state is authoritative and page text is not consulted at all.
 
         Args:
             driver: The WebDriver instance
@@ -1953,6 +2007,13 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             True if the correct course is verified, False otherwise
         """
+        checkbox_state = self._read_course_checkbox_state(driver, course_name)
+        if checkbox_state is not None:
+            logger.debug(
+                f"'{course_name}' checkbox is {'checked' if checkbox_state else 'not checked'}"
+            )
+            return checkbox_state
+
         try:
             page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
             course_name_lower = course_name.lower()

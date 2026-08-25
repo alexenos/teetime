@@ -1082,6 +1082,95 @@ class TestWaldenProviderCourseSelection:
         # close button turned out not to be interactable.
         assert trigger.click.call_count == 2
 
+    def test_read_course_checkbox_state_checked(self, provider: WaldenGolfProvider) -> None:
+        """Reads True from a checked checkbox without opening the dropdown."""
+        mock_driver = MagicMock()
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = True
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        mock_driver.find_elements.return_value = [checkbox_item]
+
+        result = provider._read_course_checkbox_state(mock_driver, "Northgate")
+
+        assert result is True
+
+    def test_read_course_checkbox_state_unchecked(self, provider: WaldenGolfProvider) -> None:
+        """Reads False from a present-but-unchecked checkbox."""
+        mock_driver = MagicMock()
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = False
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        mock_driver.find_elements.return_value = [checkbox_item]
+
+        result = provider._read_course_checkbox_state(mock_driver, "Northgate")
+
+        assert result is False
+
+    def test_read_course_checkbox_state_none_when_no_checkbox_found(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Returns None (not False) when there's simply no matching checkbox to read."""
+        mock_driver = MagicMock()
+        mock_driver.find_elements.return_value = []
+
+        result = provider._read_course_checkbox_state(mock_driver, "Northgate")
+
+        assert result is None
+
+    def test_verify_course_selection_trusts_unchecked_checkbox_over_page_text(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """A found-but-unchecked Northgate checkbox must not be overridden by page text.
+
+        This is the bug the checkbox-state check closes: "Northgate" can
+        appear in the page text (e.g. as the checkbox's own label) even
+        while its checkbox is unchecked and Walden on Lake Conroe is the
+        course actually showing.
+        """
+        mock_driver = MagicMock()
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = False
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        mock_driver.find_elements.return_value = [checkbox_item]
+
+        body = MagicMock()
+        body.text = "Northgate Walden on Lake Conroe tee times"
+        mock_driver.find_element.return_value = body
+
+        result = provider._verify_course_selection(mock_driver, "Northgate")
+
+        assert result is False
+
+    def test_verify_course_selection_falls_back_to_page_text_without_checkbox(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """No checkbox control at all - falls back to the page-text check as before."""
+        mock_driver = MagicMock()
+        mock_driver.find_elements.return_value = []
+
+        body = MagicMock()
+        body.text = "Northgate tee times"
+        mock_driver.find_element.return_value = body
+
+        result = provider._verify_course_selection(mock_driver, "Northgate")
+
+        assert result is True
+
 
 class TestWaldenProviderDateSelectionFailure:
     """Tests for booking failure when date selection fails."""
