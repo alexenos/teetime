@@ -83,10 +83,13 @@ was caught late. Today's is a same-second repeat of 08-16/08-20.
 ## 2. The course-dropdown fallback recurred a third time
 
 Step 3 raised `element not interactable` on the checkbox dropdown again —
-`08:28:39.383Z`, same shape as 08-20 and 08-21: opens the dropdown fine, then
-the click on a checkbox item races the dropdown's own open animation. The code
-caught it and fell back to verifying the page was already on Northgate via page
-text, recovering in ~5.4s against ~70s of pre-window slack. No cost to the race.
+`11:28:39.383Z`, same shape as 08-20 and 08-21: opens the dropdown fine, then
+closing it afterward is what fails — `close_button.click()` raises it, because
+the CSS selector for the dropdown's close control is broad enough to
+occasionally match an element elsewhere on the page that isn't actually
+interactable. The code caught it and fell back to verifying the page was
+already on Northgate via page text, recovering in ~5.4s against ~70s of
+pre-window slack. No cost to the race.
 
 Now recorded on 3 of the 4 mornings that have a written post-mortem (not on
 08-13); not on record for mornings without one. Previously called "watch, do

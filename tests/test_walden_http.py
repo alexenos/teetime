@@ -7,6 +7,7 @@ expects - not one derived from a hand-written mock.
 """
 
 import email.utils
+import logging
 import threading
 import time as time_module
 import urllib.parse
@@ -23,6 +24,7 @@ from app.providers.walden_http import (
     FormState,
     PrimeFacesSession,
     ViewExpiredError,
+    _SuppressProbeRequestLog,
     find_ab_for_element,
     parse_ab_call,
     parse_html,
@@ -2745,6 +2747,146 @@ class TestClockProbeTarget:
         session = make_session(FormState.from_html(TEE_SHEET), handler)
 
         assert session._resolve_probe_url().endswith("/group/pages/book-a-tee-time")
+
+
+class TestSuppressProbeRequestLog:
+    """The filter that replaces the earlier httpx-level mutation.
+
+    Raising the "httpx" logger's level for the loop's duration was scoped to
+    this call in intent but not in effect: the level is process-wide state,
+    and WaldenGolfProvider's methods each run on their own thread via
+    asyncio.to_thread(), so nothing prevented two bookings from racing to
+    set and restore it. A filter instance is scoped to one probe_url and
+    never mutates shared state, so it cannot suppress or corrupt another
+    thread's unrelated httpx logging.
+    """
+
+    def test_matches_the_head_probe_line(self) -> None:
+        probe_filter = _SuppressProbeRequestLog(
+            "https://www.waldengolf.com/o/frontend-css-web/main.css"
+        )
+        record = logging.LogRecord(
+            name="httpx",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='HTTP Request: %s %s "%s %d %s"',
+            args=(
+                "HEAD",
+                "https://www.waldengolf.com/o/frontend-css-web/main.css",
+                "HTTP/1.1",
+                200,
+                "OK",
+            ),
+            exc_info=None,
+        )
+
+        assert probe_filter.filter(record) is False
+
+    def test_does_not_match_a_different_url_or_method(self) -> None:
+        probe_filter = _SuppressProbeRequestLog(
+            "https://www.waldengolf.com/o/frontend-css-web/main.css"
+        )
+
+        other_url = logging.LogRecord(
+            name="httpx",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='HTTP Request: %s %s "%s %d %s"',
+            args=(
+                "HEAD",
+                "https://www.waldengolf.com/group/pages/book-a-tee-time",
+                "HTTP/1.1",
+                200,
+                "OK",
+            ),
+            exc_info=None,
+        )
+        post_same_url = logging.LogRecord(
+            name="httpx",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg='HTTP Request: %s %s "%s %d %s"',
+            args=(
+                "POST",
+                "https://www.waldengolf.com/o/frontend-css-web/main.css",
+                "HTTP/1.1",
+                200,
+                "OK",
+            ),
+            exc_info=None,
+        )
+
+        assert probe_filter.filter(other_url) is True
+        assert probe_filter.filter(post_same_url) is True
+
+
+class TestClockProbeLogSuppression:
+    """measure_clock_skew's use of the filter, end to end."""
+
+    def test_probe_requests_are_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The ~100 identical HEAD probes must not each produce a log line.
+
+        One "main.css" line is expected regardless: _resolve_probe_url()
+        sends its own HEAD request to pick a target before the filter is
+        installed, and that single resolution call is not part of what this
+        suppresses. It is the probe *loop* - dozens of repeats of the same
+        request - that must collapse to (at most) that one line.
+        """
+        session = make_session(FormState.from_html(TEE_SHEET), clock_handler(0.05))
+
+        with caplog.at_level(logging.INFO, logger="httpx"):
+            skew = session.measure_clock_skew()
+
+        assert skew is not None
+        httpx_main_css_lines = [
+            record
+            for record in caplog.records
+            if record.name == "httpx" and "main.css" in record.getMessage()
+        ]
+        assert len(httpx_main_css_lines) <= 1
+
+    def test_unrelated_httpx_logging_during_the_loop_survives(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A concurrent thread's httpx logging must not be caught in the blast radius.
+
+        Stands in for a second booking's Reserve POST landing on the shared
+        "httpx" logger while this thread's probe loop is in flight - exactly
+        the scenario a level mutation could suppress.
+        """
+        httpx_logger = logging.getLogger("httpx")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            httpx_logger.info(
+                'HTTP Request: %s %s "%s %d %s"',
+                "POST",
+                "https://other-thread/reserve",
+                "HTTP/1.1",
+                200,
+                "OK",
+            )
+            return httpx.Response(
+                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+            )
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+
+        with caplog.at_level(logging.INFO, logger="httpx"):
+            session.measure_clock_skew()
+
+        assert any("other-thread/reserve" in record.getMessage() for record in caplog.records)
+
+    def test_filter_is_removed_after_the_call(self) -> None:
+        """No suppression must leak past the call that added it."""
+        session = make_session(FormState.from_html(TEE_SHEET), clock_handler(0.05))
+        httpx_logger = logging.getLogger("httpx")
+
+        session.measure_clock_skew()
+
+        assert not any(isinstance(f, _SuppressProbeRequestLog) for f in httpx_logger.filters)
 
 
 class TestClockSkew:

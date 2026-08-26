@@ -152,6 +152,31 @@ _SKEW_PROBE_PATHS = (
 )
 
 
+class _SuppressProbeRequestLog(logging.Filter):
+    """Drops httpx's per-request INFO line for HEAD probes to one URL.
+
+    httpx logs "HTTP Request: ..." at INFO for every call it makes, which
+    turns the ~100 identical clock-skew probes below into that many log
+    lines with no diagnostic value beyond the summary measure_clock_skew
+    prints. Unlike raising the "httpx" logger's level for the duration of
+    the loop, adding one filter instance per call is safe under concurrent
+    bookings - each WaldenGolfProvider method runs in its own thread via
+    asyncio.to_thread(), and nothing prevents two from being in flight at
+    once. A shared level mutation can suppress or restore the wrong level
+    for another thread's unrelated httpx traffic (a Reserve POST, a GCS
+    upload); a filter only ever matches this instance's own probe_url, so
+    concurrent probes - even to the same URL - can only ever agree with
+    each other about what to drop, never race.
+    """
+
+    def __init__(self, probe_url: str) -> None:
+        super().__init__()
+        self._needle = f"HEAD {probe_url} "
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return self._needle not in record.getMessage()
+
+
 @dataclass(frozen=True)
 class ClockSkew:
     """How far the club's clock and the network sit between us and the window.
@@ -953,15 +978,11 @@ class PrimeFacesSession:
         deadline = time_module.monotonic() + _SKEW_PROBE_BUDGET_S
         attempted = 0
 
-        # httpx logs "HTTP Request: ..." at INFO for every call, which turns
-        # this loop's ~100 identical HEAD probes into that many log lines with
-        # no diagnostic value beyond the summary below - only the POST
-        # requests later in the chain (Reserve, Book Now) are worth reading
-        # individually, so this is scoped to the probe loop rather than
-        # silenced globally.
+        # See _SuppressProbeRequestLog: scoped to this call's own probe_url so
+        # it cannot suppress or corrupt another thread's httpx logging.
         httpx_logger = logging.getLogger("httpx")
-        previous_httpx_level = httpx_logger.level
-        httpx_logger.setLevel(logging.WARNING)
+        probe_log_filter = _SuppressProbeRequestLog(probe_url)
+        httpx_logger.addFilter(probe_log_filter)
         try:
             for probe in range(_SKEW_PROBE_MAX):
                 if probe:
@@ -989,7 +1010,7 @@ class PrimeFacesSession:
                 round_trips.append(round_trip)
                 samples.append(((sent + received) / 2, server_second))
         finally:
-            httpx_logger.setLevel(previous_httpx_level)
+            httpx_logger.removeFilter(probe_log_filter)
 
         if len(samples) < 2:
             logger.warning(
