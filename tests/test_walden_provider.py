@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import pytest
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import ElementNotInteractableException, WebDriverException
 from selenium.webdriver.common.by import By
 
 from app.config import settings
@@ -987,6 +987,189 @@ class TestWaldenProviderCalendarNavigation:
             provider._select_date_via_calendar_sync(mock_driver, target_date)
 
             mock_navigate.assert_called_once_with(mock_driver, target_date)
+
+
+class TestWaldenProviderCourseSelection:
+    """Tests for _select_course_sync and the checkbox-dropdown course picker."""
+
+    def test_select_course_sync_skips_dropdown_when_already_on_course(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Already on the target course - the fragile dropdown click is never attempted."""
+        mock_driver = MagicMock()
+        provider.wait_strategy = MagicMock()
+
+        with (
+            patch.object(provider, "_verify_course_selection", return_value=True) as verify_mock,
+            patch.object(provider, "_select_course_via_checkbox_dropdown") as dropdown_mock,
+        ):
+            result = provider._select_course_sync(mock_driver, "Northgate")
+
+        assert result is True
+        dropdown_mock.assert_not_called()
+        verify_mock.assert_called_once_with(mock_driver, "Northgate")
+
+    def test_select_course_sync_attempts_dropdown_when_not_on_course(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Not on the target course yet - falls through to the dropdown, then re-verifies."""
+        mock_driver = MagicMock()
+        provider.wait_strategy = MagicMock()
+
+        with (
+            patch.object(
+                provider, "_verify_course_selection", side_effect=[False, True]
+            ) as verify_mock,
+            patch.object(
+                provider, "_select_course_via_checkbox_dropdown", return_value=True
+            ) as dropdown_mock,
+        ):
+            result = provider._select_course_sync(mock_driver, "Northgate")
+
+        assert result is True
+        dropdown_mock.assert_called_once()
+        assert verify_mock.call_count == 2
+
+    def test_checkbox_dropdown_close_button_failure_is_non_fatal(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """A close button that is found but not interactable must not abort selection.
+
+        Reproduces the element-not-interactable failure seen on 2026-08-20,
+        08-21 and 08-25: the CSS selector for the dropdown's close control
+        ("[class*='close'], .x, button[aria-label='close']") is broad enough
+        to match a non-interactable element elsewhere on the page. Before the
+        fix, that raised ElementNotInteractableException past a
+        NoSuchElementException-only except clause and aborted the whole
+        checkbox-dropdown path even though the course was already configured
+        correctly.
+        """
+        mock_driver = MagicMock()
+        provider.wait_strategy = MagicMock()
+
+        trigger = MagicMock()
+        trigger.is_displayed.return_value = True
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = True  # Northgate already checked
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        close_button = MagicMock()
+        close_button.click.side_effect = ElementNotInteractableException(
+            "Message: element not interactable"
+        )
+
+        def find_elements_side_effect(_by: str, selector: str) -> list[MagicMock]:
+            if "select" in selector and "course" in selector:
+                return [trigger]
+            if "checkbox" in selector or "option" in selector:
+                return [checkbox_item]
+            return []
+
+        mock_driver.find_elements.side_effect = find_elements_side_effect
+        mock_driver.find_element.return_value = close_button
+
+        result = provider._select_course_via_checkbox_dropdown(
+            mock_driver, "Northgate", "Walden on Lake Conroe"
+        )
+
+        assert result is True
+        close_button.click.assert_called_once()
+        # Opened once, then clicked again as the close fallback after the
+        # close button turned out not to be interactable.
+        assert trigger.click.call_count == 2
+
+    def test_read_course_checkbox_state_checked(self, provider: WaldenGolfProvider) -> None:
+        """Reads True from a checked checkbox without opening the dropdown."""
+        mock_driver = MagicMock()
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = True
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        mock_driver.find_elements.return_value = [checkbox_item]
+
+        result = provider._read_course_checkbox_state(mock_driver, "Northgate")
+
+        assert result is True
+
+    def test_read_course_checkbox_state_unchecked(self, provider: WaldenGolfProvider) -> None:
+        """Reads False from a present-but-unchecked checkbox."""
+        mock_driver = MagicMock()
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = False
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        mock_driver.find_elements.return_value = [checkbox_item]
+
+        result = provider._read_course_checkbox_state(mock_driver, "Northgate")
+
+        assert result is False
+
+    def test_read_course_checkbox_state_none_when_no_checkbox_found(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """Returns None (not False) when there's simply no matching checkbox to read."""
+        mock_driver = MagicMock()
+        mock_driver.find_elements.return_value = []
+
+        result = provider._read_course_checkbox_state(mock_driver, "Northgate")
+
+        assert result is None
+
+    def test_verify_course_selection_trusts_unchecked_checkbox_over_page_text(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """A found-but-unchecked Northgate checkbox must not be overridden by page text.
+
+        This is the bug the checkbox-state check closes: "Northgate" can
+        appear in the page text (e.g. as the checkbox's own label) even
+        while its checkbox is unchecked and Walden on Lake Conroe is the
+        course actually showing.
+        """
+        mock_driver = MagicMock()
+
+        checkbox = MagicMock()
+        checkbox.is_selected.return_value = False
+
+        checkbox_item = MagicMock()
+        checkbox_item.text = "Northgate"
+        checkbox_item.find_element.return_value = checkbox
+
+        mock_driver.find_elements.return_value = [checkbox_item]
+
+        body = MagicMock()
+        body.text = "Northgate Walden on Lake Conroe tee times"
+        mock_driver.find_element.return_value = body
+
+        result = provider._verify_course_selection(mock_driver, "Northgate")
+
+        assert result is False
+
+    def test_verify_course_selection_falls_back_to_page_text_without_checkbox(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        """No checkbox control at all - falls back to the page-text check as before."""
+        mock_driver = MagicMock()
+        mock_driver.find_elements.return_value = []
+
+        body = MagicMock()
+        body.text = "Northgate tee times"
+        mock_driver.find_element.return_value = body
+
+        result = provider._verify_course_selection(mock_driver, "Northgate")
+
+        assert result is True
 
 
 class TestWaldenProviderDateSelectionFailure:
