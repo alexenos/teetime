@@ -47,6 +47,7 @@ import concurrent.futures
 import hashlib
 import logging
 import re
+import threading
 import time as time_module
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -348,6 +349,15 @@ class DirectHttpBooker:
         # trip between them. Off here so the historical one-shot default stays
         # exactly that; prepare() turns it on.
         self._pipeline_opening_pair: bool = False
+        # Raised the moment the first Reserve is *answered* - response in hand,
+        # or a timeout that means the request may have reached the club. Either
+        # way a browser retry is off the table from then on, which is what makes
+        # it safe for the provider's quieting thread to take the resident Chrome
+        # page apart. Deliberately never raised on a connection that never
+        # opened: that is the one failure the browser chain still rescues, and
+        # it needs its page alive. Assigned by the provider; None means nobody
+        # is listening.
+        self.quiet_signal: threading.Event | None = None
         # The frame every reported offset is measured from - the club's stated
         # 06:30:00, which the aim may sit past. book() sets it.
         self._window_timestamp_ms: int | None = None
@@ -1169,7 +1179,18 @@ class DirectHttpBooker:
             )
             result.attempt_log.append(observation)
             _log_reserve_observation(observation)
+            # The request may have reached the club, so the browser-retry door
+            # is closed exactly as it is for an answered request - the quieting
+            # thread may proceed.
+            if self.quiet_signal is not None:
+                self.quiet_signal.set()
             return None, None, None, str(exc)
+
+        # First answer in hand: from here the provider treats a browser retry
+        # as racing our own reservation, so the page's last job is done. ~1us,
+        # and the thread it wakes does its work off the race thread entirely.
+        if self.quiet_signal is not None:
+            self.quiet_signal.set()
 
         result.final_markup = response.markup
         # One parse, three questions: the verdict, the ledger row and the next

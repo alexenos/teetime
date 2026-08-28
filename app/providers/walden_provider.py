@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time as time_module
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta
@@ -1505,6 +1506,12 @@ class WaldenGolfProvider(ReservationProvider):
                         )
                     )
                     total_failed += 1
+
+            # Race mornings only, and after every booking has its outcome: the
+            # sheet a few minutes past the window is the one artifact that says
+            # who actually holds the slots the race asked about - win or lose.
+            if execute_at_timestamp_ms is not None and settings.walden_capture_postrace_sheet:
+                self._capture_postrace_sheet(driver, target_date)
 
             logger.info(
                 f"BATCH_BOOKING: === BATCH COMPLETE === "
@@ -4315,6 +4322,34 @@ class WaldenGolfProvider(ReservationProvider):
                 session.close()
             return None
 
+        # Armed before the race, fired after it starts: the booker raises
+        # quiet_signal once the first Reserve is answered (or times out on the
+        # socket) - the point past which a browser retry is treated as racing
+        # our own reservation - and this thread then clears the resident tee
+        # sheet page's JS timers. 2026-08-28 attempt 2 measured the page's
+        # cost mid-race: 310ms of container CPU burned by a process that was
+        # not ours, with the race descheduled under it (cpu/wall 0.39). A
+        # connection that never opens never raises the signal, and the page
+        # stays live for the JS-chain rescue.
+        quiet_thread: threading.Thread | None = None
+        quiet_signal: threading.Event | None = None
+        quiet_stand_down = threading.Event()
+        if settings.walden_quiet_browser_during_race and execute_at_timestamp_ms is not None:
+            quiet_signal = threading.Event()
+            booker.quiet_signal = quiet_signal
+            # Generous on purpose: the wait costs a parked daemon thread and
+            # nothing else, and a signal that never comes must simply expire.
+            quiet_wait_s = (
+                max(0.0, (execute_at_timestamp_ms - time_module.time() * 1000) / 1000.0) + 30.0
+            )
+            quiet_thread = threading.Thread(
+                target=self._quiet_browser_when_signaled,
+                args=(driver, quiet_signal, quiet_stand_down, quiet_wait_s),
+                name="quiet-browser",
+                daemon=True,
+            )
+            quiet_thread.start()
+
         try:
             result = booker.book(
                 num_players,
@@ -4334,6 +4369,15 @@ class WaldenGolfProvider(ReservationProvider):
                 "timing": {},
             }
         finally:
+            # The race is decided, so quieting is either already done or moot.
+            # Stand the thread down before waking it, so a wait that never saw
+            # the signal exits without touching the driver the code below is
+            # about to navigate; the join then only covers a script mid-flight.
+            if quiet_thread is not None:
+                quiet_stand_down.set()
+                if quiet_signal is not None:
+                    quiet_signal.set()
+                quiet_thread.join(timeout=2.0)
             session.close()
 
         # Before the summary line and outside the failure branches: the ledger is
@@ -5763,6 +5807,115 @@ class WaldenGolfProvider(ReservationProvider):
                 logger.warning(
                     f"RACE_LEDGER: failed to store attempt {observation.attempt} payload: {e}"
                 )
+
+    def _quiet_browser_when_signaled(
+        self,
+        driver: webdriver.Chrome,
+        signal: threading.Event,
+        stand_down: threading.Event,
+        timeout_s: float,
+    ) -> None:
+        """Clear the parked tee sheet page's JS timers once the race is on HTTP.
+
+        Runs on its own thread. It sleeps until the booker raises ``signal`` -
+        the first Reserve answered, past which no browser retry is ever made -
+        then takes the page's timers apart, so the countdown and datascroller
+        loops stop competing with the race for the container's CPU (2026-08-28
+        attempt 2: 310ms of container CPU that was not ours, cpu/wall 0.39).
+        The page itself stays loaded; nothing else uses it until the post-race
+        navigation, which starts from ``driver.get`` either way.
+
+        ``stand_down`` wins over ``signal``: the caller sets it once the race
+        is decided, so a wait that never saw the signal exits without touching
+        a driver someone else is about to navigate. Everything here is
+        best-effort - a page that cannot be quieted costs what it already cost.
+        """
+        try:
+            if not signal.wait(timeout=timeout_s):
+                logger.info(
+                    "QUIET_BROWSER: No Reserve answered within %.0fs; leaving the page alone",
+                    timeout_s,
+                )
+                return
+            if stand_down.is_set():
+                return
+            swept = driver.execute_script(
+                """
+                try { if (typeof stopSheetTimers === 'function') { stopSheetTimers(); } }
+                catch (e) {}
+                var top = 0;
+                try {
+                    top = window.setTimeout(function () {}, 0);
+                    for (var i = 1; i <= top; i++) {
+                        window.clearTimeout(i);
+                        window.clearInterval(i);
+                    }
+                } catch (e) {}
+                return top;
+                """
+            )
+            logger.info(
+                "QUIET_BROWSER: Cleared the tee sheet page's timers (%s handles swept) "
+                "while the race runs over HTTP",
+                swept,
+            )
+        except Exception as e:  # noqa: BLE001 - a quieting failure must cost nothing
+            logger.warning(f"QUIET_BROWSER: Could not quiet the browser: {e}")
+
+    def _capture_postrace_sheet(self, driver: webdriver.Chrome, target_date: date | None) -> None:
+        """Photograph the live tee sheet minutes after the race, names and all.
+
+        The race's own artifacts cannot say who holds a slot it lost: a
+        refusal's rows are echoed pre-window chrome (established 2026-08-21),
+        and the pre-window capture predates every grant by definition. Both
+        Friday post-mortems ended at the same wall - "someone has 08:38, the
+        bucket cannot say who" - until the member photographed the sheet by
+        hand. This is that photograph, taken automatically: a fresh render of
+        the target date after the dust settles, stored as HTML and screenshot
+        beside the morning's ledger. Post-race, driver-closing time; the race
+        is long over.
+        """
+        if target_date is None:
+            return
+        bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
+        if not bucket_name:
+            return
+        try:
+            logger.info(
+                "POSTRACE_SHEET: Reloading the tee sheet for %s to record who holds what",
+                target_date.strftime("%Y-%m-%d"),
+            )
+            driver.get(self.TEE_TIME_URL)
+            WebDriverWait(driver, 20).until(
+                expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form"))
+            )
+            if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
+                logger.warning("POSTRACE_SHEET: Course re-selection failed; capturing anyway")
+            if not self._select_date_sync(driver, target_date):
+                logger.warning("POSTRACE_SHEET: Date re-selection failed; capturing anyway")
+            WebDriverWait(driver, 20).until(
+                expected_conditions.presence_of_element_located(
+                    (By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.page_loaded)
+                )
+            )
+            self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            uri = self._upload_bytes_to_gcs(
+                bucket_name=bucket_name,
+                object_name=f"walden/postrace/{timestamp}/tee_sheet.html",
+                content_type="text/html; charset=utf-8",
+                data=driver.page_source.encode("utf-8", errors="replace"),
+            )
+            self._upload_bytes_to_gcs(
+                bucket_name=bucket_name,
+                object_name=f"walden/postrace/{timestamp}/screenshot.png",
+                content_type="image/png",
+                data=driver.get_screenshot_as_png(),
+            )
+            logger.info("POSTRACE_SHEET: Saved post-race sheet and screenshot to %s", uri)
+        except Exception as e:  # noqa: BLE001 - diagnostics must not fail the batch
+            logger.warning(f"POSTRACE_SHEET: Could not capture the post-race sheet: {e}")
 
     def _capture_response_artifact(self, context: str, markup: str) -> None:
         """Record a direct-HTTP response body for diagnosis.

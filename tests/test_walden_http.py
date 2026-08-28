@@ -1238,6 +1238,35 @@ class TestDirectHttpBooker:
         assert result.phase in PRE_SUBMIT_PHASES
         assert result.error is not None and "connection refused" in result.error
 
+    def test_quiet_signal_is_raised_once_the_first_reserve_answers(self) -> None:
+        """The provider's browser-quieting thread waits on exactly this event."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        booker = make_booker(recorder)
+        booker.quiet_signal = threading.Event()
+        result = booker.book(1)
+
+        assert result.success, result.error
+        assert booker.quiet_signal.is_set()
+
+    def test_quiet_signal_stays_down_when_nothing_was_submitted(self) -> None:
+        """A connection that never opened leaves the browser retry live, and the
+        page it needs must not be taken apart under it."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Mock transport handler for one test case."""
+            raise httpx.ConnectError("connection refused")
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+        booker = DirectHttpBooker(session)
+        booker._reserve_config = AbConfig(source=RESERVE_ID, form=FORM_ID)
+        booker._reserve_body = b"staged=reserve"
+        booker.quiet_signal = threading.Event()
+        result = booker.book(4)
+
+        assert not result.success
+        assert result.phase in PRE_SUBMIT_PHASES
+        assert not booker.quiet_signal.is_set()
+
     def test_book_without_prepare_is_rejected(self) -> None:
         """Misuse is a pre-submit result, so the caller falls back rather than
         losing the booking to a bug in an opt-in path."""
