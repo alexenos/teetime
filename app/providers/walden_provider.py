@@ -4299,6 +4299,15 @@ class WaldenGolfProvider(ReservationProvider):
                     settings.walden_reserve_pipeline_opening_pair
                     and execute_at_timestamp_ms is not None
                 ),
+                # Also the race only: an ad-hoc booking fires into a window that
+                # opened days ago, so its sheet is never closed and a hold would
+                # never engage - but gating it here keeps the policy readable as
+                # a race behaviour rather than an accident of the marker.
+                hold_until_open=(
+                    settings.walden_reserve_hold_until_open and execute_at_timestamp_ms is not None
+                ),
+                hold_cap_ms=settings.walden_reserve_hold_cap_ms,
+                target_interleave=settings.walden_reserve_target_interleave,
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
