@@ -5889,10 +5889,28 @@ class WaldenGolfProvider(ReservationProvider):
             WebDriverWait(driver, 20).until(
                 expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form"))
             )
-            if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
-                logger.warning("POSTRACE_SHEET: Course re-selection failed; capturing anyway")
+            # A failed course narrowing is survivable: the unnarrowed sheet
+            # renders both courses side by side, so Northgate's rows are still
+            # in it - a superset, not different data. It goes in the object name
+            # so a reader knows which they are looking at rather than inferring
+            # it from the column count.
+            narrowed = self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME)
+            if not narrowed:
+                logger.warning(
+                    "POSTRACE_SHEET: Course re-selection failed; capturing the unnarrowed sheet"
+                )
+            # A failed date selection is not survivable. The sheet on screen is
+            # then some other day, and this whole artifact exists to say who
+            # holds a slot *on the target date* - storing the wrong day under a
+            # name that does not say so would be one more piece of evidence
+            # that reads as live and is not, which is the trap three
+            # post-mortems have already been lost to.
             if not self._select_date_sync(driver, target_date):
-                logger.warning("POSTRACE_SHEET: Date re-selection failed; capturing anyway")
+                logger.warning(
+                    "POSTRACE_SHEET: Date re-selection failed; not storing a sheet that "
+                    "may be for the wrong day"
+                )
+                return
             WebDriverWait(driver, 20).until(
                 expected_conditions.presence_of_element_located(
                     (By.CSS_SELECTOR, DOM.SLOT_DISCOVERY.page_loaded)
@@ -5900,16 +5918,23 @@ class WaldenGolfProvider(ReservationProvider):
             )
             self.wait_strategy.wait_after_action(driver, fixed_duration=2.0)
 
+            # The target date is in the path, not just the capture time: these
+            # sit beside race ledgers stamped UTC, and "which day is this sheet"
+            # is the first question anyone reading one will have.
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prefix = (
+                f"walden/postrace/{timestamp}_for_{target_date.strftime('%Y%m%d')}"
+                f"{'' if narrowed else '_allcourses'}"
+            )
             uri = self._upload_bytes_to_gcs(
                 bucket_name=bucket_name,
-                object_name=f"walden/postrace/{timestamp}/tee_sheet.html",
+                object_name=f"{prefix}/tee_sheet.html",
                 content_type="text/html; charset=utf-8",
                 data=driver.page_source.encode("utf-8", errors="replace"),
             )
             self._upload_bytes_to_gcs(
                 bucket_name=bucket_name,
-                object_name=f"walden/postrace/{timestamp}/screenshot.png",
+                object_name=f"{prefix}/screenshot.png",
                 content_type="image/png",
                 data=driver.get_screenshot_as_png(),
             )

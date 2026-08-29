@@ -1366,6 +1366,13 @@ class DirectHttpBooker:
                 pair.carried_observation = observation
 
         pair.never_connected = never_connected
+        # Same contract as the single-Reserve path, and `never_connected` is
+        # already exactly the condition: something reached the socket, so a
+        # browser retry is off the table and the page's timers are free to be
+        # cleared. Only a pair where *neither* half connected leaves the signal
+        # down, because that is the one case the JS chain still rescues.
+        if not never_connected and self.quiet_signal is not None:
+            self.quiet_signal.set()
         # first_sent_ms_past_window is read for the log line only; the ledger
         # takes each request's own send time from the exchange above.
         logger.info(
