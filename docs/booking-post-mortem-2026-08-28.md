@@ -118,9 +118,12 @@ to make the *policy* boundary-shaped instead of chasing the boundary:
   than abandoned, because an open-sheet refusal before the first grant moment
   is not yet proof the slot is taken. Same-slot re-asks never consume the
   attempt budget; only distinct fallbacks do.
-- Non-Fridays are unaffected: the sheet is open at :01, the hold never
-  engages, and attempt 1 wins as it has five mornings running. Ad-hoc
-  bookings never engage it at all.
+- One execution path everywhere. Non-Fridays run the same loop and are
+  unaffected in practice: their sheet is open at :01, so the hold has nothing
+  to do and attempt 1 wins as it has five mornings running. Ad-hoc bookings
+  run it too - their sheet opened days ago, so the hold no-ops - which means a
+  Tuesday-afternoon booking exercises the exact code Friday's race runs, the
+  same reasoning `walden_adhoc_execute_delay_s` already encodes.
 
 On this morning's timeline the policy would have re-asked 08:38 at roughly
 :04 and :05–:06 — the seconds in which, both Fridays, grants started flowing.

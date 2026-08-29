@@ -204,8 +204,14 @@ class Settings(BaseSettings):
     # not count against the target at all: the same slot is asked for again
     # immediately, paced by nothing but the club's own answer rate (~300-500ms a
     # round trip). The first refusal that arrives on an open sheet ends the hold
-    # and starts the fallback walk. Timed bookings only - an ad-hoc booking
-    # fires into a window that opened days ago.
+    # and starts the fallback walk.
+    #
+    # One execution path, race and ad-hoc alike. An ad-hoc booking fires into a
+    # window that opened days ago, so its sheet is already open and the hold
+    # naturally has nothing to do - but it runs the same loop, for the same
+    # reason walden_adhoc_execute_delay_s exists: a Tuesday-afternoon booking
+    # nobody is racing for is the only place this code gets exercised before
+    # the morning it decides.
     walden_reserve_hold_until_open: bool = True
 
     # How long past the stated window to keep holding for the sheet to open,

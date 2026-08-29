@@ -3245,10 +3245,23 @@ class TestHoldUntilOpen:
         assert result.success, result.error
         assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
 
-    def test_untimed_bookings_ignore_the_hold(self) -> None:
-        """An ad-hoc booking fires into a window that opened days ago."""
-        recorder = ChainRecorder([CLOSED_SHEET])
+    def test_untimed_bookings_run_the_same_policy(self) -> None:
+        """One execution path: an ad-hoc refusal walks with the target interleaved.
+
+        An ad-hoc booking's sheet opened days ago, so the hold itself no-ops -
+        but the loop is the same one the race runs, which is what lets a
+        Tuesday-afternoon booking exercise Friday's code.
+        """
+        recorder = ChainRecorder([OPEN_BLOCKED_SHEET])
         result = hold_booker(recorder).book(1)
 
         assert not result.success
-        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, SLOT_C_ID]
+        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, RESERVE_ID, SLOT_C_ID, RESERVE_ID]
+
+    def test_an_untimed_closed_sheet_is_still_capped(self) -> None:
+        """No window to measure the cap from, so it runs from the first Reserve."""
+        recorder = ChainRecorder([CLOSED_SHEET])
+        result = hold_booker(recorder, cap_ms=0).book(1)
+
+        assert not result.success
+        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, RESERVE_ID, SLOT_C_ID, RESERVE_ID]

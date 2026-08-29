@@ -409,7 +409,10 @@ class DirectHttpBooker:
                 immediately instead of spending rungs or fallbacks on it. The
                 closed-sheet refusals of 2026-08-21 and 08-28 are the evidence:
                 the sweep's rungs assume the sheet opens at 06:30:01, and both
-                Fridays it did not. Timed bookings only.
+                Fridays it did not. One path for timed and untimed alike - an
+                ad-hoc booking's sheet is already open so the hold has nothing
+                to do, and running the same loop there is what exercises the
+                race's code off-race.
             hold_cap_ms: How long past the stated window to keep holding before
                 conceding the sheet is not opening and walking the fallback
                 list anyway. Measured from the stated window, the frame every
@@ -870,9 +873,11 @@ class DirectHttpBooker:
         attempt = 0
         # The hold-until-open policy (see prepare()): while refusals arrive on a
         # closed sheet they spend nothing, and once the sheet is open the target
-        # is re-asked between fallbacks. Timed bookings only - an ad-hoc booking
-        # fires into a window that opened days ago and its sheet is always open.
-        hold_active = self._hold_until_open and target_timestamp_ms is not None
+        # is re-asked between fallbacks. One execution path, timed or not: an
+        # ad-hoc booking's sheet opened days ago, so the hold naturally no-ops
+        # there - but running the same loop is what lets a Tuesday-afternoon
+        # booking exercise the code the race will run on Friday.
+        hold_active = self._hold_until_open
         # Latches on the first answer that is not a closed sheet and never
         # clears: the hold is for a sheet that has not opened yet, not a defense
         # against one the club might re-close.
@@ -1119,10 +1124,15 @@ class DirectHttpBooker:
                         if observation.server_ms_past_window is not None
                         else observation.sent_ms_past_window
                     )
+                    # The cap's clock: from the stated window when there is
+                    # one, else from the first Reserve. An untimed booking
+                    # should never see a closed sheet at all, but if one does,
+                    # the cap has to run from *something* or the hold would
+                    # hammer until the deadline.
                     now_ms_past_window = (
                         int(time_module.time() * 1000) - window_frame_ms
                         if window_frame_ms is not None
-                        else 0
+                        else int((time_module.perf_counter() - started) * 1000)
                     )
                     if now_ms_past_window < self._hold_cap_ms:
                         # A closed sheet cannot lose a slot to anyone, so this
