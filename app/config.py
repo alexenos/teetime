@@ -280,6 +280,32 @@ class Settings(BaseSettings):
     # dialog is expected to differ from a re-rendered one.
     walden_capture_race_ledger: bool = True
 
+    # Clear the resident Chrome page's JS timers once the race is on HTTP.
+    #
+    # The browser stays parked on the pre-window tee sheet through the whole
+    # race - live countdown and datascroller timers included - and 2026-08-28
+    # attempt 2 caught the cost on the new counters: cpu/wall 0.39 with 310ms of
+    # container CPU burned by a process that was not ours, on the machine that
+    # was mid-race. The page cannot be parked outright: until the first Reserve
+    # is answered it is the JS chain's safety net for a socket that never
+    # opens. So the booker raises a signal when the first response is in hand -
+    # the point past which a browser retry is treated as racing our own
+    # reservation - and a side thread then clears the page's timers. Nothing
+    # runs on the race thread, and a page never quieted (signal never raised)
+    # is a page whose retry path was still live.
+    walden_quiet_browser_during_race: bool = True
+
+    # Photograph the live tee sheet right after a race, names and all.
+    #
+    # Both Friday losses were diagnosed blind on this point: a refusal's slot
+    # rows are echoed pre-window chrome (established 08-21), so nothing the
+    # race stores says who actually holds the slot it lost. The member's own
+    # screenshots are what established that the same foursome held 08:38 on
+    # both Fridays. This re-renders the sheet minutes after the race and stores
+    # HTML and screenshot beside the ledger - post-race, driver-closing time,
+    # nowhere near the critical path.
+    walden_capture_postrace_sheet: bool = True
+
     user_phone_number: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./teetime.db"

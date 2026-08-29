@@ -1238,6 +1238,35 @@ class TestDirectHttpBooker:
         assert result.phase in PRE_SUBMIT_PHASES
         assert result.error is not None and "connection refused" in result.error
 
+    def test_quiet_signal_is_raised_once_the_first_reserve_answers(self) -> None:
+        """The provider's browser-quieting thread waits on exactly this event."""
+        recorder = ChainRecorder([PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        booker = make_booker(recorder)
+        booker.quiet_signal = threading.Event()
+        result = booker.book(1)
+
+        assert result.success, result.error
+        assert booker.quiet_signal.is_set()
+
+    def test_quiet_signal_stays_down_when_nothing_was_submitted(self) -> None:
+        """A connection that never opened leaves the browser retry live, and the
+        page it needs must not be taken apart under it."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Mock transport handler for one test case."""
+            raise httpx.ConnectError("connection refused")
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+        booker = DirectHttpBooker(session)
+        booker._reserve_config = AbConfig(source=RESERVE_ID, form=FORM_ID)
+        booker._reserve_body = b"staged=reserve"
+        booker.quiet_signal = threading.Event()
+        result = booker.book(4)
+
+        assert not result.success
+        assert result.phase in PRE_SUBMIT_PHASES
+        assert not booker.quiet_signal.is_set()
+
     def test_book_without_prepare_is_rejected(self) -> None:
         """Misuse is a pre-submit result, so the caller falls back rather than
         losing the booking to a bug in an opt-in path."""
@@ -2307,6 +2336,32 @@ class TestOpeningPairIsFiredTogether:
         # answered 400ms later. The margin is wide because only the order of
         # magnitude is the claim.
         assert recorder.sent_at_ms[1] - recorder.sent_at_ms[0] < 300
+
+    def test_the_pair_signals_the_quiet_worker(self) -> None:
+        """The pipelined path answers the same contract as the single send.
+
+        It never set the signal, so with the pair enabled the parked page kept
+        its timers through the whole race - the exact CPU contention the signal
+        exists to end, left running in the one mode built to be fastest.
+        """
+        recorder = PairRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        booker = paired_booker(recorder, 1030, 1250)
+        booker.quiet_signal = threading.Event()
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert booker.quiet_signal.is_set()
+
+    def test_a_pair_that_never_connected_leaves_the_page_alone(self) -> None:
+        """Neither half reached the socket, so the JS chain still needs its page."""
+        recorder = StallingRecorder([PLAYER_PAGE], stall_on={1, 2}, error=httpx.ConnectError)
+        booker = paired_booker(recorder, 1030, 1250)
+        booker.quiet_signal = threading.Event()
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert result.phase in PRE_SUBMIT_PHASES
+        assert not booker.quiet_signal.is_set()
 
     def test_a_grant_on_the_later_rung_is_taken(self) -> None:
         """A refused aim point costs a rung, not the morning."""
