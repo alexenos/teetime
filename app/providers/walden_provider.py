@@ -4306,6 +4306,14 @@ class WaldenGolfProvider(ReservationProvider):
                     settings.walden_reserve_pipeline_opening_pair
                     and execute_at_timestamp_ms is not None
                 ),
+                # Unlike the sweep and the pair above, NOT gated on the race:
+                # an ad-hoc booking's sheet opened days ago, so the hold
+                # naturally no-ops there - and running the one path everywhere
+                # is what lets an ad-hoc booking exercise the loop the race
+                # runs (same reasoning as walden_adhoc_execute_delay_s).
+                hold_until_open=settings.walden_reserve_hold_until_open,
+                hold_cap_ms=settings.walden_reserve_hold_cap_ms,
+                target_interleave=settings.walden_reserve_target_interleave,
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as

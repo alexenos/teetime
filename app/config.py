@@ -190,6 +190,51 @@ class Settings(BaseSettings):
     # "0" restores the historical single ask.
     walden_reserve_sweep_offsets_ms: str = "0,250,1000"
 
+    # Keep asking for the target slot while the club renders its sheet closed.
+    #
+    # The sweep above was built for a boundary that sits at 06:30:01. On the
+    # two Friday races on record (2026-08-21 and 08-28) it sat at :03-:05, and
+    # the ladder spent every ask for the target into a provably closed sheet -
+    # the club's own disable-div marker was on each refusal - then walked off to
+    # the fallback list at :03, two seconds before the club granted anything to
+    # anyone. The member who got the target both Fridays did not have to be
+    # faster than the bot; he only had to still be asking when the sheet opened.
+    #
+    # Under this policy a refusal whose response renders the sheet closed does
+    # not count against the target at all: the same slot is asked for again
+    # immediately, paced by nothing but the club's own answer rate (~300-500ms a
+    # round trip). The first refusal that arrives on an open sheet ends the hold
+    # and starts the fallback walk.
+    #
+    # One execution path, race and ad-hoc alike. An ad-hoc booking fires into a
+    # window that opened days ago, so its sheet is already open and the hold
+    # naturally has nothing to do - but it runs the same loop, for the same
+    # reason walden_adhoc_execute_delay_s exists: a Tuesday-afternoon booking
+    # nobody is racing for is the only place this code gets exercised before
+    # the morning it decides.
+    walden_reserve_hold_until_open: bool = True
+
+    # How long past the stated window to keep holding for the sheet to open,
+    # before conceding it is not going to and walking the fallback list anyway.
+    #
+    # Measured from the stated 06:30:00, not the aim. The latest open on record
+    # is ~+3s (2026-08-28), drifting roughly a second later per week; 8s covers
+    # that with margin while leaving room inside the 10s reserve deadline for
+    # the fallback walk if the sheet never opens. A sheet still closed at +8s is
+    # a morning something else is wrong on.
+    walden_reserve_hold_cap_ms: int = 8000
+
+    # Once the sheet is open, re-ask the target slot between fallback attempts
+    # (target, fallback 1, target, fallback 2, ...) instead of abandoning it on
+    # its first open-sheet refusal.
+    #
+    # Both Fridays the first grant to anyone came at :05 while the sheet showed
+    # open from :03 - so an open-sheet refusal of the target is not yet proof
+    # the slot is taken, and leaving it on that evidence hands it to whoever is
+    # still asking at :05. A re-ask costs one round trip of fallback delay and
+    # nothing else: same-slot repeats never consume the attempt budget.
+    walden_reserve_target_interleave: bool = True
+
     # Fire the first two rungs without waiting for the first one's answer.
     #
     # Serialised, the ladder cannot ask twice inside one round trip: 08-15 fired

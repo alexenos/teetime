@@ -349,6 +349,12 @@ class DirectHttpBooker:
         # trip between them. Off here so the historical one-shot default stays
         # exactly that; prepare() turns it on.
         self._pipeline_opening_pair: bool = False
+        # Keep re-asking the target while the club renders its sheet closed,
+        # and re-ask it between fallbacks once the sheet is open. Off here for
+        # the same reason as the pair above; prepare() wires the settings in.
+        self._hold_until_open: bool = False
+        self._hold_cap_ms: int = 8000
+        self._target_interleave: bool = True
         # Raised the moment the first Reserve is *answered* - response in hand,
         # or a timeout that means the request may have reached the club. Either
         # way a browser retry is off the table from then on, which is what makes
@@ -374,6 +380,9 @@ class DirectHttpBooker:
         refresh_at_window: bool = False,
         sweep_offsets_ms: Sequence[int] = (0,),
         pipeline_opening_pair: bool = False,
+        hold_until_open: bool = False,
+        hold_cap_ms: int = 8000,
+        target_interleave: bool = True,
     ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
@@ -405,6 +414,22 @@ class DirectHttpBooker:
                 the first one's answer, so the pair brackets the refusal boundary
                 inside a single round trip. Needs at least two offsets and a
                 timed booking; ignored otherwise.
+            hold_until_open: While a refusal's own markup renders the tee sheet
+                closed (the club's disable-div marker), re-ask the target slot
+                immediately instead of spending rungs or fallbacks on it. The
+                closed-sheet refusals of 2026-08-21 and 08-28 are the evidence:
+                the sweep's rungs assume the sheet opens at 06:30:01, and both
+                Fridays it did not. One path for timed and untimed alike - an
+                ad-hoc booking's sheet is already open so the hold has nothing
+                to do, and running the same loop there is what exercises the
+                race's code off-race.
+            hold_cap_ms: How long past the stated window to keep holding before
+                conceding the sheet is not opening and walking the fallback
+                list anyway. Measured from the stated window, the frame every
+                ledger offset is reported in.
+            target_interleave: Once the sheet is open, re-ask the target between
+                fallback attempts rather than abandoning it on its first
+                open-sheet refusal. Only meaningful under ``hold_until_open``.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -435,6 +460,9 @@ class DirectHttpBooker:
         # where there is nothing to overlap and a worker thread would only add a
         # handoff to the one request that has to be fast.
         self._pipeline_opening_pair = pipeline_opening_pair and len(self._sweep_offsets_ms) >= 2
+        self._hold_until_open = hold_until_open
+        self._hold_cap_ms = max(0, hold_cap_ms)
+        self._target_interleave = target_interleave
         logger.info(
             "DIRECT_HTTP: Reserve request staged - source=%s, slot=%s, %d body bytes, "
             "viewState=%s, sweep=%s%s, fallbacks=%s",
@@ -446,7 +474,13 @@ class DirectHttpBooker:
             # from the one staged here.
             _view_state_fingerprint(self.session),
             "+".join(str(offset) for offset in self._sweep_offsets_ms) + "ms",
-            " (first two pipelined)" if self._pipeline_opening_pair else "",
+            (" (first two pipelined)" if self._pipeline_opening_pair else "")
+            + (
+                f" (hold target until sheet open, cap +{self._hold_cap_ms}ms"
+                f"{', interleave' if self._target_interleave else ''})"
+                if self._hold_until_open
+                else ""
+            ),
             ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
         )
         if refresh_at_window:
@@ -793,6 +827,17 @@ class DirectHttpBooker:
         ``result.attempt_log``, so a morning spent losing still narrows where the
         club's boundary actually sits.
 
+        Under ``hold_until_open`` (the race default since the 2026-08-28
+        post-mortem) the rungs are superseded: a refusal whose own markup
+        renders the sheet closed spends nothing and the same slot is asked for
+        again immediately, capped at ``hold_cap_ms`` past the stated window; the
+        first answer on an open sheet ends the hold, starts the fallback walk,
+        and - under ``target_interleave`` - keeps re-asking the target between
+        fallbacks. Both Friday races on record spent every target ask into a
+        provably closed sheet and then walked away seconds before the club
+        granted anything to anyone; this loop shape is the fix. The rung list
+        survives as the retry budget for the stall (timeout) paths only.
+
         A Reserve that never answers is survivable but contagious. It used to end
         the run, which on 2026-08-13 and 08-14 stopped the ladder at +1000ms -
         two rungs short of the ~1.24s that had been granted on the two mornings
@@ -836,6 +881,23 @@ class DirectHttpBooker:
         max_attempts = _RESERVE_MAX_ATTEMPTS + len(rungs)
         last_reason: str | None = None
         attempt = 0
+        # The hold-until-open policy (see prepare()): while refusals arrive on a
+        # closed sheet they spend nothing, and once the sheet is open the target
+        # is re-asked between fallbacks. One execution path, timed or not: an
+        # ad-hoc booking's sheet opened days ago, so the hold naturally no-ops
+        # there - but running the same loop is what lets a Tuesday-afternoon
+        # booking exercise the code the race will run on Friday.
+        hold_active = self._hold_until_open
+        # Latches on the first answer that is not a closed sheet and never
+        # clears: the hold is for a sheet that has not opened yet, not a defense
+        # against one the club might re-close.
+        sheet_seen_open = not hold_active
+        # The slot the caller actually wants, kept apart from the loop's
+        # slot_time which the fallback walk reassigns.
+        target_slot_time = slot_time
+        # The last closed answer's club-clock offset, so the open transition can
+        # be logged as a bracket rather than a point.
+        last_closed_ms: int | None = None
 
         while attempt < max_attempts:
             attempt += 1
@@ -1050,6 +1112,120 @@ class DirectHttpBooker:
                     int(spent_ms),
                 )
                 break
+
+            if hold_active:
+                sheet_closed = observation.sheet_open is False
+                if not sheet_seen_open and not sheet_closed:
+                    # First answer rendered on an open sheet. None counts as
+                    # open: a response with no sheet to read has to fail toward
+                    # progress rather than toward an unbounded hold.
+                    sheet_seen_open = True
+                    logger.info(
+                        "DIRECT_HTTP: The club's sheet opened between +%sms and +%sms past "
+                        "the window; refusals count from here",
+                        last_closed_ms if last_closed_ms is not None else "?",
+                        observation.server_ms_past_window
+                        if observation.server_ms_past_window is not None
+                        else observation.sent_ms_past_window,
+                    )
+                if not sheet_seen_open:
+                    last_closed_ms = (
+                        observation.server_ms_past_window
+                        if observation.server_ms_past_window is not None
+                        else observation.sent_ms_past_window
+                    )
+                    # The cap's clock: from the stated window when there is
+                    # one, else from the first Reserve. An untimed booking
+                    # should never see a closed sheet at all, but if one does,
+                    # the cap has to run from *something* or the hold would
+                    # hammer until the deadline.
+                    now_ms_past_window = (
+                        int(time_module.time() * 1000) - window_frame_ms
+                        if window_frame_ms is not None
+                        else int((time_module.perf_counter() - started) * 1000)
+                    )
+                    if now_ms_past_window < self._hold_cap_ms:
+                        # A closed sheet cannot lose a slot to anyone, so this
+                        # refusal says nothing about who holds it. Ask again,
+                        # now, and spend nothing: not a rung, not a fallback,
+                        # not the attempt budget. Pacing is the club's own
+                        # answer rate - one ask per round trip.
+                        restaged = (
+                            _relocate_reserve_in(document, response.markup, slot_time)
+                            if slot_time is not None
+                            else None
+                        )
+                        if restaged is not None:
+                            config = restaged
+                        body = self.session.build_body(config)
+                        max_attempts += 1
+                        logger.info(
+                            "DIRECT_HTTP: Sheet still closed %dms past the window; asking "
+                            "again for %s immediately (holding until open, cap +%dms)",
+                            now_ms_past_window,
+                            slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                            self._hold_cap_ms,
+                        )
+                        continue
+                    sheet_seen_open = True
+                    logger.warning(
+                        "DIRECT_HTTP: Sheet still closed %dms past the window with the hold "
+                        "cap spent; walking the fallback list anyway",
+                        now_ms_past_window,
+                    )
+
+                # From here the sheet is open (or unreadable, or the cap is
+                # spent) and a refusal is real. Same timeout rule as the legacy
+                # ladder: once anything has gone unanswered, no other tee time.
+                if timed_out:
+                    logger.warning(
+                        "DIRECT_HTTP: %s, but an earlier Reserve never answered - not trying "
+                        "another tee time, as the club may be holding %s",
+                        observation.reason,
+                        slot_time.strftime("%I:%M %p") if slot_time else "the staged slot",
+                    )
+                    break
+
+                if (
+                    self._target_interleave
+                    and target_slot_time is not None
+                    and slot_time != target_slot_time
+                ):
+                    # The refusal just spent was a fallback's. Re-ask the target
+                    # before the next one: on both Friday races on record the
+                    # first grant to anyone came seconds after the sheet opened,
+                    # so an open-sheet refusal of the target is not yet proof it
+                    # is taken - and the member who got it both weeks was simply
+                    # still asking at that point. One round trip of fallback
+                    # delay, and it never consumes the attempt budget.
+                    relocated = _relocate_reserve_in(document, response.markup, target_slot_time)
+                    if relocated is not None:
+                        config = relocated
+                        slot_time = target_slot_time
+                        body = self.session.build_body(config)
+                        max_attempts += 1
+                        logger.info(
+                            "DIRECT_HTTP: %s; re-asking for the target %s between fallbacks",
+                            observation.reason,
+                            target_slot_time.strftime("%I:%M %p"),
+                        )
+                        continue
+
+                next_candidate = self._next_candidate(document, response.markup, remaining)
+                if next_candidate is None:
+                    logger.warning(
+                        "DIRECT_HTTP: %s and no fallback tee time left to try",
+                        observation.reason,
+                    )
+                    break
+                config, slot_time = next_candidate
+                body = self.session.build_body(config)
+                logger.info(
+                    "DIRECT_HTTP: %s; falling back to %s",
+                    observation.reason,
+                    slot_time.strftime("%I:%M %p"),
+                )
+                continue
 
             rung_ms = _next_future_rung(rungs, target_timestamp_ms)
             # The target is always set when a rung comes back - rungs are built

@@ -3177,3 +3177,146 @@ class TestReviewFindings:
         assert result.phase == PHASE_RESERVE_SENT
         assert result.phase not in PRE_SUBMIT_PHASES
         assert result.attempted_times == [RESERVE_SLOT_TIME]
+
+
+def gated_sheet(open_: bool, *slots: str) -> str:
+    """A refusal sheet carrying the club's own open/closed marker.
+
+    The datascroller's ``disable-div`` class is the live "this sheet is not
+    open for booking" signal (established 2026-08-21, #160/#161); the popup
+    rides along because every real refusal carries it whatever the cause.
+    """
+    scroller = (
+        f'<div id="{FORM_ID}:teeTimeCourses:0:teeTimeSlots" '
+        f'class="ui-datascroller ui-widget{"" if open_ else " disable-div"}">'
+        + "".join(slots)
+        + "</div>"
+    )
+    return refreshed_sheet(
+        '<div id="teeSheetValidationErrorPopup" aria-hidden="false">'
+        "This slot is blocked by another user</div>",
+        scroller,
+    )
+
+
+CLOSED_SHEET = gated_sheet(False, *ALL_THREE)
+OPEN_BLOCKED_SHEET = gated_sheet(True, *ALL_THREE)
+
+
+def hold_booker(
+    recorder: ChainRecorder, *, cap_ms: int = 8000, interleave: bool = True
+) -> DirectHttpBooker:
+    """A booker running the hold-until-open policy over the usual three slots."""
+    booker = stage_fallbacks(make_booker(recorder), SLOT_B_TIME, SLOT_C_TIME)
+    booker._sweep_offsets_ms = (0,)
+    booker._hold_until_open = True
+    booker._hold_cap_ms = cap_ms
+    booker._target_interleave = interleave
+    return booker
+
+
+class TestHoldUntilOpen:
+    """A closed sheet cannot lose a slot, so refusals on one spend nothing.
+
+    Both Friday races on record (2026-08-21 and 08-28) spent every ask for the
+    target into a sheet the club's own reply rendered closed, then walked off to
+    the fallback list seconds before the club granted anything to anyone. The
+    member who took the target both weeks was simply still asking when the
+    sheet opened. This policy makes the bot the one still asking.
+    """
+
+    def test_closed_refusals_re_ask_the_target_and_spend_nothing(self) -> None:
+        """Refusals on a closed sheet repeat the same slot, not the next one."""
+        recorder = ChainRecorder(
+            [CLOSED_SHEET, CLOSED_SHEET, CLOSED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        )
+        result = hold_booker(recorder).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:4] == [RESERVE_ID, RESERVE_ID, RESERVE_ID, RESERVE_ID]
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        assert result.timing["reserveAttempts"] == 4
+
+    def test_the_hold_outlasts_the_legacy_attempt_budget(self) -> None:
+        """Ten closed refusals must not exhaust a budget sized for six asks."""
+        from app.providers.walden_http_booker import _RESERVE_MAX_ATTEMPTS
+
+        closed_streak = [CLOSED_SHEET] * (_RESERVE_MAX_ATTEMPTS + 4)
+        recorder = ChainRecorder([*closed_streak, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = hold_booker(recorder).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources.count(RESERVE_ID) == len(closed_streak) + 1
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+
+    def test_an_open_sheet_refusal_starts_the_fallback_walk(self) -> None:
+        """The first refusal that arrives on an open sheet is a real one."""
+        recorder = ChainRecorder([OPEN_BLOCKED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = hold_booker(recorder).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+        assert result.booked_slot_time == SLOT_B_TIME
+
+    def test_the_target_is_re_asked_between_fallbacks(self) -> None:
+        """The win the policy exists for: the target granted on a later re-ask."""
+        recorder = ChainRecorder(
+            [OPEN_BLOCKED_SHEET, OPEN_BLOCKED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        )
+        result = hold_booker(recorder).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:3] == [RESERVE_ID, SLOT_B_ID, RESERVE_ID]
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+
+    def test_interleave_off_walks_the_fallbacks_straight_through(self) -> None:
+        """Without interleave the open-sheet walk is the caller's exact rule."""
+        recorder = ChainRecorder(
+            [OPEN_BLOCKED_SHEET, OPEN_BLOCKED_SHEET, PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE]
+        )
+        result = hold_booker(recorder, interleave=False).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert result.success, result.error
+        assert recorder.sources[:3] == [RESERVE_ID, SLOT_B_ID, SLOT_C_ID]
+        assert result.booked_slot_time == SLOT_C_TIME
+
+    def test_the_hold_cap_ends_the_hold(self) -> None:
+        """A sheet that never opens must not hold the race hostage."""
+        recorder = ChainRecorder([CLOSED_SHEET])
+        result = hold_booker(recorder, cap_ms=0).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert result.blocked
+        # Cap spent on the first refusal: the walk proceeds, target interleaved.
+        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, RESERVE_ID, SLOT_C_ID, RESERVE_ID]
+
+    def test_a_sheet_with_no_marker_counts_as_open(self) -> None:
+        """An unreadable sheet fails toward progress, not an unbounded hold."""
+        recorder = ChainRecorder([blocked_sheet(*ALL_THREE), PLAYER_PAGE, ROWS_PAGE, BOOKED_PAGE])
+        result = hold_booker(recorder).book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+
+    def test_untimed_bookings_run_the_same_policy(self) -> None:
+        """One execution path: an ad-hoc refusal walks with the target interleaved.
+
+        An ad-hoc booking's sheet opened days ago, so the hold itself no-ops -
+        but the loop is the same one the race runs, which is what lets a
+        Tuesday-afternoon booking exercise Friday's code.
+        """
+        recorder = ChainRecorder([OPEN_BLOCKED_SHEET])
+        result = hold_booker(recorder).book(1)
+
+        assert not result.success
+        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, RESERVE_ID, SLOT_C_ID, RESERVE_ID]
+
+    def test_an_untimed_closed_sheet_is_still_capped(self) -> None:
+        """No window to measure the cap from, so it runs from the first Reserve."""
+        recorder = ChainRecorder([CLOSED_SHEET])
+        result = hold_booker(recorder, cap_ms=0).book(1)
+
+        assert not result.success
+        assert recorder.sources == [RESERVE_ID, SLOT_B_ID, RESERVE_ID, SLOT_C_ID, RESERVE_ID]
