@@ -46,7 +46,7 @@ stampede hitting the club's server as the sheet opens.
 
 ## 2. First morning of CPU accounting, and what it says
 
-#160 proposed O2′ (wall vs CPU per attempt); #161 shipped it; this is its
+PR #160 proposed O2′ (wall vs CPU per attempt); #161 shipped it; this is its
 first race. Three findings:
 
 - **The CPU thief is real but intermittent.** Attempt 2 shows the descheduled
