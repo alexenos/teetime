@@ -29,6 +29,80 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 MAX_MESSAGE_LEN = 4096  # Telegram's hard limit per message
 WEBHOOK_PATH = "/webhooks/telegram"
 
+# The bot's own @username, needed to recognize which mentions and commands are
+# addressed to it. Fetched once from getMe and cached for the process: it is a
+# constant of the bot token, and the webhook route and the startup registration
+# hold different provider instances, so an instance-level cache would not be
+# shared between them.
+_bot_username: str | None = None
+
+
+def _utf16_units(text: str) -> bytes:
+    """Encode to the UTF-16 code units Telegram measures entity offsets in."""
+    return text.encode("utf-16-le")
+
+
+def _utf16_slice(units: bytes, offset: int, length: int) -> str:
+    return units[offset * 2 : (offset + length) * 2].decode("utf-16-le", errors="ignore")
+
+
+def strip_bot_prefix(
+    text: str, entities: list[dict[str, object]] | None, bot_username: str | None
+) -> str:
+    """Remove the mentions and command name that address a message to this bot.
+
+    In a group the user has to address the bot, so the raw text arrives as
+    "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a". The addressing
+    is noise the LLM parser has to see past - the same reason the Discord
+    gateway strips "<@1533...>" before dispatching.
+
+    Telegram marks the addressing structurally in ``entities`` rather than
+    leaving it to be matched out of the text, so this cuts the marked ranges
+    instead of guessing. Only entities that are actually ours are removed: a
+    mention of someone else, or a "/other@otherbot" aimed at a different bot in
+    the same group, is left in place.
+
+    Entity offsets are measured in UTF-16 code units, not characters, so a
+    single emoji earlier in the message shifts every later offset by one.
+    Slicing the Python string directly would cut the wrong range - and this app
+    treats a bare "👍" as a booking confirmation, so emoji in
+    messages is an expected case, not a hypothetical one.
+    """
+    if not entities:
+        return text.strip()
+
+    units = _utf16_units(text)
+    cuts: list[tuple[int, int]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        offset, length = entity.get("offset"), entity.get("length")
+        if not isinstance(offset, int) or not isinstance(length, int):
+            continue
+        if offset < 0 or length <= 0:
+            continue
+        fragment = _utf16_slice(units, offset, length)
+        entity_type = entity.get("type")
+        if entity_type == "mention":
+            if bot_username and fragment.lower() == f"@{bot_username.lower()}":
+                cuts.append((offset, length))
+        elif entity_type == "bot_command" and offset == 0:
+            # "/book" or "/book@teetimebot". An unsuffixed command is ours by
+            # definition here: in privacy mode Telegram only delivers commands
+            # meant for this bot, and in a group with several bots a user who
+            # means someone else has to write the suffix.
+            _, _, suffix = fragment.partition("@")
+            if not suffix or (bot_username and suffix.lower() == bot_username.lower()):
+                cuts.append((offset, length))
+
+    if not cuts:
+        return text.strip()
+
+    # Cut from the end so earlier offsets stay valid as the buffer shrinks.
+    for offset, length in sorted(cuts, reverse=True):
+        units = units[: offset * 2] + units[(offset + length) * 2 :]
+    return " ".join(units.decode("utf-16-le", errors="ignore").split())
+
 
 def is_authorized_user(user_id: str, is_bot: bool) -> bool:
     """Decide whether an incoming Telegram update should be processed.
@@ -150,6 +224,32 @@ class TelegramProvider(SMSProvider):
             logger.error(f"Telegram request failed sending to chat {chat_id}: {type(exc).__name__}")
             return SMSResult(success=False, error_message=str(exc))
 
+    async def get_bot_username(self) -> str | None:
+        """This bot's @username, from getMe, cached for the process.
+
+        Needed to tell a mention of this bot from a mention of someone else.
+        Returns None when it cannot be determined, which makes strip_bot_prefix
+        conservative rather than wrong: an unrecognized mention is left in the
+        text for the LLM to see past, instead of a stranger's being cut out.
+        """
+        global _bot_username
+        if _bot_username is not None:
+            return _bot_username
+        if not settings.telegram_bot_token:
+            return None
+        try:
+            async with self._client() as client:
+                resp = await client.get("/getMe")
+                resp.raise_for_status()
+                username = resp.json()["result"].get("username")
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            # The token is a path segment, so never log the request URL.
+            logger.warning(f"Could not resolve the Telegram bot username: {type(exc).__name__}")
+            return None
+        if username:
+            _bot_username = str(username)
+        return _bot_username
+
     async def register_webhook(self) -> bool:
         """Point Telegram at this service's webhook URL.
 
@@ -191,6 +291,9 @@ class TelegramProvider(SMSProvider):
                 )
                 resp.raise_for_status()
             logger.info(f"Telegram webhook registered at {url}")
+            # Warm the username cache here rather than on the first group
+            # message, which would otherwise wait on a getMe round trip.
+            await self.get_bot_username()
             return True
         except httpx.HTTPError as exc:
             # Never log the exception's URL or response body unfiltered: the bot

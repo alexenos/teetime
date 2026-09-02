@@ -56,9 +56,20 @@ heals itself rather than leaving the bot pointed at a dead endpoint.
 
 ## Deploying it
 
-Terraform creates the three secrets **empty**. A Cloud Run revision that
-references a secret with no version fails to deploy, so create the versions
-first, then enable the channel:
+Three steps, in this order. The gate is `telegram_enabled`, **not** the merge:
+merging with it off is a no-op for the running service, because the revision
+does not reference the Telegram secrets at all until the flag is on.
+
+### 1. Merge and deploy with `telegram_enabled = false` (its default)
+
+Terraform creates the three secrets **empty**. Nothing else changes: the
+credentials are not mounted, `TELEGRAM_WEBHOOK_BASE_URL` is empty so no webhook
+is registered, and Discord keeps running exactly as before.
+
+This step has to come first because the next one adds *versions* to secrets, and
+those secrets do not exist until Terraform has created them.
+
+### 2. Add the secret versions
 
 ```bash
 PROJECT_ID="teetime"
@@ -67,13 +78,18 @@ printf '%s' "<your user id>"  | gcloud secrets versions add TELEGRAM_ALLOWED_USE
 printf '%s' "<webhook secret>"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECRET --data-file=- --project=$PROJECT_ID
 ```
 
-Then turn the channel on by changing the **default** of `telegram_enabled` to
-`true` in `terraform/variables.tf`, and deploy. It has to be the default rather
-than a `terraform.tfvars` entry: `*.tfvars` is gitignored, so it is absent from
-the Cloud Build checkout, and `cloudbuild.yaml` passes only `project_id`,
-`region`, `container_image` and `log_level`. Every other variable resolves to
-its default. `TELEGRAM_WEBHOOK_BASE_URL` is filled in from the service's own URL
+### 3. Turn the channel on
+
+Change the **default** of `telegram_enabled` to `true` in
+`terraform/variables.tf`, and deploy. It has to be the default rather than a
+`terraform.tfvars` entry: `*.tfvars` is gitignored, so it is absent from the
+Cloud Build checkout, and `cloudbuild.yaml` passes only `project_id`, `region`,
+`container_image` and `log_level`. Every other variable resolves to its default.
+`TELEGRAM_WEBHOOK_BASE_URL` is filled in from the service's own URL
 automatically.
+
+A Cloud Run revision that references a secret with no version fails to deploy,
+which is why step 2 comes first.
 
 Confirm it came up: the startup log reads `Telegram webhook registered at
 https://.../webhooks/telegram`. Then message the bot.
@@ -95,16 +111,31 @@ to answer on. Rows written before this existed have no channel and fall back to
 The bot works in a group chat: add it to the group and it will answer there,
 with booking results posted back to the same group.
 
-By default Telegram bots run in **privacy mode**, where they only receive
-messages that are commands or direct replies to the bot. To have the bot see
-ordinary group conversation — the prerequisite for booking from what the group
-is already discussing — message BotFather → `/setprivacy` → select the bot →
-**Disable**. Telegram caches this, so **remove the bot from the group and add it
-back** for the change to take effect.
+By default Telegram bots run in **privacy mode**, where they receive only
+commands aimed at them, @-mentions of their username, and replies to their own
+messages. Ordinary group chatter never leaves Telegram's servers.
 
-Leave privacy mode **on** unless you actually need ambient messages: with it off,
-every message in the group reaches the service, and each one is a wake-up for a
-scale-to-zero container.
+That is already an "only act when addressed" filter, enforced server-side, at no
+cost — so **leave privacy mode on**. The container is not woken and the LLM is
+not called for messages that were not meant for the bot.
+
+Turn it off (BotFather → `/setprivacy` → select the bot → **Disable**, then
+remove the bot from the group and add it back, since Telegram caches this) only
+when you want the bot to act on what the group was *discussing* before it was
+addressed. That needs the preceding messages, which a filter cannot recover — so
+it has to receive them. Pair it with a cheap triage that buffers unaddressed
+messages and only calls the LLM once the bot is actually addressed; otherwise
+every message in the group becomes an LLM call.
+
+### Addressing is stripped before parsing
+
+Whichever mode is on, a group message arrives addressed to the bot —
+`@teetimebot book 9/5 at 9a`, or `/book@teetimebot 9/5 at 9a`. That addressing is
+removed before the text reaches the parser, so the LLM sees `book 9/5 at 9a`.
+Telegram marks it structurally in the update's `entities`, so the removal cuts
+the marked ranges rather than pattern-matching the text: a mention of someone
+else, or a `/command@otherbot` aimed at a different bot in the same group, is
+left alone.
 
 ## How it maps onto the existing design
 

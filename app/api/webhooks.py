@@ -3,7 +3,12 @@ import logging
 from fastapi import APIRouter, Form, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from app.providers.telegram_provider import is_authorized_user, verify_webhook_secret
+from app.providers.telegram_provider import (
+    TelegramProvider,
+    is_authorized_user,
+    strip_bot_prefix,
+    verify_webhook_secret,
+)
 from app.providers.twilio_provider import TwilioSMSProvider
 from app.services.booking_service import booking_service
 from app.services.sms_service import sms_service
@@ -115,6 +120,17 @@ async def handle_telegram_update(
 
     if not text:
         logger.info(f"Telegram message from {user_id} had no text; ignoring")
+        return {"status": "ignored"}
+
+    # In a group the message has to address the bot to reach us at all, so it
+    # arrives as "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a".
+    # Strip that addressing before the parser sees it, the same way the Discord
+    # gateway strips "<@1533...>".
+    text = strip_bot_prefix(
+        text, message.get("entities"), await TelegramProvider().get_bot_username()
+    )
+    if not text:
+        logger.info(f"Telegram message from {user_id} was only addressing; nothing to parse")
         return {"status": "ignored"}
 
     logger.info(f"Telegram message received from {user_id} in chat {chat_id}: {text[:80]}")

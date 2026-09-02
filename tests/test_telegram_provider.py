@@ -8,13 +8,21 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.config import Settings, settings
+from app.providers import telegram_provider
 from app.providers.sms_base import split_message
 from app.providers.telegram_provider import (
     MAX_MESSAGE_LEN,
     TelegramProvider,
     is_authorized_user,
+    strip_bot_prefix,
     verify_webhook_secret,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_bot_username_cache() -> None:
+    """getMe is cached for the process; keep that from leaking between tests."""
+    telegram_provider._bot_username = None
 
 
 class TestSplitMessage:
@@ -311,6 +319,60 @@ class TestTelegramWebhookRoute:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ignored"}
 
+    def test_group_addressing_stripped_before_dispatch(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End to end: the parser must not see "@teetimebot" or "/book"."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        seen: dict = {}
+
+        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+            seen["message"] = message
+            return "ok"
+
+        async def fake_send(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(text="@teetimebot book 9/5 at 9a", chat_id=-1001234567890)
+        update["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 11}]
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+
+        assert resp.status_code == 200
+        assert seen["message"] == "book 9/5 at 9a"
+
+    def test_message_that_is_only_addressing_ignored(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+
+        async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("a bare mention has nothing to parse")
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fail)
+
+        update = self._update(text="@teetimebot")
+        update["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 11}]
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ignored"}
+
     def test_empty_text_ignored_with_200(self, client: TestClient) -> None:
         resp = client.post(
             "/webhooks/telegram",
@@ -319,3 +381,134 @@ class TestTelegramWebhookRoute:
         )
         assert resp.status_code == 200
         assert resp.json() == {"status": "ignored"}
+
+
+def mention_entity(offset: int, length: int) -> dict:
+    return {"type": "mention", "offset": offset, "length": length}
+
+
+def command_entity(offset: int, length: int) -> dict:
+    return {"type": "bot_command", "offset": offset, "length": length}
+
+
+class TestStripBotPrefix:
+    """A group message has to address the bot, and that addressing is noise
+    the LLM parser has to see past - see the Discord gateway's strip_bot_mention.
+    """
+
+    def test_no_entities_returns_trimmed_text(self) -> None:
+        assert strip_bot_prefix("  book 9/5 at 9a  ", None, "teetimebot") == "book 9/5 at 9a"
+
+    def test_leading_mention_removed(self) -> None:
+        text = "@teetimebot book 9/5 at 9a"
+        assert strip_bot_prefix(text, [mention_entity(0, 11)], "teetimebot") == "book 9/5 at 9a"
+
+    def test_mention_matched_case_insensitively(self) -> None:
+        text = "@TeeTimeBot book 9/5"
+        assert strip_bot_prefix(text, [mention_entity(0, 11)], "teetimebot") == "book 9/5"
+
+    def test_trailing_mention_removed(self) -> None:
+        text = "book 9/5 at 9a @teetimebot"
+        assert strip_bot_prefix(text, [mention_entity(15, 11)], "teetimebot") == "book 9/5 at 9a"
+
+    def test_someone_elses_mention_kept(self) -> None:
+        """Cutting a stranger's name out of the text would lose real content."""
+        text = "@alex book 9/5 at 9a"
+        assert strip_bot_prefix(text, [mention_entity(0, 5)], "teetimebot") == text
+
+    def test_unsuffixed_command_removed(self) -> None:
+        text = "/book 9/5 at 9a"
+        assert strip_bot_prefix(text, [command_entity(0, 5)], "teetimebot") == "9/5 at 9a"
+
+    def test_suffixed_command_removed(self) -> None:
+        text = "/book@teetimebot 9/5 at 9a"
+        assert strip_bot_prefix(text, [command_entity(0, 16)], "teetimebot") == "9/5 at 9a"
+
+    def test_command_for_another_bot_kept(self) -> None:
+        text = "/book@otherbot 9/5 at 9a"
+        assert strip_bot_prefix(text, [command_entity(0, 14)], "teetimebot") == text
+
+    def test_command_not_at_start_kept(self) -> None:
+        """Only a leading command is addressing; one mid-sentence is content."""
+        text = "remind me to /book later"
+        assert strip_bot_prefix(text, [command_entity(13, 5)], "teetimebot") == text
+
+    def test_unknown_username_leaves_mentions_alone(self) -> None:
+        """getMe can fail; being conservative beats cutting the wrong range."""
+        text = "@teetimebot book 9/5"
+        assert strip_bot_prefix(text, [mention_entity(0, 11)], None) == text
+
+    def test_unknown_username_still_strips_bare_command(self) -> None:
+        text = "/book 9/5"
+        assert strip_bot_prefix(text, [command_entity(0, 5)], None) == "9/5"
+
+    def test_offsets_are_utf16_code_units_not_characters(self) -> None:
+        """A single emoji shifts every later offset by one code unit.
+
+        This app already treats a bare thumbs-up as a booking confirmation, so
+        emoji in messages is expected. Slicing the Python string directly would
+        cut one character short and leave a stray "t" in the text.
+        """
+        text = "👍 @teetimebot book 9/5"
+        offset = len("👍 ".encode("utf-16-le")) // 2
+        result = strip_bot_prefix(text, [mention_entity(offset, 11)], "teetimebot")
+        assert result == "👍 book 9/5"
+
+    def test_multiple_mentions_all_removed(self) -> None:
+        text = "@teetimebot book 9/5 @teetimebot"
+        entities = [mention_entity(0, 11), mention_entity(21, 11)]
+        assert strip_bot_prefix(text, entities, "teetimebot") == "book 9/5"
+
+    def test_only_addressing_collapses_to_empty(self) -> None:
+        assert strip_bot_prefix("@teetimebot", [mention_entity(0, 11)], "teetimebot") == ""
+
+    def test_malformed_entity_ignored(self) -> None:
+        text = "@teetimebot book 9/5"
+        entities = [{"type": "mention"}, {"type": "mention", "offset": -1, "length": 4}, "junk"]
+        assert strip_bot_prefix(text, entities, "teetimebot") == text  # type: ignore[arg-type]
+
+
+class TestGetBotUsername:
+    async def test_fetches_and_caches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={"ok": True, "result": {"username": "teetimebot"}})
+
+        provider = make_provider(handler)
+        assert await provider.get_bot_username() == "teetimebot"
+        assert await provider.get_bot_username() == "teetimebot"
+        assert calls == 1
+
+    async def test_cache_shared_across_instances(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The webhook route and startup registration hold different instances."""
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "result": {"username": "teetimebot"}})
+
+        assert await make_provider(handler).get_bot_username() == "teetimebot"
+
+        def fail(request: httpx.Request) -> httpx.Response:  # pragma: no cover - not reached
+            raise AssertionError("second instance should read the cache")
+
+        assert await make_provider(fail).get_bot_username() == "teetimebot"
+
+    async def test_api_failure_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, text="Unauthorized")
+
+        assert await make_provider(handler).get_bot_username() is None
+
+    async def test_no_token_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "")
+
+        def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - not reached
+            raise AssertionError("should not call the API without a token")
+
+        assert await make_provider(handler).get_bot_username() is None

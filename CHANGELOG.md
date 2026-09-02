@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exercised end to end before Discord is switched off. **No cost is saved until
   that switch happens** - see `docs/telegram-setup.md`.
 
+  In a group the addressing (`@teetimebot`, or `/book@teetimebot`) is stripped
+  before the text reaches the parser, mirroring the Discord gateway's
+  `strip_bot_mention`. Telegram marks it structurally in the update's
+  `entities`, so the removal cuts the marked ranges rather than pattern-matching
+  text - a mention of someone else, or a command aimed at a different bot in the
+  same group, is left alone. Entity offsets are UTF-16 code units, so an emoji
+  earlier in the message shifts them; this app already treats a bare thumbs-up
+  as a booking confirmation, so that case is handled rather than assumed away.
+
   Requests are authenticated with the shared secret Telegram echoes in
   `X-Telegram-Bot-Api-Secret-Token`; an unset secret rejects every update rather
   than trusting the caller. Beyond that, only `TELEGRAM_ALLOWED_USER_IDS` are
