@@ -1,6 +1,7 @@
 # TeeTime - Golf Reservation Assistant
 
-An LLM-powered application that helps reserve golf tee times at Northgate Country Club via SMS.
+An LLM-powered application that helps reserve golf tee times at Northgate Country Club by
+message - over Telegram, Discord, or SMS.
 
 > **Note**: The booking platform is waldengolf.com (Walden Golf manages multiple clubs), but this application is specifically configured for Northgate Country Club.
 
