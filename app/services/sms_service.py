@@ -63,21 +63,34 @@ class SMSService:
         self._provider = provider
         self._providers.clear()
 
-    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
+    def validate_request(
+        self,
+        url: str,
+        params: dict[str, str],
+        signature: str | None,
+        channel: str | None = None,
+    ) -> bool:
         """
         Validate a webhook request signature.
 
-        Delegates to the underlying SMS provider's validation logic.
+        Delegates to the provider for the channel the request arrived on, which
+        the caller names. A webhook route knows exactly which service is calling
+        it, so it must not be answered by whichever provider MESSAGING_CHANNEL
+        happens to select: Discord and Telegram both validate inbound through
+        other means and return True here, so a Twilio request checked against
+        either would have its signature waved through.
 
         Args:
             url: The full URL of the webhook request.
             params: The form parameters from the request.
             signature: The signature header value (may be None).
+            channel: Channel the request arrived on. None falls back to
+                MESSAGING_CHANNEL.
 
         Returns:
             True if the request is valid, False otherwise.
         """
-        return self.provider.validate_request(url, params, signature)
+        return self.provider_for(channel).validate_request(url, params, signature)
 
     async def send_sms(
         self,

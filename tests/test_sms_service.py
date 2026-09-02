@@ -496,3 +496,63 @@ class TestPerChannelRouting:
         monkeypatch.setattr(settings, "twilio_auth_token", "token")
         with patch("app.providers.twilio_provider.Client"):
             assert isinstance(sms_service.provider_for("telegram"), TwilioSMSProvider)
+
+
+class TestValidateRequestRouting:
+    """A webhook route must be validated by the service that calls it.
+
+    Regression: validate_request delegated to whichever provider
+    MESSAGING_CHANNEL named. Discord and Telegram validate inbound requests by
+    other means and return True here, so while MESSAGING_CHANNEL was "discord"
+    an unsigned POST to the public /webhooks/twilio/sms was accepted.
+    """
+
+    def test_twilio_signature_enforced_while_discord_is_the_channel(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "messaging_channel", "discord")
+        monkeypatch.setattr(settings, "discord_bot_token", "discord-token")
+        monkeypatch.setattr(settings, "twilio_account_sid", "AC123")
+        monkeypatch.setattr(settings, "twilio_auth_token", "auth-token")
+
+        with (
+            patch("app.providers.twilio_provider.Client"),
+            patch("app.providers.twilio_provider.RequestValidator") as mock_validator,
+        ):
+            mock_validator.return_value.validate.return_value = False
+            assert (
+                sms_service.validate_request(
+                    "https://example.com/webhooks/twilio/sms",
+                    {"Body": "book saturday"},
+                    "a-forged-signature",
+                    channel="twilio",
+                )
+                is False
+            )
+
+    def test_missing_signature_rejected_while_discord_is_the_channel(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "messaging_channel", "discord")
+        monkeypatch.setattr(settings, "discord_bot_token", "discord-token")
+        monkeypatch.setattr(settings, "twilio_account_sid", "AC123")
+        monkeypatch.setattr(settings, "twilio_auth_token", "auth-token")
+
+        with patch("app.providers.twilio_provider.Client"):
+            assert (
+                sms_service.validate_request(
+                    "https://example.com/webhooks/twilio/sms",
+                    {"Body": "book saturday"},
+                    None,
+                    channel="twilio",
+                )
+                is False
+            )
+
+    def test_unnamed_channel_still_uses_the_configured_default(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Callers that do not name a channel keep the previous behavior."""
+        monkeypatch.setattr(settings, "messaging_channel", "discord")
+        monkeypatch.setattr(settings, "discord_bot_token", "discord-token")
+        assert sms_service.validate_request("https://example.com/x", {}, None) is True

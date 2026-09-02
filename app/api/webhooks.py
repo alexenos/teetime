@@ -61,7 +61,9 @@ async def handle_incoming_sms(
     form_data = await request.form()
     params = {key: str(value) for key, value in form_data.items()}
 
-    if not sms_service.validate_request(url, params, x_twilio_signature):
+    # Named explicitly rather than left to MESSAGING_CHANNEL: this route is only
+    # ever called by Twilio, and only Twilio's provider checks its signature.
+    if not sms_service.validate_request(url, params, x_twilio_signature, channel="twilio"):
         raise HTTPException(status_code=403, detail="Invalid or missing Twilio signature")
 
     normalized_from = TwilioSMSProvider.normalize_phone_number(from_number)

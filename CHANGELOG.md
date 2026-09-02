@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Rows written before the column existed have no channel and fall back to
   `MESSAGING_CHANNEL`, exactly as they behaved before.
 
+### Security
+
+- **The Twilio webhook now validates its own signatures.**
+  `SMSService.validate_request` delegated to whichever provider
+  `MESSAGING_CHANNEL` selected. Discord and Telegram validate inbound requests
+  by other means and return `True` from that method, so while
+  `MESSAGING_CHANNEL` was `discord` - its default since the Discord channel
+  landed - an unsigned POST to the public `/webhooks/twilio/sms` endpoint was
+  accepted and could create bookings. The route now names its channel
+  explicitly, so Twilio requests are checked against Twilio's validator
+  regardless of which channel is configured.
+
 ### Fixed
 
 - **Stale pooled database connections no longer kill the morning job.** The

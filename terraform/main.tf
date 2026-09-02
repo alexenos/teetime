@@ -61,16 +61,19 @@ locals {
     "USER_PHONE_NUMBER",
   ], local.discord_secrets, local.telegram_secrets)
 
-  # Secrets the running container may read. A channel's credentials are only
-  # mounted (and only readable) while that channel is active. Both channels can
-  # be live at once during the Telegram trial, so this is not a single choice:
+  # Credentials for a channel that is switched off. Both channels can be live
+  # at once during the Telegram trial, so this is not one choice between them:
   # each is withheld independently of the other.
+  disabled_channel_secrets = concat(
+    var.messaging_channel == "discord" ? [] : local.discord_secrets,
+    var.telegram_enabled ? [] : local.telegram_secrets,
+  )
+
+  # Secrets the running container may read. A channel's credentials are only
+  # mounted (and only readable) while that channel is active.
   runtime_secrets = setsubtract(
     toset(local.secrets),
-    setunion(
-      var.messaging_channel == "discord" ? toset([]) : toset(local.discord_secrets),
-      var.telegram_enabled ? toset([]) : toset(local.telegram_secrets)
-    )
+    toset(local.disabled_channel_secrets)
   )
 }
 
