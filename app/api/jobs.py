@@ -314,7 +314,10 @@ async def execute_due_bookings(
                 )
 
             await sms_service.send_booking_confirmation(
-                original_booking.phone_number, details, original_booking.origin_channel_id
+                original_booking.phone_number,
+                details,
+                original_booking.origin_channel_id,
+                original_booking.channel,
             )
         else:
             failed += 1
@@ -345,6 +348,7 @@ async def execute_due_bookings(
                 error_message or "Unknown error",
                 booking_details=booking_details,
                 origin_channel_id=original_booking.origin_channel_id,
+                channel=original_booking.channel,
             )
 
     logger.info(

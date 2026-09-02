@@ -34,7 +34,32 @@ class Settings(BaseSettings):
     # channel (mentioning the user) instead of a private DM, so the whole
     # conversation stays in one place. Leave empty to fall back to DMs.
     discord_channel_id: str = ""
-    messaging_channel: str = "twilio"  # "twilio" or "discord"
+
+    # Telegram: the same conversation, over HTTP webhooks instead of a
+    # persistent socket. Inbound updates arrive as POSTs (app/api/webhooks.py),
+    # so unlike the Discord gateway this needs no always-on instance and the
+    # service can scale to zero.
+    #
+    # The webhook is mounted whenever telegram_bot_token is set, independently
+    # of messaging_channel, so Telegram can be exercised end to end while
+    # Discord is still the live channel. messaging_channel only decides where
+    # a conversation with no recorded channel of its own is answered.
+    telegram_bot_token: str = ""
+    # Comma-separated Telegram user IDs allowed to talk to the bot. Empty means
+    # nobody, matching the Discord allowlist - fail closed.
+    telegram_allowed_user_ids: str = ""
+    # Shared secret Telegram echoes back in X-Telegram-Bot-Api-Secret-Token.
+    # This is the entire authentication story for a public webhook, so an unset
+    # value means the endpoint refuses every update rather than trusting the
+    # caller. Set it and setWebhook registers it; leave it unset locally and
+    # inbound Telegram is simply off.
+    telegram_webhook_secret: str = ""
+    # Public base URL of this service (e.g. the Cloud Run URL), used to register
+    # the webhook with Telegram at startup. Empty skips registration, which is
+    # what local development wants - there is no public URL to register.
+    telegram_webhook_base_url: str = ""
+
+    messaging_channel: str = "twilio"  # "twilio", "discord" or "telegram"
 
     gemini_api_key: str = ""
     # Floating alias rather than a pinned version: a pinned model (gemini-2.0-flash)
@@ -344,6 +369,33 @@ class Settings(BaseSettings):
                 "channel and choose Copy Channel ID. Leave it unset to use DMs."
             )
         return v
+
+    @field_validator("telegram_allowed_user_ids")
+    @classmethod
+    def _validate_telegram_allowed_user_ids(cls, v: str) -> str:
+        """Reject a TELEGRAM_ALLOWED_USER_IDS that is not numeric IDs at load time.
+
+        This is the allowlist; a value that silently parses to nothing would
+        fail closed and leave the bot mute with no obvious cause. A Telegram
+        @username is the likely mistake, and it is not an ID - reject it here
+        where the message can say so.
+        """
+        v = v.strip()
+        for piece in v.split(","):
+            piece = piece.strip()
+            if piece and not piece.isdigit():
+                raise ValueError(
+                    "TELEGRAM_ALLOWED_USER_IDS must be comma-separated numeric Telegram "
+                    f"user IDs; got {piece!r}. A @username is not an ID - message "
+                    "@userinfobot in Telegram to get yours. Leave it unset to allow no one."
+                )
+        return v
+
+    def telegram_allowed_ids(self) -> frozenset[str]:
+        """The Telegram allowlist as a set of IDs, empty when unset."""
+        return frozenset(
+            piece.strip() for piece in self.telegram_allowed_user_ids.split(",") if piece.strip()
+        )
 
     def walden_sweep_offsets_ms(self) -> tuple[int, ...]:
         """The sweep ladder as ordered, deduplicated, non-negative offsets.

@@ -143,7 +143,11 @@ class BookingService:
         await database_service.update_session(session)
 
     async def handle_incoming_message(
-        self, phone_number: str, message: str, origin_channel_id: str | None = None
+        self,
+        phone_number: str,
+        message: str,
+        origin_channel_id: str | None = None,
+        channel: str | None = None,
     ) -> str:
         """
         Process an incoming SMS message and return a response.
@@ -158,10 +162,17 @@ class BookingService:
         Args:
             phone_number: The sender's phone number.
             message: The text content of the SMS.
-            origin_channel_id: For Discord, the channel this message arrived in.
-                Stored on the session and copied onto any booking created from
-                this conversation, so the booking result days later replies in
-                the same place. None for SMS, which has no channels.
+            origin_channel_id: For Discord and Telegram, the channel or chat
+                this message arrived in. Stored on the session and copied onto
+                any booking created from this conversation, so the booking
+                result days later replies in the same place. None for SMS,
+                which has no channels.
+            channel: Which messaging channel the message arrived over
+                ("discord", "telegram" or "twilio"). Stored alongside
+                origin_channel_id and copied onto bookings for the same reason:
+                Discord and Telegram IDs are both bare numbers, so the channel
+                is the only thing that says which one to answer on. None leaves
+                the session's existing channel untouched.
 
         Returns:
             The response message to send back to the user.
@@ -169,6 +180,8 @@ class BookingService:
         session = await self.get_session(phone_number)
         if origin_channel_id:
             session.origin_channel_id = origin_channel_id
+        if channel:
+            session.channel = channel
 
         affirmative = self._confirmation_shortcut(session, message)
         if affirmative is not None:
@@ -304,7 +317,10 @@ class BookingService:
 
         try:
             booking = await self.create_booking(
-                session.phone_number, session.pending_request, session.origin_channel_id
+                session.phone_number,
+                session.pending_request,
+                session.origin_channel_id,
+                channel=session.channel,
             )
         except ValueError as e:
             session.pending_request = None
@@ -373,6 +389,7 @@ class BookingService:
                     request,
                     session.origin_channel_id,
                     defer_execution=True,
+                    channel=session.channel,
                 )
                 successful_bookings.append(booking)
             except ValueError as e:
@@ -577,6 +594,7 @@ class BookingService:
                     INTERRUPTED_ERROR_MESSAGE,
                     booking_details=booking_details,
                     origin_channel_id=booking.origin_channel_id,
+                    channel=booking.channel,
                 )
             except Exception:
                 # A notification failure must not stop us reconciling the rest.
@@ -801,6 +819,7 @@ class BookingService:
         request: TeeTimeRequest,
         origin_channel_id: str | None = None,
         defer_execution: bool = False,
+        channel: str | None = None,
     ) -> TeeTimeBooking:
         """
         Create a new booking record and schedule it for execution.
@@ -821,9 +840,12 @@ class BookingService:
         Args:
             phone_number: The phone number to associate with the booking.
             request: The tee time request details.
-            origin_channel_id: Discord channel this booking was requested in, so
-                the success/failure notification replies there. None for SMS and
-                REST API callers.
+            origin_channel_id: Discord channel or Telegram chat this booking was
+                requested in, so the success/failure notification replies there.
+                None for SMS and REST API callers.
+            channel: Messaging channel this booking was requested over, so its
+                notification days later goes back over the same one. None for
+                REST API callers, which fall back to MESSAGING_CHANNEL.
             defer_execution: Create the record and mark it IN_PROGRESS, but do
                 not start the attempt. Callers creating several bookings at once
                 set this so they can run the whole set as one batch instead of
@@ -865,6 +887,7 @@ class BookingService:
             status=BookingStatus.SCHEDULED,
             scheduled_execution_time=execution_time,
             origin_channel_id=origin_channel_id,
+            channel=channel,
         )
 
         created_booking = await database_service.create_booking(booking)
@@ -1361,7 +1384,7 @@ class BookingService:
                 details += f"\n\nNote: {result.fallback_reason}"
 
             await sms_service.send_booking_confirmation(
-                booking.phone_number, details, booking.origin_channel_id
+                booking.phone_number, details, booking.origin_channel_id, booking.channel
             )
             return
 
@@ -1374,6 +1397,7 @@ class BookingService:
             result.alternatives,
             booking_details,
             booking.origin_channel_id,
+            booking.channel,
         )
 
     async def get_pending_bookings(self) -> list[TeeTimeBooking]:

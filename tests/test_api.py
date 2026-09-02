@@ -381,7 +381,7 @@ class TestWebhookEndpoints:
 
                 assert response.status_code == 200
                 mock_booking.handle_incoming_message.assert_called_once_with(
-                    "+15551234567", "Book Saturday 8am"
+                    "+15551234567", "Book Saturday 8am", channel="twilio"
                 )
                 mock_sms.send_sms.assert_called_once()
 

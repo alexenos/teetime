@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Telegram as a messaging channel, running alongside Discord.** Inbound
+  messages arrive as HTTP webhooks (`POST /webhooks/telegram`) rather than over
+  a persistent WebSocket, so the service does not need `min-instances=1` and can
+  scale to zero between messages. This is the groundwork for retiring the
+  always-on Cloud Run instance the Discord gateway requires, which accounts for
+  roughly USD 58 of the current USD 71 monthly bill.
+
+  Telegram is enabled by `TELEGRAM_BOT_TOKEN` independently of
+  `MESSAGING_CHANNEL`, so both channels can be live at once and Telegram can be
+  exercised end to end before Discord is switched off. **No cost is saved until
+  that switch happens** - see `docs/telegram-setup.md`.
+
+  In a group the addressing (`@teetimebot`, or `/book@teetimebot`) is stripped
+  before the text reaches the parser, mirroring the Discord gateway's
+  `strip_bot_mention`. Telegram marks it structurally in the update's
+  `entities`, so the removal cuts the marked ranges rather than pattern-matching
+  text - a mention of someone else, or a command aimed at a different bot in the
+  same group, is left alone. Entity offsets are UTF-16 code units, so an emoji
+  earlier in the message shifts them; this app already treats a bare thumbs-up
+  as a booking confirmation, so that case is handled rather than assumed away.
+
+  Requests are authenticated with the shared secret Telegram echoes in
+  `X-Telegram-Bot-Api-Secret-Token`; an unset secret rejects every update rather
+  than trusting the caller. Beyond that, only `TELEGRAM_ALLOWED_USER_IDS` are
+  answered.
+
+- **Sessions and bookings record the channel they came from.** A booking's
+  result notification - including the 6:30 AM confirmation that arrives days
+  later - is sent back over the channel it was requested on. Discord and
+  Telegram identify users with bare numbers and are otherwise indistinguishable,
+  so the recorded channel is the only thing that says which API to answer on.
+  Rows written before the column existed have no channel and fall back to
+  `MESSAGING_CHANNEL`, exactly as they behaved before.
+
+### Security
+
+- **The Twilio webhook now validates its own signatures.**
+  `SMSService.validate_request` delegated to whichever provider
+  `MESSAGING_CHANNEL` selected. Discord and Telegram validate inbound requests
+  by other means and return `True` from that method, so while
+  `MESSAGING_CHANNEL` was `discord` - its default since the Discord channel
+  landed - an unsigned POST to the public `/webhooks/twilio/sms` endpoint was
+  accepted and could create bookings. The route now names its channel
+  explicitly, so Twilio requests are checked against Twilio's validator
+  regardless of which channel is configured.
+
 ### Fixed
 
 - **Stale pooled database connections no longer kill the morning job.** The

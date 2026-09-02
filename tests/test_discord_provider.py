@@ -353,7 +353,7 @@ class TestGatewayOnMessage:
 
         await gw._on_message(message)
 
-        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am", DM_ORIGIN)
+        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am", DM_ORIGIN, "discord")
         message.channel.send.assert_awaited_once_with("ok")
 
     async def test_guild_message_from_allowed_user_dispatched(self, gateway) -> None:  # type: ignore[no-untyped-def]
@@ -364,7 +364,9 @@ class TestGatewayOnMessage:
 
         await gw._on_message(message)
 
-        handler.assert_awaited_once_with(ALLOWED_ID, "book saturday 8am", GUILD_CHANNEL_ID)
+        handler.assert_awaited_once_with(
+            ALLOWED_ID, "book saturday 8am", GUILD_CHANNEL_ID, "discord"
+        )
         message.channel.send.assert_awaited_once_with("ok")
 
     async def test_own_message_suppressed(
@@ -418,7 +420,9 @@ class TestGatewayOnMessage:
 
         await gw._on_message(message)
 
-        handler.assert_awaited_once_with(ALLOWED_ID, "book 8/2 at 5:06p", GUILD_CHANNEL_ID)
+        handler.assert_awaited_once_with(
+            ALLOWED_ID, "book 8/2 at 5:06p", GUILD_CHANNEL_ID, "discord"
+        )
 
     @pytest.mark.parametrize("mention_fmt", ["<@{id}>", "<@!{id}>"])
     async def test_mention_only_message_ignored(self, gateway, mention_fmt: str) -> None:  # type: ignore[no-untyped-def]

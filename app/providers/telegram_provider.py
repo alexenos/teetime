@@ -1,0 +1,363 @@
+"""
+Telegram implementation of the messaging provider interface.
+
+Both halves of this channel are plain HTTPS. Outbound messages are POSTed to
+the Bot API; inbound updates arrive as webhook POSTs from Telegram (see
+``app/api/webhooks.py``), not over a persistent socket. That is the whole point
+of this provider: unlike the Discord gateway it holds no connection, so the
+Cloud Run service can scale to zero between messages.
+
+Throughout the app the user identifier field is called ``phone_number``; for
+Telegram it carries the user's numeric ID as a string, which fits the existing
+20-char column without a schema change. ``origin_channel_id`` carries the chat
+the conversation is happening in - the same value as the user ID in a private
+chat, and a negative group ID in a group - so a booking result days later
+replies where it was asked for.
+"""
+
+import asyncio
+import hmac
+import logging
+import re
+
+import httpx
+
+from app.config import settings
+from app.providers.sms_base import SMSProvider, SMSResult, split_message
+
+logger = logging.getLogger(__name__)
+
+TELEGRAM_API_BASE = "https://api.telegram.org"
+MAX_MESSAGE_LEN = 4096  # Telegram's hard limit per message
+WEBHOOK_PATH = "/webhooks/telegram"
+
+# The bot's own @username, needed to recognize which mentions and commands are
+# addressed to it. Fetched once from getMe and cached for the process: it is a
+# constant of the bot token, and the webhook route and the startup registration
+# hold different provider instances, so an instance-level cache would not be
+# shared between them.
+_bot_username: str | None = None
+# Set once getMe has been attempted, successfully or not. Without it a token
+# that cannot resolve would retry on every single message, putting the client's
+# 15-second timeout in front of each one. Instances are ephemeral, so a
+# transient failure self-heals on the next cold start rather than sticking.
+_bot_username_resolved = False
+
+
+def _utf16_units(text: str) -> bytes:
+    """Encode to the UTF-16 code units Telegram measures entity offsets in."""
+    return text.encode("utf-16-le")
+
+
+def _utf16_slice(units: bytes, offset: int, length: int) -> str:
+    return units[offset * 2 : (offset + length) * 2].decode("utf-16-le", errors="ignore")
+
+
+def strip_bot_prefix(
+    text: str, entities: list[dict[str, object]] | None, bot_username: str | None
+) -> str:
+    """Remove the mentions and command name that address a message to this bot.
+
+    In a group the user has to address the bot, so the raw text arrives as
+    "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a". The addressing
+    is noise the LLM parser has to see past - the same reason the Discord
+    gateway strips "<@1533...>" before dispatching.
+
+    Telegram marks the addressing structurally in ``entities`` rather than
+    leaving it to be matched out of the text, so this cuts the marked ranges
+    instead of guessing. Only entities that are actually ours are removed: a
+    mention of someone else, or a "/other@otherbot" aimed at a different bot in
+    the same group, is left in place.
+
+    Entity offsets are measured in UTF-16 code units, not characters, so a
+    single emoji earlier in the message shifts every later offset by one.
+    Slicing the Python string directly would cut the wrong range - and this app
+    treats a bare "👍" as a booking confirmation, so emoji in
+    messages is an expected case, not a hypothetical one.
+    """
+    if not entities:
+        return text.strip()
+
+    units = _utf16_units(text)
+    cuts: list[tuple[int, int]] = []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        offset, length = entity.get("offset"), entity.get("length")
+        if not isinstance(offset, int) or not isinstance(length, int):
+            continue
+        if offset < 0 or length <= 0:
+            continue
+        fragment = _utf16_slice(units, offset, length)
+        entity_type = entity.get("type")
+        if entity_type == "mention":
+            if bot_username and fragment.lower() == f"@{bot_username.lower()}":
+                cuts.append((offset, length))
+        elif entity_type == "bot_command" and offset == 0:
+            # "/book" or "/book@teetimebot". An unsuffixed command is ours by
+            # definition here: in privacy mode Telegram only delivers commands
+            # meant for this bot, and in a group with several bots a user who
+            # means someone else has to write the suffix.
+            _, _, suffix = fragment.partition("@")
+            if not suffix or (bot_username and suffix.lower() == bot_username.lower()):
+                cuts.append((offset, length))
+
+    if not cuts:
+        return text.strip()
+
+    # Cut from the end so earlier offsets stay valid as the buffer shrinks.
+    for offset, length in sorted(cuts, reverse=True):
+        units = units[: offset * 2] + units[(offset + length) * 2 :]
+    # Tidy the gap a removed mention leaves behind, but only horizontal
+    # whitespace: a multi-booking message is one request per line, and folding
+    # its newlines into spaces would change what the parser is asked to read.
+    return re.sub(r"[^\S\n]+", " ", units.decode("utf-16-le", errors="ignore")).strip()
+
+
+def is_authorized_user(user_id: str, is_bot: bool) -> bool:
+    """Decide whether an incoming Telegram update should be processed.
+
+    Mirrors the Discord allowlist: only the configured user IDs are handled,
+    wherever the bot can see them, and an empty allowlist authorizes no one.
+    The webhook is a public URL whose only other protection is the shared
+    secret, so this must fail closed.
+    """
+    if is_bot:
+        return False
+    allowed = settings.telegram_allowed_ids()
+    if not allowed:
+        logger.warning("TELEGRAM_ALLOWED_USER_IDS not configured; ignoring update from %s", user_id)
+        return False
+    return user_id in allowed
+
+
+def verify_webhook_secret(header_value: str | None) -> bool:
+    """Check the secret Telegram echoes in X-Telegram-Bot-Api-Secret-Token.
+
+    Telegram does not sign webhook payloads; this shared secret is the only
+    thing standing between the public endpoint and a forged booking, so an
+    unconfigured secret rejects everything rather than accepting everything.
+    Compared with compare_digest to keep the check constant-time.
+    """
+    configured = settings.telegram_webhook_secret
+    if not configured:
+        logger.error(
+            "TELEGRAM_WEBHOOK_SECRET is not configured; rejecting the update. "
+            "Inbound Telegram is disabled until it is set."
+        )
+        return False
+    if not header_value:
+        return False
+    # Compared as bytes, not str: Starlette decodes header bytes as latin-1, so
+    # a header carrying any byte above 0x7f becomes a non-ASCII str, and
+    # compare_digest raises TypeError on those. That would turn a rejected
+    # forgery into a 500 instead of a 403.
+    return hmac.compare_digest(header_value.encode("utf-8"), configured.encode("utf-8"))
+
+
+class TelegramProvider(SMSProvider):
+    """Sends messages to a Telegram user or group chat via the Bot API.
+
+    ``to_number`` is a Telegram user ID. ``origin_channel_id`` is the chat to
+    post into and takes precedence, so a request made in a group is answered in
+    that group; with no origin recorded the message goes to the user directly.
+    """
+
+    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self._transport = transport
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=f"{TELEGRAM_API_BASE}/bot{settings.telegram_bot_token}",
+            timeout=15.0,
+            transport=self._transport,
+        )
+
+    def validate_request(self, url: str, params: dict[str, str], signature: str | None) -> bool:
+        """Telegram webhooks carry no signature; the shared secret is checked instead.
+
+        See verify_webhook_secret, which the webhook route calls against the
+        X-Telegram-Bot-Api-Secret-Token header. This interface method takes form
+        params and a signature, neither of which Telegram sends, so it has
+        nothing to validate here.
+        """
+        return True
+
+    @staticmethod
+    def resolve_chat_id(to_number: str, origin_channel_id: str | None) -> str:
+        """Pick the chat to post into.
+
+        The conversation's own chat wins when one was recorded, so a booking
+        requested in a group is answered in that group rather than splitting
+        into a private message. Falls back to the user's ID, which in Telegram
+        is also their private chat ID.
+
+        Group chat IDs are negative, so this cannot use isdigit() the way the
+        Discord provider does; it checks for an integer instead. Whatever comes
+        back is sent as the chat_id parameter, so both sources are checked here
+        rather than trusted.
+        """
+        candidate = (origin_channel_id or "").strip()
+        if candidate:
+            try:
+                int(candidate)
+            except ValueError:
+                logger.warning(f"Ignoring unrecognized Telegram origin chat {candidate!r}")
+            else:
+                return candidate
+        return to_number.strip()
+
+    async def send_sms(
+        self, to_number: str, message: str, origin_channel_id: str | None = None
+    ) -> SMSResult:
+        if not settings.telegram_bot_token:
+            return SMSResult(success=False, error_message="TELEGRAM_BOT_TOKEN is not configured")
+
+        chat_id = self.resolve_chat_id(to_number, origin_channel_id)
+        if not chat_id:
+            return SMSResult(success=False, error_message="No Telegram chat to send to")
+
+        try:
+            async with self._client() as client:
+                last_message_id: str | None = None
+                for chunk in split_message(message, MAX_MESSAGE_LEN):
+                    resp = await client.post(
+                        "/sendMessage", json={"chat_id": chat_id, "text": chunk}
+                    )
+                    resp.raise_for_status()
+                    try:
+                        last_message_id = str(resp.json()["result"]["message_id"])
+                    except (ValueError, KeyError, TypeError):
+                        # Callers expect an SMSResult, so a 2xx body in an
+                        # unexpected shape must be reported rather than raised.
+                        logger.error(f"Unexpected Telegram sendMessage response for chat {chat_id}")
+                        return SMSResult(
+                            success=False, error_message="Unexpected Telegram API response"
+                        )
+            return SMSResult(success=True, message_sid=last_message_id)
+        except httpx.HTTPStatusError as exc:
+            # The token is in the URL, so exc.request.url must never be logged.
+            body = exc.response.text[:200]
+            logger.error(
+                f"Telegram API error sending to chat {chat_id}: {exc.response.status_code} {body}"
+            )
+            return SMSResult(success=False, error_message=f"{exc.response.status_code}: {body}")
+        except httpx.HTTPError as exc:
+            logger.error(f"Telegram request failed sending to chat {chat_id}: {type(exc).__name__}")
+            return SMSResult(success=False, error_message=str(exc))
+
+    async def register_webhook_with_retry(self, attempts: int = 3, base_delay: float = 2.0) -> bool:
+        """Register the webhook, retrying a few times before giving up.
+
+        A single failed attempt is not recoverable on its own: with no webhook
+        registered, no Telegram message can reach the service, so nothing will
+        ever wake it to try again. The next Cloud Scheduler run at 06:28 would
+        eventually re-register, but that leaves inbound dead for up to a day
+        with no signal. Retry briefly, then say so loudly.
+
+        Bounded and short on purpose - this runs as a startup task, and the
+        6:30 race must not be waiting behind it.
+        """
+        for attempt in range(1, attempts + 1):
+            if await self.register_webhook():
+                return True
+            if attempt < attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    f"Telegram webhook registration attempt {attempt}/{attempts} failed; "
+                    f"retrying in {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
+        logger.error(
+            "Telegram webhook registration failed after %s attempts. Inbound Telegram is "
+            "DOWN until the next restart re-registers it - outbound notifications still work.",
+            attempts,
+        )
+        return False
+
+    async def get_bot_username(self) -> str | None:
+        """This bot's @username, from getMe, cached for the process.
+
+        Needed to tell a mention of this bot from a mention of someone else.
+        Returns None when it cannot be determined, which makes strip_bot_prefix
+        conservative rather than wrong: an unrecognized mention is left in the
+        text for the LLM to see past, instead of a stranger's being cut out.
+        """
+        global _bot_username, _bot_username_resolved
+        if _bot_username_resolved:
+            return _bot_username
+        if not settings.telegram_bot_token:
+            return None
+        try:
+            async with self._client() as client:
+                resp = await client.get("/getMe")
+                resp.raise_for_status()
+                username = resp.json()["result"].get("username")
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            # The token is a path segment, so never log the request URL.
+            logger.warning(f"Could not resolve the Telegram bot username: {type(exc).__name__}")
+            _bot_username_resolved = True
+            return None
+        _bot_username_resolved = True
+        if username:
+            _bot_username = str(username)
+        return _bot_username
+
+    async def register_webhook(self) -> bool:
+        """Point Telegram at this service's webhook URL.
+
+        Idempotent, and re-run on every startup so a changed service URL heals
+        itself rather than leaving the bot silently pointed at a dead endpoint.
+        Only "message" updates are requested; the bot has no use for the edits,
+        reactions and membership changes Telegram would otherwise deliver, and
+        each one would be an unnecessary wake-up for a scale-to-zero service.
+
+        Returns True when the webhook is registered, False when it is not -
+        including when it is deliberately not attempted, since a missing base
+        URL or secret means inbound Telegram is simply off.
+        """
+        if not settings.telegram_bot_token:
+            return False
+        if not settings.telegram_webhook_base_url:
+            logger.info(
+                "TELEGRAM_WEBHOOK_BASE_URL is not set; skipping webhook registration. "
+                "Outbound Telegram still works; inbound will not."
+            )
+            return False
+        if not settings.telegram_webhook_secret:
+            logger.warning(
+                "TELEGRAM_WEBHOOK_SECRET is not set; skipping webhook registration. "
+                "An unauthenticated webhook would accept forged bookings."
+            )
+            return False
+
+        url = f"{settings.telegram_webhook_base_url.rstrip('/')}{WEBHOOK_PATH}"
+        try:
+            async with self._client() as client:
+                resp = await client.post(
+                    "/setWebhook",
+                    json={
+                        "url": url,
+                        "secret_token": settings.telegram_webhook_secret,
+                        "allowed_updates": ["message"],
+                    },
+                )
+                resp.raise_for_status()
+            logger.info(f"Telegram webhook registered at {url}")
+            # Warm the username cache here rather than on the first group
+            # message, which would otherwise wait on a getMe round trip.
+            await self.get_bot_username()
+            return True
+        except httpx.HTTPStatusError as exc:
+            # Status only, never the body: setWebhook echoes the secret back.
+            # 401 means the bot token is wrong; 400 means the URL or the
+            # secret_token was rejected (see the charset note in
+            # docs/telegram-setup.md).
+            logger.error(
+                f"Failed to register Telegram webhook at {url}: " f"HTTP {exc.response.status_code}"
+            )
+            return False
+        except httpx.HTTPError as exc:
+            # Never log the exception's URL: the bot token is a path segment.
+            logger.error(f"Failed to register Telegram webhook at {url}: {type(exc).__name__}")
+            return False

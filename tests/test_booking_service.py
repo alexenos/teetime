@@ -1878,6 +1878,7 @@ class TestMultipleBookings:
             request: TeeTimeRequest,
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
+            channel: str | None = None,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test123",
@@ -1927,6 +1928,7 @@ class TestMultipleBookings:
             request: TeeTimeRequest,
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
+            channel: str | None = None,
         ) -> TeeTimeBooking:
             nonlocal call_count
             call_count += 1
@@ -1999,6 +2001,7 @@ class TestMultipleBookings:
             request: TeeTimeRequest,
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
+            channel: str | None = None,
         ) -> TeeTimeBooking:
             raise ValueError("Multi-player bookings within 48 hours")
 
@@ -2158,6 +2161,7 @@ class TestOriginChannelRouting:
             state=ConversationState.AWAITING_CONFIRMATION,
             pending_request=sample_request,
             origin_channel_id="778899",
+            channel="telegram",
         )
 
         async def create_booking_side_effect(
@@ -2165,6 +2169,7 @@ class TestOriginChannelRouting:
             request: TeeTimeRequest,
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
+            channel: str | None = None,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test1234",
@@ -2173,6 +2178,7 @@ class TestOriginChannelRouting:
                 status=BookingStatus.SCHEDULED,
                 scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
                 origin_channel_id=origin_channel_id,
+                channel=channel,
             )
 
         with patch.object(
@@ -2180,7 +2186,11 @@ class TestOriginChannelRouting:
         ) as mock_create:
             await booking_service._handle_confirm_intent(session)
 
-        mock_create.assert_awaited_once_with("+15551234567", sample_request, "778899")
+        # A non-default channel, so a regression that drops it fails here rather
+        # than passing against None.
+        mock_create.assert_awaited_once_with(
+            "+15551234567", sample_request, "778899", channel="telegram"
+        )
 
     @pytest.mark.asyncio
     async def test_confirm_multiple_bookings_passes_session_origin_to_each(
@@ -2201,6 +2211,7 @@ class TestOriginChannelRouting:
             state=ConversationState.AWAITING_CONFIRMATION,
             pending_requests=requests,
             origin_channel_id="778899",
+            channel="telegram",
         )
 
         async def create_booking_side_effect(
@@ -2208,6 +2219,7 @@ class TestOriginChannelRouting:
             request: TeeTimeRequest,
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
+            channel: str | None = None,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test1234",
@@ -2216,6 +2228,7 @@ class TestOriginChannelRouting:
                 status=BookingStatus.SCHEDULED,
                 scheduled_execution_time=datetime(2025, 12, 23, 6, 30),
                 origin_channel_id=origin_channel_id,
+                channel=channel,
             )
 
         with patch.object(
@@ -2225,6 +2238,7 @@ class TestOriginChannelRouting:
 
         assert len(mock_create.await_args_list) == len(requests)
         assert all(call.args[2] == "778899" for call in mock_create.await_args_list)
+        assert all(call.kwargs["channel"] == "telegram" for call in mock_create.await_args_list)
 
     @pytest.mark.asyncio
     async def test_execute_booking_success_notifies_origin_channel(
