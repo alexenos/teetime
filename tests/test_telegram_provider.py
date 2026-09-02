@@ -23,6 +23,7 @@ from app.providers.telegram_provider import (
 def _clear_bot_username_cache() -> None:
     """getMe is cached for the process; keep that from leaking between tests."""
     telegram_provider._bot_username = None
+    telegram_provider._bot_username_resolved = False
 
 
 class TestSplitMessage:
@@ -326,6 +327,7 @@ class TestTelegramWebhookRoute:
         from app.api import webhooks
 
         monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         seen: dict = {}
 
         async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
@@ -356,6 +358,7 @@ class TestTelegramWebhookRoute:
         from app.api import webhooks
 
         monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
 
         async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("a bare mention has nothing to parse")
@@ -368,6 +371,61 @@ class TestTelegramWebhookRoute:
         resp = client.post(
             "/webhooks/telegram",
             json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ignored"}
+
+    def test_leading_whitespace_does_not_shift_entity_offsets(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: the route used to .strip() the text before applying the
+        entity offsets, which shifted them and cut the wrong range."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        seen: dict = {}
+
+        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+            seen["message"] = message
+            return "ok"
+
+        async def fake_send(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(text="  @teetimebot book 9/5 at 9a")
+        update["message"]["entities"] = [{"type": "mention", "offset": 2, "length": 11}]
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+
+        assert resp.status_code == 200
+        assert seen["message"] == "book 9/5 at 9a"
+
+    def test_malformed_json_body_ignored_with_200(self, client: TestClient) -> None:
+        """A non-2xx would have Telegram redeliver the same unparseable body."""
+        resp = client.post(
+            "/webhooks/telegram",
+            content=b"not json",
+            headers={
+                "X-Telegram-Bot-Api-Secret-Token": "s3cret",
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ignored"}
+
+    def test_non_object_json_body_ignored_with_200(self, client: TestClient) -> None:
+        resp = client.post(
+            "/webhooks/telegram",
+            json=["not", "an", "object"],
             headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
         )
         assert resp.status_code == 200
@@ -462,6 +520,23 @@ class TestStripBotPrefix:
     def test_only_addressing_collapses_to_empty(self) -> None:
         assert strip_bot_prefix("@teetimebot", [mention_entity(0, 11)], "teetimebot") == ""
 
+    def test_newlines_preserved(self) -> None:
+        """A multi-booking message is one request per line; folding the newline
+        into a space changes what the parser is asked to read."""
+        text = "@teetimebot book\nSaturday 8am\nSunday 9am"
+        result = strip_bot_prefix(text, [mention_entity(0, 11)], "teetimebot")
+        assert result == "book\nSaturday 8am\nSunday 9am"
+
+    def test_gap_left_by_removed_mention_collapsed(self) -> None:
+        text = "book @teetimebot 9/5"
+        assert strip_bot_prefix(text, [mention_entity(5, 11)], "teetimebot") == "book 9/5"
+
+    def test_offsets_are_relative_to_untrimmed_text(self) -> None:
+        """Telegram measures offsets against the text exactly as sent, so the
+        caller must not trim before this runs - see the webhook route."""
+        text = "  @teetimebot book 9/5"
+        assert strip_bot_prefix(text, [mention_entity(2, 11)], "teetimebot") == "book 9/5"
+
     def test_malformed_entity_ignored(self) -> None:
         text = "@teetimebot book 9/5"
         entities = [{"type": "mention"}, {"type": "mention", "offset": -1, "length": 4}, "junk"]
@@ -504,6 +579,22 @@ class TestGetBotUsername:
             return httpx.Response(401, text="Unauthorized")
 
         assert await make_provider(handler).get_bot_username() is None
+
+    async def test_failure_not_retried_every_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The client timeout is 15s; retrying per message would put that in
+        front of every group message for the life of the instance."""
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(500, text="Internal Server Error")
+
+        provider = make_provider(handler)
+        assert await provider.get_bot_username() is None
+        assert await provider.get_bot_username() is None
+        assert calls == 1
 
     async def test_no_token_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, "telegram_bot_token", "")

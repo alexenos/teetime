@@ -17,6 +17,7 @@ replies where it was asked for.
 
 import hmac
 import logging
+import re
 
 import httpx
 
@@ -35,6 +36,11 @@ WEBHOOK_PATH = "/webhooks/telegram"
 # hold different provider instances, so an instance-level cache would not be
 # shared between them.
 _bot_username: str | None = None
+# Set once getMe has been attempted, successfully or not. Without it a token
+# that cannot resolve would retry on every single message, putting the client's
+# 15-second timeout in front of each one. Instances are ephemeral, so a
+# transient failure self-heals on the next cold start rather than sticking.
+_bot_username_resolved = False
 
 
 def _utf16_units(text: str) -> bytes:
@@ -101,7 +107,10 @@ def strip_bot_prefix(
     # Cut from the end so earlier offsets stay valid as the buffer shrinks.
     for offset, length in sorted(cuts, reverse=True):
         units = units[: offset * 2] + units[(offset + length) * 2 :]
-    return " ".join(units.decode("utf-16-le", errors="ignore").split())
+    # Tidy the gap a removed mention leaves behind, but only horizontal
+    # whitespace: a multi-booking message is one request per line, and folding
+    # its newlines into spaces would change what the parser is asked to read.
+    return re.sub(r"[^\S\n]+", " ", units.decode("utf-16-le", errors="ignore")).strip()
 
 
 def is_authorized_user(user_id: str, is_bot: bool) -> bool:
@@ -232,8 +241,8 @@ class TelegramProvider(SMSProvider):
         conservative rather than wrong: an unrecognized mention is left in the
         text for the LLM to see past, instead of a stranger's being cut out.
         """
-        global _bot_username
-        if _bot_username is not None:
+        global _bot_username, _bot_username_resolved
+        if _bot_username_resolved:
             return _bot_username
         if not settings.telegram_bot_token:
             return None
@@ -242,10 +251,12 @@ class TelegramProvider(SMSProvider):
                 resp = await client.get("/getMe")
                 resp.raise_for_status()
                 username = resp.json()["result"].get("username")
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
             # The token is a path segment, so never log the request URL.
             logger.warning(f"Could not resolve the Telegram bot username: {type(exc).__name__}")
+            _bot_username_resolved = True
             return None
+        _bot_username_resolved = True
         if username:
             _bot_username = str(username)
         return _bot_username

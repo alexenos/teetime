@@ -101,11 +101,26 @@ async def handle_telegram_update(
     if not verify_webhook_secret(x_telegram_bot_api_secret_token):
         raise HTTPException(status_code=403, detail="Invalid or missing Telegram webhook secret")
 
-    update = await request.json()
+    try:
+        update = await request.json()
+    except ValueError:
+        # Only a caller holding the secret can get this far, so this is a bug or
+        # a malformed retry rather than an attack. Answer 200 either way: a
+        # non-2xx would have Telegram redeliver the same unparseable body.
+        logger.warning("Telegram update body was not valid JSON; ignoring")
+        return {"status": "ignored"}
+
+    if not isinstance(update, dict):
+        logger.warning("Telegram update was not an object; ignoring")
+        return {"status": "ignored"}
+
     message = update.get("message") or {}
     sender = message.get("from") or {}
     chat = message.get("chat") or {}
-    text = (message.get("text") or "").strip()
+    # Deliberately NOT stripped: entity offsets below are relative to the text
+    # exactly as Telegram sent it, so trimming leading whitespace here would
+    # shift every offset and cut the wrong range. strip_bot_prefix trims.
+    raw_text = message.get("text") or ""
 
     user_id = str(sender.get("id", ""))
     chat_id = str(chat.get("id", ""))
@@ -118,7 +133,7 @@ async def handle_telegram_update(
         logger.info(f"Ignoring Telegram message from unauthorized user {user_id}")
         return {"status": "ignored"}
 
-    if not text:
+    if not raw_text.strip():
         logger.info(f"Telegram message from {user_id} had no text; ignoring")
         return {"status": "ignored"}
 
@@ -127,7 +142,7 @@ async def handle_telegram_update(
     # Strip that addressing before the parser sees it, the same way the Discord
     # gateway strips "<@1533...>".
     text = strip_bot_prefix(
-        text, message.get("entities"), await TelegramProvider().get_bot_username()
+        raw_text, message.get("entities"), await TelegramProvider().get_bot_username()
     )
     if not text:
         logger.info(f"Telegram message from {user_id} was only addressing; nothing to parse")
