@@ -2,6 +2,29 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
+def split_message(message: str, limit: int) -> list[str]:
+    """Split a message into chunks under a provider's length limit.
+
+    Every chat platform caps message length (Discord at 2000 characters,
+    Telegram at 4096) and rejects anything longer outright, so a long booking
+    list has to be sent as several messages. Breaks on a newline where there is
+    one inside the limit, since these messages are mostly line-per-booking.
+    """
+    if len(message) <= limit:
+        return [message]
+    chunks = []
+    remaining = message
+    while len(remaining) > limit:
+        cut = remaining.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
 @dataclass
 class SMSResult:
     success: bool

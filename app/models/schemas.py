@@ -91,6 +91,12 @@ class TeeTimeBooking(BaseModel):
             when the booking is created so the result notification (sent days
             later, at 6:30am) goes back to the same conversation instead of a DM.
             None for bookings made over SMS or the REST API.
+        channel: Messaging channel this booking was requested through
+            ("discord", "telegram" or "twilio"), so its notification days later
+            is sent back over the same one. Needed because Discord and Telegram
+            IDs are both bare numbers and are otherwise indistinguishable.
+            None for bookings created before the field existed, and for the
+            REST API; those fall back to MESSAGING_CHANNEL.
         created_at: When this booking record was created.
         updated_at: When this booking record was last modified.
     """
@@ -100,6 +106,7 @@ class TeeTimeBooking(BaseModel):
     request: TeeTimeRequest
     status: BookingStatus = BookingStatus.PENDING
     origin_channel_id: str | None = None
+    channel: str | None = None
     scheduled_execution_time: datetime | None = None
     actual_booked_time: time | None = None
     confirmation_number: str | None = None
@@ -156,6 +163,11 @@ class UserSession(BaseModel):
             happening in, refreshed on every inbound message. Bookings copy it at
             creation time so their notifications reply in the same place. None for
             SMS users, who have no channel concept.
+        channel: Messaging channel this conversation is happening over
+            ("discord", "telegram" or "twilio"), refreshed on every inbound
+            message and copied onto bookings at creation time. None for
+            sessions created before the field existed; those fall back to
+            MESSAGING_CHANNEL.
         last_interaction: Timestamp of the user's last message. Used for
             session timeout logic.
     """
@@ -166,6 +178,7 @@ class UserSession(BaseModel):
     pending_requests: list[TeeTimeRequest] | None = None
     pending_cancellation_id: str | None = None
     origin_channel_id: str | None = None
+    channel: str | None = None
     last_interaction: datetime = Field(default_factory=datetime.utcnow)
 
 

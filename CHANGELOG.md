@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Telegram as a messaging channel, running alongside Discord.** Inbound
+  messages arrive as HTTP webhooks (`POST /webhooks/telegram`) rather than over
+  a persistent WebSocket, so the service does not need `min-instances=1` and can
+  scale to zero between messages. This is the groundwork for retiring the
+  always-on Cloud Run instance the Discord gateway requires, which accounts for
+  roughly USD 58 of the current USD 71 monthly bill.
+
+  Telegram is enabled by `TELEGRAM_BOT_TOKEN` independently of
+  `MESSAGING_CHANNEL`, so both channels can be live at once and Telegram can be
+  exercised end to end before Discord is switched off. **No cost is saved until
+  that switch happens** - see `docs/telegram-setup.md`.
+
+  Requests are authenticated with the shared secret Telegram echoes in
+  `X-Telegram-Bot-Api-Secret-Token`; an unset secret rejects every update rather
+  than trusting the caller. Beyond that, only `TELEGRAM_ALLOWED_USER_IDS` are
+  answered.
+
+- **Sessions and bookings record the channel they came from.** A booking's
+  result notification - including the 6:30 AM confirmation that arrives days
+  later - is sent back over the channel it was requested on. Discord and
+  Telegram identify users with bare numbers and are otherwise indistinguishable,
+  so the recorded channel is the only thing that says which API to answer on.
+  Rows written before the column existed have no channel and fall back to
+  `MESSAGING_CHANNEL`, exactly as they behaved before.
+
 ### Fixed
 
 - **Stale pooled database connections no longer kill the morning job.** The

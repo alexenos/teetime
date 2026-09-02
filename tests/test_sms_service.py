@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.config import settings
 from app.providers.twilio_provider import MockSMSProvider, TwilioSMSProvider
 from app.services.sms_service import SMSService
 
@@ -424,3 +425,74 @@ class TestTwilioSMSProviderWhatsApp:
                 from_="whatsapp:+15559999999",
                 to="whatsapp:+15551234567",
             )
+
+
+class TestPerChannelRouting:
+    """A booking is answered over the channel it was requested on.
+
+    Discord and Telegram both identify users with bare numbers, so the
+    conversation's recorded channel is the only thing distinguishing them once
+    both are live at the same time.
+    """
+
+    def test_discord_channel_uses_discord_provider(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.providers.discord_provider import DiscordProvider
+
+        monkeypatch.setattr(settings, "discord_bot_token", "discord-token")
+        assert isinstance(sms_service.provider_for("discord"), DiscordProvider)
+
+    def test_telegram_channel_uses_telegram_provider(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.providers.telegram_provider import TelegramProvider
+
+        monkeypatch.setattr(settings, "telegram_bot_token", "telegram-token")
+        assert isinstance(sms_service.provider_for("telegram"), TelegramProvider)
+
+    def test_both_channels_live_at_once(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole point of the parallel-run period: neither displaces the other."""
+        from app.providers.discord_provider import DiscordProvider
+        from app.providers.telegram_provider import TelegramProvider
+
+        monkeypatch.setattr(settings, "discord_bot_token", "discord-token")
+        monkeypatch.setattr(settings, "telegram_bot_token", "telegram-token")
+
+        assert isinstance(sms_service.provider_for("discord"), DiscordProvider)
+        assert isinstance(sms_service.provider_for("telegram"), TelegramProvider)
+
+    def test_no_channel_falls_back_to_configured_default(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bookings from the REST API, and rows written before the column existed."""
+        from app.providers.discord_provider import DiscordProvider
+
+        monkeypatch.setattr(settings, "messaging_channel", "discord")
+        monkeypatch.setattr(settings, "discord_bot_token", "discord-token")
+        assert isinstance(sms_service.provider_for(None), DiscordProvider)
+
+    def test_provider_cached_per_channel(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "telegram-token")
+        assert sms_service.provider_for("telegram") is sms_service.provider_for("telegram")
+
+    def test_set_provider_overrides_every_channel(
+        self, sms_service: SMSService, mock_provider: MockSMSProvider
+    ) -> None:
+        sms_service.set_provider(mock_provider)
+        assert sms_service.provider_for("discord") is mock_provider
+        assert sms_service.provider_for("telegram") is mock_provider
+
+    def test_unusable_channel_falls_through_to_twilio(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Preserves the cascade this had when the channel was global."""
+        monkeypatch.setattr(settings, "telegram_bot_token", "")
+        monkeypatch.setattr(settings, "twilio_account_sid", "AC123")
+        monkeypatch.setattr(settings, "twilio_auth_token", "token")
+        with patch("app.providers.twilio_provider.Client"):
+            assert isinstance(sms_service.provider_for("telegram"), TwilioSMSProvider)

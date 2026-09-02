@@ -136,6 +136,26 @@ variable "messaging_channel" {
   }
 }
 
+variable "telegram_enabled" {
+  description = <<-EOT
+    Expose the Telegram credentials to the running service and register its
+    inbound webhook.
+
+    Independent of messaging_channel, so Telegram can be exercised end to end
+    while Discord is still the live channel. Unlike Discord, Telegram needs no
+    always-on instance: updates arrive as HTTP webhooks rather than over a
+    persistent socket, so enabling this costs nothing on its own.
+
+    Create versions for TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_IDS and
+    TELEGRAM_WEBHOOK_SECRET in Secret Manager BEFORE setting this to true.
+    Terraform creates those secrets empty, and a Cloud Run revision that
+    references a secret with no version fails to deploy. See
+    docs/telegram-setup.md.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "log_level" {
   description = "Application log level (DEBUG to see BOOKING_DEBUG messages)"
   type        = string

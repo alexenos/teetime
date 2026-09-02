@@ -38,6 +38,12 @@ locals {
     "DISCORD_USER_ID",
   ]
 
+  telegram_secrets = [
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_ALLOWED_USER_IDS",
+    "TELEGRAM_WEBHOOK_SECRET",
+  ]
+
   # Every secret this project stores. Deliberately NOT scoped by
   # messaging_channel: dropping a secret from this list would have Terraform
   # delete it (and its versions) from Secret Manager, so flipping the channel
@@ -53,12 +59,18 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
-  ], local.discord_secrets)
+  ], local.discord_secrets, local.telegram_secrets)
 
-  # Secrets the running container may read. The Discord credentials are only
-  # mounted (and only readable) when the Discord channel is active.
-  runtime_secrets = var.messaging_channel == "discord" ? toset(local.secrets) : setsubtract(
-    toset(local.secrets), toset(local.discord_secrets)
+  # Secrets the running container may read. A channel's credentials are only
+  # mounted (and only readable) while that channel is active. Both channels can
+  # be live at once during the Telegram trial, so this is not a single choice:
+  # each is withheld independently of the other.
+  runtime_secrets = setsubtract(
+    toset(local.secrets),
+    setunion(
+      var.messaging_channel == "discord" ? toset([]) : toset(local.discord_secrets),
+      var.telegram_enabled ? toset([]) : toset(local.telegram_secrets)
+    )
   )
 }
 
@@ -281,6 +293,14 @@ resource "google_cloud_run_v2_service" "teetime" {
       env {
         name  = "WALDEN_FAST_BOOKING_IMMEDIATE"
         value = tostring(var.walden_fast_booking_immediate)
+      }
+
+      # Where Telegram registers its webhook at startup. Not a secret - it is
+      # the service's own public URL, the same one Cloud Scheduler is pointed
+      # at. Empty when Telegram is off, which skips registration.
+      env {
+        name  = "TELEGRAM_WEBHOOK_BASE_URL"
+        value = var.telegram_enabled ? local.cloud_run_url : ""
       }
 
       dynamic "env" {

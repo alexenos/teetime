@@ -18,6 +18,7 @@ import httpx
 
 from app.config import settings
 from app.providers.sms_base import SMSProvider, SMSResult
+from app.providers.sms_base import split_message as _split_message
 
 logger = logging.getLogger(__name__)
 
@@ -33,19 +34,7 @@ DM_ORIGIN = "dm"
 
 def split_message(message: str, limit: int = MAX_MESSAGE_LEN) -> list[str]:
     """Split a message into chunks under Discord's length limit, preferring newlines."""
-    if len(message) <= limit:
-        return [message]
-    chunks = []
-    remaining = message
-    while len(remaining) > limit:
-        cut = remaining.rfind("\n", 0, limit)
-        if cut <= 0:
-            cut = limit
-        chunks.append(remaining[:cut])
-        remaining = remaining[cut:].lstrip("\n")
-    if remaining:
-        chunks.append(remaining)
-    return chunks
+    return _split_message(message, limit)
 
 
 class DiscordProvider(SMSProvider):

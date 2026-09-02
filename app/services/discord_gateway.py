@@ -28,8 +28,8 @@ from app.providers.discord_provider import DM_ORIGIN, split_message
 
 logger = logging.getLogger(__name__)
 
-# (user_id, content, origin_channel_id) -> reply text
-MessageHandler = Callable[[str, str, str], Awaitable[str]]
+# (user_id, content, origin_channel_id, channel) -> reply text
+MessageHandler = Callable[[str, str, str, str], Awaitable[str]]
 
 
 def should_handle_message(
@@ -118,7 +118,7 @@ class DiscordGateway:
         # (the 6:30am booking result) reply here rather than opening a DM.
         origin_channel_id = DM_ORIGIN if is_dm else str(message.channel.id)
         try:
-            response = await self._message_handler(author_id, content, origin_channel_id)
+            response = await self._message_handler(author_id, content, origin_channel_id, "discord")
         except Exception:
             logger.exception("Error handling Discord message")
             response = "Sorry, something went wrong processing that message."

@@ -52,6 +52,9 @@ class BookingRecord(Base):
             from requested_time if fallback was used).
         confirmation_number: Confirmation number from the club website.
         error_message: Details about why a booking failed.
+        channel: Messaging channel the booking was requested through
+            ("discord", "telegram" or "twilio"). NULL on rows written before
+            this column existed, which fall back to MESSAGING_CHANNEL.
         origin_channel_id: Discord channel ID the booking was requested in, so
             the result notification replies in that conversation rather than a
             DM. NULL for SMS and REST API bookings.
@@ -74,6 +77,7 @@ class BookingRecord(Base):
     confirmation_number = Column(String(100), nullable=True)
     error_message = Column(Text, nullable=True)
     origin_channel_id = Column(String(32), nullable=True)
+    channel = Column(String(16), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -94,6 +98,9 @@ class SessionRecord(Base):
             through the conversation. NULL when state is IDLE.
         pending_cancellation_id: Booking ID awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for confirmation.
+        channel: Messaging channel this conversation is happening over
+            ("discord", "telegram" or "twilio"). NULL on rows written before
+            this column existed, which fall back to MESSAGING_CHANNEL.
         origin_channel_id: Discord channel ID of the user's current conversation,
             refreshed on each inbound message. NULL for SMS users.
         last_interaction: Timestamp of the user's last message.
@@ -107,6 +114,7 @@ class SessionRecord(Base):
     pending_request_json = Column(Text, nullable=True)
     pending_cancellation_id = Column(String(50), nullable=True)
     origin_channel_id = Column(String(32), nullable=True)
+    channel = Column(String(16), nullable=True)
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
@@ -169,6 +177,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "pending_cancellation_id", "VARCHAR(50)"),
     ("sessions", "origin_channel_id", "VARCHAR(32)"),
     ("bookings", "origin_channel_id", "VARCHAR(32)"),
+    ("sessions", "channel", "VARCHAR(16)"),
+    ("bookings", "channel", "VARCHAR(16)"),
 ]
 
 

@@ -68,6 +68,24 @@ SHUTDOWN_BOOKING_TIMEOUT_SECONDS = 8
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
 
+    # Telegram is mounted whenever a token is configured, independently of
+    # MESSAGING_CHANNEL, so it can be exercised end to end while Discord is
+    # still the live channel. Registration is idempotent and re-run on every
+    # startup, so a changed service URL heals itself instead of leaving the bot
+    # pointed at a dead endpoint.
+    telegram_task: asyncio.Task[bool] | None = None
+    if settings.telegram_bot_token:
+        from app.providers.telegram_provider import TelegramProvider
+
+        logger.info("Telegram bot token configured - registering webhook")
+        # Backgrounded rather than awaited: registration persists on Telegram's
+        # side across restarts, so nothing here needs it to have finished, and
+        # an unreachable api.telegram.org must not put its timeout in front of
+        # the 6:28 cold start that the morning race depends on.
+        telegram_task = asyncio.create_task(
+            TelegramProvider().register_webhook(), name="telegram-register-webhook"
+        )
+
     discord_gateway = None
     if settings.messaging_channel == "discord":
         if settings.discord_bot_token:
@@ -111,6 +129,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     yield
+
+    if telegram_task is not None:
+        telegram_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await telegram_task
 
     # Cancel and collect the reconcile task before tearing the gateway down, so
     # it can't be left pending against a closed client.

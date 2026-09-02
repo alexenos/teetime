@@ -6,7 +6,7 @@ An LLM-powered application that helps reserve golf tee times at Northgate Countr
 
 ## Features
 
-- SMS-based interface using Twilio
+- Messaging interface over Telegram, Discord or Twilio SMS
 - Natural language understanding via Google Gemini API
 - Automated booking at reservation open time (6:30am CT, 7 days in advance)
 - Confirmation and status notifications
@@ -14,7 +14,9 @@ An LLM-powered application that helps reserve golf tee times at Northgate Countr
 ## Architecture
 
 - **Backend**: FastAPI on Google Cloud Run
-- **SMS**: Twilio for inbound/outbound messaging
+- **Messaging**: Telegram (HTTP webhooks) or Discord (gateway) or Twilio SMS.
+  Telegram needs no always-on instance, so the service can scale to zero -
+  see `docs/telegram-setup.md`.
 - **LLM**: Google Gemini API with function calling
 - **Scheduling**: Cloud Run Jobs + Cloud Scheduler
 - **Database**: Cloud SQL (Postgres) / SQLite for local dev
@@ -70,6 +72,7 @@ poetry run mypy app
 - `GET /` - Service info
 - `GET /health` - Health check
 - `POST /webhooks/twilio/sms` - Twilio SMS webhook
+- `POST /webhooks/telegram` - Telegram bot webhook
 - `GET /bookings` - List bookings
 - `POST /bookings` - Create booking
 - `GET /bookings/{id}` - Get booking details
