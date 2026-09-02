@@ -72,6 +72,24 @@ class TestVerifyWebhookSecret:
         assert verify_webhook_secret("") is False
 
 
+class TestVerifyWebhookSecretEncoding:
+    """Starlette decodes header bytes as latin-1, so a header carrying a byte
+    above 0x7f arrives as a non-ASCII str. compare_digest raises TypeError on
+    those, which would turn a rejected forgery into a 500 instead of a 403.
+    """
+
+    def test_non_ascii_header_rejected_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_webhook_secret", "s3cret")
+        assert verify_webhook_secret("s\xe9cret") is False
+
+    def test_non_ascii_configured_secret_does_not_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_webhook_secret", "s\xe9cret")
+        assert verify_webhook_secret("s3cret") is False
+        assert verify_webhook_secret("s\xe9cret") is True
+
+
 class TestSettingsValidation:
     def test_username_rejected_as_allowlist(self) -> None:
         with pytest.raises(ValidationError, match="numeric Telegram user IDs"):
@@ -160,6 +178,91 @@ class TestSendSms:
 
         result = await make_provider(handler).send_sms("111", "hello")
         assert not result.success
+
+
+class TestSendSmsMalformedResponse:
+    """Callers expect an SMSResult; a 2xx body in an unexpected shape used to
+    raise ValueError/KeyError/TypeError straight out of send_sms."""
+
+    async def test_non_json_2xx_body_reported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="not json")
+
+        result = await make_provider(handler).send_sms("111", "hello")
+        assert not result.success
+        assert result.error_message == "Unexpected Telegram API response"
+
+    async def test_2xx_body_without_message_id_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        result = await make_provider(handler).send_sms("111", "hello")
+        assert not result.success
+
+    async def test_2xx_body_with_null_result_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "result": None})
+
+        result = await make_provider(handler).send_sms("111", "hello")
+        assert not result.success
+
+
+class TestRegisterWebhookWithRetry:
+    """A registration that fails and is never retried leaves inbound dead: with
+    no webhook, no Telegram message can reach the service to wake it."""
+
+    async def test_retries_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        monkeypatch.setattr(settings, "telegram_webhook_secret", "s3cret")
+        monkeypatch.setattr(settings, "telegram_webhook_base_url", "https://teetime.example.com")
+        monkeypatch.setattr(telegram_provider.asyncio, "sleep", _no_sleep)
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if request.url.path.endswith("/setWebhook") and calls == 1:
+                return httpx.Response(503, text="Service Unavailable")
+            return httpx.Response(200, json={"ok": True, "result": {"username": "teetimebot"}})
+
+        assert await make_provider(handler).register_webhook_with_retry() is True
+        assert calls >= 2
+
+    async def test_gives_up_after_bounded_attempts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        monkeypatch.setattr(settings, "telegram_webhook_secret", "s3cret")
+        monkeypatch.setattr(settings, "telegram_webhook_base_url", "https://teetime.example.com")
+        monkeypatch.setattr(telegram_provider.asyncio, "sleep", _no_sleep)
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(503, text="Service Unavailable")
+
+        assert await make_provider(handler).register_webhook_with_retry(attempts=3) is False
+        assert calls == 3
+
+    async def test_does_not_retry_a_deliberate_skip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No base URL means registration is off, not failing - do not spin."""
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        monkeypatch.setattr(settings, "telegram_webhook_secret", "s3cret")
+        monkeypatch.setattr(settings, "telegram_webhook_base_url", "")
+
+        def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - not reached
+            raise AssertionError("should not call the API with no base URL")
+
+        assert await make_provider(handler).register_webhook_with_retry(attempts=2) is False
 
 
 class TestRegisterWebhook:
@@ -439,6 +542,11 @@ class TestTelegramWebhookRoute:
         )
         assert resp.status_code == 200
         assert resp.json() == {"status": "ignored"}
+
+
+async def _no_sleep(seconds: float) -> None:
+    """Collapse retry backoff so the tests do not actually wait."""
+    return None
 
 
 def mention_entity(offset: int, length: int) -> dict:

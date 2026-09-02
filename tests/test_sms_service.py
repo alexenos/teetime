@@ -487,15 +487,43 @@ class TestPerChannelRouting:
         assert sms_service.provider_for("discord") is mock_provider
         assert sms_service.provider_for("telegram") is mock_provider
 
-    def test_unusable_channel_falls_through_to_twilio(
+    def test_unusable_chat_channel_does_not_fall_through_to_twilio(
         self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Preserves the cascade this had when the channel was global."""
+        """A Telegram user ID is not a phone number.
+
+        This assertion previously required the opposite - the cascade was
+        inherited from when the channel was global and the identifier was
+        always a phone number. Per-record that fallthrough would take a booking
+        requested on Telegram, after telegram_enabled was turned off, and hand
+        its text plus a Telegram user ID to Twilio.
+        """
         monkeypatch.setattr(settings, "telegram_bot_token", "")
         monkeypatch.setattr(settings, "twilio_account_sid", "AC123")
         monkeypatch.setattr(settings, "twilio_auth_token", "token")
         with patch("app.providers.twilio_provider.Client"):
-            assert isinstance(sms_service.provider_for("telegram"), TwilioSMSProvider)
+            provider = sms_service.provider_for("telegram")
+        assert not isinstance(provider, TwilioSMSProvider)
+        assert isinstance(provider, MockSMSProvider)
+
+    def test_unusable_discord_channel_does_not_fall_through_to_twilio(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "discord_bot_token", "")
+        monkeypatch.setattr(settings, "twilio_account_sid", "AC123")
+        monkeypatch.setattr(settings, "twilio_auth_token", "token")
+        with patch("app.providers.twilio_provider.Client"):
+            assert not isinstance(sms_service.provider_for("discord"), TwilioSMSProvider)
+
+    def test_unnamed_channel_still_uses_the_old_cascade(
+        self, sms_service: SMSService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The REST API and rows written before the column existed rely on it."""
+        monkeypatch.setattr(settings, "messaging_channel", "")
+        monkeypatch.setattr(settings, "twilio_account_sid", "AC123")
+        monkeypatch.setattr(settings, "twilio_auth_token", "token")
+        with patch("app.providers.twilio_provider.Client"):
+            assert isinstance(sms_service.provider_for(None), TwilioSMSProvider)
 
 
 class TestValidateRequestRouting:

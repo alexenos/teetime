@@ -1,8 +1,12 @@
+import logging
+
 from app.config import settings
 from app.providers.discord_provider import DiscordProvider
 from app.providers.sms_base import SMSProvider
 from app.providers.telegram_provider import TelegramProvider
 from app.providers.twilio_provider import MockSMSProvider, TwilioSMSProvider
+
+logger = logging.getLogger(__name__)
 
 
 class SMSService:
@@ -24,18 +28,37 @@ class SMSService:
         self._provider: SMSProvider | None = None
         self._providers: dict[str, SMSProvider] = {}
 
+    # Channels whose recipient identifier is meaningless to any other channel.
+    # A Discord snowflake or a Telegram user ID is not a phone number, so a
+    # conversation on one of these must never be answered over Twilio.
+    _CHAT_CHANNELS = ("discord", "telegram")
+
     def _build_provider(self, channel: str) -> SMSProvider:
         """Construct the provider for a channel.
 
-        A channel whose credentials are missing falls through to Twilio and then
-        to Mock, rather than raising - the same cascade this method used when
-        the channel was global, so a misconfigured channel still degrades
-        instead of leaving a booking result undeliverable.
+        A named chat channel whose credentials are missing degrades to Mock
+        rather than falling through to Twilio. The fallthrough made sense when
+        the channel was global and the identifier was always a phone number;
+        per-record it would take a booking that was requested on Telegram,
+        after telegram_enabled was turned off, and hand its text plus a
+        Telegram user ID to Twilio as though that ID were a phone number. The
+        send fails either way - the difference is whether the content leaves
+        for a service that was never part of that conversation.
+
+        Only an unnamed channel still uses the old cascade, which is what the
+        REST API and pre-column rows rely on.
         """
         if channel == "discord" and settings.discord_bot_token:
             return DiscordProvider()
         if channel == "telegram" and settings.telegram_bot_token:
             return TelegramProvider()
+        if channel in self._CHAT_CHANNELS:
+            logger.error(
+                "No credentials configured for the %s channel; a message for a conversation "
+                "on it cannot be delivered. Check that channel's token.",
+                channel,
+            )
+            return MockSMSProvider()
         if settings.twilio_account_sid and settings.twilio_auth_token:
             return TwilioSMSProvider()
         return MockSMSProvider()

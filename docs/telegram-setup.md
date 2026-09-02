@@ -29,11 +29,15 @@ you are satisfied.
    the allowlist — the bot ignores everyone else. It takes a comma-separated
    list, so more people can be added later.
 
-4. **Invent a webhook secret**: any random string, e.g.
+4. **Invent a webhook secret**:
    `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Telegram does
    not sign webhook payloads, so this shared secret is the only thing standing
    between a public endpoint and a forged booking. Without it the endpoint
    rejects every update.
+
+   Telegram constrains the value: 1-256 characters, and only `A-Z`, `a-z`,
+   `0-9`, `_` and `-`. `token_urlsafe` stays inside that set; a hand-picked
+   passphrase with punctuation does not, and `setWebhook` rejects it with a 400.
 
 5. **Start a chat**: open your bot and send `/start`. A bot cannot message you
    first, so until you do this, outbound notifications have nowhere to go.

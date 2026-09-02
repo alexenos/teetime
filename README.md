@@ -6,7 +6,8 @@ An LLM-powered application that helps reserve golf tee times at Northgate Countr
 
 ## Features
 
-- Messaging interface over Telegram, Discord or Twilio SMS
+- Messaging interface over Telegram, Discord and Twilio SMS - which can run
+  concurrently, each conversation answered on the channel it started from
 - Natural language understanding via Google Gemini API
 - Automated booking at reservation open time (6:30am CT, 7 days in advance)
 - Confirmation and status notifications
@@ -14,9 +15,12 @@ An LLM-powered application that helps reserve golf tee times at Northgate Countr
 ## Architecture
 
 - **Backend**: FastAPI on Google Cloud Run
-- **Messaging**: Telegram (HTTP webhooks) or Discord (gateway) or Twilio SMS.
-  Telegram needs no always-on instance, so the service can scale to zero -
-  see `docs/telegram-setup.md`.
+- **Messaging**: Telegram (HTTP webhooks), Discord (gateway) and Twilio SMS.
+  These are not mutually exclusive - Telegram is enabled by its own bot token,
+  independently of `MESSAGING_CHANNEL`, so it can run alongside Discord. Each
+  booking records the channel it was requested on and its result is sent back
+  over that same one. Telegram needs no always-on instance, so the service can
+  scale to zero - see `docs/telegram-setup.md`.
 - **LLM**: Google Gemini API with function calling
 - **Scheduling**: Cloud Run Jobs + Cloud Scheduler
 - **Database**: Cloud SQL (Postgres) / SQLite for local dev
@@ -136,6 +140,23 @@ echo -n "your_member_number" | gcloud secrets versions add WALDEN_MEMBER_NUMBER 
 echo -n "your_password" | gcloud secrets versions add WALDEN_PASSWORD --data-file=-
 echo -n "your_scheduler_key" | gcloud secrets versions add SCHEDULER_API_KEY --data-file=-
 echo -n "+1234567890" | gcloud secrets versions add USER_PHONE_NUMBER --data-file=-
+```
+
+Discord and Telegram have their own secrets, added the same way, but only when
+that channel is switched on. Terraform creates all of them empty, and a Cloud
+Run revision that references a secret with no version fails to deploy - so add
+the values before enabling the channel, never after:
+
+```bash
+# Discord (MESSAGING_CHANNEL=discord)
+echo -n "your_bot_token" | gcloud secrets versions add DISCORD_BOT_TOKEN --data-file=-
+echo -n "your_user_id"   | gcloud secrets versions add DISCORD_USER_ID --data-file=-
+
+# Telegram (telegram_enabled = true) - see docs/telegram-setup.md for how to
+# obtain each of these, and for the character set setWebhook accepts.
+echo -n "your_bot_token"     | gcloud secrets versions add TELEGRAM_BOT_TOKEN --data-file=-
+echo -n "your_user_id"       | gcloud secrets versions add TELEGRAM_ALLOWED_USER_IDS --data-file=-
+echo -n "your_webhook_secret"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECRET --data-file=-
 ```
 
 ### First Deployment

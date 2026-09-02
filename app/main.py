@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # an unreachable api.telegram.org must not put its timeout in front of
         # the 6:28 cold start that the morning race depends on.
         telegram_task = asyncio.create_task(
-            TelegramProvider().register_webhook(), name="telegram-register-webhook"
+            TelegramProvider().register_webhook_with_retry(), name="telegram-register-webhook"
         )
 
     discord_gateway = None

@@ -15,6 +15,7 @@ chat, and a negative group ID in a group - so a booking result days later
 replies where it was asked for.
 """
 
+import asyncio
 import hmac
 import logging
 import re
@@ -147,7 +148,11 @@ def verify_webhook_secret(header_value: str | None) -> bool:
         return False
     if not header_value:
         return False
-    return hmac.compare_digest(header_value, configured)
+    # Compared as bytes, not str: Starlette decodes header bytes as latin-1, so
+    # a header carrying any byte above 0x7f becomes a non-ASCII str, and
+    # compare_digest raises TypeError on those. That would turn a rejected
+    # forgery into a 500 instead of a 403.
+    return hmac.compare_digest(header_value.encode("utf-8"), configured.encode("utf-8"))
 
 
 class TelegramProvider(SMSProvider):
@@ -220,7 +225,15 @@ class TelegramProvider(SMSProvider):
                         "/sendMessage", json={"chat_id": chat_id, "text": chunk}
                     )
                     resp.raise_for_status()
-                    last_message_id = str(resp.json()["result"]["message_id"])
+                    try:
+                        last_message_id = str(resp.json()["result"]["message_id"])
+                    except (ValueError, KeyError, TypeError):
+                        # Callers expect an SMSResult, so a 2xx body in an
+                        # unexpected shape must be reported rather than raised.
+                        logger.error(f"Unexpected Telegram sendMessage response for chat {chat_id}")
+                        return SMSResult(
+                            success=False, error_message="Unexpected Telegram API response"
+                        )
             return SMSResult(success=True, message_sid=last_message_id)
         except httpx.HTTPStatusError as exc:
             # The token is in the URL, so exc.request.url must never be logged.
@@ -232,6 +245,35 @@ class TelegramProvider(SMSProvider):
         except httpx.HTTPError as exc:
             logger.error(f"Telegram request failed sending to chat {chat_id}: {type(exc).__name__}")
             return SMSResult(success=False, error_message=str(exc))
+
+    async def register_webhook_with_retry(self, attempts: int = 3, base_delay: float = 2.0) -> bool:
+        """Register the webhook, retrying a few times before giving up.
+
+        A single failed attempt is not recoverable on its own: with no webhook
+        registered, no Telegram message can reach the service, so nothing will
+        ever wake it to try again. The next Cloud Scheduler run at 06:28 would
+        eventually re-register, but that leaves inbound dead for up to a day
+        with no signal. Retry briefly, then say so loudly.
+
+        Bounded and short on purpose - this runs as a startup task, and the
+        6:30 race must not be waiting behind it.
+        """
+        for attempt in range(1, attempts + 1):
+            if await self.register_webhook():
+                return True
+            if attempt < attempts:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    f"Telegram webhook registration attempt {attempt}/{attempts} failed; "
+                    f"retrying in {delay:.0f}s"
+                )
+                await asyncio.sleep(delay)
+        logger.error(
+            "Telegram webhook registration failed after %s attempts. Inbound Telegram is "
+            "DOWN until the next restart re-registers it - outbound notifications still work.",
+            attempts,
+        )
+        return False
 
     async def get_bot_username(self) -> str | None:
         """This bot's @username, from getMe, cached for the process.
@@ -306,8 +348,16 @@ class TelegramProvider(SMSProvider):
             # message, which would otherwise wait on a getMe round trip.
             await self.get_bot_username()
             return True
+        except httpx.HTTPStatusError as exc:
+            # Status only, never the body: setWebhook echoes the secret back.
+            # 401 means the bot token is wrong; 400 means the URL or the
+            # secret_token was rejected (see the charset note in
+            # docs/telegram-setup.md).
+            logger.error(
+                f"Failed to register Telegram webhook at {url}: " f"HTTP {exc.response.status_code}"
+            )
+            return False
         except httpx.HTTPError as exc:
-            # Never log the exception's URL or response body unfiltered: the bot
-            # token is a path segment and setWebhook echoes the secret back.
+            # Never log the exception's URL: the bot token is a path segment.
             logger.error(f"Failed to register Telegram webhook at {url}: {type(exc).__name__}")
             return False
