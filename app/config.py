@@ -21,6 +21,29 @@ class WaitMode(str, Enum):
     HYBRID = "hybrid"
 
 
+def _parse_offsets_ms(value: str, name: str) -> tuple[int, ...]:
+    """Comma-separated millisecond offsets as an ordered, deduplicated tuple.
+
+    Shared by the sweep ladder and the opening burst, which want the same
+    leniency: an unparseable piece is logged and skipped, a negative one is
+    dropped, and nothing usable degrades to ``(0,)`` - one send on the aim -
+    rather than to an exception that would cost the morning.
+    """
+    offsets: list[int] = []
+    for piece in value.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            parsed = int(piece)
+        except ValueError:
+            logger.warning("%s: ignoring unparseable offset %r", name, piece)
+            continue
+        if parsed >= 0:
+            offsets.append(parsed)
+    return tuple(sorted(dict.fromkeys(offsets))) or (0,)
+
+
 class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
@@ -182,12 +205,20 @@ class Settings(BaseSettings):
     #
     # Kept separate from the offset above because the two are tuned for different
     # reasons: that one is what we believe about the club, this one is how much we
-    # distrust our own clock probe. The probe pins the club's second tick to
-    # roughly +-15ms, and arriving 15ms early lands back inside the second that
-    # has never once been granted - so the primary shot is aimed just past it.
-    # Folding these into one number would leave a refusal at the aim point
-    # ambiguous between "move the belief" and "widen the slack".
-    walden_reserve_aim_margin_ms: int = 30
+    # distrust our own clock probe. Folding them into one number would leave a
+    # refusal at the aim point ambiguous between "move the belief" and "widen
+    # the slack".
+    #
+    # 0 since 2026-09-04. It was 30, on the reasoning that the probe pins the
+    # club's tick to roughly +-22ms and arriving early lands inside the second
+    # that has never been granted. That protects against a cost that does not
+    # exist - an early ask is one free refusal - and on a contested slot the
+    # 30ms is the whole loss: every Friday first ask on record went at
+    # +1005..+1026ms, club clock :01, and was refused, while the identical ask
+    # at the identical club-second was accepted every other day. Under the
+    # opening burst (walden_reserve_opening_mode) the first send is aimed at the
+    # tick itself and the members behind it cover the probe's error.
+    walden_reserve_aim_margin_ms: int = 0
 
     # Milliseconds past the open (above) to ask for the target slot at, before
     # any fallback tee time is tried. Comma-separated; see
@@ -296,6 +327,60 @@ class Settings(BaseSettings):
     # and rung 0 always wins there - before letting it near the race.
     walden_reserve_pipeline_opening_pair: bool = False
 
+    # How the opening of the window is asked: "burst" or "ladder".
+    #
+    # "ladder" is everything above exactly as it ran through 2026-09-04: the
+    # sweep rungs, the opening pair, the hold-until-open policy and the target
+    # interleave, one request in flight at a time, each rung reached only once
+    # the previous answer lands. It stays reachable by this switch so that a
+    # burst that misbehaves on the ad-hoc test can be rolled back by setting
+    # WALDEN_RESERVE_OPENING_MODE=ladder on the service, with no code change.
+    #
+    # "burst" replaces the sweep, the pair and the hold with a pipelined
+    # opening: the requests in walden_reserve_burst_offsets_ms are sent at
+    # their instants *without waiting for answers*, so a request lands on the
+    # club every hundred-odd milliseconds through the window's first seconds.
+    # The first grant wins; members not yet sent when it lands are skipped;
+    # the serial fallback walk continues after the burst if nothing was
+    # granted. Why: the ladder's cadence was one round trip plus a parse -
+    # 700-1030ms between asks - and every Friday's target was gone before the
+    # second ask. Under a crowd whose retries land every second or so, or a
+    # gate that opens somewhere in a two-second span, one ask per 750ms is
+    # not in the race. See docs/booking-post-mortem-2026-09-04.md.
+    #
+    # The fallback list is *not* replaced: its first entries are pulled into
+    # the burst (see walden_reserve_burst_target_only) and the rest are walked
+    # serially afterwards, out to the deadline, as before.
+    #
+    # Every day, not Fridays only. The path the race runs has to be the path
+    # every ad-hoc booking runs, or it is untested until the morning it counts.
+    walden_reserve_opening_mode: str = "burst"
+
+    # Instants past the aim to send the burst's members at, comma-separated ms.
+    #
+    # The aim is the club's tick (walden_window_opens_offset_ms), so 0 is
+    # :01.000 and 2600 is :03.600. Dense for the first half-second, because the
+    # probe brackets the tick to +-22ms and the first member can land a hair
+    # early; then every 200-400ms out past the latest instant at which the club
+    # has rendered its sheet closed to us on a Friday (:02.8 on 08-28). A member
+    # is one POST of ~1.8KB and one ~670KB refusal back; twelve of them over
+    # 2.6s is three or four in flight at once, which the pair had already
+    # exercised at two. Whether the club tolerates that many is the ad-hoc test
+    # this mode must pass before a race - see the module docstring.
+    walden_reserve_burst_offsets_ms: str = "0,100,220,370,520,700,900,1150,1450,1800,2200,2600"
+
+    # How many members from the front of the burst ask for the target alone.
+    #
+    # After these, members alternate fallback and target - F1, T, F2, T, F3, T,
+    # cycling through the fallback list - so a target that is gone from the
+    # first ask does not cost the uncontested neighbour beside it. Both prior
+    # Friday wins were fallback grants, at +4871 and +5279ms; this asks the
+    # same question at about +1.5s. 4 leaves the first ~370ms to the target,
+    # which is roughly one round trip: a fallback fired later than that can be
+    # skipped once the target's own first answer is a grant, which is what
+    # keeps a second hold from being taken on a morning the first ask won.
+    walden_reserve_burst_target_only: int = 4
+
     # Write the per-attempt race ledger to the debug artifacts bucket.
     #
     # Only the *final* Reserve response was ever kept, and on both mornings the
@@ -305,19 +390,26 @@ class Settings(BaseSettings):
     # dialog is expected to differ from a re-rendered one.
     walden_capture_race_ledger: bool = True
 
-    # Clear the resident Chrome page's JS timers once the race is on HTTP.
+    # Clear the resident Chrome page's JS timers once a Reserve has been granted.
     #
     # The browser stays parked on the pre-window tee sheet through the whole
     # race - live countdown and datascroller timers included - and 2026-08-28
     # attempt 2 caught the cost on the new counters: cpu/wall 0.39 with 310ms of
     # container CPU burned by a process that was not ours, on the machine that
-    # was mid-race. The page cannot be parked outright: until the first Reserve
-    # is answered it is the JS chain's safety net for a socket that never
-    # opens. So the booker raises a signal when the first response is in hand -
-    # the point past which a browser retry is treated as racing our own
-    # reservation - and a side thread then clears the page's timers. Nothing
-    # runs on the race thread, and a page never quieted (signal never raised)
-    # is a page whose retry path was still live.
+    # was mid-race. A side thread clears the page's timers when the booker
+    # raises its signal; nothing runs on the race thread.
+    #
+    # The signal moved on 2026-09-04, from "first Reserve answered" to "a
+    # Reserve was granted", and the sweep no longer calls the club's own
+    # stopSheetTimers(). The first Friday this ran, the sweep fired at +1.6s on
+    # a refusal, and every one of the fourteen responses that followed was
+    # byte-identical to the pre-window render - countdown still reading
+    # 00:01:20 at +10.7s. Those page timers are what had been advancing the
+    # server-side view our requests are evaluated against (the two Fridays
+    # before it, with the timers alive, the view changed mid-race); with them
+    # dead on a morning that needed a retry, the hold policy read our own
+    # frozen render as "sheet still closed" for the rest of the race. After a
+    # grant the chain advances the view itself, so quieting then costs nothing.
     walden_quiet_browser_during_race: bool = True
 
     # Photograph the live tee sheet right after a race, names and all.
@@ -405,21 +497,20 @@ class Settings(BaseSettings):
         stopping the morning. Negative offsets are dropped - arriving before the
         window is the one thing five mornings of evidence says does not work.
         """
-        offsets: list[int] = []
-        for piece in self.walden_reserve_sweep_offsets_ms.split(","):
-            piece = piece.strip()
-            if not piece:
-                continue
-            try:
-                value = int(piece)
-            except ValueError:
-                logger.warning(
-                    "WALDEN_RESERVE_SWEEP_OFFSETS_MS: ignoring unparseable offset %r", piece
-                )
-                continue
-            if value >= 0:
-                offsets.append(value)
-        return tuple(sorted(dict.fromkeys(offsets))) or (0,)
+        return _parse_offsets_ms(
+            self.walden_reserve_sweep_offsets_ms, "WALDEN_RESERVE_SWEEP_OFFSETS_MS"
+        )
+
+    def walden_burst_offsets_ms(self) -> tuple[int, ...]:
+        """The opening burst's send instants, ordered and deduplicated.
+
+        Same leniency as the sweep: a malformed value degrades to a single send
+        on the aim rather than losing the morning. A burst of one is the
+        historical single shot, which is the safe direction to fail in.
+        """
+        return _parse_offsets_ms(
+            self.walden_reserve_burst_offsets_ms, "WALDEN_RESERVE_BURST_OFFSETS_MS"
+        )
 
     class Config:
         env_file = ".env"
