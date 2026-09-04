@@ -571,7 +571,28 @@ class DirectHttpBooker:
             self._describe_opening(),
             ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
         )
-        if refresh_at_window:
+        if refresh_at_window and self._opening_mode == OPENING_MODE_BURST:
+            # The two contradict each other, and silently honouring both would
+            # defeat the burst's warm-up: _run_chain wakes _BURST_WARMUP_MS
+            # early so the thread pool is up before the tick, and a refresh
+            # runs in that gap - one POST budgeted at _REFRESH_TIMEOUT_S, and
+            # up to _REFRESH_DEADLINE_MS of retries, which is the warm-up
+            # budget eighty times over. Member 0 would then reach a wait
+            # already spent, pay the pool startup anyway, and be later still by
+            # however long the refresh took.
+            #
+            # Refused rather than reordered: a fresh view was ruled out as the
+            # way in on 2026-08-07 - the refresh ran exactly as designed,
+            # countdown gone and 86 of 87 rows reservable, and the club refused
+            # anyway - so there is nothing to preserve by keeping the pair
+            # working, and the burst is what a race is now aimed with. Set
+            # WALDEN_RESERVE_OPENING_MODE=ladder to get the refresh back.
+            logger.warning(
+                "DIRECT_HTTP: A view refresh was asked for in burst mode; ignoring it - the "
+                "refresh would spend the burst's warm-up and land the opening late. Use the "
+                "ladder if the refresh is what is wanted."
+            )
+        elif refresh_at_window:
             self._stage_view_refresh(document, page_html, button)
         self.session.warm_up()
         if measure_skew:

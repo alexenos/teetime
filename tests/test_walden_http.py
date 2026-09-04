@@ -3710,6 +3710,38 @@ class TestOpeningBurst:
         assert "Too Many Requests" in body
         assert body.count("<redacted>") == 3
 
+    def test_a_view_refresh_is_refused_in_burst_mode(self) -> None:
+        """The refresh would spend the warm-up the burst wakes early for.
+
+        _run_chain wakes _BURST_WARMUP_MS early so the pool is up before the
+        tick, and the refresh runs in exactly that gap - one POST budgeted at
+        1.5s with up to 4s of retries, against a 50ms budget. Member 0 would
+        reach a wait already spent, pay the pool startup anyway, and be later
+        still by however long the refresh took. A fresh view was ruled out as
+        the way in on 2026-08-07, so the pair is refused rather than reordered.
+        """
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            booker.prepare(
+                RESERVE_ID,
+                TEE_SHEET,
+                refresh_at_window=True,
+                opening_mode=OPENING_MODE_BURST,
+                burst_offsets_ms=(0, 100),
+            )
+
+        assert booker._refresh_config is None
+        assert any("ignoring it" in r.getMessage() for r in records)
+
+    def test_the_ladder_still_stages_a_view_refresh(self) -> None:
+        """The escape hatch is the ladder, so the refresh must still work there."""
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        booker.prepare(RESERVE_ID, TEE_SHEET, refresh_at_window=True)
+
+        assert booker._refresh_config is not None
+
     def test_an_untimed_booking_sends_once_then_walks(self) -> None:
         """No instant to burst around: the ad-hoc untimed retry is one ask, then the walk."""
         recorder = SourceRecorder(
