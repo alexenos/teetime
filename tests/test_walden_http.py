@@ -34,6 +34,7 @@ from app.providers.walden_http import (
     visible_text,
 )
 from app.providers.walden_http_booker import (
+    _BURST_WARMUP_MS,
     OPENING_MODE_BURST,
     PHASE_BOOK_NOW,
     PHASE_RESERVE_SENT,
@@ -3362,6 +3363,7 @@ class SourceRecorder(ChainRecorder):
         chain: list[str],
         *,
         status_on: dict[int, int] | None = None,
+        status_body: str = "<html>Too Many Requests</html>",
         stall_on: set[int] | None = None,
         delay_on: set[int] | None = None,
         delay_s: float = 0.0,
@@ -3370,6 +3372,7 @@ class SourceRecorder(ChainRecorder):
         super().__init__(chain)
         self.by_source = by_source
         self.status_on = status_on or {}
+        self.status_body = status_body
         self.stall_on = stall_on or set()
         self.delay_on = delay_on or set()
         self.delay_s = delay_s
@@ -3392,7 +3395,7 @@ class SourceRecorder(ChainRecorder):
         if index in self.status_on:
             return httpx.Response(
                 self.status_on[index],
-                text="<html>Too Many Requests</html>",
+                text=self.status_body,
                 headers={"Retry-After": "2", "Date": email.utils.formatdate(usegmt=True)},
             )
         if index in self.delay_on:
@@ -3618,6 +3621,94 @@ class TestOpeningBurst:
         gate = [r.getMessage() for r in records if r.getMessage().startswith("GATE:")]
         assert any("GRANTED 04:42 PM" in line for line in gate)
         assert any("gate was open by club" in line for line in gate)
+
+    def test_member_zero_fires_after_the_pool_is_warm(self) -> None:
+        """The pool spin-up is paid before the instant, not in front of the send.
+
+        Submitting eleven members into a cold pool measured 3.5ms median and
+        4.9ms worst, all of it otherwise landing on the one send the morning is
+        timed around. _run_chain wakes a warm-up budget early and the burst
+        redoes the wait precisely, so member 0's drift is small and positive
+        rather than carrying the spin-up.
+        """
+        recorder = SourceRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 300, 600, 900, target_only=4)
+        target = window_about_to_open(in_ms=300)
+        result = booker.book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        # The warm-up wake is its own number, and the precise wait is the one
+        # reported as the click drift.
+        assert "burstWarmupDriftMs" in result.timing
+        assert result.timing["clickDriftMs"] >= 0
+        assert result.timing["clickDriftMs"] < _BURST_WARMUP_MS
+        # And the send really did land on the instant, not before it.
+        assert recorder.sent_at_ms[0] >= target - 1
+
+    def test_unanswered_asks_are_counted_outside_the_club_seconds(self) -> None:
+        """A 429 has no club clock, so it belongs to no second and is named apart.
+
+        It used to be summed inside the per-second line, where it could never
+        appear: those rows are built from answers, and an ask the club never
+        answered carries no Date header to bucket it by.
+        """
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429},
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=1)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        gate = [r.getMessage() for r in records if r.getMessage().startswith("GATE:")]
+        assert any("GRANTED" in line for line in gate)
+        assert any("no readable answer" in line and "status 429" in line for line in gate)
+
+    def test_a_wholly_throttled_burst_still_says_so(self) -> None:
+        """Nothing answered is the case the summary most needs to report."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [BLOCKED_ALL]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429, 2: 429, 3: 429},
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=2, fallbacks=())
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        gate = [r.getMessage() for r in records if r.getMessage().startswith("GATE:")]
+        assert any("no readable answer" in line and "status 429" in line for line in gate)
+
+    def test_a_status_body_is_redacted_before_it_is_kept(self) -> None:
+        """The error body is logged and uploaded, so session tokens never enter it."""
+        session_body = (
+            "<html><a href='/book;jsessionid=ABC123SECRET'>retry</a>"
+            "<input name='javax.faces.ViewState' value='-8840302615059009897:138'>"
+            "<a href='/x?p_auth=Ab3xQ9'>home</a> Too Many Requests</html>"
+        )
+
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429},
+            status_body=session_body,
+        )
+        result = burst_booker(recorder, 0, 30, target_only=2, fallbacks=()).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert not result.success
+        errored = [o for o in result.attempt_log if o.verdict == RESERVE_ERRORED]
+        assert errored, result.error
+        body = errored[0].error_body or ""
+        assert "ABC123SECRET" not in body
+        assert "8840302615059009897" not in body
+        assert "Ab3xQ9" not in body
+        # The club's own words survive - that is the whole diagnostic value.
+        assert "Too Many Requests" in body
+        assert body.count("<redacted>") == 3
 
     def test_an_untimed_booking_sends_once_then_walks(self) -> None:
         """No instant to burst around: the ad-hoc untimed retry is one ask, then the walk."""

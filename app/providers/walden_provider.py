@@ -5696,26 +5696,36 @@ class WaldenGolfProvider(ReservationProvider):
             return list(attempts)
 
         refusals = [o for o in attempts if o.verdict == RESERVE_REFUSED]
-        # dict.fromkeys over attempt numbers: the ends can coincide, and the
-        # order of the ledger must be preserved for the reader.
-        wanted = {attempts[0].attempt, attempts[-1].attempt}
+        # The ends, which a post-mortem always reads. Held apart from the rest
+        # because the cap is applied by *dropping* the optional ones: while
+        # "wanted" was only ever these four the slice below could not lose any
+        # of them, but a twelve-member burst can nominate more than the cap and
+        # would have silently dropped the last attempt - the one that ended the
+        # race - to keep earlier repeats.
+        mandatory = {attempts[0].attempt, attempts[-1].attempt}
         if refusals:
-            wanted.add(refusals[0].attempt)
-            wanted.add(refusals[-1].attempt)
+            mandatory.add(refusals[0].attempt)
+            mandatory.add(refusals[-1].attempt)
         # Anything that is not a repeat of the sheet before it earns its
         # upload: a grant, an answer that was neither grant nor refusal, and
         # every refusal whose body differs from the previous one. On
         # 2026-09-04 the fourteen refusals were one body fourteen times, and
         # "first and last" was exactly right; a burst that is throttled or
         # answered with a live sheet mid-way is the case this widens for.
+        optional: list[int] = []
         previous_digest = None
         for observation in attempts:
             digest = getattr(observation, "body_digest", None)
-            if observation.verdict != RESERVE_REFUSED or (
-                digest is not None and digest != previous_digest
+            if observation.attempt not in mandatory and (
+                observation.verdict != RESERVE_REFUSED
+                or (digest is not None and digest != previous_digest)
             ):
-                wanted.add(observation.attempt)
+                optional.append(observation.attempt)
             previous_digest = digest
+        # Mandatory first, then as many changed responses as the cap still
+        # allows, and the result is put back in ledger order for the reader.
+        wanted = set(mandatory)
+        wanted.update(optional[: max(0, _RACE_LEDGER_MAX_PAYLOADS - len(mandatory))])
         chosen = [o for o in attempts if o.attempt in wanted][:_RACE_LEDGER_MAX_PAYLOADS]
         logger.info(
             "RACE_LEDGER: storing %d of %d raw payload(s) - attempts %s; "

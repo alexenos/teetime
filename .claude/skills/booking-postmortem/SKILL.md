@@ -345,12 +345,15 @@ a past morning can be answered there without touching GCS or a booking.
 
 ## 6. Classify
 
-- **Lost on the clock** — attempt 1 did not land on its rung. Since #150 the aim
-  point is +1030ms, i.e. 30ms past the club's 06:30:01 tick, so "early" now means
-  *near zero* and not the other way round. Read `Clock skew measured` for the
-  tick bracket: a wide one (the probe is budget-bounded at 5s with 20ms spacing
-  and should yield several transitions) means the 30ms of margin was aimed with
-  a ruler that could not see it. `Clock skew unmeasurable` is the same class.
+- **Lost on the clock** — the opening did not land where it was aimed. The aim
+  is the club's 06:30:01 tick itself: +1000ms, margin 0 since 2026-09-04 (§7d
+  — an early ask is one free refusal, and the burst's later members cover the
+  probe's error, so the 30ms that used to sit past the tick was pure lateness
+  on a contested slot). Read `Clock skew measured` for the tick bracket, which
+  the probe pins to roughly ±22ms, and `clickDriftMs` for what the wait
+  actually hit; under the burst that drift is from its own final wait, taken
+  after the thread pool is warm, and `burstWarmupDriftMs` is the earlier wake.
+  `Clock skew unmeasurable` is the same class.
 - **Lost on the slot list** — few or zero fallbacks kept, or the scan dropped
   everything. Check the `dropped course=/window=` split.
 - **Refused at Reserve inside the first second** — was the standing failure

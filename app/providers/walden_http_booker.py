@@ -237,6 +237,14 @@ OPENING_MODE_BURST = "burst"
 # sockets against a club that has only ever seen two in flight.
 _BURST_MAX_MEMBERS = 16
 
+# How far ahead of the first burst member the precision wait wakes, so the
+# thread pool is spun up before the instant rather than in front of it.
+# Measured: submitting eleven members into a cold pool is 3.5ms median and
+# 4.9ms worst, all of it otherwise landing on the one send the morning is timed
+# around. Sized an order of magnitude above that - it is slack before a wait
+# that is redone precisely, so spending it costs nothing.
+_BURST_WARMUP_MS = 50
+
 # After the burst, how many more times the fallback list may be walked before
 # the deadline ends the run. The burst asks the first few fallbacks inside the
 # first seconds, when a Friday's gate may not yet be open; walking the list
@@ -821,9 +829,22 @@ class DirectHttpBooker:
             # Led, so that the request *arrives* at the aimed-at offset. The
             # drift is still reported against the lead-adjusted instant, which is
             # the one the wait was actually aiming at.
-            result.timing["clickDriftMs"] = sleep_until(
-                target_timestamp_ms + opening_offset_ms - int(round(self._lead_ms))
-            )
+            #
+            # The burst wakes early by its warm-up budget and does the final,
+            # precise wait itself, because spinning up its thread pool between
+            # the wait and the socket write would land the one send the morning
+            # is timed around 3-5ms late (measured: 11 submits into a cold pool
+            # is 3.5ms median, 4.9ms worst). Workers sleep to their own absolute
+            # instants, so starting them early moves nothing. The burst sets
+            # clickDriftMs from its own wait.
+            wake_offset_ms = opening_offset_ms
+            if self._opening_mode == OPENING_MODE_BURST:
+                wake_offset_ms -= _BURST_WARMUP_MS
+            drift = sleep_until(target_timestamp_ms + wake_offset_ms - int(round(self._lead_ms)))
+            if self._opening_mode == OPENING_MODE_BURST:
+                result.timing["burstWarmupDriftMs"] = drift
+            else:
+                result.timing["clickDriftMs"] = drift
 
             # After the wait, not before: a sheet re-rendered while the window
             # is still shut is the very thing being refreshed away from.
@@ -1919,7 +1940,16 @@ class DirectHttpBooker:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, len(members) - 1), thread_name_prefix="reserve-burst"
         ) as pool:
+            # Started first, and each sleeps to its own absolute instant, so the
+            # spin-up is paid inside the warm-up budget _run_chain woke early
+            # for rather than in front of member 0's socket write.
             futures = [pool.submit(send, member) for member in members[1:]]
+            # The wait that has to be exact. sleep_until no-ops on an instant
+            # already gone, so a warm-up that overran costs nothing beyond the
+            # lateness it already had, and the drift says which happened.
+            result.timing["clickDriftMs"] = sleep_until(
+                target_timestamp_ms + members[0].offset_ms - lead_ms
+            )
             self._absorb_burst_exchange(
                 burst, send(members[0]), won=won, view_state=view_state, frame_ms=frame_ms
             )
@@ -3191,8 +3221,35 @@ def _failed_observation(
     if isinstance(exc, DirectHttpStatusError):
         observation.status_code = exc.status_code
         observation.response_headers = dict(exc.headers)
-        observation.error_body = exc.body_snippet
+        observation.error_body = _redact_tokens(exc.body_snippet)
     return observation
+
+
+# Session tokens as they appear in a Liferay/JSF error page: the id in a
+# URL-rewritten link, the portal's CSRF parameter, and a ViewState echoed into
+# a form. The body they come from is an error page kept to tell a rate limit
+# from an outage, and it is both logged and uploaded to the artifacts bucket -
+# so it follows the same rule the rest of this module already applies to
+# session state, which is fingerprinted or reported as "present" and never
+# written down. The surrounding text is kept: the club's own words are the
+# whole diagnostic value, and gutting the snippet to a status line would lose
+# them.
+_TOKEN_PATTERNS = (
+    re.compile(r"(;?\bjsessionid=)[^&;\"'\s<]+", re.IGNORECASE),
+    re.compile(r"(\bp_auth=)[^&;\"'\s<]+", re.IGNORECASE),
+    # Bounded and non-greedy rather than [^"'>]*: the marker and the value are
+    # separated by the attribute's own closing quote, which that class excluded,
+    # so the token went through unredacted. Stopping at > keeps it inside the
+    # one tag.
+    re.compile(r"(javax\.faces\.ViewState[^>]{0,40}?value=[\"'])[^\"']+", re.IGNORECASE),
+)
+
+
+def _redact_tokens(text: str) -> str:
+    """Blank out session tokens in text bound for the log and the ledger."""
+    for pattern in _TOKEN_PATTERNS:
+        text = pattern.sub(r"\1<redacted>", text)
+    return text
 
 
 def _log_gate_summary(observations: list[ReserveObservation], when: str) -> None:
@@ -3208,7 +3265,26 @@ def _log_gate_summary(observations: list[ReserveObservation], when: str) -> None
     last refresh, not the club (2026-09-04).
     """
     answered = [o for o in observations if o.server_ms_past_window is not None]
+    # An ask the club never answered - a status, a dead view, a socket timeout -
+    # has no club clock and so belongs to no second. Counted apart rather than
+    # dropped: a burst being throttled is exactly what this summary is for, and
+    # a fully throttled one would otherwise log nothing at all.
+    unanswered = [o for o in observations if o.verdict in (RESERVE_ERRORED, RESERVE_TIMEDOUT)]
+
+    def log_unanswered() -> None:
+        """Name the asks that got no readable answer, with their statuses."""
+        if not unanswered:
+            return
+        statuses = sorted({str(o.status_code) for o in unanswered if o.status_code is not None})
+        logger.warning(
+            "GATE: %d ask(s) got no readable answer%s - they belong to no club-second "
+            "and are not counted above",
+            len(unanswered),
+            f" (status {', '.join(statuses)})" if statuses else "",
+        )
+
     if not answered:
+        log_unanswered()
         return
     by_second: dict[int, list[ReserveObservation]] = {}
     for observation in answered:
@@ -3232,13 +3308,9 @@ def _log_gate_summary(observations: list[ReserveObservation], when: str) -> None
                 )
             )
             if grants
-            else "granted none"
-            + (
-                f" ({sum(1 for o in rows if o.verdict == RESERVE_ERRORED)} errored)"
-                if any(o.verdict == RESERVE_ERRORED for o in rows)
-                else ""
-            ),
+            else "granted none",
         )
+    log_unanswered()
     distinct_slots = {o.slot_time for o in answered if o.slot_time is not None}
     if first_grant_second is not None:
         logger.info(
