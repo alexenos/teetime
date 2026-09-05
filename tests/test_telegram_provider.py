@@ -14,6 +14,7 @@ from app.providers.sms_base import split_message
 from app.providers.telegram_provider import (
     MAX_MESSAGE_LEN,
     TelegramProvider,
+    addressee_prefix,
     is_addressed_to_bot,
     is_authorized_user,
     strip_bot_prefix,
@@ -159,6 +160,76 @@ class TestSendSms:
         assert result.success
         assert len(texts) == 2
         assert all(len(t) <= MAX_MESSAGE_LEN for t in texts)
+
+    async def test_reply_to_message_id_threads_the_reply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 8}})
+
+        result = await make_provider(handler).send_sms(
+            "111", "yes, booking that", "-100999", reply_to_message_id="42"
+        )
+
+        assert result.success
+        body = json.loads(requests[0].content)
+        assert body["reply_parameters"] == {"message_id": 42}
+
+    async def test_no_reply_to_message_id_omits_reply_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+
+        await make_provider(handler).send_sms("111", "hello")
+
+        assert "reply_parameters" not in json.loads(requests[0].content)
+
+    async def test_only_first_chunk_of_a_long_reply_is_threaded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A long reply split into several messages should not repeat the
+        "replying to" strip on every chunk."""
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": len(bodies)}})
+
+        await make_provider(handler).send_sms(
+            "111", "y" * (MAX_MESSAGE_LEN + 5), reply_to_message_id="42"
+        )
+
+        assert len(bodies) == 2
+        assert bodies[0]["reply_parameters"] == {"message_id": 42}
+        assert "reply_parameters" not in bodies[1]
+
+    async def test_non_numeric_reply_to_message_id_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defensive: a malformed id must not crash the send or reach the API."""
+        monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 10}})
+
+        result = await make_provider(handler).send_sms(
+            "111", "hello", reply_to_message_id="not-a-number"
+        )
+
+        assert result.success
+        assert "reply_parameters" not in json.loads(requests[0].content)
 
     async def test_api_error_reported_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, "telegram_bot_token", "test-token")
@@ -379,7 +450,9 @@ class TestTelegramWebhookRoute:
 
         sent: dict = {}
 
-        async def fake_send(to_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_send(  # type: ignore[no-untyped-def]
+            to_number, message, origin_channel_id=None, channel=None, reply_to_message_id=None
+        ):
             sent.update(to_number=to_number, message=message, channel=channel)
             return "msg-1"
 
@@ -518,6 +591,77 @@ class TestTelegramWebhookRoute:
 
         assert resp.status_code == 200
         assert seen["message"] == "book 9/5 at 9a"
+
+    def test_group_reply_prefixed_and_threaded(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Concurrent conversations in one group must not read as anonymous
+        answers to whoever spoke last - see addressee_prefix."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        sent: dict = {}
+
+        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+            return "I'll book Tuesday at 5pm. Reply 'yes' to confirm."
+
+        async def fake_send(  # type: ignore[no-untyped-def]
+            to_number, message, origin_channel_id=None, channel=None, reply_to_message_id=None
+        ):
+            sent.update(message=message, reply_to_message_id=reply_to_message_id)
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(
+            text="@teetimebot book 9/5 at 9a", chat_id=-1001234567890, chat_type="group"
+        )
+        update["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 11}]
+        update["message"]["from"]["username"] = "dax"
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert sent["message"] == "@dax I'll book Tuesday at 5pm. Reply 'yes' to confirm."
+        assert sent["reply_to_message_id"] == "2"  # _update's fixed message_id
+
+    def test_private_reply_not_prefixed_or_threaded(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The addressee prefix and reply-threading only matter where several
+        people share one chat with the bot - never needed in a DM."""
+        from app.api import webhooks
+
+        sent: dict = {}
+
+        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+            return "I'll book Tuesday at 5pm. Reply 'yes' to confirm."
+
+        async def fake_send(  # type: ignore[no-untyped-def]
+            to_number, message, origin_channel_id=None, channel=None, reply_to_message_id=None
+        ):
+            sent.update(message=message, reply_to_message_id=reply_to_message_id)
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(text="book 9/5 at 9a", chat_type="private")
+        update["message"]["from"]["username"] = "dax"
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert sent["message"] == "I'll book Tuesday at 5pm. Reply 'yes' to confirm."
+        assert sent["reply_to_message_id"] is None
 
     def test_group_message_without_addressing_ignored(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -855,6 +999,26 @@ class TestStripBotPrefix:
         text = "@teetimebot book 9/5"
         entities = [{"type": "mention"}, {"type": "mention", "offset": -1, "length": 4}, "junk"]
         assert strip_bot_prefix(text, entities, "teetimebot") == text  # type: ignore[arg-type]
+
+
+class TestAddresseePrefix:
+    """Names who a group reply is for, so concurrent conversations in one
+    shared chat don't read as anonymous answers to whoever spoke last."""
+
+    def test_username_mentioned(self) -> None:
+        sender = {"id": 111, "username": "dax", "first_name": "Dax"}
+        assert addressee_prefix(sender) == "@dax "
+
+    def test_falls_back_to_first_name_without_a_username(self) -> None:
+        sender = {"id": 111, "first_name": "Dax"}
+        assert addressee_prefix(sender) == "Dax, "
+
+    def test_empty_when_neither_available(self) -> None:
+        assert addressee_prefix({"id": 111}) == ""
+
+    def test_empty_username_falls_back_to_first_name(self) -> None:
+        sender = {"id": 111, "username": "", "first_name": "Dax"}
+        assert addressee_prefix(sender) == "Dax, "
 
 
 class TestIsAddressedToBot:

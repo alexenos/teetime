@@ -6,6 +6,7 @@ from fastapi.responses import PlainTextResponse
 from app.models.schemas import ConversationState
 from app.providers.telegram_provider import (
     TelegramProvider,
+    addressee_prefix,
     is_addressed_to_bot,
     is_authorized_user,
     strip_bot_prefix,
@@ -186,8 +187,22 @@ async def handle_telegram_update(
         logger.exception("Error handling Telegram message")
         response_message = "Sorry, something went wrong processing that message."
 
+    reply_to_message_id: str | None = None
+    if chat.get("type") != "private":
+        # Several people can be mid-conversation with the bot in this same
+        # group at once - name who this reply is for, and thread it to their
+        # message so it doesn't read as a bare answer to whoever spoke last.
+        response_message = addressee_prefix(sender) + response_message
+        message_id = message.get("message_id")
+        if message_id is not None:
+            reply_to_message_id = str(message_id)
+
     await sms_service.send_sms(
-        user_id, response_message, origin_channel_id=chat_id, channel="telegram"
+        user_id,
+        response_message,
+        origin_channel_id=chat_id,
+        channel="telegram",
+        reply_to_message_id=reply_to_message_id,
     )
 
     return {"status": "ok"}

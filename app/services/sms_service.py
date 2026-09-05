@@ -121,6 +121,7 @@ class SMSService:
         message: str,
         origin_channel_id: str | None = None,
         channel: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str | None:
         """
         Send an SMS message.
@@ -132,11 +133,15 @@ class SMSService:
                 that support channels (Discord, Telegram). Ignored by SMS providers.
             channel: Messaging channel to send over. None falls back to
                 MESSAGING_CHANNEL.
+            reply_to_message_id: The inbound message this answers, for a
+                provider that can thread a reply to it. See SMSProvider.send_sms.
 
         Returns:
             The message SID if successful, None otherwise.
         """
-        result = await self.provider_for(channel).send_sms(to_number, message, origin_channel_id)
+        result = await self.provider_for(channel).send_sms(
+            to_number, message, origin_channel_id, reply_to_message_id
+        )
         return result.message_sid if result.success else None
 
     async def send_booking_confirmation(

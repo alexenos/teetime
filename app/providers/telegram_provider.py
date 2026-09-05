@@ -159,6 +159,27 @@ def is_addressed_to_bot(
     )
 
 
+def addressee_prefix(sender: dict[str, object]) -> str:
+    """A prefix naming who a group reply is for.
+
+    Multiple people can be mid-conversation with the bot in the same group at
+    once (session state is per-user, not per-chat - see is_addressed_to_bot),
+    so a bare reply in the shared channel would not say which of them it
+    answers. Telegram auto-links any "@word" matching a real username into a
+    tappable mention - and pings that user - without needing a message
+    entity, the same way Discord's own provider prefixes shared-channel
+    replies with a mention (see DiscordProvider.send_sms). Falls back to a
+    first name when the sender has no public username to mention by.
+    """
+    username = sender.get("username")
+    if isinstance(username, str) and username:
+        return f"@{username} "
+    first_name = sender.get("first_name")
+    if isinstance(first_name, str) and first_name:
+        return f"{first_name}, "
+    return ""
+
+
 def is_authorized_user(user_id: str, is_bot: bool) -> bool:
     """Decide whether an incoming Telegram update should be processed.
 
@@ -253,7 +274,11 @@ class TelegramProvider(SMSProvider):
         return to_number.strip()
 
     async def send_sms(
-        self, to_number: str, message: str, origin_channel_id: str | None = None
+        self,
+        to_number: str,
+        message: str,
+        origin_channel_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> SMSResult:
         if not settings.telegram_bot_token:
             return SMSResult(success=False, error_message="TELEGRAM_BOT_TOKEN is not configured")
@@ -262,13 +287,24 @@ class TelegramProvider(SMSProvider):
         if not chat_id:
             return SMSResult(success=False, error_message="No Telegram chat to send to")
 
+        reply_message_id: int | None = None
+        if reply_to_message_id:
+            try:
+                reply_message_id = int(reply_to_message_id)
+            except ValueError:
+                logger.warning(f"Ignoring non-numeric reply_to_message_id {reply_to_message_id!r}")
+
         try:
             async with self._client() as client:
                 last_message_id: str | None = None
-                for chunk in split_message(message, MAX_MESSAGE_LEN):
-                    resp = await client.post(
-                        "/sendMessage", json={"chat_id": chat_id, "text": chunk}
-                    )
+                for i, chunk in enumerate(split_message(message, MAX_MESSAGE_LEN)):
+                    payload: dict[str, object] = {"chat_id": chat_id, "text": chunk}
+                    # Threaded only on the first chunk - a long reply split
+                    # into several messages would otherwise show the same
+                    # "replying to" strip repeated on each one.
+                    if i == 0 and reply_message_id is not None:
+                        payload["reply_parameters"] = {"message_id": reply_message_id}
+                    resp = await client.post("/sendMessage", json=payload)
                     resp.raise_for_status()
                     try:
                         last_message_id = str(resp.json()["result"]["message_id"])

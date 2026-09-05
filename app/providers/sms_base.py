@@ -52,7 +52,11 @@ class SMSProvider(ABC):
 
     @abstractmethod
     async def send_sms(
-        self, to_number: str, message: str, origin_channel_id: str | None = None
+        self,
+        to_number: str,
+        message: str,
+        origin_channel_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> SMSResult:
         """
         Send an SMS message.
@@ -63,6 +67,12 @@ class SMSProvider(ABC):
             origin_channel_id: Where the conversation this message belongs to
                 started, for providers that have a concept of channels. Discord
                 uses it to reply in that channel; SMS providers ignore it.
+            reply_to_message_id: The inbound message this is answering, for
+                providers that can visually thread a reply to it (Telegram).
+                Only meaningful for a direct answer to something just
+                received; a proactive send (a booking confirmation, the
+                weekly prompt) has nothing to thread to. Providers without a
+                threading concept ignore it.
 
         Returns:
             SMSResult with success status and message SID or error.
