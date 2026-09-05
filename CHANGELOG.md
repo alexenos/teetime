@@ -70,9 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   served by a `StaticPool` where recycling would discard the schema.
 
 - **The opening burst no longer interleaves a fallback ask with the target.**
-  `walden_reserve_burst_target_only` now defaults to the whole burst plan
-  (12), so every member asks for the requested slot; the fallback list is
-  walked serially afterwards instead, as it already was when the burst granted
+  `walden_reserve_burst_target_only` now defaults to unset, which
+  `walden_burst_target_only()` couples to the burst plan's own length (12
+  today) rather than a separately hard-coded number, so every member asks for
+  the requested slot and lengthening `walden_reserve_burst_offsets_ms` can
+  never silently reintroduce the interleave. The fallback list is walked
+  serially afterwards instead, as it already was when the burst granted
   nothing. Found by the 2026-09-04 evening ad-hoc test this mode was built to
   require before a race: a fallback member interleaved into the burst shares
   the target's PrimeFaces ViewState, and when both were granted the club's own
@@ -80,8 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the target the chain reported booking (05:06 PM) - the 05:06 PM slot was
   still open on the post-race sheet. See
   `docs/booking-post-mortem-2026-09-04-evening.md`. The interleave code is
-  unchanged and stays reachable via `WALDEN_RESERVE_BURST_TARGET_ONLY` for a
-  future fix that makes concurrent grants under one ViewState safe.
+  unchanged and stays reachable via an explicit
+  `WALDEN_RESERVE_BURST_TARGET_ONLY`, for a future fix that makes concurrent
+  grants under one ViewState safe.
 
 ## [0.2.0] - 2026-08-20
 

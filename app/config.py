@@ -349,9 +349,9 @@ class Settings(BaseSettings):
     # not in the race. See docs/booking-post-mortem-2026-09-04.md.
     #
     # The fallback list is *not* replaced: by default the burst asks nothing
-    # but the target (see walden_reserve_burst_target_only) and the whole list
-    # is walked serially afterwards, out to the deadline, one request in flight
-    # at a time - as before, and as the burst itself falls back to when nothing
+    # but the target (see walden_burst_target_only()) and the whole list is
+    # walked serially afterwards, out to the deadline, one request in flight at
+    # a time - as before, and as the burst itself falls back to when nothing
     # inside it was granted.
     #
     # Every day, not Fridays only. The path the race runs has to be the path
@@ -373,25 +373,33 @@ class Settings(BaseSettings):
 
     # How many members from the front of the burst ask for the target alone.
     #
-    # Set to cover the whole plan by default, so the burst asks nothing but the
-    # target - see docs/booking-post-mortem-2026-09-04-evening.md. A value below
-    # the offset count interleaves fallback and target - F1, T, F2, T, ... -
-    # which is how this was first shipped, on the theory that a target gone from
-    # the first ask should not cost the uncontested neighbour beside it. The
-    # 2026-09-04 evening ad-hoc test - the test this mode was explicitly built
-    # to need before a race - ran that plan and found the failure mode it was
-    # built to answer: two members shared one PrimeFaces ViewState, the target
-    # (05:06 PM) was granted first and adopted as the win, a later-arriving
-    # fallback grant (04:58 PM) landed under the same ViewState, and the club's
-    # own reservation record ended up anchored to the fallback - the sheet
-    # showed 04:58 PM reserved and 05:06 PM open, while the chain reported
-    # success for 05:06 PM. A fallback interleaved into the burst is not a free
-    # hedge; it can overwrite which slot the club actually finalizes. Until that
-    # is fixed at the session level, the burst asks only the target, and the
-    # fallback list is walked serially afterwards - one request in flight at a
-    # time, the ladder's own contract - exactly as it already does when nothing
-    # is granted inside the burst.
-    walden_reserve_burst_target_only: int = 12
+    # Unset (the default) couples this to the burst plan's own length, so the
+    # burst asks nothing but the target regardless of how
+    # walden_reserve_burst_offsets_ms is configured - see
+    # walden_burst_target_only() and
+    # docs/booking-post-mortem-2026-09-04-evening.md. A copy of the offset
+    # count hard-coded here instead would silently drift the moment someone
+    # lengthens the offsets list past it, quietly reintroducing the fallback
+    # interleave this default exists to remove.
+    #
+    # Set explicitly (WALDEN_RESERVE_BURST_TARGET_ONLY) to opt back into
+    # interleaving fallback and target - F1, T, F2, T, ... - which is how this
+    # was first shipped, on the theory that a target gone from the first ask
+    # should not cost the uncontested neighbour beside it. The 2026-09-04
+    # evening ad-hoc test - the test this mode was explicitly built to need
+    # before a race - ran that plan and found the failure mode it was built to
+    # answer: two members shared one PrimeFaces ViewState, the target (05:06 PM)
+    # was granted first and adopted as the win, a later-arriving fallback grant
+    # (04:58 PM) landed under the same ViewState, and the club's own reservation
+    # record ended up anchored to the fallback - the sheet showed 04:58 PM
+    # reserved and 05:06 PM open, while the chain reported success for
+    # 05:06 PM. A fallback interleaved into the burst is not a free hedge; it
+    # can overwrite which slot the club actually finalizes. Until that is fixed
+    # at the session level, the burst asks only the target, and the fallback
+    # list is walked serially afterwards - one request in flight at a time, the
+    # ladder's own contract - exactly as it already does when nothing is
+    # granted inside the burst.
+    walden_reserve_burst_target_only: int | None = None
 
     # Write the per-attempt race ledger to the debug artifacts bucket.
     #
@@ -523,6 +531,20 @@ class Settings(BaseSettings):
         return _parse_offsets_ms(
             self.walden_reserve_burst_offsets_ms, "WALDEN_RESERVE_BURST_OFFSETS_MS"
         )
+
+    def walden_burst_target_only(self) -> int:
+        """How many burst members ask for the target alone, coupled to the plan.
+
+        Unset (the default) is the whole burst plan's own length, so lengthening
+        walden_reserve_burst_offsets_ms can never quietly reintroduce a fallback
+        interleave - a hard-coded copy of the offset count would drift the
+        moment the two were edited separately. An explicit
+        WALDEN_RESERVE_BURST_TARGET_ONLY opts back into interleaving fallback
+        and target past that many members.
+        """
+        if self.walden_reserve_burst_target_only is not None:
+            return max(1, self.walden_reserve_burst_target_only)
+        return len(self.walden_burst_offsets_ms())
 
     class Config:
         env_file = ".env"

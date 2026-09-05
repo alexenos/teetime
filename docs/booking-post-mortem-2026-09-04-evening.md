@@ -26,7 +26,7 @@ the one the chain reported booking.
 
 Members #4 and #5 were logged by the booker itself as surplus:
 
-```
+```text
 WARNING - Burst member #5 was also granted 05:06 PM - a surplus hold, left to
 the club's hold timer; the ad-hoc test of this mode is what says whether the
 club tolerates two
@@ -40,7 +40,7 @@ grant (05:06 PM) and proceeded on it: added two TBD guests, clicked Book Now,
 and reported `Chain finished - phase=complete, success=True, booked=05:06 PM`.
 `RESERVATION_CHECK` read back:
 
-```
+```text
 TEE TIMES (NORTHGATE) 09/08/2026 04:58 PM - 05:06 PM RESERVED
 ```
 
@@ -93,27 +93,42 @@ this member.
 
 ## 4. Fix (this PR)
 
-`walden_reserve_burst_target_only` now defaults to the full burst plan (12),
-so by default **no fallback is interleaved into the burst** — every member
-asks for the requested slot alone. The fallback list is walked serially
-afterward, unchanged: one request in flight at a time, waiting for each
-answer, exactly the path already taken when nothing inside the burst was
-granted. This removes the condition that produced the mixup (two different
-slots granted under one shared ViewState) without touching the burst's actual
-purpose — landing the *target* ask early and often, which is unaffected by
-removing the fallback interleave. The alternating-fallback code itself is
-untouched and stays reachable via `WALDEN_RESERVE_BURST_TARGET_ONLY` below the
-offset count, for whenever concurrent multi-slot grants under one ViewState
-are made safe.
+`walden_reserve_burst_target_only` now defaults to unset, which
+`walden_burst_target_only()` resolves to the full burst plan's own length
+(12 today) rather than a separately hard-coded number — so by default **no
+fallback is interleaved into the burst** regardless of how
+`walden_reserve_burst_offsets_ms` is configured, and lengthening the offsets
+list can never silently reintroduce the interleave the way a stored copy of
+the count would. Every member asks for the requested slot alone. The fallback
+list is walked serially afterward, unchanged: one request in flight at a
+time, waiting for each answer, exactly the path already taken when nothing
+inside the burst was granted. This removes the condition that produced the
+mixup (two *different* slots granted under one shared ViewState) without
+touching the burst's actual purpose — landing the *target* ask early and
+often, which is unaffected by removing the fallback interleave. The
+alternating-fallback code itself is untouched and stays reachable via an
+explicit `WALDEN_RESERVE_BURST_TARGET_ONLY`, for whenever concurrent
+multi-slot grants under one ViewState are made safe.
 
 **Not yet done:** the underlying session-sharing issue (concurrent Reserve
 calls against one ViewState racing each other server-side) is still there in
-principle for the four now-serial target-only retries within the burst itself
-(members 0–3 all ask the *same* slot, so a mixup between them is harmless —
-worst case is redundant refusals), but has not been proven safe for any future
-mode that reintroduces concurrent *different*-slot asks. Before
-`WALDEN_RESERVE_BURST_TARGET_ONLY` is ever lowered again, that needs its own
-ad-hoc test.
+principle for the now-target-only burst itself. All 12 members still fire the
+*same* slot concurrently through the burst's thread pool, without waiting for
+answers, exactly as before — "target-only" changed *what* they ask, not
+*how* they ask it. A request still in flight when member #0's grant lands is
+not cancelled, and if a later one is also accepted, `_absorb_burst_exchange`
+records it the same way #4 and #5 were here: a surplus, left to the club's own
+hold timer. Today's run cannot say whether the club's response to a *second*
+grant on the *same* slot is a genuine second hold, a no-op re-confirmation, or
+something that could itself perturb which reservation stands, the way a
+different-slot surplus did — asserting "harmless" would be repeating the same
+kind of unverified assumption this whole post-mortem exists to correct. Treat
+same-slot concurrent grants as unproven, not safe, until a test with a
+reachable second grant (a shorter offsets list densely spaced early, on a
+slot popular enough to contest) confirms the shared ViewState settles on
+exactly one reservation. Before `WALDEN_RESERVE_BURST_TARGET_ONLY` is ever
+lowered back below the plan length, that same question applies doubly, since
+a *different*-slot surplus is exactly what this fix removed.
 
 ## Round-trip table (§7b of the skill)
 
