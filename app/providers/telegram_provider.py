@@ -153,7 +153,8 @@ def is_addressed_to_bot(
         return False
     replied_username = replied_to.get("username")
     return bool(
-        bot_username and isinstance(replied_username, str)
+        bot_username
+        and isinstance(replied_username, str)
         and replied_username.lower() == bot_username.lower()
     )
 

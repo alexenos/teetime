@@ -152,7 +152,9 @@ async def handle_telegram_update(
     if chat.get("type") != "private" and not is_addressed_to_bot(
         raw_text, entities, bot_username, message.get("reply_to_message")
     ):
-        logger.info(f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring")
+        logger.info(
+            f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring"
+        )
         return {"status": "ignored"}
 
     # In a group the message has to address the bot to reach us at all, so it
