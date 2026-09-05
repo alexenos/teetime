@@ -4327,7 +4327,7 @@ class WaldenGolfProvider(ReservationProvider):
                     else "ladder"
                 ),
                 burst_offsets_ms=settings.walden_burst_offsets_ms(),
-                burst_target_only=settings.walden_reserve_burst_target_only,
+                burst_target_only=settings.walden_burst_target_only(),
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as

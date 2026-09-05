@@ -192,7 +192,46 @@ class TestSweepLadder:
         assert offsets[0] == 0
         assert offsets[1] <= 120
         assert offsets[-1] >= 1800
-        assert 1 <= config.walden_reserve_burst_target_only < len(offsets)
+        # Target-only by default (see docs/booking-post-mortem-2026-09-04-evening.md):
+        # a fallback interleaved into the burst shares the target's ViewState, and
+        # the 2026-09-04 evening ad-hoc test found the club can finalize the
+        # fallback's grant instead of the target's. The fallback list is walked
+        # serially after the burst instead.
+        assert config.walden_reserve_burst_target_only is None
+        assert config.walden_burst_target_only() == len(offsets)
+
+    def test_burst_target_only_stays_coupled_to_a_longer_offset_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A hard-coded target-only count would drift the moment the offsets grow past it.
+
+        Caught by CodeRabbit on the PR that introduced the target-only default
+        (#174): a plain ``int`` copy of the offset count is only correct until
+        someone lengthens ``WALDEN_RESERVE_BURST_OFFSETS_MS`` without also
+        raising the copy, which silently reintroduces the fallback interleave
+        and the shared-ViewState wrong-slot booking that default exists to
+        prevent. ``walden_burst_target_only()`` must track the *parsed* offset
+        count instead of a stored number.
+        """
+        monkeypatch.delenv("WALDEN_RESERVE_BURST_TARGET_ONLY", raising=False)
+        monkeypatch.setenv(
+            "WALDEN_RESERVE_BURST_OFFSETS_MS",
+            ",".join(str(ms) for ms in range(0, 1400, 100)),  # 14 offsets
+        )
+        config = Settings(_env_file=None)
+
+        offsets = config.walden_burst_offsets_ms()
+        assert len(offsets) == 14
+        assert config.walden_burst_target_only() == 14
+
+    def test_burst_target_only_explicit_override_still_interleaves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator who explicitly opts back into interleaving is respected."""
+        monkeypatch.setenv("WALDEN_RESERVE_BURST_TARGET_ONLY", "4")
+        config = Settings(_env_file=None)
+
+        assert config.walden_burst_target_only() == 4
 
     def test_burst_offsets_parse_leniently(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A malformed value degrades to one send on the aim, never to an error."""
