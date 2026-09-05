@@ -69,6 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberately excluded — it has no connection to go stale, and `:memory:` is
   served by a `StaticPool` where recycling would discard the schema.
 
+- **The opening burst no longer interleaves a fallback ask with the target.**
+  `walden_reserve_burst_target_only` now defaults to the whole burst plan
+  (12), so every member asks for the requested slot; the fallback list is
+  walked serially afterwards instead, as it already was when the burst granted
+  nothing. Found by the 2026-09-04 evening ad-hoc test this mode was built to
+  require before a race: a fallback member interleaved into the burst shares
+  the target's PrimeFaces ViewState, and when both were granted the club's own
+  reservation record ended up anchored to the fallback (04:58 PM) rather than
+  the target the chain reported booking (05:06 PM) - the 05:06 PM slot was
+  still open on the post-race sheet. See
+  `docs/booking-post-mortem-2026-09-04-evening.md`. The interleave code is
+  unchanged and stays reachable via `WALDEN_RESERVE_BURST_TARGET_ONLY` for a
+  future fix that makes concurrent grants under one ViewState safe.
+
 ## [0.2.0] - 2026-08-20
 
 The release in which the bot started winning the 06:30 race.

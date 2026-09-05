@@ -348,9 +348,11 @@ class Settings(BaseSettings):
     # gate that opens somewhere in a two-second span, one ask per 750ms is
     # not in the race. See docs/booking-post-mortem-2026-09-04.md.
     #
-    # The fallback list is *not* replaced: its first entries are pulled into
-    # the burst (see walden_reserve_burst_target_only) and the rest are walked
-    # serially afterwards, out to the deadline, as before.
+    # The fallback list is *not* replaced: by default the burst asks nothing
+    # but the target (see walden_reserve_burst_target_only) and the whole list
+    # is walked serially afterwards, out to the deadline, one request in flight
+    # at a time - as before, and as the burst itself falls back to when nothing
+    # inside it was granted.
     #
     # Every day, not Fridays only. The path the race runs has to be the path
     # every ad-hoc booking runs, or it is untested until the morning it counts.
@@ -371,15 +373,25 @@ class Settings(BaseSettings):
 
     # How many members from the front of the burst ask for the target alone.
     #
-    # After these, members alternate fallback and target - F1, T, F2, T, F3, T,
-    # cycling through the fallback list - so a target that is gone from the
-    # first ask does not cost the uncontested neighbour beside it. Both prior
-    # Friday wins were fallback grants, at +4871 and +5279ms; this asks the
-    # same question at about +1.5s. 4 leaves the first ~370ms to the target,
-    # which is roughly one round trip: a fallback fired later than that can be
-    # skipped once the target's own first answer is a grant, which is what
-    # keeps a second hold from being taken on a morning the first ask won.
-    walden_reserve_burst_target_only: int = 4
+    # Set to cover the whole plan by default, so the burst asks nothing but the
+    # target - see docs/booking-post-mortem-2026-09-04-evening.md. A value below
+    # the offset count interleaves fallback and target - F1, T, F2, T, ... -
+    # which is how this was first shipped, on the theory that a target gone from
+    # the first ask should not cost the uncontested neighbour beside it. The
+    # 2026-09-04 evening ad-hoc test - the test this mode was explicitly built
+    # to need before a race - ran that plan and found the failure mode it was
+    # built to answer: two members shared one PrimeFaces ViewState, the target
+    # (05:06 PM) was granted first and adopted as the win, a later-arriving
+    # fallback grant (04:58 PM) landed under the same ViewState, and the club's
+    # own reservation record ended up anchored to the fallback - the sheet
+    # showed 04:58 PM reserved and 05:06 PM open, while the chain reported
+    # success for 05:06 PM. A fallback interleaved into the burst is not a free
+    # hedge; it can overwrite which slot the club actually finalizes. Until that
+    # is fixed at the session level, the burst asks only the target, and the
+    # fallback list is walked serially afterwards - one request in flight at a
+    # time, the ladder's own contract - exactly as it already does when nothing
+    # is granted inside the burst.
+    walden_reserve_burst_target_only: int = 12
 
     # Write the per-attempt race ledger to the debug artifacts bucket.
     #

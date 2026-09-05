@@ -192,7 +192,12 @@ class TestSweepLadder:
         assert offsets[0] == 0
         assert offsets[1] <= 120
         assert offsets[-1] >= 1800
-        assert 1 <= config.walden_reserve_burst_target_only < len(offsets)
+        # Target-only by default (see docs/booking-post-mortem-2026-09-04-evening.md):
+        # a fallback interleaved into the burst shares the target's ViewState, and
+        # the 2026-09-04 evening ad-hoc test found the club can finalize the
+        # fallback's grant instead of the target's. The fallback list is walked
+        # serially after the burst instead.
+        assert config.walden_reserve_burst_target_only >= len(offsets)
 
     def test_burst_offsets_parse_leniently(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A malformed value degrades to one send on the aim, never to an error."""
