@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.config import Settings, settings
+from app.models.schemas import ConversationState, UserSession
 from app.providers import telegram_provider
 from app.providers.sms_base import split_message
 from app.providers.telegram_provider import (
@@ -527,6 +528,9 @@ class TestTelegramWebhookRoute:
 
         monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        monkeypatch.setattr(
+            webhooks.booking_service, "get_session", _stub_get_session(ConversationState.IDLE)
+        )
 
         async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("an unaddressed group message must not be dispatched")
@@ -610,6 +614,42 @@ class TestTelegramWebhookRoute:
         assert resp.status_code == 200
         assert seen["message"] == "yes"
 
+    def test_group_message_mid_conversation_dispatched_without_addressing(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Once the bot has asked this user something, they can just answer -
+        no need to re-mention the bot on every turn of the conversation."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        monkeypatch.setattr(
+            webhooks.booking_service,
+            "get_session",
+            _stub_get_session(ConversationState.AWAITING_CONFIRMATION),
+        )
+        seen: dict = {}
+
+        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+            seen["message"] = message
+            return "ok"
+
+        async def fake_send(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(text="yes", chat_id=-1001234567890, chat_type="group")
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert seen["message"] == "yes"
+
     def test_group_reply_to_someone_elses_message_ignored(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -617,6 +657,9 @@ class TestTelegramWebhookRoute:
 
         monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        monkeypatch.setattr(
+            webhooks.booking_service, "get_session", _stub_get_session(ConversationState.IDLE)
+        )
 
         async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("a reply to another member is not addressed to the bot")
@@ -701,6 +744,15 @@ class TestTelegramWebhookRoute:
 async def _no_sleep(seconds: float) -> None:
     """Collapse retry backoff so the tests do not actually wait."""
     return None
+
+
+def _stub_get_session(state: ConversationState):  # type: ignore[no-untyped-def]
+    """A fake booking_service.get_session returning a fixed conversation state."""
+
+    async def get_session(phone_number: str) -> UserSession:
+        return UserSession(phone_number=phone_number, state=state)
+
+    return get_session
 
 
 def mention_entity(offset: int, length: int) -> dict:

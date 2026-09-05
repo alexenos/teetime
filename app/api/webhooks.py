@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Form, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from app.models.schemas import ConversationState
 from app.providers.telegram_provider import (
     TelegramProvider,
     is_addressed_to_bot,
@@ -149,13 +150,22 @@ async def handle_telegram_update(
     # Telegram now hands over every message regardless of addressing - so an
     # unaddressed one in a non-private chat has to be dropped here instead,
     # or every group message becomes an LLM call.
+    #
+    # Exception: a user already mid-conversation (we just asked them a
+    # question) can keep replying without re-addressing the bot every turn -
+    # the same way a human keeps talking after being spoken to, rather than
+    # re-tagging the other person in every reply. Scoped to this user's own
+    # session, so someone else's unaddressed chatter in the same group still
+    # needs its own mention to start a conversation.
     if chat.get("type") != "private" and not is_addressed_to_bot(
         raw_text, entities, bot_username, message.get("reply_to_message")
     ):
-        logger.info(
-            f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring"
-        )
-        return {"status": "ignored"}
+        session = await booking_service.get_session(user_id)
+        if session.state == ConversationState.IDLE:
+            logger.info(
+                f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring"
+            )
+            return {"status": "ignored"}
 
     # In a group the message has to address the bot to reach us at all, so it
     # arrives as "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a".
