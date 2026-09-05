@@ -126,8 +126,15 @@ class DiscordProvider(SMSProvider):
         return None
 
     async def send_sms(
-        self, to_number: str, message: str, origin_channel_id: str | None = None
+        self,
+        to_number: str,
+        message: str,
+        origin_channel_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> SMSResult:
+        # Unused: Discord identifies whose message a reply is for with the
+        # <@user_id> mention below, already threaded regardless of order.
+        del reply_to_message_id
         user_id = self.resolve_user_id(to_number)
         if not user_id:
             return SMSResult(success=False, error_message="No Discord user ID configured")

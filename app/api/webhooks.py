@@ -1,10 +1,14 @@
 import logging
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Form, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from app.models.schemas import ConversationState
 from app.providers.telegram_provider import (
     TelegramProvider,
+    addressee_prefix,
+    is_addressed_to_bot,
     is_authorized_user,
     strip_bot_prefix,
     verify_webhook_secret,
@@ -16,6 +20,14 @@ from app.services.sms_service import sms_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+# How long an unfinished conversation still counts as "live" for the group
+# addressing bypass below. Nothing in the conversation state machine ever
+# resets a session back to IDLE on its own - only finishing the flow does
+# (booked, cancelled, or an error path) - so without this, someone who was
+# once asked "reply yes to confirm" and never answered would have every one
+# of their unaddressed group messages routed to the parser, indefinitely.
+_GROUP_CONVERSATION_TIMEOUT = timedelta(minutes=15)
 
 
 def get_external_url(request: Request) -> str:
@@ -139,13 +151,39 @@ async def handle_telegram_update(
         logger.info(f"Telegram message from {user_id} had no text; ignoring")
         return {"status": "ignored"}
 
+    entities = message.get("entities")
+    bot_username = await TelegramProvider().get_bot_username()
+
+    # With group privacy mode on, Telegram only ever delivers a group message
+    # that already addresses this bot. Some groups need privacy mode off to
+    # get delivery working at all (see docs/telegram-setup.md), which means
+    # Telegram now hands over every message regardless of addressing - so an
+    # unaddressed one in a non-private chat has to be dropped here instead,
+    # or every group message becomes an LLM call.
+    #
+    # Exception: a user already mid-conversation (we just asked them a
+    # question) can keep replying without re-addressing the bot every turn -
+    # the same way a human keeps talking after being spoken to, rather than
+    # re-tagging the other person in every reply. Scoped to this user's own
+    # session, so someone else's unaddressed chatter in the same group still
+    # needs its own mention to start a conversation.
+    if chat.get("type") != "private" and not is_addressed_to_bot(
+        raw_text, entities, bot_username, message.get("reply_to_message")
+    ):
+        session = await booking_service.get_session(user_id)
+        session_age = datetime.now(UTC).replace(tzinfo=None) - session.last_interaction
+        live = session.state != ConversationState.IDLE and session_age < _GROUP_CONVERSATION_TIMEOUT
+        if not live:
+            logger.info(
+                f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring"
+            )
+            return {"status": "ignored"}
+
     # In a group the message has to address the bot to reach us at all, so it
     # arrives as "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a".
     # Strip that addressing before the parser sees it, the same way the Discord
     # gateway strips "<@1533...>".
-    text = strip_bot_prefix(
-        raw_text, message.get("entities"), await TelegramProvider().get_bot_username()
-    )
+    text = strip_bot_prefix(raw_text, entities, bot_username)
     if not text:
         logger.info(f"Telegram message from {user_id} was only addressing; nothing to parse")
         return {"status": "ignored"}
@@ -160,8 +198,22 @@ async def handle_telegram_update(
         logger.exception("Error handling Telegram message")
         response_message = "Sorry, something went wrong processing that message."
 
+    reply_to_message_id: str | None = None
+    if chat.get("type") != "private":
+        # Several people can be mid-conversation with the bot in this same
+        # group at once - name who this reply is for, and thread it to their
+        # message so it doesn't read as a bare answer to whoever spoke last.
+        response_message = addressee_prefix(sender) + response_message
+        message_id = message.get("message_id")
+        if message_id is not None:
+            reply_to_message_id = str(message_id)
+
     await sms_service.send_sms(
-        user_id, response_message, origin_channel_id=chat_id, channel="telegram"
+        user_id,
+        response_message,
+        origin_channel_id=chat_id,
+        channel="telegram",
+        reply_to_message_id=reply_to_message_id,
     )
 
     return {"status": "ok"}

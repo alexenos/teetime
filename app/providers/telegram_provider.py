@@ -53,32 +53,19 @@ def _utf16_slice(units: bytes, offset: int, length: int) -> str:
     return units[offset * 2 : (offset + length) * 2].decode("utf-16-le", errors="ignore")
 
 
-def strip_bot_prefix(
-    text: str, entities: list[dict[str, object]] | None, bot_username: str | None
-) -> str:
-    """Remove the mentions and command name that address a message to this bot.
+def _bot_addressing_cuts(
+    units: bytes, entities: list[dict[str, object]] | None, bot_username: str | None
+) -> list[tuple[int, int]]:
+    """Entity offsets (in UTF-16 code units) that address the text to this bot.
 
-    In a group the user has to address the bot, so the raw text arrives as
-    "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a". The addressing
-    is noise the LLM parser has to see past - the same reason the Discord
-    gateway strips "<@1533...>" before dispatching.
-
-    Telegram marks the addressing structurally in ``entities`` rather than
-    leaving it to be matched out of the text, so this cuts the marked ranges
-    instead of guessing. Only entities that are actually ours are removed: a
-    mention of someone else, or a "/other@otherbot" aimed at a different bot in
-    the same group, is left in place.
-
-    Entity offsets are measured in UTF-16 code units, not characters, so a
-    single emoji earlier in the message shifts every later offset by one.
-    Slicing the Python string directly would cut the wrong range - and this app
-    treats a bare "👍" as a booking confirmation, so emoji in
-    messages is an expected case, not a hypothetical one.
+    A mention of this bot's username, or a leading /command meant for it -
+    bare, or explicitly suffixed to it. Only entities that are actually ours
+    are matched: a mention of someone else, or a "/other@otherbot" aimed at a
+    different bot in the same group, is left alone.
     """
     if not entities:
-        return text.strip()
+        return []
 
-    units = _utf16_units(text)
     cuts: list[tuple[int, int]] = []
     for entity in entities:
         if not isinstance(entity, dict):
@@ -101,7 +88,34 @@ def strip_bot_prefix(
             _, _, suffix = fragment.partition("@")
             if not suffix or (bot_username and suffix.lower() == bot_username.lower()):
                 cuts.append((offset, length))
+    return cuts
 
+
+def strip_bot_prefix(
+    text: str, entities: list[dict[str, object]] | None, bot_username: str | None
+) -> str:
+    """Remove the mentions and command name that address a message to this bot.
+
+    In a group the user has to address the bot, so the raw text arrives as
+    "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a". The addressing
+    is noise the LLM parser has to see past - the same reason the Discord
+    gateway strips "<@1533...>" before dispatching.
+
+    Telegram marks the addressing structurally in ``entities`` rather than
+    leaving it to be matched out of the text, so this cuts the marked ranges
+    instead of guessing.
+
+    Entity offsets are measured in UTF-16 code units, not characters, so a
+    single emoji earlier in the message shifts every later offset by one.
+    Slicing the Python string directly would cut the wrong range - and this app
+    treats a bare "👍" as a booking confirmation, so emoji in
+    messages is an expected case, not a hypothetical one.
+    """
+    if not entities:
+        return text.strip()
+
+    units = _utf16_units(text)
+    cuts = _bot_addressing_cuts(units, entities, bot_username)
     if not cuts:
         return text.strip()
 
@@ -112,6 +126,58 @@ def strip_bot_prefix(
     # whitespace: a multi-booking message is one request per line, and folding
     # its newlines into spaces would change what the parser is asked to read.
     return re.sub(r"[^\S\n]+", " ", units.decode("utf-16-le", errors="ignore")).strip()
+
+
+def is_addressed_to_bot(
+    text: str,
+    entities: list[dict[str, object]] | None,
+    bot_username: str | None,
+    reply_to_message: dict[str, object] | None = None,
+) -> bool:
+    """Report whether a group message is actually meant for this bot.
+
+    With privacy mode on, Telegram only ever delivers a group message that
+    already satisfies this - it is the whole reason ``strip_bot_prefix`` could
+    assume anything reaching it was addressing. With privacy mode off (see
+    docs/telegram-setup.md), Telegram hands over every message in the group,
+    addressed or not, and this check is what stands in for the filter Telegram
+    used to do for free. Skipped entirely for a private chat, where every
+    message is already directed at the bot by construction.
+    """
+    if _bot_addressing_cuts(_utf16_units(text), entities, bot_username):
+        return True
+    if not isinstance(reply_to_message, dict):
+        return False
+    replied_to = reply_to_message.get("from")
+    if not isinstance(replied_to, dict):
+        return False
+    replied_username = replied_to.get("username")
+    return bool(
+        bot_username
+        and isinstance(replied_username, str)
+        and replied_username.lower() == bot_username.lower()
+    )
+
+
+def addressee_prefix(sender: dict[str, object]) -> str:
+    """A prefix naming who a group reply is for.
+
+    Multiple people can be mid-conversation with the bot in the same group at
+    once (session state is per-user, not per-chat - see is_addressed_to_bot),
+    so a bare reply in the shared channel would not say which of them it
+    answers. Telegram auto-links any "@word" matching a real username into a
+    tappable mention - and pings that user - without needing a message
+    entity, the same way Discord's own provider prefixes shared-channel
+    replies with a mention (see DiscordProvider.send_sms). Falls back to a
+    first name when the sender has no public username to mention by.
+    """
+    username = sender.get("username")
+    if isinstance(username, str) and username:
+        return f"@{username} "
+    first_name = sender.get("first_name")
+    if isinstance(first_name, str) and first_name:
+        return f"{first_name}, "
+    return ""
 
 
 def is_authorized_user(user_id: str, is_bot: bool) -> bool:
@@ -208,7 +274,11 @@ class TelegramProvider(SMSProvider):
         return to_number.strip()
 
     async def send_sms(
-        self, to_number: str, message: str, origin_channel_id: str | None = None
+        self,
+        to_number: str,
+        message: str,
+        origin_channel_id: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> SMSResult:
         if not settings.telegram_bot_token:
             return SMSResult(success=False, error_message="TELEGRAM_BOT_TOKEN is not configured")
@@ -217,13 +287,31 @@ class TelegramProvider(SMSProvider):
         if not chat_id:
             return SMSResult(success=False, error_message="No Telegram chat to send to")
 
+        reply_message_id: int | None = None
+        if reply_to_message_id:
+            try:
+                reply_message_id = int(reply_to_message_id)
+            except ValueError:
+                logger.warning(f"Ignoring non-numeric reply_to_message_id {reply_to_message_id!r}")
+
         try:
             async with self._client() as client:
                 last_message_id: str | None = None
-                for chunk in split_message(message, MAX_MESSAGE_LEN):
-                    resp = await client.post(
-                        "/sendMessage", json={"chat_id": chat_id, "text": chunk}
-                    )
+                for i, chunk in enumerate(split_message(message, MAX_MESSAGE_LEN)):
+                    payload: dict[str, object] = {"chat_id": chat_id, "text": chunk}
+                    # Threaded only on the first chunk - a long reply split
+                    # into several messages would otherwise show the same
+                    # "replying to" strip repeated on each one.
+                    # allow_sending_without_reply: the thread is a nice-to-have,
+                    # not a condition for delivery - without it, Telegram
+                    # rejects the whole send if the trigger message was
+                    # deleted in between, silently losing the reply itself.
+                    if i == 0 and reply_message_id is not None:
+                        payload["reply_parameters"] = {
+                            "message_id": reply_message_id,
+                            "allow_sending_without_reply": True,
+                        }
+                    resp = await client.post("/sendMessage", json=payload)
                     resp.raise_for_status()
                     try:
                         last_message_id = str(resp.json()["result"]["message_id"])
