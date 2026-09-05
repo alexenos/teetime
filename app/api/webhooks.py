@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Form, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
@@ -19,6 +20,14 @@ from app.services.sms_service import sms_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+# How long an unfinished conversation still counts as "live" for the group
+# addressing bypass below. Nothing in the conversation state machine ever
+# resets a session back to IDLE on its own - only finishing the flow does
+# (booked, cancelled, or an error path) - so without this, someone who was
+# once asked "reply yes to confirm" and never answered would have every one
+# of their unaddressed group messages routed to the parser, indefinitely.
+_GROUP_CONVERSATION_TIMEOUT = timedelta(minutes=15)
 
 
 def get_external_url(request: Request) -> str:
@@ -162,7 +171,9 @@ async def handle_telegram_update(
         raw_text, entities, bot_username, message.get("reply_to_message")
     ):
         session = await booking_service.get_session(user_id)
-        if session.state == ConversationState.IDLE:
+        session_age = datetime.now(UTC).replace(tzinfo=None) - session.last_interaction
+        live = session.state != ConversationState.IDLE and session_age < _GROUP_CONVERSATION_TIMEOUT
+        if not live:
             logger.info(
                 f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring"
             )

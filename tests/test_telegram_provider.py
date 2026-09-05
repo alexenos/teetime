@@ -1,6 +1,7 @@
 """Tests for the Telegram messaging provider and its inbound webhook."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -177,7 +178,10 @@ class TestSendSms:
 
         assert result.success
         body = json.loads(requests[0].content)
-        assert body["reply_parameters"] == {"message_id": 42}
+        assert body["reply_parameters"] == {
+            "message_id": 42,
+            "allow_sending_without_reply": True,
+        }
 
     async def test_no_reply_to_message_id_omits_reply_parameters(
         self, monkeypatch: pytest.MonkeyPatch
@@ -210,7 +214,10 @@ class TestSendSms:
         )
 
         assert len(bodies) == 2
-        assert bodies[0]["reply_parameters"] == {"message_id": 42}
+        assert bodies[0]["reply_parameters"] == {
+            "message_id": 42,
+            "allow_sending_without_reply": True,
+        }
         assert "reply_parameters" not in bodies[1]
 
     async def test_non_numeric_reply_to_message_id_ignored(
@@ -794,6 +801,37 @@ class TestTelegramWebhookRoute:
         assert resp.status_code == 200
         assert seen["message"] == "yes"
 
+    def test_group_message_from_stale_session_still_requires_addressing(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing else resets a non-IDLE session back to IDLE on its own - a
+        conversation started and never finished must not stay live forever."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+        monkeypatch.setattr(
+            webhooks.booking_service,
+            "get_session",
+            _stub_get_session(ConversationState.AWAITING_CONFIRMATION, last_interaction=stale),
+        )
+
+        async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("a conversation an hour stale must not bypass addressing")
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fail)
+
+        update = self._update(text="yes", chat_id=-1001234567890, chat_type="group")
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ignored"}
+
     def test_group_reply_to_someone_elses_message_ignored(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -890,11 +928,14 @@ async def _no_sleep(seconds: float) -> None:
     return None
 
 
-def _stub_get_session(state: ConversationState):  # type: ignore[no-untyped-def]
+def _stub_get_session(state: ConversationState, last_interaction=None):  # type: ignore[no-untyped-def]
     """A fake booking_service.get_session returning a fixed conversation state."""
 
     async def get_session(phone_number: str) -> UserSession:
-        return UserSession(phone_number=phone_number, state=state)
+        kwargs = {}
+        if last_interaction is not None:
+            kwargs["last_interaction"] = last_interaction
+        return UserSession(phone_number=phone_number, state=state, **kwargs)
 
     return get_session
 

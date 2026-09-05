@@ -302,8 +302,15 @@ class TelegramProvider(SMSProvider):
                     # Threaded only on the first chunk - a long reply split
                     # into several messages would otherwise show the same
                     # "replying to" strip repeated on each one.
+                    # allow_sending_without_reply: the thread is a nice-to-have,
+                    # not a condition for delivery - without it, Telegram
+                    # rejects the whole send if the trigger message was
+                    # deleted in between, silently losing the reply itself.
                     if i == 0 and reply_message_id is not None:
-                        payload["reply_parameters"] = {"message_id": reply_message_id}
+                        payload["reply_parameters"] = {
+                            "message_id": reply_message_id,
+                            "allow_sending_without_reply": True,
+                        }
                     resp = await client.post("/sendMessage", json=payload)
                     resp.raise_for_status()
                     try:
