@@ -153,7 +153,7 @@ variable "telegram_enabled" {
     docs/telegram-setup.md.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "log_level" {
