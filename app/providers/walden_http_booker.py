@@ -59,6 +59,7 @@ from app.providers.walden_http import (
     AbConfig,
     DirectHttpConnectionError,
     DirectHttpError,
+    DirectHttpStatusError,
     DirectHttpTimeoutError,
     Node,
     PartialResponse,
@@ -101,6 +102,9 @@ _NON_MESSAGE_TAGS = frozenset({"a", "button", "script", "style"})
 # Enough to carry a validation sentence or two into an SMS/Discord reply without
 # pasting a re-rendered tee sheet into it.
 _MAX_MESSAGE_CHARS = 500
+
+# How much of a non-200 body to put in the log; the ledger row keeps more.
+_ERROR_BODY_LOG_CHARS = 300
 
 # The day tab for the date already showing. Replaying its handler re-renders the
 # whole form without changing what is selected, which is what makes it usable as
@@ -182,10 +186,16 @@ _RESERVE_MAX_ATTEMPTS = 6
 # 6000 was sized when a timeout ended the run outright, so it only ever had to
 # bound a healthy ladder. Now that a stalled Reserve is survivable, one stall
 # can spend 3s of it, and 6000 would leave a ladder that survived the stall with
-# no room left to walk. The club has granted slots at ~1.24s and the member
-# wants the tee time whenever it comes, so asking out to 10s costs nothing on a
-# morning already being lost.
-_RESERVE_DEADLINE_MS = 10000
+# no room left to walk. The member wants the tee time whenever it comes, so
+# asking further costs nothing on a morning already being lost.
+#
+# 30000 since 2026-09-04, from 10000. That morning's race hit the 10s wall on
+# attempt 14 having reached three of its seven fallbacks; the seventh, 09:08 AM,
+# was still Available on the sheet photographed 44 seconds after the window.
+# Every Friday on record has cleared the whole 07:53-09:00 block inside a
+# minute, so the fallback walk's reach is what a Friday is decided by once the
+# opening is lost, and a walk of ~750ms per ask needs the room.
+_RESERVE_DEADLINE_MS = 30000
 
 # Budget for a single Reserve POST, well under the session default. The deadline
 # above cannot cancel a request already handed to the socket, so without this a
@@ -216,6 +226,32 @@ _RESERVE_TIMEOUT_S = 3.0
 # a later booking in a batch overshoots its shared target - which is the case
 # _next_future_rung exists to drop.
 _RUNG_LATE_GRACE_MS = 2000
+
+# The two ways of asking at the opening. See prepare() and, for why the burst
+# exists, _fire_opening_burst.
+OPENING_MODE_LADDER = "ladder"
+OPENING_MODE_BURST = "burst"
+
+# Ceiling on burst members, and so on threads. The default plan is twelve; the
+# cap exists so a misconfigured offsets string cannot turn into a hundred
+# sockets against a club that has only ever seen two in flight.
+_BURST_MAX_MEMBERS = 16
+
+# How far ahead of the first burst member the precision wait wakes, so the
+# thread pool is spun up before the instant rather than in front of it.
+# Measured: submitting eleven members into a cold pool is 3.5ms median and
+# 4.9ms worst, all of it otherwise landing on the one send the morning is timed
+# around. Sized an order of magnitude above that - it is slack before a wait
+# that is redone precisely, so spending it costs nothing.
+_BURST_WARMUP_MS = 50
+
+# After the burst, how many more times the fallback list may be walked before
+# the deadline ends the run. The burst asks the first few fallbacks inside the
+# first seconds, when a Friday's gate may not yet be open; walking the list
+# again afterwards is what asks them at the instants both prior Friday wins
+# were granted (+4.9s, +5.3s). Bounded so a sheet being emptied around us is
+# not asked about forever.
+_BURST_WALK_CYCLES = 2
 
 # Marks a chain result as this path's. The provider handles both this and the JS
 # chain's results through the same branches, but only this one leaves the browser
@@ -355,14 +391,29 @@ class DirectHttpBooker:
         self._hold_until_open: bool = False
         self._hold_cap_ms: int = 8000
         self._target_interleave: bool = True
-        # Raised the moment the first Reserve is *answered* - response in hand,
-        # or a timeout that means the request may have reached the club. Either
-        # way a browser retry is off the table from then on, which is what makes
-        # it safe for the provider's quieting thread to take the resident Chrome
-        # page apart. Deliberately never raised on a connection that never
-        # opened: that is the one failure the browser chain still rescues, and
-        # it needs its page alive. Assigned by the provider; None means nobody
-        # is listening.
+        # How the opening is asked. The ladder is the class default so that a
+        # booker built without prepare() - every test that stages the private
+        # fields by hand - behaves as it always has; settings pick the burst.
+        self._opening_mode: str = OPENING_MODE_LADDER
+        # The burst's send instants past the aim, and how many from the front
+        # ask for the target alone before fallbacks are interleaved.
+        self._burst_offsets_ms: tuple[int, ...] = (0,)
+        self._burst_target_only: int = 4
+        # Fallback Reserve requests staged pre-window for the burst, best first:
+        # the tee time, its handler as resolved in the staged sheet, and the
+        # serialized body. Built in prepare() so that at the window every member
+        # of the burst is a socket write, the target and fallbacks alike.
+        self._burst_fallback_requests: list[tuple[time, AbConfig, bytes]] = []
+        # Raised the moment a Reserve is *granted*. From then on the chain
+        # advances the club's view by its own actions, so the resident Chrome
+        # page's timers have nothing left to do and the provider's quieting
+        # thread may take them apart. Never raised on a refusal: on 2026-09-04
+        # the page was quieted at +1.6s on a refusal and every later response
+        # was the same frozen pre-window render, because those timers had been
+        # what advanced the view our requests are evaluated against. And never
+        # raised on a connection that never opened: that is the one failure the
+        # browser chain still rescues, and it needs its page alive. Assigned by
+        # the provider; None means nobody is listening.
         self.quiet_signal: threading.Event | None = None
         # The frame every reported offset is measured from - the club's stated
         # 06:30:00, which the aim may sit past. book() sets it.
@@ -383,6 +434,9 @@ class DirectHttpBooker:
         hold_until_open: bool = False,
         hold_cap_ms: int = 8000,
         target_interleave: bool = True,
+        opening_mode: str = OPENING_MODE_LADDER,
+        burst_offsets_ms: Sequence[int] = (0,),
+        burst_target_only: int = 4,
     ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
@@ -430,6 +484,17 @@ class DirectHttpBooker:
             target_interleave: Once the sheet is open, re-ask the target between
                 fallback attempts rather than abandoning it on its first
                 open-sheet refusal. Only meaningful under ``hold_until_open``.
+            opening_mode: ``"burst"`` sends the opening as a pipelined burst
+                (see :meth:`_fire_opening_burst`) and ignores the sweep, the
+                pair and the hold; ``"ladder"`` is every option above exactly as
+                it ran through 2026-09-04. Anything else is treated as the
+                ladder and logged, so a typo in a setting cannot cost a morning.
+            burst_offsets_ms: Milliseconds past the aim to send each burst
+                member at. Timed bookings only; an untimed booking has no
+                instant to burst around and sends once.
+            burst_target_only: How many members from the front of the burst
+                ask for the target alone; after these, members alternate
+                fallback and target through ``fallback_times``.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -463,9 +528,39 @@ class DirectHttpBooker:
         self._hold_until_open = hold_until_open
         self._hold_cap_ms = max(0, hold_cap_ms)
         self._target_interleave = target_interleave
+        if opening_mode not in (OPENING_MODE_LADDER, OPENING_MODE_BURST):
+            logger.warning("DIRECT_HTTP: Unknown opening mode %r; using the ladder", opening_mode)
+            opening_mode = OPENING_MODE_LADDER
+        self._opening_mode = opening_mode
+        self._burst_offsets_ms = tuple(sorted(dict.fromkeys(burst_offsets_ms)))[
+            :_BURST_MAX_MEMBERS
+        ] or (0,)
+        self._burst_target_only = max(1, burst_target_only)
+        self._burst_fallback_requests = []
+        if self._opening_mode == OPENING_MODE_BURST:
+            # Every fallback the burst may ask is resolved and serialized now,
+            # against the staged sheet, so that at the window a fallback member
+            # costs exactly what a target member costs: a socket write. Only as
+            # many as the plan can use - a burst of twelve with four
+            # target-only members interleaves at most four fallbacks.
+            wanted = max(0, len(self._burst_offsets_ms) - self._burst_target_only)
+            for candidate in self._fallback_times:
+                if len(self._burst_fallback_requests) >= wanted:
+                    break
+                relocated = _relocate_reserve_in(document, page_html, candidate)
+                if relocated is None:
+                    logger.info(
+                        "DIRECT_HTTP: Fallback %s has no Reserve in the staged sheet; "
+                        "the burst will not ask for it",
+                        candidate.strftime("%I:%M %p"),
+                    )
+                    continue
+                self._burst_fallback_requests.append(
+                    (candidate, relocated, self.session.build_body(relocated))
+                )
         logger.info(
             "DIRECT_HTTP: Reserve request staged - source=%s, slot=%s, %d body bytes, "
-            "viewState=%s, sweep=%s%s, fallbacks=%s",
+            "viewState=%s, opening=%s, fallbacks=%s",
             config.source,
             self._slot_time.strftime("%I:%M %p") if self._slot_time else "unreadable",
             len(self._reserve_body),
@@ -473,21 +568,91 @@ class DirectHttpBooker:
             # and all a post-mortem needs is whether the one that fired differs
             # from the one staged here.
             _view_state_fingerprint(self.session),
-            "+".join(str(offset) for offset in self._sweep_offsets_ms) + "ms",
-            (" (first two pipelined)" if self._pipeline_opening_pair else "")
+            self._describe_opening(),
+            ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
+        )
+        if refresh_at_window and self._opening_mode == OPENING_MODE_BURST:
+            # The two contradict each other, and silently honouring both would
+            # defeat the burst's warm-up: _run_chain wakes _BURST_WARMUP_MS
+            # early so the thread pool is up before the tick, and a refresh
+            # runs in that gap - one POST budgeted at _REFRESH_TIMEOUT_S, and
+            # up to _REFRESH_DEADLINE_MS of retries, which is the warm-up
+            # budget eighty times over. Member 0 would then reach a wait
+            # already spent, pay the pool startup anyway, and be later still by
+            # however long the refresh took.
+            #
+            # Refused rather than reordered: a fresh view was ruled out as the
+            # way in on 2026-08-07 - the refresh ran exactly as designed,
+            # countdown gone and 86 of 87 rows reservable, and the club refused
+            # anyway - so there is nothing to preserve by keeping the pair
+            # working, and the burst is what a race is now aimed with. Set
+            # WALDEN_RESERVE_OPENING_MODE=ladder to get the refresh back.
+            logger.warning(
+                "DIRECT_HTTP: A view refresh was asked for in burst mode; ignoring it - the "
+                "refresh would spend the burst's warm-up and land the opening late. Use the "
+                "ladder if the refresh is what is wanted."
+            )
+        elif refresh_at_window:
+            self._stage_view_refresh(document, page_html, button)
+        self.session.warm_up()
+        if measure_skew:
+            self._stage_arrival_lead()
+
+    def _describe_opening(self) -> str:
+        """The opening plan as one phrase for the staging log line."""
+        if self._opening_mode == OPENING_MODE_BURST:
+            plan = self._burst_plan_slots()
+            members = "+".join(
+                f"{offset}{'T' if is_target else 'F'}" for offset, _, is_target in plan
+            )
+            return (
+                f"burst of {len(plan)} at +{members}ms past the aim "
+                f"({self._burst_target_only} target-only, then alternating "
+                f"{len(self._burst_fallback_requests)} staged fallback(s))"
+            )
+        return (
+            "ladder sweep="
+            + "+".join(str(offset) for offset in self._sweep_offsets_ms)
+            + "ms"
+            + (" (first two pipelined)" if self._pipeline_opening_pair else "")
             + (
                 f" (hold target until sheet open, cap +{self._hold_cap_ms}ms"
                 f"{', interleave' if self._target_interleave else ''})"
                 if self._hold_until_open
                 else ""
-            ),
-            ", ".join(t.strftime("%I:%M %p") for t in self._fallback_times) or "none",
+            )
         )
-        if refresh_at_window:
-            self._stage_view_refresh(document, page_html, button)
-        self.session.warm_up()
-        if measure_skew:
-            self._stage_arrival_lead()
+
+    def _burst_plan_slots(self) -> list[tuple[int, int | None, bool]]:
+        """Which slot each burst member asks for: ``(offset_ms, fallback_index, is_target)``.
+
+        The first ``_burst_target_only`` members are the target. After them,
+        members alternate fallback and target - F1, T, F2, T, ... - cycling
+        through the staged fallbacks. With none staged every member is the
+        target, which is the pipelined form of the sweep.
+        """
+        plan: list[tuple[int, int | None, bool]] = []
+        fallback_count = len(self._burst_fallback_requests)
+        next_fallback = 0
+        for index, offset in enumerate(self._burst_offsets_ms):
+            position = index - self._burst_target_only
+            if position < 0 or fallback_count == 0 or position % 2 == 1:
+                plan.append((offset, None, True))
+                continue
+            plan.append((offset, next_fallback % fallback_count, False))
+            next_fallback += 1
+        return plan
+
+    @property
+    def _opening_offset_ms(self) -> int:
+        """The offset past the aim the precision wait sleeps to.
+
+        The first burst member or the first sweep rung, whichever mode is on.
+        Both default to 0 - the aim point itself.
+        """
+        if self._opening_mode == OPENING_MODE_BURST:
+            return self._burst_offsets_ms[0]
+        return self._sweep_offsets_ms[0]
 
     def _stage_arrival_lead(self) -> None:
         """Work out how far ahead of the target the Reserve should be sent.
@@ -679,14 +844,28 @@ class DirectHttpBooker:
             # Slept to here rather than inside the ladder because this is the
             # wait that has to be precise - everything after it is paced by how
             # fast the club answers.
-            opening_offset_ms = self._sweep_offsets_ms[0]
+            opening_offset_ms = self._opening_offset_ms
             result.timing["openingOffsetMs"] = opening_offset_ms
+            result.timing["openingMode"] = self._opening_mode
             # Led, so that the request *arrives* at the aimed-at offset. The
             # drift is still reported against the lead-adjusted instant, which is
             # the one the wait was actually aiming at.
-            result.timing["clickDriftMs"] = sleep_until(
-                target_timestamp_ms + opening_offset_ms - int(round(self._lead_ms))
-            )
+            #
+            # The burst wakes early by its warm-up budget and does the final,
+            # precise wait itself, because spinning up its thread pool between
+            # the wait and the socket write would land the one send the morning
+            # is timed around 3-5ms late (measured: 11 submits into a cold pool
+            # is 3.5ms median, 4.9ms worst). Workers sleep to their own absolute
+            # instants, so starting them early moves nothing. The burst sets
+            # clickDriftMs from its own wait.
+            wake_offset_ms = opening_offset_ms
+            if self._opening_mode == OPENING_MODE_BURST:
+                wake_offset_ms -= _BURST_WARMUP_MS
+            drift = sleep_until(target_timestamp_ms + wake_offset_ms - int(round(self._lead_ms)))
+            if self._opening_mode == OPENING_MODE_BURST:
+                result.timing["burstWarmupDriftMs"] = drift
+            else:
+                result.timing["clickDriftMs"] = drift
 
             # After the wait, not before: a sheet re-rendered while the window
             # is still shut is the very thing being refreshed away from.
@@ -710,6 +889,15 @@ class DirectHttpBooker:
         if response is None:
             result.timing["blockedDetectedMs"] = elapsed_ms()
             return result
+
+        # A slot is held. From here every step is an action of ours the club
+        # acts on, so the parked page's timers - which until now were what kept
+        # the shared view moving - have nothing left to do, and the provider's
+        # quieting thread may take them apart. ~1us; the work it wakes is off
+        # the race thread entirely. See quiet_signal in __init__ for why this
+        # is raised on a grant and never on a refusal.
+        if self.quiet_signal is not None:
+            self.quiet_signal.set()
 
         # The popup the club granted the slot alongside. It was already in the
         # response that gave us the tee time, so it cannot be about anything the
@@ -872,13 +1060,33 @@ class DirectHttpBooker:
         # Untimed bookings have no window to sweep around; the first rung is
         # already spent by the precision wait in _run_chain.
         rungs = list(self._sweep_offsets_ms[1:]) if target_timestamp_ms is not None else []
+        # The burst replaces the sweep, the pair and the hold at the opening
+        # and leaves the fallback walk below to run after it. Timed bookings
+        # only: an untimed one has no instant to burst around, and the ladder's
+        # own untimed behaviour - one send, then the walk - is right for it.
+        burst_mode = self._opening_mode == OPENING_MODE_BURST and target_timestamp_ms is not None
+        if burst_mode:
+            rungs = []
         # The second rung leaves the ladder when it is pipelined: it is fired
         # alongside the first rather than after it, so the loop must not also
         # walk to it.
         paired_rung_ms: int | None = None
-        if self._pipeline_opening_pair and target_timestamp_ms is not None and rungs:
+        if (
+            not burst_mode
+            and self._pipeline_opening_pair
+            and target_timestamp_ms is not None
+            and rungs
+        ):
             paired_rung_ms = rungs.pop(0)
-        max_attempts = _RESERVE_MAX_ATTEMPTS + len(rungs)
+        if burst_mode:
+            # Every member of the burst is an attempt, and the walk after it
+            # may cover the list a bounded number of times.
+            max_attempts = len(self._burst_offsets_ms) + _BURST_WALK_CYCLES * (
+                1 + len(self._fallback_times)
+            )
+        else:
+            max_attempts = _RESERVE_MAX_ATTEMPTS + len(rungs)
+        walk_cycles_left = _BURST_WALK_CYCLES - 1 if burst_mode else 0
         last_reason: str | None = None
         attempt = 0
         # The hold-until-open policy (see prepare()): while refusals arrive on a
@@ -887,7 +1095,14 @@ class DirectHttpBooker:
         # ad-hoc booking's sheet opened days ago, so the hold naturally no-ops
         # there - but running the same loop is what lets a Tuesday-afternoon
         # booking exercise the code the race will run on Friday.
-        hold_active = self._hold_until_open
+        #
+        # Off under the burst, and not only because the burst asks faster than
+        # the hold could: the signal the hold reads - the sheet-open marker in
+        # a refusal's own markup - turned out on 2026-09-04 to describe the
+        # state of *our* view as of its last refresh, not the club. Fourteen
+        # refusals read "closed" that morning against a sheet other members
+        # were booking from.
+        hold_active = self._hold_until_open and not burst_mode
         # Latches on the first answer that is not a closed sheet and never
         # clears: the hold is for a sheet that has not opened yet, not a defense
         # against one the club might re-close.
@@ -952,7 +1167,90 @@ class DirectHttpBooker:
                 if window_frame_ms is not None
                 else None
             )
-            if paired_rung_ms is not None and attempt == 1:
+            if burst_mode and attempt == 1:
+                assert target_timestamp_ms is not None  # burst only when timed
+                burst = self._fire_opening_burst(
+                    config,
+                    body,
+                    target_timestamp_ms=target_timestamp_ms,
+                    window_frame_ms=window_frame_ms,
+                    view_state=view_state,
+                    result=result,
+                )
+                if burst.never_connected:
+                    # No member reached the socket, so nothing was submitted
+                    # and the browser chain is still a safe retry - the same
+                    # contract as the single send and the pair.
+                    result.phase = PHASE_RESERVE_STAGED
+                    raise DirectHttpConnectionError(
+                        f"No opening Reserve for {config.source} connected: {burst.reason}"
+                    )
+                result.attempt_log.extend(burst.observations)
+                for burst_observation in burst.observations:
+                    if burst_observation.slot_time is not None and burst_observation.attempt > 1:
+                        result.attempted_times.append(burst_observation.slot_time)
+                attempt += max(0, len(burst.observations) - 1)
+                result.timing["reserveAttempts"] = attempt
+                timed_out = timed_out or burst.timed_out
+                _log_gate_summary(result.attempt_log, "after the opening burst")
+
+                if burst.accepted is not None:
+                    result.final_markup = burst.accepted.markup
+                    self.session.adopt(burst.accepted)
+                    result.booked_slot_time = burst.accepted_slot_time
+                    logger.info(
+                        "DIRECT_HTTP: Reserve accepted for %s from burst member #%s after %dms "
+                        "(%s)%s",
+                        burst.accepted_slot_time.strftime("%I:%M %p")
+                        if burst.accepted_slot_time
+                        else "the staged slot",
+                        burst.accepted_member if burst.accepted_member is not None else "?",
+                        int((time_module.perf_counter() - started) * 1000),
+                        burst.accepted_reason or "",
+                        "; a surplus hold was also granted and is left to expire"
+                        if burst.surplus
+                        else "",
+                    )
+                    return burst.accepted
+
+                if burst.view_expired is not None:
+                    # The session is dead; every later ask would fail the same
+                    # way. Raised so the chain reports it as the ladder would.
+                    raise burst.view_expired
+
+                if timed_out:
+                    # A member may have reached the club and be holding its
+                    # slot. Same rule as the ladder: nothing else is asked for.
+                    last_reason = burst.reason
+                    logger.warning(
+                        "DIRECT_HTTP: A burst member never answered and none was granted; "
+                        "stopping rather than asking for another tee time"
+                    )
+                    break
+
+                last_reason = burst.reason
+                if burst.carried is None:
+                    # Nothing came back readable - every member errored. Fall
+                    # through to a serial ask of the staged target; if the club
+                    # is throttling, that answer says so in one round trip.
+                    spent_ms = (time_module.perf_counter() - started) * 1000
+                    logger.warning(
+                        "DIRECT_HTTP: No burst member returned a sheet (%s); asking once "
+                        "more serially %dms in",
+                        burst.reason,
+                        int(spent_ms),
+                    )
+                    continue
+
+                # Refused throughout. Carry the latest refusal forward as the
+                # sheet to relocate fallbacks in, and let the walk below run.
+                self.session.adopt(burst.carried)
+                result.final_markup = burst.carried.markup
+                response = burst.carried
+                document = burst.carried_document
+                observation = burst.carried_observation
+                assert document is not None and observation is not None
+            elif paired_rung_ms is not None and attempt == 1:
                 assert target_timestamp_ms is not None  # paired only when timed
                 pair = self._fire_opening_pair(
                     config,
@@ -1270,6 +1568,25 @@ class DirectHttpBooker:
                 break
 
             next_candidate = self._next_candidate(document, response.markup, remaining)
+            if next_candidate is None and walk_cycles_left > 0:
+                # The burst asked the first fallbacks inside the first seconds,
+                # when a Friday's gate may still have been shut; the list is
+                # walked again so each is asked at the instants both prior
+                # Friday grants actually came (+4.9s, +5.3s). The target leads
+                # the second pass for the same reason.
+                walk_cycles_left -= 1
+                remaining = [
+                    candidate
+                    for candidate in (target_slot_time, *self._fallback_times)
+                    if candidate is not None
+                ]
+                logger.info(
+                    "DIRECT_HTTP: %s and the list is spent; walking it again from the target "
+                    "(%d more pass(es) after this)",
+                    observation.reason,
+                    walk_cycles_left,
+                )
+                next_candidate = self._next_candidate(document, response.markup, remaining)
             if next_candidate is None:
                 logger.warning(
                     "DIRECT_HTTP: %s and no fallback tee time left to try", observation.reason
@@ -1283,6 +1600,7 @@ class DirectHttpBooker:
                 slot_time.strftime("%I:%M %p"),
             )
 
+        _log_gate_summary(result.attempt_log, "at the end of the race")
         # Only a run the club actually refused is "blocked". One that ended
         # because a Reserve never answered gets reported as a plain failure, the
         # same shape the raised timeout produced before it was survivable, and
@@ -1356,17 +1674,10 @@ class DirectHttpBooker:
             result.attempt_log.append(observation)
             _log_reserve_observation(observation)
             # The request may have reached the club, so the browser-retry door
-            # is closed exactly as it is for an answered request - the quieting
-            # thread may proceed.
-            if self.quiet_signal is not None:
-                self.quiet_signal.set()
+            # is closed (the phase says so). The page's timers are left alone:
+            # nothing is held yet, and they are what keeps the shared view
+            # moving if the next ask is to see a live sheet.
             return None, None, None, str(exc)
-
-        # First answer in hand: from here the provider treats a browser retry
-        # as racing our own reservation, so the page's last job is done. ~1us,
-        # and the thread it wakes does its work off the race thread entirely.
-        if self.quiet_signal is not None:
-            self.quiet_signal.set()
 
         result.final_markup = response.markup
         # One parse, three questions: the verdict, the ledger row and the next
@@ -1475,22 +1786,27 @@ class DirectHttpBooker:
         for index, (rung_ms, sent_ms, response, exc) in enumerate((first, second)):
             attempt_number = index + 1
             if exc is not None:
-                if not isinstance(exc, DirectHttpConnectionError):
-                    never_connected = False
-                    pair.timed_out = True
                 pair.reason = str(exc)
                 pair.observations.append(
-                    ReserveObservation(
+                    _failed_observation(
+                        exc,
                         attempt=attempt_number,
                         slot_time=slot_time,
                         source=config.source,
                         view_state=view_state,
-                        verdict=RESERVE_TIMEDOUT,
-                        reason=str(exc),
                         sent_ms_past_window=sent_ms,
-                        round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
                     )
                 )
+                if isinstance(exc, DirectHttpTimeoutError):
+                    # Read or write timeout: the request may have landed, and
+                    # that is the one failure that closes the fallback list.
+                    never_connected = False
+                    pair.timed_out = True
+                elif not isinstance(exc, DirectHttpConnectionError):
+                    # The club answered - a status, a dead view - and reserved
+                    # nothing. Until 2026-09-04 this was filed with the
+                    # timeouts, which would have closed the list on a 429.
+                    never_connected = False
                 continue
 
             never_connected = False
@@ -1542,13 +1858,6 @@ class DirectHttpBooker:
                 pair.carried_observation = observation
 
         pair.never_connected = never_connected
-        # Same contract as the single-Reserve path, and `never_connected` is
-        # already exactly the condition: something reached the socket, so a
-        # browser retry is off the table and the page's timers are free to be
-        # cleared. Only a pair where *neither* half connected leaves the signal
-        # down, because that is the one case the JS chain still rescues.
-        if not never_connected and self.quiet_signal is not None:
-            self.quiet_signal.set()
         # first_sent_ms_past_window is read for the log line only; the ledger
         # takes each request's own send time from the exchange above.
         logger.info(
@@ -1558,6 +1867,290 @@ class DirectHttpBooker:
             first_sent_ms_past_window if first_sent_ms_past_window is not None else "?",
         )
         return pair
+
+    def _burst_members(self, config: AbConfig, body: bytes) -> list["_BurstMember"]:
+        """Resolve the burst plan into sendable members, in plan order."""
+        members: list[_BurstMember] = []
+        for index, (offset_ms, fallback_index, is_target) in enumerate(self._burst_plan_slots()):
+            if is_target or fallback_index is None:
+                members.append(_BurstMember(index, offset_ms, self._slot_time, config, body, True))
+                continue
+            slot_time, fallback_config, fallback_body = self._burst_fallback_requests[
+                fallback_index
+            ]
+            members.append(
+                _BurstMember(index, offset_ms, slot_time, fallback_config, fallback_body, False)
+            )
+        return members
+
+    def _fire_opening_burst(
+        self,
+        config: AbConfig,
+        body: bytes,
+        *,
+        target_timestamp_ms: int,
+        window_frame_ms: int | None,
+        view_state: str,
+        result: DirectBookingResult,
+    ) -> "_OpeningBurst":
+        """Ask at every instant in the burst plan without waiting for answers.
+
+        The ladder's cadence was one round trip plus a parse between asks -
+        700-1030ms on every morning measured - and on all three Friday races on
+        record the target was gone before the second ask went out. Whoever is
+        taking those slots, a crowd whose retries land every second or so or a
+        gate that opens somewhere inside a two-second span, one question per
+        750ms is not in that race. The burst puts a request on the club every
+        hundred-odd milliseconds through the first seconds of the window, so
+        that whatever instant the gate opens, one of ours lands within a fraction
+        of a human's refresh-and-click.
+
+        Members are sent detached (see :meth:`PrimeFacesSession.send_detached`)
+        on their own threads, each sleeping to its own instant; the first goes
+        on this thread because it is the one the morning is timed around.
+        Answers are absorbed as they arrive, not in plan order. The first grant
+        sets ``won``, and every member that has not yet been sent when it lands
+        is skipped rather than fired - which is what keeps a burst that won on
+        its first ask from taking a second hold on a fallback. A fallback
+        already in flight when the target is granted may still be granted too;
+        the target's grant is the one adopted, and the other is reported as a
+        surplus hold and left to the club's own hold timer.
+
+        What each failure means is kept apart, because they demand different
+        responses: a read timeout may have reached the club and closes the
+        fallback walk (``timed_out``); a status - a 429, a 503 - is the club
+        declining to reserve anything and closes nothing; a dead view is fatal
+        to every later ask; a connection that never opened submitted nothing.
+
+        Every member's answer becomes a ledger row, numbered by plan position so
+        the ledger reads in send order whatever order the club answered in.
+        """
+        lead_ms = int(round(self._lead_ms))
+        frame_ms = window_frame_ms if window_frame_ms is not None else target_timestamp_ms
+        members = self._burst_members(config, body)
+        won = threading.Event()
+        burst = _OpeningBurst(observations=[])
+        burst_started = time_module.perf_counter()
+
+        def send(member: _BurstMember) -> _BurstExchange:
+            """Sleep to the member's instant, then send unless the race is won."""
+            if member.index > 0:
+                sleep_until(target_timestamp_ms + member.offset_ms - lead_ms)
+                if won.is_set():
+                    return _BurstExchange(member, None, None, None, skipped=True)
+            sent_ms = int(time_module.time() * 1000) - frame_ms
+            try:
+                response = self.session.send_detached(
+                    member.config, body=member.body, timeout_s=_RESERVE_TIMEOUT_S
+                )
+            except DirectHttpError as exc:
+                return _BurstExchange(member, sent_ms, None, exc)
+            return _BurstExchange(member, sent_ms, response, None)
+
+        logger.info(
+            "DIRECT_HTTP: Firing opening burst of %d for %s - %s, lead %dms",
+            len(members),
+            self._slot_time.strftime("%I:%M %p") if self._slot_time else "the staged slot",
+            ", ".join(
+                f"#{m.index}@+{m.offset_ms}ms "
+                f"{'T' if m.is_target else m.slot_time.strftime('%I:%M') if m.slot_time else 'F'}"
+                for m in members
+            ),
+            lead_ms,
+        )
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, len(members) - 1), thread_name_prefix="reserve-burst"
+        ) as pool:
+            # Started first, and each sleeps to its own absolute instant, so the
+            # spin-up is paid inside the warm-up budget _run_chain woke early
+            # for rather than in front of member 0's socket write.
+            futures = [pool.submit(send, member) for member in members[1:]]
+            # The wait that has to be exact. sleep_until no-ops on an instant
+            # already gone, so a warm-up that overran costs nothing beyond the
+            # lateness it already had, and the drift says which happened.
+            result.timing["clickDriftMs"] = sleep_until(
+                target_timestamp_ms + members[0].offset_ms - lead_ms
+            )
+            self._absorb_burst_exchange(
+                burst, send(members[0]), won=won, view_state=view_state, frame_ms=frame_ms
+            )
+            for future in concurrent.futures.as_completed(futures):
+                self._absorb_burst_exchange(
+                    burst, future.result(), won=won, view_state=view_state, frame_ms=frame_ms
+                )
+
+        burst.observations.sort(key=lambda o: o.attempt)
+        if burst.accepted is None and burst.carried is None and burst.unknown is not None:
+            # No grant and no refusal, but a 200 whose shape was neither. The
+            # ladder treats that as progress and lets the next step say what is
+            # missing; with nothing better to carry forward, so does this.
+            logger.warning(
+                "DIRECT_HTTP: No burst member was granted or refused; carrying an "
+                "unreadable answer forward (%s)",
+                burst.unknown_reason,
+            )
+            burst.accepted = burst.unknown
+            burst.accepted_slot_time = burst.unknown_slot_time
+            burst.accepted_member = burst.unknown_member
+            burst.accepted_reason = burst.unknown_reason
+        sent = len(members) - burst.skipped
+        result.timing["burstMembers"] = len(members)
+        result.timing["burstSent"] = sent
+        result.timing["burstSkipped"] = burst.skipped
+        result.timing["burstAccepted"] = burst.accepted_member
+        result.timing["burstMs"] = int((time_module.perf_counter() - burst_started) * 1000)
+        for member_index, slot_time in burst.surplus:
+            logger.warning(
+                "DIRECT_HTTP: Burst member #%d was also granted %s - a surplus hold, left to "
+                "the club's hold timer; the ad-hoc test of this mode is what says whether "
+                "the club tolerates two",
+                member_index,
+                slot_time.strftime("%I:%M %p") if slot_time else "a slot",
+            )
+        logger.info(
+            "DIRECT_HTTP: Opening burst done in %dms - %d sent, %d skipped after the grant, "
+            "%d refused, %d errored, %d never answered%s",
+            result.timing["burstMs"],
+            sent,
+            burst.skipped,
+            sum(1 for o in burst.observations if o.verdict == RESERVE_REFUSED),
+            sum(1 for o in burst.observations if o.verdict == RESERVE_ERRORED),
+            sum(1 for o in burst.observations if o.verdict == RESERVE_TIMEDOUT),
+            f"; granted by member #{burst.accepted_member}"
+            if burst.accepted_member is not None
+            else "; nothing granted",
+        )
+        return burst
+
+    def _absorb_burst_exchange(
+        self,
+        burst: "_OpeningBurst",
+        exchange: "_BurstExchange",
+        *,
+        won: threading.Event,
+        view_state: str,
+        frame_ms: int,
+    ) -> None:
+        """Fold one member's answer into the burst's record, as it arrives."""
+        member = exchange.member
+        attempt_number = member.index + 1
+        if exchange.skipped:
+            burst.skipped += 1
+            return
+        if exchange.error is not None:
+            exc = exchange.error
+            burst.reason = str(exc)
+            observation = _failed_observation(
+                exc,
+                attempt=attempt_number,
+                slot_time=member.slot_time,
+                source=member.config.source,
+                view_state=view_state,
+                sent_ms_past_window=exchange.sent_ms,
+                burst_index=member.index,
+            )
+            burst.observations.append(observation)
+            _log_reserve_observation(observation)
+            if isinstance(exc, DirectHttpTimeoutError):
+                burst.never_connected = False
+                burst.timed_out = True
+            elif isinstance(exc, ViewExpiredError):
+                burst.never_connected = False
+                if burst.view_expired is None:
+                    burst.view_expired = exc
+            elif not isinstance(exc, DirectHttpConnectionError):
+                burst.never_connected = False
+            return
+
+        burst.never_connected = False
+        response = exchange.response
+        assert response is not None
+        wall_start = time_module.perf_counter()
+        cpu_start = time_module.process_time()
+        container_cpu_start = _container_cpu_ms()
+
+        document = parse_html(response.markup)
+        observation = observe_reserve_response(
+            attempt=attempt_number,
+            slot_time=member.slot_time,
+            source=member.config.source,
+            view_state=view_state,
+            response=response,
+            document=document,
+            markup=response.markup,
+            target_timestamp_ms=frame_ms,
+            defer_telemetry=True,
+            burst_index=member.index,
+        )
+        observation.post_response_wall_ms = int((time_module.perf_counter() - wall_start) * 1000)
+        observation.post_response_cpu_ms = int((time_module.process_time() - cpu_start) * 1000)
+        if container_cpu_start is not None:
+            container_cpu_end = _container_cpu_ms()
+            if container_cpu_end is not None:
+                observation.container_cpu_ms = container_cpu_end - container_cpu_start
+
+        if observation.verdict == RESERVE_REFUSED:
+            # Frozen-view check, in arrival order: a refusal identical to the
+            # last one is the club re-rendering the same snapshot, and once it
+            # has happened twice the sheet in these answers is not live.
+            observation.identical_to_previous = (
+                burst.last_refusal_digest is not None
+                and observation.body_digest == burst.last_refusal_digest
+            )
+            burst.last_refusal_digest = observation.body_digest
+            if observation.identical_to_previous:
+                burst.identical_refusals += 1
+                if burst.identical_refusals == 1:
+                    logger.warning(
+                        "DIRECT_HTTP: Burst member #%d's refusal is byte-identical to the "
+                        "previous one - the club is re-rendering a frozen view; its "
+                        "sheet-open marker and rows describe our snapshot, not the club",
+                        member.index,
+                    )
+        burst.observations.append(observation)
+        _log_reserve_observation(observation)
+
+        if observation.verdict == RESERVE_ACCEPTED:
+            won.set()
+            if burst.accepted is None:
+                burst.accepted = response
+                burst.accepted_slot_time = member.slot_time
+                burst.accepted_member = member.index
+                burst.accepted_reason = observation.reason
+                burst.accepted_is_target = member.is_target
+            elif member.is_target and not burst.accepted_is_target:
+                # The target's own grant outranks a fallback's: it is the tee
+                # time the member asked for. The fallback's hold becomes the
+                # surplus one.
+                burst.surplus.append((burst.accepted_member or 0, burst.accepted_slot_time))
+                burst.accepted = response
+                burst.accepted_slot_time = member.slot_time
+                burst.accepted_member = member.index
+                burst.accepted_reason = observation.reason
+                burst.accepted_is_target = True
+            else:
+                burst.surplus.append((member.index, member.slot_time))
+            return
+
+        if observation.verdict == RESERVE_REFUSED:
+            burst.reason = observation.reason
+            # Latest refusal by plan order is carried forward: the walk after
+            # the burst relocates its fallbacks in this sheet.
+            if (
+                burst.carried_observation is None
+                or attempt_number > burst.carried_observation.attempt
+            ):
+                burst.carried = response
+                burst.carried_document = document
+                burst.carried_observation = observation
+            return
+
+        # Neither shape. Kept aside; adopted only if nothing better comes.
+        if burst.unknown is None:
+            burst.unknown = response
+            burst.unknown_slot_time = member.slot_time
+            burst.unknown_member = member.index
+            burst.unknown_reason = observation.reason
 
     def _next_candidate(
         self,
@@ -2261,6 +2854,12 @@ RESERVE_UNKNOWN = "unknown"
 # answered, a timeout says we do not know whether it acted. Only the latter
 # closes the fallback list off for the rest of the run.
 RESERVE_TIMEDOUT = "timeout"
+# The club answered with something other than HTTP 200 - a 429, a 503, an error
+# page. It received the request and reserved nothing, so unlike a timeout this
+# leaves the fallback list open: there is no invisible hold to stack on. Kept
+# apart from RESERVE_UNKNOWN too, because that one is a 200 whose body could
+# not be read, and a burst being throttled has to be visible as exactly that.
+RESERVE_ERRORED = "errored"
 
 # The populated header of the booking form the club returns once it has given us
 # the slot: "Reservation at </label><label>04:53 PM". Populated is the point -
@@ -2447,11 +3046,31 @@ class ReserveObservation:
     # the only way a future morning can be re-read for a signal nobody has
     # thought of yet. Excluded from as_row(); it is stored as its own object.
     raw_xml: str = ""
+    # Transport facts, kept since 2026-09-04 so that a throttled or erroring
+    # burst is legible from the ledger alone: the status, the handful of
+    # headers _LEDGER_HEADERS names (Retry-After above all), and for a non-200
+    # the start of the body, where an error page's own words are.
+    status_code: int | None = None
+    response_headers: dict[str, str] = field(default_factory=dict)
+    error_body: str | None = None
+    # Position in the opening burst's plan, or None for a serial ask.
+    burst_index: int | None = None
+    # A short digest of the markup, and whether it matched the refusal before
+    # it. The frozen-view signature of 2026-09-04 was fourteen identical bodies
+    # that took a post-mortem to notice; this makes it a field.
+    body_digest: str | None = None
+    identical_to_previous: bool | None = None
 
     def as_row(self) -> dict[str, Any]:
         """Flatten for the JSONL ledger."""
         return {
             "attempt": self.attempt,
+            "burstIndex": self.burst_index,
+            "statusCode": self.status_code,
+            "responseHeaders": self.response_headers,
+            "errorBody": self.error_body,
+            "bodyDigest": self.body_digest,
+            "identicalToPrevious": self.identical_to_previous,
             "slot": self.slot_time.strftime("%I:%M %p") if self.slot_time else None,
             "source": self.source,
             "viewState": self.view_state,
@@ -2510,6 +3129,229 @@ class _OpeningPair:
     reason: str | None = None
 
 
+@dataclass
+class _BurstMember:
+    """One planned send of the opening burst: when, for which slot, with what."""
+
+    index: int
+    offset_ms: int
+    slot_time: time | None
+    config: AbConfig
+    body: bytes
+    is_target: bool
+
+
+@dataclass
+class _BurstExchange:
+    """What one burst member came back with - an answer, a failure, or nothing.
+
+    ``skipped`` means the member reached its instant after a grant had already
+    landed and was deliberately not sent.
+    """
+
+    member: _BurstMember
+    sent_ms: int | None
+    response: PartialResponse | None
+    error: Exception | None
+    skipped: bool = False
+
+
+@dataclass
+class _OpeningBurst:
+    """What the opening burst came back with, as absorbed in arrival order.
+
+    ``accepted`` is the grant adopted - the target's if it had one, else the
+    first fallback's; ``surplus`` names any other grant, which is a hold the
+    club will release on its own timer. ``carried`` is the latest refusal by
+    plan order, the sheet the fallback walk continues against when nothing was
+    granted. Exactly one response is adopted before the chain goes on.
+    """
+
+    observations: list[ReserveObservation]
+    accepted: PartialResponse | None = None
+    accepted_slot_time: time | None = None
+    accepted_member: int | None = None
+    accepted_reason: str | None = None
+    accepted_is_target: bool = False
+    surplus: list[tuple[int, time | None]] = field(default_factory=list)
+    carried: PartialResponse | None = None
+    carried_document: Node | None = None
+    carried_observation: ReserveObservation | None = None
+    # A 200 whose body was neither a grant nor a refusal, kept aside.
+    unknown: PartialResponse | None = None
+    unknown_slot_time: time | None = None
+    unknown_member: int | None = None
+    unknown_reason: str | None = None
+    # A read or write timeout on any member: it may have reached the club, and
+    # closes the fallback walk for the rest of the run.
+    timed_out: bool = False
+    # Starts True and is cleared by the first member that reached the socket.
+    never_connected: bool = True
+    view_expired: ViewExpiredError | None = None
+    skipped: int = 0
+    reason: str | None = None
+    # Frozen-view bookkeeping, in arrival order.
+    last_refusal_digest: str | None = None
+    identical_refusals: int = 0
+
+
+def _body_digest(markup: str) -> str:
+    """A short, stable digest of a response's markup, for the frozen-view check."""
+    return hashlib.sha1(markup.encode("utf-8", errors="replace")).hexdigest()[:12]  # noqa: S324
+
+
+def _failed_observation(
+    exc: Exception,
+    *,
+    attempt: int,
+    slot_time: time | None,
+    source: str,
+    view_state: str,
+    sent_ms_past_window: int | None,
+    burst_index: int | None = None,
+) -> ReserveObservation:
+    """The ledger row for a Reserve that raised instead of answering.
+
+    A timeout is ``RESERVE_TIMEDOUT`` and carries the budget as its round trip,
+    as it always has. Everything else - a status, a dead view, a connection that
+    never opened - is ``RESERVE_ERRORED``, and a status error brings its status,
+    headers and body along, which is what tells a rate limit from an outage.
+    """
+    if isinstance(exc, DirectHttpTimeoutError):
+        return ReserveObservation(
+            attempt=attempt,
+            slot_time=slot_time,
+            source=source,
+            view_state=view_state,
+            verdict=RESERVE_TIMEDOUT,
+            reason=str(exc),
+            sent_ms_past_window=sent_ms_past_window,
+            round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+            burst_index=burst_index,
+        )
+    observation = ReserveObservation(
+        attempt=attempt,
+        slot_time=slot_time,
+        source=source,
+        view_state=view_state,
+        verdict=RESERVE_ERRORED,
+        reason=str(exc),
+        sent_ms_past_window=sent_ms_past_window,
+        burst_index=burst_index,
+    )
+    if isinstance(exc, DirectHttpStatusError):
+        observation.status_code = exc.status_code
+        observation.response_headers = dict(exc.headers)
+        observation.error_body = _redact_tokens(exc.body_snippet)
+    return observation
+
+
+# Session tokens as they appear in a Liferay/JSF error page: the id in a
+# URL-rewritten link, the portal's CSRF parameter, and a ViewState echoed into
+# a form. The body they come from is an error page kept to tell a rate limit
+# from an outage, and it is both logged and uploaded to the artifacts bucket -
+# so it follows the same rule the rest of this module already applies to
+# session state, which is fingerprinted or reported as "present" and never
+# written down. The surrounding text is kept: the club's own words are the
+# whole diagnostic value, and gutting the snippet to a status line would lose
+# them.
+_TOKEN_PATTERNS = (
+    re.compile(r"(;?\bjsessionid=)[^&;\"'\s<]+", re.IGNORECASE),
+    re.compile(r"(\bp_auth=)[^&;\"'\s<]+", re.IGNORECASE),
+    # Bounded and non-greedy rather than [^"'>]*: the marker and the value are
+    # separated by the attribute's own closing quote, which that class excluded,
+    # so the token went through unredacted. Stopping at > keeps it inside the
+    # one tag.
+    re.compile(r"(javax\.faces\.ViewState[^>]{0,40}?value=[\"'])[^\"']+", re.IGNORECASE),
+)
+
+
+def _redact_tokens(text: str) -> str:
+    """Blank out session tokens in text bound for the log and the ledger."""
+    for pattern in _TOKEN_PATTERNS:
+        text = pattern.sub(r"\1<redacted>", text)
+    return text
+
+
+def _log_gate_summary(observations: list[ReserveObservation], when: str) -> None:
+    """Say, per club-second, what was asked and what was granted.
+
+    This is the only way the two refusals the club words identically can be
+    told apart, and it needs more than one slot in play: a grant for *any* slot
+    inside a club-second proves the gate was open in that second, which turns
+    every refusal in the same second or later into a slot that was taken. No
+    grant across several different slots in a second is strong evidence the
+    gate was still shut. Nothing in a single response can say which - the
+    sheet-open marker and the rows in a refusal describe our own view as of its
+    last refresh, not the club (2026-09-04).
+    """
+    answered = [o for o in observations if o.server_ms_past_window is not None]
+    # An ask the club never answered - a status, a dead view, a socket timeout -
+    # has no club clock and so belongs to no second. Counted apart rather than
+    # dropped: a burst being throttled is exactly what this summary is for, and
+    # a fully throttled one would otherwise log nothing at all.
+    unanswered = [o for o in observations if o.verdict in (RESERVE_ERRORED, RESERVE_TIMEDOUT)]
+
+    def log_unanswered() -> None:
+        """Name the asks that got no readable answer, with their statuses."""
+        if not unanswered:
+            return
+        statuses = sorted({str(o.status_code) for o in unanswered if o.status_code is not None})
+        logger.warning(
+            "GATE: %d ask(s) got no readable answer%s - they belong to no club-second "
+            "and are not counted above",
+            len(unanswered),
+            f" (status {', '.join(statuses)})" if statuses else "",
+        )
+
+    if not answered:
+        log_unanswered()
+        return
+    by_second: dict[int, list[ReserveObservation]] = {}
+    for observation in answered:
+        by_second.setdefault(observation.server_ms_past_window // 1000, []).append(observation)  # type: ignore[operator]
+    first_grant_second: int | None = None
+    for second in sorted(by_second):
+        rows = by_second[second]
+        slots = sorted({o.slot_time.strftime("%I:%M %p") for o in rows if o.slot_time is not None})
+        grants = [o for o in rows if o.verdict == RESERVE_ACCEPTED]
+        if grants and first_grant_second is None:
+            first_grant_second = second
+        logger.info(
+            "GATE: club :%02d - asked %s (%d ask(s)) - %s",
+            second,
+            ", ".join(slots) or "?",
+            len(rows),
+            (
+                "GRANTED "
+                + ", ".join(
+                    o.slot_time.strftime("%I:%M %p") if o.slot_time else "?" for o in grants
+                )
+            )
+            if grants
+            else "granted none",
+        )
+    log_unanswered()
+    distinct_slots = {o.slot_time for o in answered if o.slot_time is not None}
+    if first_grant_second is not None:
+        logger.info(
+            "GATE: %s - gate was open by club :%02d; refusals from that second on were taken "
+            "slots, refusals before it are ambiguous (gate or taken)",
+            when,
+            first_grant_second,
+        )
+    else:
+        seconds = sorted(by_second)
+        logger.warning(
+            "GATE: %s - no grant in any club-second asked (:%02d..:%02d) across %d distinct "
+            "slot(s) - the gate was still shut, or every slot asked was already gone",
+            when,
+            seconds[0],
+            seconds[-1],
+            len(distinct_slots),
+        )
+
+
 def observe_reserve_response(
     *,
     attempt: int,
@@ -2521,6 +3363,7 @@ def observe_reserve_response(
     markup: str,
     target_timestamp_ms: int | None,
     defer_telemetry: bool = False,
+    burst_index: int | None = None,
 ) -> ReserveObservation:
     """Build the ledger row for one Reserve exchange.
 
@@ -2567,6 +3410,10 @@ def observe_reserve_response(
         eval_text=response.eval_text,
         callback_args=response.callback_args,
         raw_xml=response.raw_xml,
+        status_code=response.status_code,
+        response_headers=dict(response.headers),
+        burst_index=burst_index,
+        body_digest=_body_digest(markup),
     )
 
 
@@ -2692,10 +3539,19 @@ def _log_reserve_observation(observation: ReserveObservation) -> None:
     line: when it was sent relative to the window, what the club's own clock
     said, which view came back, and the verdict that view produced.
     """
+    extras = ""
+    if observation.burst_index is not None:
+        extras += f", burst=#{observation.burst_index}"
+    if observation.status_code is not None and observation.status_code != 200:
+        extras += f", status={observation.status_code}"
+        if "retry-after" in observation.response_headers:
+            extras += f", retry-after={observation.response_headers['retry-after']}"
+    if observation.identical_to_previous:
+        extras += ", frozen=True"
     logger.info(
         "DIRECT_HTTP: Reserve %d -> %s (%s) - sent %sms past the window, club clock %sms "
         "past, round trip %sms, %d bytes, %d sheet row(s), %d Reserve button(s), "
-        "form=%s, countdown=%s, popup=%s, sheet=%s, post-response %s",
+        "form=%s, countdown=%s, popup=%s, sheet=%s, post-response %s%s",
         observation.attempt,
         observation.verdict,
         observation.reason,
@@ -2716,7 +3572,14 @@ def _log_reserve_observation(observation: ReserveObservation) -> None:
         if observation.sheet_open is False
         else "none",
         _post_response_phrase(observation),
+        extras,
     )
+    if observation.error_body:
+        logger.warning(
+            "DIRECT_HTTP: Reserve %d error body: %r",
+            observation.attempt,
+            observation.error_body[:_ERROR_BODY_LOG_CHARS],
+        )
     # The dialog is opened by script, not by markup, so whatever separates a
     # shown popup from a re-rendered one lives here. Logged in full the first
     # time it is ever captured, because no saved morning contains it.

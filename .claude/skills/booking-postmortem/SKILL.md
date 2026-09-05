@@ -345,12 +345,15 @@ a past morning can be answered there without touching GCS or a booking.
 
 ## 6. Classify
 
-- **Lost on the clock** — attempt 1 did not land on its rung. Since #150 the aim
-  point is +1030ms, i.e. 30ms past the club's 06:30:01 tick, so "early" now means
-  *near zero* and not the other way round. Read `Clock skew measured` for the
-  tick bracket: a wide one (the probe is budget-bounded at 5s with 20ms spacing
-  and should yield several transitions) means the 30ms of margin was aimed with
-  a ruler that could not see it. `Clock skew unmeasurable` is the same class.
+- **Lost on the clock** — the opening did not land where it was aimed. The aim
+  is the club's 06:30:01 tick itself: +1000ms, margin 0 since 2026-09-04 (§7d
+  — an early ask is one free refusal, and the burst's later members cover the
+  probe's error, so the 30ms that used to sit past the tick was pure lateness
+  on a contested slot). Read `Clock skew measured` for the tick bracket, which
+  the probe pins to roughly ±22ms, and `clickDriftMs` for what the wait
+  actually hit; under the burst that drift is from its own final wait, taken
+  after the thread pool is warm, and `burstWarmupDriftMs` is the earlier wake.
+  `Clock skew unmeasurable` is the same class.
 - **Lost on the slot list** — few or zero fallbacks kept, or the scan dropped
   everything. Check the `dropped course=/window=` split.
 - **Refused at Reserve inside the first second** — was the standing failure
@@ -590,6 +593,52 @@ prints `perf_counter() - started`, elapsed since the chain began, while still
 saying "past the window" (`walden_http_booker.py:810-831`). On 08-21 attempt 3
 logged "2228ms past the window" against a true +3243ms. **Take rung offsets from
 the ledger's `sentMsPastWindow`, never from the log line.**
+
+## 7d. Corrected 2026-09-04: nothing in a refusal describes the club
+
+This supersedes the reading of `sheet=closed` / `disable-div` in §3, §6 and
+§7a wherever it is used as evidence about the club. The full account is
+`docs/booking-post-mortem-2026-09-04.md`; the corrections a post-mortem needs:
+
+**A refusal's body is a re-render of our own view as of its last refresh.**
+Not just the countdown and the rows (§5, §7a): the `disable-div` marker too.
+On 09-04 all fourteen refusals were byte-identical to each other and carried
+the staged sheet's `00:01:20` countdown at +10.7s. On 08-21 and 08-28 the view
+was refreshed *once* mid-race, by the parked Chrome page's own timers (the
+only thing that differed: PR #166 cleared those timers at the first answer,
+and 09-04 was its first Friday), and after that refresh the rows *still* read
+Available for slots the club was refusing. So: `sheetOpen`, `countdownS`,
+`sheetRows`, `reserveButtons` say what our snapshot looked like. None of them
+can say "too early" versus "taken". **The verdict is live; the body is not.**
+
+**Check `identicalToPrevious` / `bodyDigest` first.** A run whose refusals
+share one digest is a run whose sheet-derived fields are frozen and must not
+be read at all. The `frozen=True` log flag says the same thing live.
+
+**The only discriminator is a grant for a different slot in the same
+club-second.** Read the `GATE:` lines: a grant in club `:0N` proves the gate was
+open in `:0N`, and every refusal in that second or later is a taken slot. No
+grant across several distinct slots in a second is strong (not airtight)
+evidence the gate was still shut. A single slot asked repeatedly proves
+nothing either way, which is why the burst asks fallbacks early.
+
+**`errored` is not `timeout`.** A non-200 (`statusCode`, `responseHeaders`,
+`errorBody` on the row) is the club declining to reserve and closes nothing;
+only a socket timeout closes the fallback list. Read `retry-after` and the
+`x-ratelimit-*` headers on an errored row before calling a burst too dense.
+
+**Friday is contested, not late.** Postrace sheets: the 07:53–09:00 block is
+gone inside a minute on Fridays and mostly open at +28s on a Thursday. Attempt
+1 is the same request at the same club-second every day and is refused only on
+Fridays. Whether that is a competitor inside 26ms of the tick or a gate a
+second or two later than `:01` cannot be told from the artifacts; the burst's
+ledger will show which (a grant inside club `:01` means the former).
+
+**The opening is a burst** (`walden_reserve_opening_mode`, default `burst`):
+read `burstIndex` for plan order — rows are numbered by plan position, not by
+arrival — and `timing.burstSkipped` for members not sent after a grant. Under
+the burst the hold policy is off and `sheet=closed` in a log line is
+information about our snapshot only. `_RESERVE_DEADLINE_MS` is 30s.
 
 ## 8. Report
 

@@ -140,14 +140,20 @@ class TestStaleMessagesLaterInTheChain:
 class TestSweepLadder:
     """The offsets the Reserve is asked at, parsed from configuration."""
 
-    def test_the_aim_clears_every_refusal_on_record(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The sheet is believed to open at 06:30:01, and that is where we aim.
+    def test_the_aim_is_the_tick_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The sheet is believed to open at 06:30:01, and that is exactly where we aim.
 
         Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
-        817) and every grant over +1200ms, with the club stamping refusals inside
-        the 06:30:00 second and its grant inside 06:30:01. An aim that did not
-        clear the last refusal would be spending the primary shot on a question
-        already answered no seven times.
+        817) and every grant over +1000ms, with the club stamping refusals inside
+        the 06:30:00 second and its grants inside 06:30:01. An aim short of the
+        tick would spend the primary shot on a question already answered no.
+
+        The margin past the tick is 0 since 2026-09-04. It was 30, to keep the
+        probe's +-22ms from landing the first send early - but an early send is
+        one free refusal, and on a contested slot the 30ms was the loss: every
+        Friday first ask went at +1005..+1026ms and was refused, while the same
+        ask at the same club-second won every other day. The burst's later
+        members are what cover the probe's error now.
 
         Isolated from the environment: terraform sets these on the deployed
         service, so a shell mirroring the deployment would make this assert what
@@ -160,9 +166,41 @@ class TestSweepLadder:
         aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
 
         assert config.walden_window_opens_offset_ms >= 1000
-        # Strictly past, not equal: landing exactly on the tick is the case the
-        # margin exists for, since the probe pins it to only about +-15ms.
-        assert aim_ms > 1000
+        assert config.walden_reserve_aim_margin_ms == 0
+        assert aim_ms == config.walden_window_opens_offset_ms
+
+    def test_the_opening_is_a_burst_every_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The burst is the default, not a Friday special.
+
+        The path the race runs has to be the path every ad-hoc booking runs, or
+        it is untested until the morning it counts; and the ladder stays one
+        setting away for the rollback.
+        """
+        for name in (
+            "WALDEN_RESERVE_OPENING_MODE",
+            "WALDEN_RESERVE_BURST_OFFSETS_MS",
+            "WALDEN_RESERVE_BURST_TARGET_ONLY",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        config = Settings(_env_file=None)
+
+        assert config.walden_reserve_opening_mode == "burst"
+        offsets = config.walden_burst_offsets_ms()
+        # Starts on the tick, is dense through the probe's error, and reaches
+        # past the latest instant a Friday sheet has rendered closed (+2.8s
+        # past the window on 08-28, i.e. ~+1800ms past the aim).
+        assert offsets[0] == 0
+        assert offsets[1] <= 120
+        assert offsets[-1] >= 1800
+        assert 1 <= config.walden_reserve_burst_target_only < len(offsets)
+
+    def test_burst_offsets_parse_leniently(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A malformed value degrades to one send on the aim, never to an error."""
+        monkeypatch.setenv("WALDEN_RESERVE_BURST_OFFSETS_MS", " 100, 0,bad,-5,100,220 ")
+        assert Settings(_env_file=None).walden_burst_offsets_ms() == (0, 100, 220)
+
+        monkeypatch.setenv("WALDEN_RESERVE_BURST_OFFSETS_MS", "nonsense")
+        assert Settings(_env_file=None).walden_burst_offsets_ms() == (0,)
 
     def test_the_default_ladder_is_retries_from_the_aim(
         self, monkeypatch: pytest.MonkeyPatch

@@ -21,6 +21,7 @@ import pytest
 from app.providers.walden_http import (
     AbConfig,
     DirectHttpError,
+    DirectHttpStatusError,
     FormState,
     PrimeFacesSession,
     ViewExpiredError,
@@ -33,15 +34,21 @@ from app.providers.walden_http import (
     visible_text,
 )
 from app.providers.walden_http_booker import (
+    _BURST_WARMUP_MS,
+    OPENING_MODE_BURST,
     PHASE_BOOK_NOW,
     PHASE_RESERVE_SENT,
     PHASE_RESERVE_STAGED,
     PHASE_VIEW_REFRESH,
     PRE_SUBMIT_PHASES,
+    RESERVE_ACCEPTED,
+    RESERVE_ERRORED,
+    RESERVE_TIMEDOUT,
     DirectHttpBooker,
     _first_real_option_value,
     _parse_slot_time,
     _relocate_reserve,
+    _relocate_reserve_in,
     find_response_message,
 )
 
@@ -3320,3 +3327,485 @@ class TestHoldUntilOpen:
 
         assert not result.success
         assert recorder.sources == [RESERVE_ID, SLOT_B_ID, RESERVE_ID, SLOT_C_ID, RESERVE_ID]
+
+
+# ---------------------------------------------------------------------------
+# The opening burst
+# ---------------------------------------------------------------------------
+
+# What the club actually returns when it grants a slot: its booking form, with
+# the populated "Reservation at" header the classifier keys on. PLAYER_PAGE
+# alone classifies as neither grant nor refusal - the ladder treats that as
+# progress, the burst does not, because a burst member that is a 200 error page
+# must not be mistaken for a win and stop the burst.
+ACCEPTED_PAGE = PLAYER_PAGE.replace(
+    '<div class="ui-selectonebutton" id="playerGroup">',
+    "<label>Reservation at</label><label>04:34 PM</label>"
+    '<div class="ui-selectonebutton" id="playerGroup">',
+)
+
+
+class SourceRecorder(ChainRecorder):
+    """Answers each Reserve button by its own page queue, thread-safely.
+
+    Burst members are in flight together and ask for different slots, so the
+    reply has to be chosen by *which* slot was asked, not by request order.
+    Sources with no queue of their own - the chain steps after a grant - are
+    served from ``chain`` in order. ``status_on`` answers the given 1-based
+    request numbers with that HTTP status instead, ``stall_on`` raises a read
+    timeout for them, and ``delay_on`` answers them late. Every 200 carries a
+    Date header, because the gate summary is read off the club's clock.
+    """
+
+    def __init__(
+        self,
+        by_source: dict[str, list[str]],
+        chain: list[str],
+        *,
+        status_on: dict[int, int] | None = None,
+        status_body: str = "<html>Too Many Requests</html>",
+        stall_on: set[int] | None = None,
+        delay_on: set[int] | None = None,
+        delay_s: float = 0.0,
+    ) -> None:
+        """Queue the per-slot pages and the chain pages that follow a grant."""
+        super().__init__(chain)
+        self.by_source = by_source
+        self.status_on = status_on or {}
+        self.status_body = status_body
+        self.stall_on = stall_on or set()
+        self.delay_on = delay_on or set()
+        self.delay_s = delay_s
+        self.sent_at_ms: list[int] = []
+        self._served: dict[str, int] = {}
+        self._chain_served = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """Answer by the requested source, or fail the request as configured."""
+        params = dict(urllib.parse.parse_qsl(request.content.decode()))
+        source = params.get("javax.faces.source", "")
+        with self._lock:
+            self.requests.append(params)
+            self.sources.append(source)
+            index = len(self.sources)
+            self.sent_at_ms.append(int(time_module.time() * 1000))
+        if index in self.stall_on:
+            raise httpx.ReadTimeout("stalled by the test", request=request)
+        if index in self.status_on:
+            return httpx.Response(
+                self.status_on[index],
+                text=self.status_body,
+                headers={"Retry-After": "2", "Date": email.utils.formatdate(usegmt=True)},
+            )
+        if index in self.delay_on:
+            time_module.sleep(self.delay_s)
+        with self._lock:
+            queue = self.by_source.get(source)
+            if queue is None:
+                page = self.pages[min(self._chain_served, len(self.pages) - 1)]
+                self._chain_served += 1
+            else:
+                served = self._served.get(source, 0)
+                self._served[source] = served + 1
+                page = queue[min(served, len(queue) - 1)]
+        return httpx.Response(
+            200,
+            text=partial_response(page, f"vs-{index}"),
+            headers={"Date": email.utils.formatdate(usegmt=True)},
+        )
+
+
+BLOCKED_ALL = blocked_sheet(*ALL_THREE)
+CHAIN_AFTER_GRANT = [ROWS_PAGE, BOOKED_PAGE]
+
+
+def burst_booker(
+    recorder: ChainRecorder,
+    *offsets: int,
+    target_only: int = 4,
+    fallbacks: tuple[time, ...] = (SLOT_B_TIME, SLOT_C_TIME),
+) -> DirectHttpBooker:
+    """A booker in burst mode, its fallbacks staged the way prepare() stages them."""
+    booker = stage_fallbacks(make_booker(recorder), *fallbacks)
+    booker._opening_mode = OPENING_MODE_BURST
+    booker._burst_offsets_ms = offsets
+    booker._burst_target_only = target_only
+    sheet = refreshed_sheet(*ALL_THREE)
+    document = parse_html(sheet)
+    booker._burst_fallback_requests = []
+    for candidate in fallbacks:
+        relocated = _relocate_reserve_in(document, sheet, candidate)
+        assert relocated is not None
+        booker._burst_fallback_requests.append(
+            (candidate, relocated, booker.session.build_body(relocated))
+        )
+    return booker
+
+
+class TestOpeningBurst:
+    """The opening is asked as a pipelined burst, not one round trip at a time.
+
+    Every Friday on record lost its target between the first ask and the second,
+    700-1030ms later - one round trip plus a parse, the ladder's cadence. The
+    burst keeps a request landing every hundred-odd milliseconds through the
+    first seconds, target and top fallbacks alike, and the first grant wins.
+    """
+
+    def test_members_overlap_rather_than_queue(self) -> None:
+        """Three members leave inside 300ms although the first takes 400ms to answer."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [BLOCKED_ALL], SLOT_C_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            delay_on={1},
+            delay_s=0.4,
+        )
+        booker = burst_booker(recorder, 0, 60, 120, target_only=3)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert recorder.sources[:3] == [RESERVE_ID, RESERVE_ID, RESERVE_ID]
+        assert recorder.sent_at_ms[2] - recorder.sent_at_ms[0] < 300
+        assert result.timing["burstMembers"] == 3
+        assert result.timing["openingMode"] == "burst"
+
+    def test_the_first_grant_wins_and_unsent_members_are_skipped(self) -> None:
+        """A win on the first ask must not go on to take a second hold."""
+        recorder = SourceRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 300, 600, target_only=1)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        # The members at +300 and +600 - one of them a fallback - reached
+        # their instants after the grant had landed and were not sent.
+        assert recorder.sources == [RESERVE_ID, "playerGroup", "bookTeeTimeAction"]
+        assert result.timing["burstSkipped"] == 2
+        assert result.timing["burstAccepted"] == 0
+
+    def test_a_fallback_in_the_burst_is_granted_when_the_target_is_gone(self) -> None:
+        """Both Friday wins were fallback grants at +5s; the burst asks at +0.1s."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT
+        )
+        booker = burst_booker(recorder, 0, 30, 60, 90, target_only=2)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert result.booked_slot_time == SLOT_B_TIME
+        granted = [o for o in result.attempt_log if o.verdict == RESERVE_ACCEPTED]
+        assert [o.slot_time for o in granted] == [SLOT_B_TIME]
+        assert granted[0].burst_index == 2
+        assert SLOT_B_TIME in result.attempted_times
+
+    def test_the_targets_grant_outranks_a_fallbacks(self) -> None:
+        """When both are granted, the tee time the member asked for is the one kept."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [ACCEPTED_PAGE], SLOT_B_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            delay_on={1},
+            delay_s=0.2,
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=1)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert result.booked_slot_time == RESERVE_SLOT_TIME
+        assert any("surplus hold" in r.getMessage() for r in records)
+
+    def test_a_status_error_is_recorded_and_closes_nothing(self) -> None:
+        """A 429 is the club declining to reserve; the walk goes on and the row says so."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [BLOCKED_ALL], SLOT_C_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429},
+        )
+        booker = burst_booker(recorder, 0, 30, 60, target_only=3)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert result.booked_slot_time == SLOT_C_TIME
+        errored = [o for o in result.attempt_log if o.verdict == RESERVE_ERRORED]
+        assert len(errored) == 1
+        assert errored[0].status_code == 429
+        assert errored[0].response_headers["retry-after"] == "2"
+        assert errored[0].error_body is not None and "Too Many" in errored[0].error_body
+        row = errored[0].as_row()
+        assert row["statusCode"] == 429 and row["burstIndex"] == 0
+
+    def test_a_socket_timeout_without_a_grant_closes_the_fallback_walk(self) -> None:
+        """A member that never answered may be holding its slot; nothing else is asked."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            stall_on={2},
+        )
+        booker = burst_booker(recorder, 0, 30, 60, target_only=3)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        assert not result.blocked
+        assert SLOT_B_ID not in recorder.sources
+        assert [o.verdict for o in result.attempt_log].count(RESERVE_TIMEDOUT) == 1
+
+    def test_the_walk_after_the_burst_covers_the_list_again(self) -> None:
+        """Fallbacks refused inside the burst are asked again, later, from the target."""
+        recorder = SourceRecorder(
+            {
+                RESERVE_ID: [BLOCKED_ALL],
+                SLOT_B_ID: [BLOCKED_ALL],
+                SLOT_C_ID: [BLOCKED_ALL, ACCEPTED_PAGE],
+            },
+            CHAIN_AFTER_GRANT,
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=1)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        assert result.booked_slot_time == SLOT_C_TIME
+        # Burst: T, B. Walk: B (already asked in the burst, asked again), C
+        # refused, list spent; second pass from the target: T, B, C granted.
+        assert recorder.sources.count(SLOT_C_ID) == 2
+        assert recorder.sources.count(RESERVE_ID) >= 2
+
+    def test_the_quiet_signal_is_raised_on_a_grant_and_never_on_a_refusal(self) -> None:
+        """The page's timers stay alive until a slot is held.
+
+        2026-09-04: quieted at +1.6s on a refusal, and every later answer was
+        the same frozen pre-window render.
+        """
+        refused = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [BLOCKED_ALL], SLOT_C_ID: [BLOCKED_ALL]},
+            CHAIN_AFTER_GRANT,
+        )
+        booker = burst_booker(refused, 0, 30, target_only=2)
+        booker.quiet_signal = threading.Event()
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+        assert not result.success
+        assert not booker.quiet_signal.is_set()
+
+        granted = SourceRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(granted, 0, 30, target_only=2)
+        booker.quiet_signal = threading.Event()
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+        assert result.success, result.error
+        assert booker.quiet_signal.is_set()
+
+    def test_identical_refusals_are_flagged_as_a_frozen_view(self) -> None:
+        """Fourteen identical bodies took a post-mortem to notice; now it is a field."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [BLOCKED_ALL], SLOT_C_ID: [BLOCKED_ALL]},
+            CHAIN_AFTER_GRANT,
+        )
+        booker = burst_booker(recorder, 0, 30, 60, target_only=3)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        burst_rows = [o for o in result.attempt_log if o.burst_index is not None]
+        assert [o.identical_to_previous for o in burst_rows][1:] == [True, True]
+        assert burst_rows[0].body_digest is not None
+        assert any("frozen view" in r.getMessage() for r in records)
+
+    def test_the_gate_summary_names_the_first_granted_second(self) -> None:
+        """A grant for any slot in a club-second proves the gate was open in it."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=1)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        gate = [r.getMessage() for r in records if r.getMessage().startswith("GATE:")]
+        assert any("GRANTED 04:42 PM" in line for line in gate)
+        assert any("gate was open by club" in line for line in gate)
+
+    def test_member_zero_fires_after_the_pool_is_warm(self) -> None:
+        """The pool spin-up is paid before the instant, not in front of the send.
+
+        Submitting eleven members into a cold pool measured 3.5ms median and
+        4.9ms worst, all of it otherwise landing on the one send the morning is
+        timed around. _run_chain wakes a warm-up budget early and the burst
+        redoes the wait precisely, so member 0's drift is small and positive
+        rather than carrying the spin-up.
+        """
+        recorder = SourceRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 300, 600, 900, target_only=4)
+        target = window_about_to_open(in_ms=300)
+        result = booker.book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        # The warm-up wake is its own number, and the precise wait is the one
+        # reported as the click drift.
+        assert "burstWarmupDriftMs" in result.timing
+        assert result.timing["clickDriftMs"] >= 0
+        assert result.timing["clickDriftMs"] < _BURST_WARMUP_MS
+        # And the send really did land on the instant, not before it.
+        assert recorder.sent_at_ms[0] >= target - 1
+
+    def test_unanswered_asks_are_counted_outside_the_club_seconds(self) -> None:
+        """A 429 has no club clock, so it belongs to no second and is named apart.
+
+        It used to be summed inside the per-second line, where it could never
+        appear: those rows are built from answers, and an ask the club never
+        answered carries no Date header to bucket it by.
+        """
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429},
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=1)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        gate = [r.getMessage() for r in records if r.getMessage().startswith("GATE:")]
+        assert any("GRANTED" in line for line in gate)
+        assert any("no readable answer" in line and "status 429" in line for line in gate)
+
+    def test_a_wholly_throttled_burst_still_says_so(self) -> None:
+        """Nothing answered is the case the summary most needs to report."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [BLOCKED_ALL]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429, 2: 429, 3: 429},
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=2, fallbacks=())
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert not result.success
+        gate = [r.getMessage() for r in records if r.getMessage().startswith("GATE:")]
+        assert any("no readable answer" in line and "status 429" in line for line in gate)
+
+    def test_a_status_body_is_redacted_before_it_is_kept(self) -> None:
+        """The error body is logged and uploaded, so session tokens never enter it."""
+        session_body = (
+            "<html><a href='/book;jsessionid=ABC123SECRET'>retry</a>"
+            "<input name='javax.faces.ViewState' value='-8840302615059009897:138'>"
+            "<a href='/x?p_auth=Ab3xQ9'>home</a> Too Many Requests</html>"
+        )
+
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL]},
+            CHAIN_AFTER_GRANT,
+            status_on={1: 429},
+            status_body=session_body,
+        )
+        result = burst_booker(recorder, 0, 30, target_only=2, fallbacks=()).book(
+            1, target_timestamp_ms=window_about_to_open()
+        )
+
+        assert not result.success
+        errored = [o for o in result.attempt_log if o.verdict == RESERVE_ERRORED]
+        assert errored, result.error
+        body = errored[0].error_body or ""
+        assert "ABC123SECRET" not in body
+        assert "8840302615059009897" not in body
+        assert "Ab3xQ9" not in body
+        # The club's own words survive - that is the whole diagnostic value.
+        assert "Too Many Requests" in body
+        assert body.count("<redacted>") == 3
+
+    def test_a_view_refresh_is_refused_in_burst_mode(self) -> None:
+        """The refresh would spend the warm-up the burst wakes early for.
+
+        _run_chain wakes _BURST_WARMUP_MS early so the pool is up before the
+        tick, and the refresh runs in exactly that gap - one POST budgeted at
+        1.5s with up to 4s of retries, against a 50ms budget. Member 0 would
+        reach a wait already spent, pay the pool startup anyway, and be later
+        still by however long the refresh took. A fresh view was ruled out as
+        the way in on 2026-08-07, so the pair is refused rather than reordered.
+        """
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            booker.prepare(
+                RESERVE_ID,
+                TEE_SHEET,
+                refresh_at_window=True,
+                opening_mode=OPENING_MODE_BURST,
+                burst_offsets_ms=(0, 100),
+            )
+
+        assert booker._refresh_config is None
+        assert any("ignoring it" in r.getMessage() for r in records)
+
+    def test_the_ladder_still_stages_a_view_refresh(self) -> None:
+        """The escape hatch is the ladder, so the refresh must still work there."""
+        session = make_session(FormState.from_html(TEE_SHEET), lambda request: httpx.Response(200))
+        booker = DirectHttpBooker(session)
+        booker.prepare(RESERVE_ID, TEE_SHEET, refresh_at_window=True)
+
+        assert booker._refresh_config is not None
+
+    def test_an_untimed_booking_sends_once_then_walks(self) -> None:
+        """No instant to burst around: the ad-hoc untimed retry is one ask, then the walk."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT
+        )
+        booker = burst_booker(recorder, 0, 30, 60, target_only=3)
+        result = booker.book(1)
+
+        assert result.success, result.error
+        assert recorder.sources[:2] == [RESERVE_ID, SLOT_B_ID]
+        assert "burstMembers" not in result.timing
+
+
+class TestNon200Responses:
+    """A status other than 200 is an answer, and the answer is kept."""
+
+    def test_a_non_200_carries_status_headers_and_body(self) -> None:
+        """What a rate limit looks like from the ledger's side."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """Mock transport handler for one test case."""
+            return httpx.Response(
+                429,
+                text="<html>Slow down</html>",
+                headers={"Retry-After": "3", "Set-Cookie": "JSESSIONID=secret"},
+            )
+
+        session = make_session(FormState.from_html(TEE_SHEET), handler)
+        with pytest.raises(DirectHttpStatusError) as raised:
+            session.post(AbConfig(source="s", form=FORM_ID))
+
+        assert raised.value.status_code == 429
+        assert raised.value.headers["retry-after"] == "3"
+        # The token itself never leaves the transport layer.
+        assert raised.value.headers["set-cookie"] == "present"
+        assert "Slow down" in raised.value.body_snippet
+        assert isinstance(raised.value, DirectHttpError)
+
+
+class _CaptureLogs:
+    """Collect the records a logger emits inside a ``with`` block."""
+
+    def __init__(self, name: str) -> None:
+        self._logger = logging.getLogger(name)
+        self._handler = _ListHandler()
+
+    def __enter__(self) -> list[logging.LogRecord]:
+        self._logger.addHandler(self._handler)
+        self._previous_level = self._logger.level
+        self._logger.setLevel(logging.DEBUG)
+        return self._handler.records
+
+    def __exit__(self, *exc: object) -> None:
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._previous_level)
+
+
+class _ListHandler(logging.Handler):
+    """A handler that keeps every record it is given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Keep the record."""
+        self.records.append(record)

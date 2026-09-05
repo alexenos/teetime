@@ -283,6 +283,68 @@ class DirectHttpConnectionError(DirectHttpError):
     """
 
 
+class DirectHttpStatusError(DirectHttpError):
+    """The club answered, and the answer was not HTTP 200.
+
+    Its own class because a status is the *opposite* of a timeout in what it
+    says about the club: the request was received, processed and declined at
+    the transport level - a 429 or a 503 - and nothing was reserved. A caller
+    may therefore carry on asking, for the same slot or another, without the
+    one-round-per-day hazard a timeout carries. Before this existed a non-200
+    surfaced as a bare DirectHttpError with the number in its message, and the
+    opening pair filed it beside the timeouts - so one rate-limit reply would
+    have closed the fallback list for the rest of the morning.
+
+    Carries what a post-mortem needs to tell a rate limit from an outage: the
+    status, the headers worth keeping (Retry-After above all), and the start of
+    the body, which for an error page is where the club's own words are.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        headers: dict[str, str],
+        body_snippet: str,
+    ) -> None:
+        """Record the failed exchange's transport facts alongside the message."""
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers
+        self.body_snippet = body_snippet
+
+
+# Response headers kept on every exchange, lower-cased. Chosen for what they
+# decide: Date is the club's clock, Retry-After and the X-RateLimit family are
+# what a throttled burst would be told, Content-Type separates a partial
+# response from an error page, and Cache-Control is where a served-from-cache
+# body would show. Set-Cookie is recorded as present or not - its value is a
+# session token and does not belong in a ledger.
+_LEDGER_HEADERS = (
+    "date",
+    "retry-after",
+    "content-type",
+    "content-length",
+    "cache-control",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+)
+
+# How much of a non-200 body to keep. Enough for an error page's own sentence
+# or two; a full tee sheet in an exception message helps nobody.
+_ERROR_BODY_SNIPPET_CHARS = 600
+
+
+def _ledger_headers(headers: httpx.Headers) -> dict[str, str]:
+    """The subset of ``headers`` worth carrying into the race ledger."""
+    kept = {name: headers[name] for name in _LEDGER_HEADERS if name in headers}
+    if "set-cookie" in headers:
+        kept["set-cookie"] = "present"
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Minimal HTML tree
 # ---------------------------------------------------------------------------
@@ -674,6 +736,9 @@ class PartialResponse:
     server_date_ms: int | None = None
     sent_at_ms: int | None = None
     received_at_ms: int | None = None
+    # The response headers worth keeping - see _LEDGER_HEADERS. Empty for a
+    # response built by a parser rather than received from the club.
+    headers: dict[str, str] = field(default_factory=dict)
 
     @property
     def markup(self) -> str:
@@ -1148,12 +1213,16 @@ class PrimeFacesSession:
         received_at_ms = int(time_module.time() * 1000)
 
         if http_response.status_code != 200:
-            raise DirectHttpError(
-                f"POST for {config.source} returned HTTP {http_response.status_code}"
+            raise DirectHttpStatusError(
+                f"POST for {config.source} returned HTTP {http_response.status_code}",
+                status_code=http_response.status_code,
+                headers=_ledger_headers(http_response.headers),
+                body_snippet=http_response.text[:_ERROR_BODY_SNIPPET_CHARS],
             )
 
         response = parse_partial_response(http_response.text)
         response.status_code = http_response.status_code
+        response.headers = _ledger_headers(http_response.headers)
         response.sent_at_ms = sent_at_ms
         response.received_at_ms = received_at_ms
         # The club's clock as of this exchange, read from the endpoint that

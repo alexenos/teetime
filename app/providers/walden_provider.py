@@ -66,7 +66,7 @@ TRANSIENT_EXCEPTIONS = (
 # Raw partial-responses stored per race, out of up to a full sweep's worth. Each
 # refusal is a whole tee sheet at 500-680KB and consecutive ones are the same
 # sheet, so the ends are what get read. Ledger rows are kept for every attempt.
-_RACE_LEDGER_MAX_PAYLOADS = 4
+_RACE_LEDGER_MAX_PAYLOADS = 8
 
 
 def with_retry(
@@ -1990,7 +1990,8 @@ class WaldenGolfProvider(ReservationProvider):
                 checkbox = self._find_checkbox_in_element(driver, item, course_name)
                 if checkbox is None:
                     continue
-                return checkbox.is_selected()
+                # Selenium is untyped; the bool() is what keeps mypy --strict green.
+                return bool(checkbox.is_selected())
         except Exception as e:
             logger.debug(f"Could not read course checkbox state for '{course_name}': {e}")
 
@@ -4314,6 +4315,19 @@ class WaldenGolfProvider(ReservationProvider):
                 hold_until_open=settings.walden_reserve_hold_until_open,
                 hold_cap_ms=settings.walden_reserve_hold_cap_ms,
                 target_interleave=settings.walden_reserve_target_interleave,
+                # The burst is the race's opening and the ad-hoc booking's
+                # too: an ad-hoc booking runs the timed path on a 90s delay
+                # (walden_adhoc_execute_delay_s) precisely so that the code
+                # the race runs is exercised before the morning it counts.
+                # An untimed booking has no instant to burst around and the
+                # booker sends once.
+                opening_mode=(
+                    settings.walden_reserve_opening_mode
+                    if execute_at_timestamp_ms is not None
+                    else "ladder"
+                ),
+                burst_offsets_ms=settings.walden_burst_offsets_ms(),
+                burst_target_only=settings.walden_reserve_burst_target_only,
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
@@ -4330,15 +4344,18 @@ class WaldenGolfProvider(ReservationProvider):
                 session.close()
             return None
 
-        # Armed before the race, fired after it starts: the booker raises
-        # quiet_signal once the first Reserve is answered (or times out on the
-        # socket) - the point past which a browser retry is treated as racing
-        # our own reservation - and this thread then clears the resident tee
-        # sheet page's JS timers. 2026-08-28 attempt 2 measured the page's
-        # cost mid-race: 310ms of container CPU burned by a process that was
-        # not ours, with the race descheduled under it (cpu/wall 0.39). A
-        # connection that never opens never raises the signal, and the page
-        # stays live for the JS-chain rescue.
+        # Armed before the race, fired after it is won: the booker raises
+        # quiet_signal once a Reserve has been *granted*, and this thread then
+        # clears the resident tee sheet page's JS timers. 2026-08-28 attempt 2
+        # measured the page's cost mid-race: 310ms of container CPU burned by a
+        # process that was not ours, with the race descheduled under it
+        # (cpu/wall 0.39). It used to fire on the first *answer*, and on
+        # 2026-09-04 - the first Friday it ran - that was +1.6s on a refusal,
+        # after which every response was the frozen pre-window render: those
+        # timers were what had been advancing the server-side view the
+        # requests are evaluated against. A refusal never raises the signal
+        # now, and neither does a connection that never opens, which leaves
+        # the page live for the JS-chain rescue.
         quiet_thread: threading.Thread | None = None
         quiet_signal: threading.Event | None = None
         quiet_stand_down = threading.Event()
@@ -5679,12 +5696,36 @@ class WaldenGolfProvider(ReservationProvider):
             return list(attempts)
 
         refusals = [o for o in attempts if o.verdict == RESERVE_REFUSED]
-        # dict.fromkeys over attempt numbers: the ends can coincide, and the
-        # order of the ledger must be preserved for the reader.
-        wanted = {attempts[0].attempt, attempts[-1].attempt}
+        # The ends, which a post-mortem always reads. Held apart from the rest
+        # because the cap is applied by *dropping* the optional ones: while
+        # "wanted" was only ever these four the slice below could not lose any
+        # of them, but a twelve-member burst can nominate more than the cap and
+        # would have silently dropped the last attempt - the one that ended the
+        # race - to keep earlier repeats.
+        mandatory = {attempts[0].attempt, attempts[-1].attempt}
         if refusals:
-            wanted.add(refusals[0].attempt)
-            wanted.add(refusals[-1].attempt)
+            mandatory.add(refusals[0].attempt)
+            mandatory.add(refusals[-1].attempt)
+        # Anything that is not a repeat of the sheet before it earns its
+        # upload: a grant, an answer that was neither grant nor refusal, and
+        # every refusal whose body differs from the previous one. On
+        # 2026-09-04 the fourteen refusals were one body fourteen times, and
+        # "first and last" was exactly right; a burst that is throttled or
+        # answered with a live sheet mid-way is the case this widens for.
+        optional: list[int] = []
+        previous_digest = None
+        for observation in attempts:
+            digest = getattr(observation, "body_digest", None)
+            if observation.attempt not in mandatory and (
+                observation.verdict != RESERVE_REFUSED
+                or (digest is not None and digest != previous_digest)
+            ):
+                optional.append(observation.attempt)
+            previous_digest = digest
+        # Mandatory first, then as many changed responses as the cap still
+        # allows, and the result is put back in ledger order for the reader.
+        wanted = set(mandatory)
+        wanted.update(optional[: max(0, _RACE_LEDGER_MAX_PAYLOADS - len(mandatory))])
         chosen = [o for o in attempts if o.attempt in wanted][:_RACE_LEDGER_MAX_PAYLOADS]
         logger.info(
             "RACE_LEDGER: storing %d of %d raw payload(s) - attempts %s; "
@@ -5823,15 +5864,24 @@ class WaldenGolfProvider(ReservationProvider):
         stand_down: threading.Event,
         timeout_s: float,
     ) -> None:
-        """Clear the parked tee sheet page's JS timers once the race is on HTTP.
+        """Clear the parked tee sheet page's JS timers once a Reserve is granted.
 
         Runs on its own thread. It sleeps until the booker raises ``signal`` -
-        the first Reserve answered, past which no browser retry is ever made -
-        then takes the page's timers apart, so the countdown and datascroller
-        loops stop competing with the race for the container's CPU (2026-08-28
-        attempt 2: 310ms of container CPU that was not ours, cpu/wall 0.39).
-        The page itself stays loaded; nothing else uses it until the post-race
-        navigation, which starts from ``driver.get`` either way.
+        a Reserve granted, after which the chain advances the club's view by
+        its own actions - then takes the page's timers apart, so the countdown
+        and datascroller loops stop competing with the chain for the
+        container's CPU (2026-08-28 attempt 2: 310ms of container CPU that was
+        not ours, cpu/wall 0.39). The page itself stays loaded; nothing else
+        uses it until the post-race navigation, which starts from
+        ``driver.get`` either way.
+
+        Two things this deliberately no longer does, since 2026-09-04. It does
+        not fire on a refusal: the page's timers are what kept the server-side
+        view moving on both Fridays the race was won after a first refusal,
+        and the one morning they were cleared at +1.6s every later answer was
+        the same frozen pre-window render. And it does not call the club's own
+        ``stopSheetTimers()``: that is the site's machinery for its sheet, and
+        clearing our page's timer handles is all the CPU argument needs.
 
         ``stand_down`` wins over ``signal``: the caller sets it once the race
         is decided, so a wait that never saw the signal exits without touching
@@ -5849,8 +5899,6 @@ class WaldenGolfProvider(ReservationProvider):
                 return
             swept = driver.execute_script(
                 """
-                try { if (typeof stopSheetTimers === 'function') { stopSheetTimers(); } }
-                catch (e) {}
                 var top = 0;
                 try {
                     top = window.setTimeout(function () {}, 0);
