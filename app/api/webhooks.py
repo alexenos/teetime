@@ -5,6 +5,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.providers.telegram_provider import (
     TelegramProvider,
+    is_addressed_to_bot,
     is_authorized_user,
     strip_bot_prefix,
     verify_webhook_secret,
@@ -139,13 +140,26 @@ async def handle_telegram_update(
         logger.info(f"Telegram message from {user_id} had no text; ignoring")
         return {"status": "ignored"}
 
+    entities = message.get("entities")
+    bot_username = await TelegramProvider().get_bot_username()
+
+    # With group privacy mode on, Telegram only ever delivers a group message
+    # that already addresses this bot. Some groups need privacy mode off to
+    # get delivery working at all (see docs/telegram-setup.md), which means
+    # Telegram now hands over every message regardless of addressing - so an
+    # unaddressed one in a non-private chat has to be dropped here instead,
+    # or every group message becomes an LLM call.
+    if chat.get("type") != "private" and not is_addressed_to_bot(
+        raw_text, entities, bot_username, message.get("reply_to_message")
+    ):
+        logger.info(f"Telegram message from {user_id} in chat {chat_id} was not addressed; ignoring")
+        return {"status": "ignored"}
+
     # In a group the message has to address the bot to reach us at all, so it
     # arrives as "@teetimebot book 9/5 at 9a" or "/book@teetimebot 9/5 at 9a".
     # Strip that addressing before the parser sees it, the same way the Discord
     # gateway strips "<@1533...>".
-    text = strip_bot_prefix(
-        raw_text, message.get("entities"), await TelegramProvider().get_bot_username()
-    )
+    text = strip_bot_prefix(raw_text, entities, bot_username)
     if not text:
         logger.info(f"Telegram message from {user_id} was only addressing; nothing to parse")
         return {"status": "ignored"}
