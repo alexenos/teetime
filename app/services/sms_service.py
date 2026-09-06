@@ -150,10 +150,11 @@ class SMSService:
         booking_details: str,
         origin_channel_id: str | None = None,
         channel: str | None = None,
+        requester_handle: str | None = None,
     ) -> str | None:
         """Send a booking confirmation SMS."""
         result = await self.provider_for(channel).send_booking_confirmation(
-            to_number, booking_details, origin_channel_id
+            to_number, booking_details, origin_channel_id, requester_handle=requester_handle
         )
         return result.message_sid if result.success else None
 
@@ -165,6 +166,7 @@ class SMSService:
         booking_details: str | None = None,
         origin_channel_id: str | None = None,
         channel: str | None = None,
+        requester_handle: str | None = None,
     ) -> str | None:
         """Send a booking failure notification SMS.
 
@@ -178,9 +180,16 @@ class SMSService:
                 failure replies there instead of a DM.
             channel: Messaging channel to send over. None falls back to
                 MESSAGING_CHANNEL.
+            requester_handle: Ready-to-prepend mention of who requested this
+                booking, so a shared group sees who it was for.
         """
         result = await self.provider_for(channel).send_booking_failure(
-            to_number, reason, alternatives, booking_details, origin_channel_id
+            to_number,
+            reason,
+            alternatives,
+            booking_details,
+            origin_channel_id,
+            requester_handle=requester_handle,
         )
         return result.message_sid if result.success else None
 

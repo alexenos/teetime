@@ -203,6 +203,42 @@ class TestSMSServiceBookingNotifications:
         assert "Saturday, December 20" in mock_provider.sent_messages[0]["message"]
 
     @pytest.mark.asyncio
+    async def test_send_booking_confirmation_with_requester_handle(
+        self, sms_service: SMSService, mock_provider: MockSMSProvider
+    ) -> None:
+        """A requester_handle is prepended so a shared group sees who got the spot."""
+        sms_service.set_provider(mock_provider)
+
+        result = await sms_service.send_booking_confirmation(
+            "+15551234567",
+            "Saturday, December 20 at 08:00 AM for 4 players",
+            requester_handle="@dax ",
+        )
+
+        assert result is not None
+        message = mock_provider.sent_messages[0]["message"]
+        assert message.startswith("@dax Tee time booking confirmed!")
+
+    @pytest.mark.asyncio
+    async def test_send_booking_confirmation_without_requester_handle(
+        self, sms_service: SMSService, mock_provider: MockSMSProvider
+    ) -> None:
+        """No requester_handle (a private chat, or a channel with no addressing
+        concept) leaves the message exactly as before."""
+        sms_service.set_provider(mock_provider)
+
+        result = await sms_service.send_booking_confirmation(
+            "+15551234567",
+            "Saturday, December 20 at 08:00 AM for 4 players",
+        )
+
+        assert result is not None
+        message = mock_provider.sent_messages[0]["message"]
+        assert (
+            message == "Tee time booking confirmed! Saturday, December 20 at 08:00 AM for 4 players"
+        )
+
+    @pytest.mark.asyncio
     async def test_send_booking_failure(
         self, sms_service: SMSService, mock_provider: MockSMSProvider
     ) -> None:
@@ -255,6 +291,24 @@ class TestSMSServiceBookingNotifications:
         message = mock_provider.sent_messages[0]["message"]
         assert "Sunday, February 01 at 08:58 AM for 4 players" in message
         assert "No time slots with 4 available spots found" in message
+
+    @pytest.mark.asyncio
+    async def test_send_booking_failure_with_requester_handle(
+        self, sms_service: SMSService, mock_provider: MockSMSProvider
+    ) -> None:
+        """A requester_handle is prepended to a failure notice too, so a shared
+        group sees who it was for."""
+        sms_service.set_provider(mock_provider)
+
+        result = await sms_service.send_booking_failure(
+            "+15551234567",
+            "Time slot not available",
+            requester_handle="@dax ",
+        )
+
+        assert result is not None
+        message = mock_provider.sent_messages[0]["message"]
+        assert message.startswith("@dax Unable to book tee time")
 
     @pytest.mark.asyncio
     async def test_send_weekly_prompt(

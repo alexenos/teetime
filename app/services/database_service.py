@@ -42,6 +42,7 @@ class DatabaseService:
             error_message=booking.error_message,
             origin_channel_id=booking.origin_channel_id,
             channel=booking.channel,
+            requester_handle=booking.requester_handle,
             created_at=booking.created_at,
             updated_at=booking.updated_at,
         )
@@ -65,6 +66,7 @@ class DatabaseService:
             error_message=record.error_message,  # type: ignore[arg-type]
             origin_channel_id=record.origin_channel_id,  # type: ignore[arg-type]
             channel=record.channel,  # type: ignore[arg-type]
+            requester_handle=record.requester_handle,  # type: ignore[arg-type]
             created_at=record.created_at,  # type: ignore[arg-type]
             updated_at=record.updated_at,  # type: ignore[arg-type]
         )
@@ -85,6 +87,7 @@ class DatabaseService:
             pending_cancellation_id=session.pending_cancellation_id,
             origin_channel_id=session.origin_channel_id,
             channel=session.channel,
+            requester_handle=session.requester_handle,
             last_interaction=session.last_interaction,
         )
 
@@ -113,6 +116,7 @@ class DatabaseService:
             pending_cancellation_id=record.pending_cancellation_id,  # type: ignore[arg-type]
             origin_channel_id=record.origin_channel_id,  # type: ignore[arg-type]
             channel=record.channel,  # type: ignore[arg-type]
+            requester_handle=record.requester_handle,  # type: ignore[arg-type]
             last_interaction=record.last_interaction,  # type: ignore[arg-type]
         )
 
@@ -216,6 +220,7 @@ class DatabaseService:
             record.pending_cancellation_id = session.pending_cancellation_id  # type: ignore[assignment]
             record.origin_channel_id = session.origin_channel_id  # type: ignore[assignment]
             record.channel = session.channel  # type: ignore[assignment]
+            record.requester_handle = session.requester_handle  # type: ignore[assignment]
             record.last_interaction = session.last_interaction  # type: ignore[assignment]
 
             await db.commit()

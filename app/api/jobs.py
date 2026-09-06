@@ -318,6 +318,7 @@ async def execute_due_bookings(
                 details,
                 original_booking.origin_channel_id,
                 original_booking.channel,
+                requester_handle=original_booking.requester_handle,
             )
         else:
             failed += 1
@@ -349,6 +350,7 @@ async def execute_due_bookings(
                 booking_details=booking_details,
                 origin_channel_id=original_booking.origin_channel_id,
                 channel=original_booking.channel,
+                requester_handle=original_booking.requester_handle,
             )
 
     logger.info(

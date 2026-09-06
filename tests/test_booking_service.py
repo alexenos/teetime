@@ -1879,6 +1879,7 @@ class TestMultipleBookings:
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
             channel: str | None = None,
+            requester_handle: str | None = None,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test123",
@@ -1929,6 +1930,7 @@ class TestMultipleBookings:
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
             channel: str | None = None,
+            requester_handle: str | None = None,
         ) -> TeeTimeBooking:
             nonlocal call_count
             call_count += 1
@@ -2002,6 +2004,7 @@ class TestMultipleBookings:
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
             channel: str | None = None,
+            requester_handle: str | None = None,
         ) -> TeeTimeBooking:
             raise ValueError("Multi-player bookings within 48 hours")
 
@@ -2170,6 +2173,7 @@ class TestOriginChannelRouting:
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
             channel: str | None = None,
+            requester_handle: str | None = None,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test1234",
@@ -2189,7 +2193,113 @@ class TestOriginChannelRouting:
         # A non-default channel, so a regression that drops it fails here rather
         # than passing against None.
         mock_create.assert_awaited_once_with(
-            "+15551234567", sample_request, "778899", channel="telegram"
+            "+15551234567", sample_request, "778899", channel="telegram", requester_handle=None
+        )
+
+    @pytest.mark.asyncio
+    async def test_incoming_message_records_requester_handle(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """A group message's addressee prefix is stored on the session."""
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch("app.services.booking_service.gemini_service") as mock_gemini,
+        ):
+            mock_db.get_or_create_session = AsyncMock(return_value=sample_session)
+            mock_db.update_session = AsyncMock()
+            mock_gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="help"))
+
+            await booking_service.handle_incoming_message(
+                "+15551234567", "help", "778899", requester_handle="@dax "
+            )
+
+        assert sample_session.requester_handle == "@dax "
+
+    @pytest.mark.asyncio
+    async def test_incoming_message_empty_requester_handle_clears_it(
+        self, booking_service: BookingService
+    ) -> None:
+        """A DM explicitly clears a stale requester_handle from an earlier group
+        conversation with this same user, rather than leaving it stuck."""
+        session = UserSession(phone_number="+15551234567", requester_handle="@dax ")
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch("app.services.booking_service.gemini_service") as mock_gemini,
+        ):
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock()
+            mock_gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="help"))
+
+            await booking_service.handle_incoming_message(
+                "+15551234567", "help", requester_handle=""
+            )
+
+        assert session.requester_handle is None
+
+    @pytest.mark.asyncio
+    async def test_incoming_message_omitted_requester_handle_keeps_existing(
+        self, booking_service: BookingService
+    ) -> None:
+        """A caller that never passes requester_handle (Discord, SMS) must not
+        erase a value recorded some other way."""
+        session = UserSession(phone_number="+15551234567", requester_handle="@dax ")
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch("app.services.booking_service.gemini_service") as mock_gemini,
+        ):
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock()
+            mock_gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="help"))
+
+            await booking_service.handle_incoming_message("+15551234567", "help")
+
+        assert session.requester_handle == "@dax "
+
+    @pytest.mark.asyncio
+    async def test_confirm_intent_passes_session_requester_handle_to_booking(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Confirming a pending request carries the session's requester_handle
+        onto the booking, so the 6:30am result notification says who it was for."""
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=sample_request,
+            origin_channel_id="778899",
+            channel="telegram",
+            requester_handle="@dax ",
+        )
+
+        async def create_booking_side_effect(
+            phone_number: str,
+            request: TeeTimeRequest,
+            origin_channel_id: str | None = None,
+            defer_execution: bool = False,
+            channel: str | None = None,
+            requester_handle: str | None = None,
+        ) -> TeeTimeBooking:
+            return TeeTimeBooking(
+                id="test1234",
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+                origin_channel_id=origin_channel_id,
+                channel=channel,
+                requester_handle=requester_handle,
+            )
+
+        with patch.object(
+            booking_service, "create_booking", side_effect=create_booking_side_effect
+        ) as mock_create:
+            await booking_service._handle_confirm_intent(session)
+
+        mock_create.assert_awaited_once_with(
+            "+15551234567",
+            sample_request,
+            "778899",
+            channel="telegram",
+            requester_handle="@dax ",
         )
 
     @pytest.mark.asyncio
@@ -2220,6 +2330,7 @@ class TestOriginChannelRouting:
             origin_channel_id: str | None = None,
             defer_execution: bool = False,
             channel: str | None = None,
+            requester_handle: str | None = None,
         ) -> TeeTimeBooking:
             return TeeTimeBooking(
                 id="test1234",
@@ -2695,6 +2806,7 @@ class TestReconcileInterruptedBookings:
     def _in_progress_booking(
         origin_channel_id: str | None = None,
         updated_at: datetime | None = None,
+        requester_handle: str | None = None,
     ) -> TeeTimeBooking:
         return TeeTimeBooking(
             id="orphan01",
@@ -2706,6 +2818,7 @@ class TestReconcileInterruptedBookings:
             ),
             status=BookingStatus.IN_PROGRESS,
             origin_channel_id=origin_channel_id,
+            requester_handle=requester_handle,
             # Default to a row last touched well before any test-constructed
             # service started, i.e. a genuine prior-run orphan.
             updated_at=updated_at or datetime(2026, 8, 2, 20, 21, 54),
@@ -2746,6 +2859,26 @@ class TestReconcileInterruptedBookings:
             mock_sms.send_booking_failure.await_args.kwargs["origin_channel_id"]
             == "9990001112223330"
         )
+
+    @pytest.mark.asyncio
+    async def test_notifies_with_requester_handle(self, booking_service: BookingService) -> None:
+        """A group booking's requester_handle survives startup recovery, so the
+        interrupted-booking notice still names who it was for."""
+        orphan = self._in_progress_booking(
+            origin_channel_id="9990001112223330", requester_handle="@dax "
+        )
+        updated: list[TeeTimeBooking] = []
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[orphan])
+            mock_db.update_booking = AsyncMock(side_effect=self._recorder(updated))
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                await booking_service.reconcile_interrupted_bookings()
+
+        mock_sms.send_booking_failure.assert_awaited_once()
+        assert mock_sms.send_booking_failure.await_args.kwargs["requester_handle"] == "@dax "
 
     @pytest.mark.asyncio
     async def test_no_orphans_is_a_noop(self, booking_service: BookingService) -> None:
