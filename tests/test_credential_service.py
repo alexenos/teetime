@@ -73,7 +73,9 @@ class TestCredentialServiceResolve:
     async def test_resolve_falls_back_to_global_default(
         self, credential_service: CredentialService, monkeypatch
     ) -> None:
-        monkeypatch.setattr("app.services.credential_service.settings.walden_member_number", "GLOBAL")
+        monkeypatch.setattr(
+            "app.services.credential_service.settings.walden_member_number", "GLOBAL"
+        )
         monkeypatch.setattr("app.services.credential_service.settings.walden_password", "globalpw")
 
         result = await credential_service.resolve("+15551234567")
@@ -95,7 +97,9 @@ class TestCredentialServiceResolve:
     async def test_dedicated_credential_takes_precedence(
         self, credential_service: CredentialService, monkeypatch
     ) -> None:
-        monkeypatch.setattr("app.services.credential_service.settings.walden_member_number", "GLOBAL")
+        monkeypatch.setattr(
+            "app.services.credential_service.settings.walden_member_number", "GLOBAL"
+        )
         monkeypatch.setattr("app.services.credential_service.settings.walden_password", "globalpw")
 
         await credential_service.set_credentials(
