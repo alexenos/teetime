@@ -77,7 +77,7 @@ Offsets from the stated window, 06:30:00.000 CT.
 | Reserve 11 (burst #10) | +3194ms | refused, roundTripMs 333 | |
 | Reserve 12 (burst #11) | +3594ms | accepted (surplus hold), roundTripMs 216 | |
 | Opening burst done | 5013ms elapsed | 12 sent, 0 skipped, 10 refused, 0 errored, granted by #0 | |
-| **RACE_LEDGER / GATE** | granted +994ms; last refusal +3194ms | gate open by club :03 | |
+| **RACE_LEDGER / GATE** | granted +994ms; last refusal +3194ms | `GATE:` line reads "gate was open by club :03" — its own wording, and see §3b on why a club-second cannot carry that | |
 | Player count (4) | 06:30:06.039 | 200 OK, ~78ms | |
 | TBD guest 1 | 06:30:06.135 | 200 OK, ~79ms | |
 | TBD guest 2 | 06:30:06.222 | 200 OK, ~78ms | |
@@ -92,55 +92,75 @@ reading twice is the first Reserve's 2774ms.
 
 ## 3. Why the winning round trip was 2774ms
 
-**It was not slow. The club held it.**
+**Unresolved.** The delay is on the club's side, and it is the ask that won — but
+the mechanism is not established, and an earlier draft of this document claimed
+it was. That claim is withdrawn; §3b says why, because the mistake is an easy one
+to make again.
 
-Our first Reserve leaves at +994ms, before the club's booking gate has actually
-opened. Rather than refusing it, the club parks the request and answers it the
-moment the gate flips — with a grant. The 2774ms is time spent waiting on the
-club's side for its own window to open.
-
-The correlation across all nine races on record is exact:
-
-| morning | first Reserve sent | club second on the answer | roundTripMs | verdict |
-|---|---|---|---|---|
-| 08-20 | +1006ms | :01 | 456 | accepted |
-| 09-03 | +1013ms | :01 | 523 | accepted |
-| 08-27 | ~+1.0s | :01 | 675 | accepted |
-| 09-02 | ~+1.0s | :01 | 775 | accepted |
-| 08-29 | ~+1.0s | :01 | 777 | accepted |
-| 09-05 | +1010ms | :01 | 806 | accepted |
-| 08-25 | ~+1.0s | :01 | 831 | accepted |
-| **08-16** | **+1023ms** | **:03** | **2935** | accepted |
-| **09-06** | **+994ms** | **:03** | **2774** | accepted |
-
-Every morning answered inside club-second `:01` came back in 456–831ms. The only
-two mornings with a ~2.8s round trip are the only two whose answer was stamped
-`:03`. The round trip tracks **when the club chose to decide**, not how fast the
-network was.
-
-What this morning's ledger rules out:
+### 3a. What the artifacts do establish
 
 - **Not our container.** Attempt 1's `postResponseWallMs` 23 / `postResponseCpuMs`
-  20 — and that segment is after the round trip anyway. No §7c descheduling.
-- **Not the network.** The other eleven members, same client and same instant,
-  answered in 253–576ms.
+  20 — and that segment falls *after* the round trip anyway. No §7c descheduling.
+- **Not the network, and not load we can see.** The other eleven members, same
+  client and same instant, answered in 253–576ms.
 - **Not the cost of granting.** Member #11 performed the identical grant — same
   slot, same 86136-byte booking form — in **216ms**, 42ms after #0's answer landed.
 - **Not self-contention from our own burst.** 08-16 fired exactly **one** Reserve,
-  with no siblings to block on, and still took 2935ms with the same `:03` answer.
+  with no siblings to block on, and still took 2935ms.
+- **The verdict tracks when the club answered, not when we sent.** Ordered by
+  answer time, 09-06 splits cleanly — and note #0 was sent *first* and #11 *last*:
 
-So the delay is on the club's side, and it is the *winning* path: the parked ask
-was already at the head of the club's queue when the gate opened, ahead of anyone
-clicking at the flip. **Both slow mornings on record were won by that parked ask.**
-This inverts the natural instinct: a long round trip on the opening ask is good
-news, and the timeout is the thing that can throw the win away.
+  | answered | sent | verdict |
+  |---|---|---|
+  | +1621 … +3527ms (ten asks) | +1094 … +3194ms | refused |
+  | **+3768ms** | +994ms (#0) | **accepted** |
+  | **+3810ms** | +3594ms (#11) | **accepted** |
 
-One honest limit, per §7d: because PR #174 made the burst target-only, all 12 asks
-were 08:00 AM, and the only discriminator between "the gate opened late" and "the
-gate opened at :01 and something else delayed #0" is a grant for a *different*
-slot in the same club-second. This morning cannot settle that. What is
-established regardless is everything the fix below rests on — the delay is
-club-side, it recurs, and it is the path that wins.
+  Something on the club's side changed between +3527ms and +3768ms. That is the
+  one non-arithmetic signal this morning carries.
+
+### 3b. Withdrawn: the club-second table
+
+An earlier draft argued from the nine races on record that answers stamped
+club-second `:01` came back in 456–831ms while the only two ~2.8s mornings
+(08-16, 09-06) were stamped `:03`, and concluded that the club parks a pre-gate
+ask and answers it when the gate flips.
+
+**That table is a tautology.** `serverMsPastWindow` is derived from the HTTP
+`Date` header, which is **whole-second resolution** (§7a), so it only ever reads
+1001 / 2001 / 3001 — second-buckets, not timestamps. It restates
+`sent + roundTripMs` truncated to the second, and all twelve of this morning's
+rows match that arithmetic exactly, with no residual:
+
+| # | sent | roundTripMs | sent+RTT | club second |
+|---|---|---|---|---|
+| 1 | 994 | 2774 | 3768 | 3001 |
+| 2 | 1094 | 527 | 1621 | 1001 |
+| 7 | 1894 | 343 | 2237 | 2001 |
+| 11 | 3194 | 333 | 3527 | 3001 |
+| 12 | 3594 | 216 | 3810 | 3001 |
+
+A slow round trip lands in a later club-second **by construction**, whatever the
+club is doing. So "answered at `:03`" is not independent evidence of anything, and
+nothing about a gate follows from it. Nor were the burst's asks "held to a common
+instant": the twelve answers arrived spread across +1621ms to +3810ms, and only
+the last four happened to fall inside the `:03` second.
+
+### 3c. The candidate readings, none settled
+
+1. **A gate opening later than the aim assumes** (~+3.6s here, vs the +1.0s the
+   aim is built around).
+2. **A slow first booking transaction on the club's side** — cold path, or the
+   thundering herd of every member's browser firing at the window. This fits both
+   slow mornings being the morning's *first* ask, and needs no gate at all.
+3. **A hold taken by our own in-flight ask**, with the ten refusals being our own
+   #0 mid-transaction. Weakened by the club granting the same slot again 42ms
+   later (a surplus hold), and it cannot explain 08-16's single Reserve.
+
+Per §7d the discriminator would be a grant for a *different* slot in the same
+club-second, and PR #174's target-only burst means all 12 asks were 08:00 AM — so
+this morning cannot separate them. Worth a deeper pass if it recurs; the fix below
+does not wait on it.
 
 ## 4. Fix: split the opening budget from the walk's
 
@@ -149,10 +169,15 @@ round trip is *a stalled request*, and that "every second spent waiting on a
 stalled request is a second of ladder not walked". That premise is true of the
 serial fallback walk. It is false of the opening burst, for two reasons:
 
-1. A long round trip there is the club parking a pre-gate ask, not a stall.
+1. Twice now the slowest answer of the morning has been the one carrying the
+   grant, so a long wait there is not a request worth abandoning — whatever the
+   club is doing to produce it (§3c).
 2. Burst members are each sent on their own thread (`ThreadPoolExecutor`), so a
-   parked member costs no ladder time at all — on this morning member #0 waited
+   slow member costs no ladder time at all — on this morning member #0 waited
    2774ms while all eleven siblings fired and were answered on schedule.
+
+Both reasons are independent of §3's unresolved mechanism, which is why the fix
+does not wait on settling it.
 
 Meanwhile the downside is severe and asymmetric. A timeout does not just lose the
 ask: it latches `timed_out`, which closes the fallback list for the rest of the
@@ -164,14 +189,16 @@ and **65ms** (08-16). Two of nine mornings came within a quarter-second of it.
 The change:
 
 - New `_RESERVE_OPENING_TIMEOUT_S = 10.0`, used by the opening burst and the
-  opening pair. Covers a gate drifting to ~9s past the stated window and stays
-  well inside `_RESERVE_DEADLINE_MS` (30s).
+  opening pair. ~3.4x the slowest round trip ever recorded, and well inside
+  `_RESERVE_DEADLINE_MS` (30s).
 - `_RESERVE_TIMEOUT_S` stays **3.0s** for the serial walk, where the trade that
   sized it is still real.
 - `_failed_observation` takes the budget actually spent, so a timed-out burst row
-  reports 10000ms rather than claiming 3000ms — a post-mortem dates the club's
-  gate off that field.
+  reports 10000ms rather than claiming 3000ms — a row understating the wait by
+  seven seconds is what a later post-mortem would reason from.
 
-Not changed, deliberately: **the aim stays at +1030ms.** Chasing the drift later
-would forfeit the seven mornings won at `:01`, and — now that the parked ask is
-understood to be the winning path — firing early is a feature, not lateness.
+Not changed, deliberately: **the aim stays at +1030ms.** Seven of the nine races
+were won by an ask sent at ~+1.0s and answered in under a second, and moving the
+aim later would forfeit those. Whether firing *before* the club is ready is also
+an advantage depends on §3's unresolved mechanism, so it is not claimed here as a
+reason.
