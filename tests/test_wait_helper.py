@@ -385,7 +385,7 @@ class TestWaldenProviderWaitStrategyIntegration:
         """Test that WaldenGolfProvider initializes a WaitStrategy."""
         from app.providers.walden_provider import WaldenGolfProvider
 
-        provider = WaldenGolfProvider()
+        provider = WaldenGolfProvider("test_member", "test_password")
         assert hasattr(provider, "wait_strategy")
         assert isinstance(provider.wait_strategy, WaitStrategy)
 
@@ -395,7 +395,7 @@ class TestWaldenProviderWaitStrategyIntegration:
             mock_settings.wait_mode = WaitMode.HYBRID
             from app.providers.walden_provider import WaldenGolfProvider
 
-            provider = WaldenGolfProvider()
+            provider = WaldenGolfProvider("test_member", "test_password")
             assert provider.wait_strategy.mode == WaitMode.HYBRID
 
 

@@ -35,6 +35,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than trusting the caller. Beyond that, only `TELEGRAM_ALLOWED_USER_IDS` are
   answered.
 
+- **Per-friend Walden Golf credentials, admin-added and encrypted at rest**
+  (issue #179, phase 1 of 2). Each friend already has their own Walden
+  membership; a new `walden_credentials` table associates a requester's
+  existing identity (the same `phone_number` on `SessionRecord`/
+  `BookingRecord`) with their own member number and password, added via
+  `scripts/add_walden_credential.py` - there is still no self-service
+  onboarding, so a credential never transits chat history. Values are
+  encrypted with Fernet (`CREDENTIAL_ENCRYPTION_KEY`), not GCP Secret Manager
+  API calls, because credential resolution sits on the path to the 6:30 AM
+  race and must not add a network round trip there.
+
+  `WaldenGolfProvider`/`MockWaldenProvider` now take credentials as a
+  constructor argument instead of reading `settings.walden_member_number`/
+  `walden_password` globally, resolving #144's singleton concern via its
+  option 3 (a provider per run). `BookingService` resolves each booking's
+  requester to their own credential when one exists, falling back to the
+  single global account otherwise - existing installs keep working unchanged
+  until a friend is actually added. `execute_bookings_batch` now groups by
+  date *and* requester rather than date alone, so two friends booking
+  different tee times on the same morning no longer share one session.
+
+  Concurrent execution of those per-requester sessions - the other half of
+  #179 - is a follow-up: groups still run one at a time in this change, and
+  the issue itself flags open questions (Cloud Run resource limits, untested
+  club-side behavior under simultaneous logins) that need answering first.
+
 - **Sessions and bookings record the channel they came from.** A booking's
   result notification - including the 6:30 AM confirmation that arrives days
   later - is sent back over the channel it was requested on. Discord and

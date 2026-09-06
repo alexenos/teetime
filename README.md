@@ -141,6 +141,12 @@ echo -n "your_member_number" | gcloud secrets versions add WALDEN_MEMBER_NUMBER 
 echo -n "your_password" | gcloud secrets versions add WALDEN_PASSWORD --data-file=-
 echo -n "your_scheduler_key" | gcloud secrets versions add SCHEDULER_API_KEY --data-file=-
 echo -n "+1234567890" | gcloud secrets versions add USER_PHONE_NUMBER --data-file=-
+
+# Key that encrypts friends' own Walden logins at rest in the DB (issue #179).
+# Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Only needed once you start adding friends via scripts/add_walden_credential.py;
+# the credentials above keep working as the default account without it.
+echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENCRYPTION_KEY --data-file=-
 ```
 
 Discord and Telegram have their own secrets, added the same way, but only when

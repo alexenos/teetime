@@ -127,7 +127,7 @@ def main() -> None:
     OUTPUT_DIR.mkdir(mode=0o700, exist_ok=True)
     events: list[dict] = []
 
-    provider = WaldenGolfProvider()
+    provider = WaldenGolfProvider(settings.walden_member_number, settings.walden_password)
     driver = build_driver()
     try:
         print("Logging in ...")

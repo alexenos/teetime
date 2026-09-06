@@ -171,7 +171,7 @@ def main() -> int:
         logger.error("WALDEN_MEMBER_NUMBER / WALDEN_PASSWORD are not set")
         return 2
 
-    provider = WaldenGolfProvider()
+    provider = WaldenGolfProvider(settings.walden_member_number, settings.walden_password)
     driver = provider._create_driver()
     try:
         logger.info("Logging in...")

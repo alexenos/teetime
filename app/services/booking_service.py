@@ -20,6 +20,7 @@ from app.models.schemas import (
     UserSession,
 )
 from app.providers.base import BatchBookingRequest, BookingResult, ReservationProvider
+from app.services.credential_service import credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.sms_service import sms_service
@@ -130,8 +131,43 @@ class BookingService:
         self._started_at = datetime.now(UTC).replace(tzinfo=None)
 
     def set_reservation_provider(self, provider: ReservationProvider) -> None:
-        """Set the reservation provider for executing bookings."""
+        """Set the default reservation provider for executing bookings.
+
+        This is the provider used for any requester without their own
+        admin-added Walden login - see _provider_for.
+        """
         self._reservation_provider = provider
+
+    async def _provider_for(self, phone_number: str) -> ReservationProvider | None:
+        """The provider this requester's booking should run under.
+
+        Most requesters have no credential of their own and fall back to the
+        single shared account (settings.walden_member_number/walden_password),
+        in which case the existing default provider instance is reused
+        unchanged. A requester with their own admin-added Walden login (issue
+        #179) instead gets a dedicated instance of the same provider class,
+        constructed with their credentials - a provider per run, resolving
+        #144's singleton concern via its option 3 - rather than running under
+        someone else's account.
+
+        Making these dedicated runs execute concurrently with each other is a
+        follow-up (issue #179 flags real open questions there: Cloud Run
+        resource limits and untested club-side behavior under simultaneous
+        sessions); callers here still run one requester group at a time.
+        """
+        if self._reservation_provider is None:
+            return None
+
+        dedicated = await credential_service.get_dedicated_credentials(phone_number)
+        if dedicated is None:
+            return self._reservation_provider
+
+        return type(self._reservation_provider)(dedicated.member_number, dedicated.password)
+
+    async def _release_provider(self, provider: ReservationProvider) -> None:
+        """Close a provider built for one requester's run; leave the shared default alone."""
+        if provider is not self._reservation_provider:
+            await provider.close()
 
     async def get_session(self, phone_number: str) -> UserSession:
         """Get or create a session for the given phone number."""
@@ -803,7 +839,8 @@ class BookingService:
         Returns:
             True if cancellation was successful, False otherwise.
         """
-        if not self._reservation_provider:
+        provider = await self._provider_for(booking.phone_number)
+        if not provider:
             return False
 
         booked_time = booking.actual_booked_time or booking.request.requested_time
@@ -812,7 +849,7 @@ class BookingService:
         )
 
         try:
-            success = await self._reservation_provider.cancel_booking(cancellation_id)
+            success = await provider.cancel_booking(cancellation_id)
 
             if success:
                 booking.status = BookingStatus.CANCELLED
@@ -825,6 +862,8 @@ class BookingService:
             booking.error_message = f"Cancellation failed: {str(e)}"
             await database_service.update_booking(booking)
             return False
+        finally:
+            await self._release_provider(provider)
 
     async def create_booking(
         self,
@@ -1336,7 +1375,8 @@ class BookingService:
         if not booking:
             return False
 
-        if not self._reservation_provider:
+        provider = await self._provider_for(booking.phone_number)
+        if not provider:
             booking.status = BookingStatus.FAILED
             booking.error_message = "Reservation provider not configured"
             await database_service.update_booking(booking)
@@ -1351,7 +1391,7 @@ class BookingService:
         await database_service.update_booking(booking)
 
         try:
-            result = await self._reservation_provider.book_tee_time(
+            result = await provider.book_tee_time(
                 target_date=booking.request.requested_date,
                 target_time=booking.request.requested_time,
                 num_players=booking.request.num_players,
@@ -1383,6 +1423,8 @@ class BookingService:
                 booking, BookingResult(success=False, error_message=str(e))
             )
             return False
+        finally:
+            await self._release_provider(provider)
 
     async def _notify_booking_result(self, booking: TeeTimeBooking, result: BookingResult) -> None:
         """Tell the user how a finished booking attempt turned out.
@@ -1456,12 +1498,20 @@ class BookingService:
         """
         Execute multiple bookings in a batch for efficiency.
 
-        This method groups bookings by date and uses the provider's batch booking
-        method to book all times for each date in a single session. This is much
-        faster than booking each time individually because:
-        1. Only one login is required per date
-        2. The driver session is reused for all bookings on the same date
+        This method groups bookings by date *and requester* and uses the
+        provider's batch booking method to book all times for one group in a
+        single session. Grouping by requester as well as date matters because
+        each requester may have their own Walden login (issue #179): two
+        friends wanting different tee times on the same morning must not be
+        forced through one shared session, even though one requester's own
+        two bookings on the same date still are - which is what preserves the
+        efficiency this docstring describes for the common case:
+        1. Only one login is required per requester's date group
+        2. The driver session is reused for all of that group's bookings
         3. If execute_at is provided, the system logs in early and waits
+
+        Groups run one at a time in this call - concurrent per-requester
+        sessions are a follow-up (see _provider_for).
 
         SMS notifications are NOT sent by this method - the caller is responsible
         for sending notifications after all bookings are complete.
@@ -1496,17 +1546,15 @@ class BookingService:
                 )
             return results
 
-        bookings_by_date: dict[date, list[TeeTimeBooking]] = {}
+        groups: dict[tuple[date, str], list[TeeTimeBooking]] = {}
         for booking in bookings:
-            target_date = booking.request.requested_date
-            if target_date not in bookings_by_date:
-                bookings_by_date[target_date] = []
-            bookings_by_date[target_date].append(booking)
+            key = (booking.request.requested_date, booking.phone_number)
+            groups.setdefault(key, []).append(booking)
 
         all_results: list[tuple[str, BookingResult]] = []
 
-        for target_date, date_bookings in bookings_by_date.items():
-            for booking in date_bookings:
+        for (target_date, phone_number), group_bookings in groups.items():
+            for booking in group_bookings:
                 booking.status = BookingStatus.IN_PROGRESS
                 await database_service.update_booking(booking)
 
@@ -1517,16 +1565,24 @@ class BookingService:
                     num_players=booking.request.num_players,
                     fallback_window_minutes=booking.request.fallback_window_minutes,
                 )
-                for booking in date_bookings
+                for booking in group_bookings
             ]
 
-            batch_result = await self._reservation_provider.book_multiple_tee_times(
-                target_date=target_date,
-                requests=batch_requests,
-                execute_at=execute_at,
-            )
+            # self._reservation_provider is guaranteed set at this point (checked
+            # above), so _provider_for only ever falls back to it or returns a
+            # dedicated instance - never None.
+            provider = await self._provider_for(phone_number)
+            assert provider is not None
+            try:
+                batch_result = await provider.book_multiple_tee_times(
+                    target_date=target_date,
+                    requests=batch_requests,
+                    execute_at=execute_at,
+                )
+            finally:
+                await self._release_provider(provider)
 
-            booking_map = {b.id: b for b in date_bookings if b.id is not None}
+            booking_map = {b.id: b for b in group_bookings if b.id is not None}
             for item_result in batch_result.results:
                 booking_opt = booking_map.get(item_result.booking_id)
                 if not booking_opt:

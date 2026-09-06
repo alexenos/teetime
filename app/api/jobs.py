@@ -169,7 +169,8 @@ async def execute_due_bookings(
     Optimizations for speed:
     1. Uses batch booking to process multiple bookings with a single login session
     2. Defers SMS notifications until after ALL bookings are complete
-    3. Groups bookings by date to minimize navigation overhead
+    3. Groups bookings by date and requester to minimize navigation overhead,
+       while keeping different requesters' credentials isolated (issue #179)
     4. Logs in early and waits until booking window opens
 
     Security: Accepts OIDC token from Cloud Scheduler (preferred) or legacy API key.

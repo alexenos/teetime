@@ -57,6 +57,7 @@ locals {
     "GEMINI_API_KEY",
     "WALDEN_MEMBER_NUMBER",
     "WALDEN_PASSWORD",
+    "CREDENTIAL_ENCRYPTION_KEY",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
   ], local.discord_secrets, local.telegram_secrets)

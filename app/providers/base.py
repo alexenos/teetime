@@ -58,6 +58,13 @@ class ReservationProvider(ABC):
     """Abstract base class for golf course reservation providers."""
 
     @abstractmethod
+    def __init__(self, member_number: str, password: str) -> None:
+        """Providers take credentials as a constructor argument (issue #179)
+        rather than reading a single global login from settings, so a fresh
+        instance can be built per requester instead of assuming one shared
+        account - see BookingService._provider_for."""
+
+    @abstractmethod
     async def login(self) -> bool:
         """Authenticate with the booking system."""
         pass

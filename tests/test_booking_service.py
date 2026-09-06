@@ -26,6 +26,23 @@ from app.services.booking_service import BookingService
 from app.utils.timezone import CTDateTime
 
 
+@pytest.fixture(autouse=True)
+def no_dedicated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test here exercises a requester with no admin-added Walden login
+    of their own (issue #179), so _provider_for should fall back to whichever
+    mock provider the test wired up via set_reservation_provider, rather than
+    _provider_for's credential lookup hitting a real database.
+    """
+
+    async def _no_dedicated_credential(phone_number: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.booking_service.credential_service.get_dedicated_credentials",
+        _no_dedicated_credential,
+    )
+
+
 @pytest.fixture
 def booking_service() -> BookingService:
     """Create a fresh BookingService instance for each test."""

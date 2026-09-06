@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     walden_password: str = ""
     walden_base_url: str = "https://www.waldengolf.com"
 
+    # Symmetric key (Fernet, url-safe base64) used to encrypt per-friend Walden
+    # logins at rest in the walden_credentials table - see
+    # app/services/credential_crypto.py and issue #179. Generate one with
+    # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+    # Unset means no per-user credential can be added or read; the single
+    # global walden_member_number/walden_password above keeps working
+    # regardless, since that is the fallback every requester without their own
+    # row uses.
+    credential_encryption_key: str = ""
+
     # Run the booking chain as direct PrimeFaces HTTP calls instead of browser
     # clicks. Login, navigation and slot discovery still run in Chrome; only the
     # chain itself moves to HTTP. A failure before the reservation is submitted
