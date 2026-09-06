@@ -2806,6 +2806,7 @@ class TestReconcileInterruptedBookings:
     def _in_progress_booking(
         origin_channel_id: str | None = None,
         updated_at: datetime | None = None,
+        requester_handle: str | None = None,
     ) -> TeeTimeBooking:
         return TeeTimeBooking(
             id="orphan01",
@@ -2817,6 +2818,7 @@ class TestReconcileInterruptedBookings:
             ),
             status=BookingStatus.IN_PROGRESS,
             origin_channel_id=origin_channel_id,
+            requester_handle=requester_handle,
             # Default to a row last touched well before any test-constructed
             # service started, i.e. a genuine prior-run orphan.
             updated_at=updated_at or datetime(2026, 8, 2, 20, 21, 54),
@@ -2857,6 +2859,26 @@ class TestReconcileInterruptedBookings:
             mock_sms.send_booking_failure.await_args.kwargs["origin_channel_id"]
             == "9990001112223330"
         )
+
+    @pytest.mark.asyncio
+    async def test_notifies_with_requester_handle(self, booking_service: BookingService) -> None:
+        """A group booking's requester_handle survives startup recovery, so the
+        interrupted-booking notice still names who it was for."""
+        orphan = self._in_progress_booking(
+            origin_channel_id="9990001112223330", requester_handle="@dax "
+        )
+        updated: list[TeeTimeBooking] = []
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[orphan])
+            mock_db.update_booking = AsyncMock(side_effect=self._recorder(updated))
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                await booking_service.reconcile_interrupted_bookings()
+
+        mock_sms.send_booking_failure.assert_awaited_once()
+        assert mock_sms.send_booking_failure.await_args.kwargs["requester_handle"] == "@dax "
 
     @pytest.mark.asyncio
     async def test_no_orphans_is_a_noop(self, booking_service: BookingService) -> None:

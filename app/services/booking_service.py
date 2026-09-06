@@ -607,6 +607,7 @@ class BookingService:
                     booking_details=booking_details,
                     origin_channel_id=booking.origin_channel_id,
                     channel=booking.channel,
+                    requester_handle=booking.requester_handle,
                 )
             except Exception:
                 # A notification failure must not stop us reconciling the rest.
