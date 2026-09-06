@@ -215,7 +215,49 @@ _RESERVE_DEADLINE_MS = 30000
 # spent waiting on a stalled request is a second of ladder not walked. This is
 # ~3.6x a quiet-day round trip, which leaves a stall recoverable inside the
 # deadline below.
+#
+# This budget is for the *serial* walk, where that trade is real. The opening
+# burst's is separate and much larger; see _RESERVE_OPENING_TIMEOUT_S.
 _RESERVE_TIMEOUT_S = 3.0
+
+# Budget for a Reserve fired at the opening, where the slowest answers on record
+# are also the ones that won.
+#
+# Twice now the morning's first ask has come back just inside the 3.0s above and
+# carried the grant: 2026-08-16 at 2935ms (65ms of margin) and 2026-09-06 at
+# 2774ms (226ms). A timeout there is the worst outcome available - it latches
+# `timed_out`, which closes the fallback list and reports the run as unknown
+# rather than booked - so the budget would have discarded a tee time the club
+# had already decided to give us.
+#
+# What is established about those two answers, and what is not:
+#
+# - The delay is on the club's side. On 09-06 the other eleven burst members
+#   answered in 253-576ms over the same client at the same instant, and the
+#   post-response segment was 23ms wall / 20ms cpu (and falls after the round
+#   trip anyway).
+# - Granting is not intrinsically slow: member #11 performed the identical grant
+#   in 216ms, 42ms after member #0's answer landed.
+# - It is not our own burst blocking itself. 08-16 fired a single Reserve, with
+#   no siblings to contend with, and still took 2935ms.
+# - On 09-06 the verdict tracks when the club *answered*, not when we sent:
+#   ordered by answer time, every refusal landed by +3527ms and both grants
+#   after +3768ms, though #0 was sent first and #11 last.
+# - The mechanism is NOT established. A gate opening later than the aim assumes,
+#   a slow first booking transaction on the club's side (which fits both slow
+#   mornings being the morning's first ask, and needs no gate), and a hold taken
+#   by our own in-flight ask all fit. `serverMsPastWindow` cannot separate them:
+#   the HTTP Date header is whole-second, so it only restates
+#   sent + roundTripMs bucketed to the second. Do not read a club-second as
+#   independent evidence about a gate - see docs/booking-post-mortem-2026-09-06.md.
+#
+# The sizing does not depend on which reading is right. Waiting is close to free
+# here, because burst members are each sent on their own thread - on 09-06 member
+# #0 waited 2774ms while all eleven siblings fired and were answered on schedule -
+# whereas the trade that sized 3.0s (a stall spends ladder that is not walked)
+# applies to the serial walk. 10s is ~3.4x the slowest round trip ever recorded
+# and stays well inside _RESERVE_DEADLINE_MS.
+_RESERVE_OPENING_TIMEOUT_S = 10.0
 
 # How far past its instant a ladder rung is still worth firing at once.
 #
@@ -1762,7 +1804,9 @@ class DirectHttpBooker:
                 sleep_until(target_timestamp_ms + rung_ms - lead_ms)
             sent_ms = int(time_module.time() * 1000) - frame_ms
             try:
-                sent = self.session.send_detached(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+                sent = self.session.send_detached(
+                    config, body=body, timeout_s=_RESERVE_OPENING_TIMEOUT_S
+                )
             except (DirectHttpError, ViewExpiredError) as exc:
                 return rung_ms, sent_ms, None, exc
             return rung_ms, sent_ms, sent, None
@@ -1795,6 +1839,7 @@ class DirectHttpBooker:
                         source=config.source,
                         view_state=view_state,
                         sent_ms_past_window=sent_ms,
+                        timeout_budget_s=_RESERVE_OPENING_TIMEOUT_S,
                     )
                 )
                 if isinstance(exc, DirectHttpTimeoutError):
@@ -1941,7 +1986,7 @@ class DirectHttpBooker:
             sent_ms = int(time_module.time() * 1000) - frame_ms
             try:
                 response = self.session.send_detached(
-                    member.config, body=member.body, timeout_s=_RESERVE_TIMEOUT_S
+                    member.config, body=member.body, timeout_s=_RESERVE_OPENING_TIMEOUT_S
                 )
             except DirectHttpError as exc:
                 return _BurstExchange(member, sent_ms, None, exc)
@@ -2048,6 +2093,7 @@ class DirectHttpBooker:
                 view_state=view_state,
                 sent_ms_past_window=exchange.sent_ms,
                 burst_index=member.index,
+                timeout_budget_s=_RESERVE_OPENING_TIMEOUT_S,
             )
             burst.observations.append(observation)
             _log_reserve_observation(observation)
@@ -3209,6 +3255,7 @@ def _failed_observation(
     view_state: str,
     sent_ms_past_window: int | None,
     burst_index: int | None = None,
+    timeout_budget_s: float = _RESERVE_TIMEOUT_S,
 ) -> ReserveObservation:
     """The ledger row for a Reserve that raised instead of answering.
 
@@ -3216,6 +3263,11 @@ def _failed_observation(
     as it always has. Everything else - a status, a dead view, a connection that
     never opened - is ``RESERVE_ERRORED``, and a status error brings its status,
     headers and body along, which is what tells a rate limit from an outage.
+
+    ``timeout_budget_s`` is the budget the caller actually gave the request. The
+    opening paths spend _RESERVE_OPENING_TIMEOUT_S rather than the serial walk's
+    budget, and a row reporting the wrong one would misdate the boundary the
+    next post-mortem reads off it.
     """
     if isinstance(exc, DirectHttpTimeoutError):
         return ReserveObservation(
@@ -3226,7 +3278,7 @@ def _failed_observation(
             verdict=RESERVE_TIMEDOUT,
             reason=str(exc),
             sent_ms_past_window=sent_ms_past_window,
-            round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+            round_trip_ms=int(timeout_budget_s * 1000),
             burst_index=burst_index,
         )
     observation = ReserveObservation(
