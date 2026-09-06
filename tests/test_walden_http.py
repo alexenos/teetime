@@ -3549,6 +3549,82 @@ class TestOpeningBurst:
         assert SLOT_B_ID not in recorder.sources
         assert [o.verdict for o in result.attempt_log].count(RESERVE_TIMEDOUT) == 1
 
+    def test_the_opening_spends_a_larger_budget_than_the_serial_walk(self) -> None:
+        """A parked opening ask is the winning path, so it must not die at 3.0s.
+
+        2026-08-16 and 2026-09-06 were both won by a first Reserve the club held
+        for ~2.8s and then granted - 65ms and 226ms inside the serial budget. The
+        burst sends each member on its own thread, so waiting there costs no
+        ladder time; the serial walk still trades a stall against the deadline,
+        and keeps the smaller budget.
+        """
+        from app.providers.walden_http_booker import (
+            _RESERVE_OPENING_TIMEOUT_S,
+            _RESERVE_TIMEOUT_S,
+        )
+
+        assert _RESERVE_OPENING_TIMEOUT_S > _RESERVE_TIMEOUT_S
+
+        recorder = SourceRecorder(
+            {
+                RESERVE_ID: [BLOCKED_ALL],
+                SLOT_B_ID: [BLOCKED_ALL],
+                SLOT_C_ID: [BLOCKED_ALL, ACCEPTED_PAGE],
+            },
+            CHAIN_AFTER_GRANT,
+        )
+        booker = burst_booker(recorder, 0, 30, target_only=1)
+        detached: list[float | None] = []
+        serial: list[float | None] = []
+        original_detached = booker.session.send_detached
+        original_post = booker.session.post
+
+        def recording_detached(config, *, body=None, timeout_s=None):
+            """Record the budget every detached send was given.
+
+            ``post`` delegates here, so this sees the serial walk too; the
+            burst's own two members are the first calls, before any walk.
+            """
+            detached.append(timeout_s)
+            return original_detached(config, body=body, timeout_s=timeout_s)
+
+        def recording_post(config, *, body=None, timeout_s=None):
+            """Record the budget every serial request was given."""
+            serial.append(timeout_s)
+            return original_post(config, body=body, timeout_s=timeout_s)
+
+        booker.session.send_detached = recording_detached  # type: ignore[method-assign]
+        booker.session.post = recording_post  # type: ignore[method-assign]
+
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        assert result.success, result.error
+        # Two burst members - the target and one fallback - fired before the walk.
+        assert detached[:2] == [_RESERVE_OPENING_TIMEOUT_S] * 2
+        assert _RESERVE_OPENING_TIMEOUT_S not in serial
+        assert _RESERVE_TIMEOUT_S in serial
+
+    def test_a_timed_out_burst_member_reports_the_opening_budget(self) -> None:
+        """The row's round trip is the budget actually spent, not the walk's.
+
+        A post-mortem dates the club's gate off this field, so a burst row
+        claiming 3000ms after the member waited out the opening budget would
+        misplace the boundary the next morning is aimed at.
+        """
+        from app.providers.walden_http_booker import _RESERVE_OPENING_TIMEOUT_S
+
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL], SLOT_B_ID: [ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+            stall_on={2},
+        )
+        booker = burst_booker(recorder, 0, 30, 60, target_only=3)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open())
+
+        timed_out = [o for o in result.attempt_log if o.verdict == RESERVE_TIMEDOUT]
+        assert len(timed_out) == 1
+        assert timed_out[0].round_trip_ms == int(_RESERVE_OPENING_TIMEOUT_S * 1000)
+
     def test_the_walk_after_the_burst_covers_the_list_again(self) -> None:
         """Fallbacks refused inside the burst are asked again, later, from the target."""
         recorder = SourceRecorder(

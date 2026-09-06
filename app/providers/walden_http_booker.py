@@ -215,7 +215,38 @@ _RESERVE_DEADLINE_MS = 30000
 # spent waiting on a stalled request is a second of ladder not walked. This is
 # ~3.6x a quiet-day round trip, which leaves a stall recoverable inside the
 # deadline below.
+#
+# This budget is for the *serial* walk, where that trade is real. The opening
+# burst's is separate and much larger; see _RESERVE_OPENING_TIMEOUT_S.
 _RESERVE_TIMEOUT_S = 3.0
+
+# Budget for a Reserve fired at the opening, where a long round trip is not a
+# stall at all: it is the club holding a request that arrived before its booking
+# gate opened, and then answering it with a grant the moment the gate flips.
+#
+# Established 2026-09-06 from the nine races on record. Every morning whose
+# answer carried a club `Date` inside the 06:30:01 second came back in
+# 456-831ms; the only two mornings with a ~2.8s round trip - 2026-08-16 (2935ms)
+# and 2026-09-06 (2774ms) - are the only two whose answer was stamped 06:30:03.
+# The round trip tracks *when the club chose to decide*, not the network: on
+# 09-06 the other eleven burst members answered in 253-576ms over the same
+# client at the same instant, and member #11 performed the identical grant in
+# 216ms, 42ms after member #0's answer landed. 08-16 rules out contention from
+# our own burst - it fired one Reserve, with no siblings to block on, and still
+# took 2935ms.
+#
+# Both of those mornings were *won* by the parked ask: it was already at the
+# head of the club's queue when the gate opened, ahead of anyone clicking at the
+# flip. So the 3.0s above was 226ms (09-06) and 65ms (08-16) from timing out a
+# tee time the club was about to grant - and a timeout is the worst outcome
+# available, because it latches `timed_out`, which closes the fallback list and
+# reports the run as unknown rather than booked.
+#
+# The trade that sized 3.0s does not apply here: burst members are each sent on
+# their own thread, so a parked member costs no ladder time. 10s covers a gate
+# drifting to ~9s past the stated window, and stays well inside
+# _RESERVE_DEADLINE_MS.
+_RESERVE_OPENING_TIMEOUT_S = 10.0
 
 # How far past its instant a ladder rung is still worth firing at once.
 #
@@ -1762,7 +1793,9 @@ class DirectHttpBooker:
                 sleep_until(target_timestamp_ms + rung_ms - lead_ms)
             sent_ms = int(time_module.time() * 1000) - frame_ms
             try:
-                sent = self.session.send_detached(config, body=body, timeout_s=_RESERVE_TIMEOUT_S)
+                sent = self.session.send_detached(
+                    config, body=body, timeout_s=_RESERVE_OPENING_TIMEOUT_S
+                )
             except (DirectHttpError, ViewExpiredError) as exc:
                 return rung_ms, sent_ms, None, exc
             return rung_ms, sent_ms, sent, None
@@ -1795,6 +1828,7 @@ class DirectHttpBooker:
                         source=config.source,
                         view_state=view_state,
                         sent_ms_past_window=sent_ms,
+                        timeout_budget_s=_RESERVE_OPENING_TIMEOUT_S,
                     )
                 )
                 if isinstance(exc, DirectHttpTimeoutError):
@@ -1941,7 +1975,7 @@ class DirectHttpBooker:
             sent_ms = int(time_module.time() * 1000) - frame_ms
             try:
                 response = self.session.send_detached(
-                    member.config, body=member.body, timeout_s=_RESERVE_TIMEOUT_S
+                    member.config, body=member.body, timeout_s=_RESERVE_OPENING_TIMEOUT_S
                 )
             except DirectHttpError as exc:
                 return _BurstExchange(member, sent_ms, None, exc)
@@ -2048,6 +2082,7 @@ class DirectHttpBooker:
                 view_state=view_state,
                 sent_ms_past_window=exchange.sent_ms,
                 burst_index=member.index,
+                timeout_budget_s=_RESERVE_OPENING_TIMEOUT_S,
             )
             burst.observations.append(observation)
             _log_reserve_observation(observation)
@@ -3209,6 +3244,7 @@ def _failed_observation(
     view_state: str,
     sent_ms_past_window: int | None,
     burst_index: int | None = None,
+    timeout_budget_s: float = _RESERVE_TIMEOUT_S,
 ) -> ReserveObservation:
     """The ledger row for a Reserve that raised instead of answering.
 
@@ -3216,6 +3252,11 @@ def _failed_observation(
     as it always has. Everything else - a status, a dead view, a connection that
     never opened - is ``RESERVE_ERRORED``, and a status error brings its status,
     headers and body along, which is what tells a rate limit from an outage.
+
+    ``timeout_budget_s`` is the budget the caller actually gave the request. The
+    opening paths spend _RESERVE_OPENING_TIMEOUT_S rather than the serial walk's
+    budget, and a row reporting the wrong one would misdate the boundary the
+    next post-mortem reads off it.
     """
     if isinstance(exc, DirectHttpTimeoutError):
         return ReserveObservation(
@@ -3226,7 +3267,7 @@ def _failed_observation(
             verdict=RESERVE_TIMEDOUT,
             reason=str(exc),
             sent_ms_past_window=sent_ms_past_window,
-            round_trip_ms=int(_RESERVE_TIMEOUT_S * 1000),
+            round_trip_ms=int(timeout_budget_s * 1000),
             burst_index=burst_index,
         )
     observation = ReserveObservation(
