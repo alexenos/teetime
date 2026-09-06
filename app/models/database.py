@@ -58,6 +58,10 @@ class BookingRecord(Base):
         origin_channel_id: Discord channel ID the booking was requested in, so
             the result notification replies in that conversation rather than a
             DM. NULL for SMS and REST API bookings.
+        requester_handle: Ready-to-prepend mention of who requested this
+            booking (e.g. "@dax "), so the result notification days later says
+            who got the spot. NULL for a private conversation or a channel
+            with no addressing concept.
         created_at: When this record was created.
         updated_at: When this record was last modified.
     """
@@ -78,6 +82,7 @@ class BookingRecord(Base):
     error_message = Column(Text, nullable=True)
     origin_channel_id = Column(String(32), nullable=True)
     channel = Column(String(16), nullable=True)
+    requester_handle = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -103,6 +108,9 @@ class SessionRecord(Base):
             this column existed, which fall back to MESSAGING_CHANNEL.
         origin_channel_id: Discord channel ID of the user's current conversation,
             refreshed on each inbound message. NULL for SMS users.
+        requester_handle: Ready-to-prepend mention of the user in a shared
+            group, refreshed on each inbound message and copied onto bookings
+            at creation time. NULL in a private conversation.
         last_interaction: Timestamp of the user's last message.
     """
 
@@ -115,6 +123,7 @@ class SessionRecord(Base):
     pending_cancellation_id = Column(String(50), nullable=True)
     origin_channel_id = Column(String(32), nullable=True)
     channel = Column(String(16), nullable=True)
+    requester_handle = Column(String(64), nullable=True)
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
@@ -179,6 +188,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("bookings", "origin_channel_id", "VARCHAR(32)"),
     ("sessions", "channel", "VARCHAR(16)"),
     ("bookings", "channel", "VARCHAR(16)"),
+    ("sessions", "requester_handle", "VARCHAR(64)"),
+    ("bookings", "requester_handle", "VARCHAR(64)"),
 ]
 
 

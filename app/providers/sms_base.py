@@ -80,10 +80,25 @@ class SMSProvider(ABC):
         pass
 
     async def send_booking_confirmation(
-        self, to_number: str, booking_details: str, origin_channel_id: str | None = None
+        self,
+        to_number: str,
+        booking_details: str,
+        origin_channel_id: str | None = None,
+        requester_handle: str | None = None,
     ) -> SMSResult:
-        """Send a booking confirmation SMS."""
-        message = f"Tee time booking confirmed! {booking_details}"
+        """Send a booking confirmation SMS.
+
+        Args:
+            to_number: The recipient's phone number.
+            booking_details: Details of the booking that succeeded.
+            origin_channel_id: Channel the booking was requested in, so the
+                confirmation replies there instead of a DM.
+            requester_handle: Ready-to-prepend mention of who requested this
+                booking (e.g. "@dax "), so a shared group sees who got the
+                spot. None for a private conversation.
+        """
+        prefix = requester_handle or ""
+        message = f"{prefix}Tee time booking confirmed! {booking_details}"
         return await self.send_sms(to_number, message, origin_channel_id)
 
     async def send_booking_failure(
@@ -93,6 +108,7 @@ class SMSProvider(ABC):
         alternatives: str | None = None,
         booking_details: str | None = None,
         origin_channel_id: str | None = None,
+        requester_handle: str | None = None,
     ) -> SMSResult:
         """Send a booking failure notification SMS.
 
@@ -104,6 +120,9 @@ class SMSProvider(ABC):
                            (e.g., "Sunday, February 01 at 08:58 AM for 4 players").
             origin_channel_id: Channel the booking was requested in, so the
                 failure replies there instead of a DM.
+            requester_handle: Ready-to-prepend mention of who requested this
+                booking (e.g. "@dax "), so a shared group sees who it was for.
+                None for a private conversation.
         """
         if booking_details:
             message = f"Unable to book tee time for {booking_details}: {reason}"
@@ -111,6 +130,8 @@ class SMSProvider(ABC):
             message = f"Unable to book tee time: {reason}"
         if alternatives:
             message += f"\n\nAlternatives available: {alternatives}"
+        prefix = requester_handle or ""
+        message = f"{prefix}{message}"
         return await self.send_sms(to_number, message, origin_channel_id)
 
     async def send_weekly_prompt(

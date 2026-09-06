@@ -446,7 +446,9 @@ class TestTelegramWebhookRoute:
 
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen.update(
                 phone_number=phone_number,
                 message=message,
@@ -520,7 +522,9 @@ class TestTelegramWebhookRoute:
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen["message"] = message
             return "ok"
 
@@ -577,7 +581,9 @@ class TestTelegramWebhookRoute:
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen["message"] = message
             return "ok"
 
@@ -610,7 +616,9 @@ class TestTelegramWebhookRoute:
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         sent: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             return "I'll book Tuesday at 5pm. Reply 'yes' to confirm."
 
         async def fake_send(  # type: ignore[no-untyped-def]
@@ -637,6 +645,76 @@ class TestTelegramWebhookRoute:
         assert sent["message"] == "@dax I'll book Tuesday at 5pm. Reply 'yes' to confirm."
         assert sent["reply_to_message_id"] == "2"  # _update's fixed message_id
 
+    def test_group_message_passes_requester_handle_for_booking(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A group booking's requester_handle is captured at message time, so
+        the confirmation that lands at 6:30am names who got the spot - see
+        SMSProvider.send_booking_confirmation."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+        seen: dict = {}
+
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
+            seen["requester_handle"] = requester_handle
+            return "ok"
+
+        async def fake_send(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(
+            text="@teetimebot book 9/5 at 9a", chat_id=-1001234567890, chat_type="group"
+        )
+        update["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 11}]
+        update["message"]["from"]["username"] = "dax"
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert seen["requester_handle"] == "@dax "
+
+    def test_private_message_passes_empty_requester_handle(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A DM has no one else to name a booking for, so it explicitly clears
+        any requester_handle rather than leaving a group mention stale."""
+        from app.api import webhooks
+
+        seen: dict = {}
+
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
+            seen["requester_handle"] = requester_handle
+            return "ok"
+
+        async def fake_send(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fake_handle)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(text="book 9/5 at 9a", chat_type="private")
+        update["message"]["from"]["username"] = "dax"
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert seen["requester_handle"] == ""
+
     def test_private_reply_not_prefixed_or_threaded(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -646,7 +724,9 @@ class TestTelegramWebhookRoute:
 
         sent: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             return "I'll book Tuesday at 5pm. Reply 'yes' to confirm."
 
         async def fake_send(  # type: ignore[no-untyped-def]
@@ -709,7 +789,9 @@ class TestTelegramWebhookRoute:
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen["message"] = message
             return "ok"
 
@@ -742,7 +824,9 @@ class TestTelegramWebhookRoute:
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen["message"] = message
             return "ok"
 
@@ -781,7 +865,9 @@ class TestTelegramWebhookRoute:
         )
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen["message"] = message
             return "ok"
 
@@ -871,7 +957,9 @@ class TestTelegramWebhookRoute:
         monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
         seen: dict = {}
 
-        async def fake_handle(phone_number, message, origin_channel_id=None, channel=None):  # type: ignore[no-untyped-def]
+        async def fake_handle(  # type: ignore[no-untyped-def]
+            phone_number, message, origin_channel_id=None, channel=None, requester_handle=None
+        ):
             seen["message"] = message
             return "ok"
 

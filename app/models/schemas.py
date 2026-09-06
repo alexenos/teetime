@@ -97,6 +97,11 @@ class TeeTimeBooking(BaseModel):
             IDs are both bare numbers and are otherwise indistinguishable.
             None for bookings created before the field existed, and for the
             REST API; those fall back to MESSAGING_CHANNEL.
+        requester_handle: Ready-to-prepend mention of who requested this
+            booking (e.g. "@dax " or "Dax, "), captured at creation time so
+            the result notification says who got the spot when it lands in a
+            shared group days later. None for a private conversation, or a
+            channel with no addressing concept (SMS, REST API).
         created_at: When this booking record was created.
         updated_at: When this booking record was last modified.
     """
@@ -107,6 +112,7 @@ class TeeTimeBooking(BaseModel):
     status: BookingStatus = BookingStatus.PENDING
     origin_channel_id: str | None = None
     channel: str | None = None
+    requester_handle: str | None = None
     scheduled_execution_time: datetime | None = None
     actual_booked_time: time | None = None
     confirmation_number: str | None = None
@@ -168,6 +174,10 @@ class UserSession(BaseModel):
             message and copied onto bookings at creation time. None for
             sessions created before the field existed; those fall back to
             MESSAGING_CHANNEL.
+        requester_handle: Ready-to-prepend mention of the user in a shared
+            group (e.g. "@dax " or "Dax, "), refreshed on every inbound
+            message and copied onto bookings at creation time so their result
+            notification says who it was for. None in a private conversation.
         last_interaction: Timestamp of the user's last message. Used for
             session timeout logic.
     """
@@ -179,6 +189,7 @@ class UserSession(BaseModel):
     pending_cancellation_id: str | None = None
     origin_channel_id: str | None = None
     channel: str | None = None
+    requester_handle: str | None = None
     last_interaction: datetime = Field(default_factory=datetime.utcnow)
 
 

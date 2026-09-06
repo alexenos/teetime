@@ -190,9 +190,20 @@ async def handle_telegram_update(
 
     logger.info(f"Telegram message received from {user_id} in chat {chat_id}: {text[:80]}")
 
+    # Only a group conversation needs a mention baked into the booking - a
+    # private chat has no one else to name it for, and would just read the
+    # user their own handle back. "" (rather than omitting the argument)
+    # explicitly clears any stale mention left over from an earlier group
+    # conversation with this same user.
+    requester_handle = addressee_prefix(sender) if chat.get("type") != "private" else ""
+
     try:
         response_message = await booking_service.handle_incoming_message(
-            user_id, text, origin_channel_id=chat_id, channel="telegram"
+            user_id,
+            text,
+            origin_channel_id=chat_id,
+            channel="telegram",
+            requester_handle=requester_handle,
         )
     except Exception:
         logger.exception("Error handling Telegram message")

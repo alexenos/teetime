@@ -148,6 +148,7 @@ class BookingService:
         message: str,
         origin_channel_id: str | None = None,
         channel: str | None = None,
+        requester_handle: str | None = None,
     ) -> str:
         """
         Process an incoming SMS message and return a response.
@@ -173,6 +174,13 @@ class BookingService:
                 Discord and Telegram IDs are both bare numbers, so the channel
                 is the only thing that says which one to answer on. None leaves
                 the session's existing channel untouched.
+            requester_handle: Ready-to-prepend mention of the sender in a
+                shared group (see telegram_provider.addressee_prefix). Stored
+                on the session and copied onto any booking created from this
+                conversation, so its result notification says who it was for.
+                Not passed at all (None) leaves the session's existing value
+                untouched; an explicit "" clears it, for a caller like a
+                private chat that has no addressing concept.
 
         Returns:
             The response message to send back to the user.
@@ -182,6 +190,8 @@ class BookingService:
             session.origin_channel_id = origin_channel_id
         if channel:
             session.channel = channel
+        if requester_handle is not None:
+            session.requester_handle = requester_handle or None
 
         affirmative = self._confirmation_shortcut(session, message)
         if affirmative is not None:
@@ -321,6 +331,7 @@ class BookingService:
                 session.pending_request,
                 session.origin_channel_id,
                 channel=session.channel,
+                requester_handle=session.requester_handle,
             )
         except ValueError as e:
             session.pending_request = None
@@ -390,6 +401,7 @@ class BookingService:
                     session.origin_channel_id,
                     defer_execution=True,
                     channel=session.channel,
+                    requester_handle=session.requester_handle,
                 )
                 successful_bookings.append(booking)
             except ValueError as e:
@@ -820,6 +832,7 @@ class BookingService:
         origin_channel_id: str | None = None,
         defer_execution: bool = False,
         channel: str | None = None,
+        requester_handle: str | None = None,
     ) -> TeeTimeBooking:
         """
         Create a new booking record and schedule it for execution.
@@ -846,6 +859,10 @@ class BookingService:
             channel: Messaging channel this booking was requested over, so its
                 notification days later goes back over the same one. None for
                 REST API callers, which fall back to MESSAGING_CHANNEL.
+            requester_handle: Ready-to-prepend mention of who requested this
+                booking, so its result notification days later says who it
+                was for. None for a private conversation or a channel with no
+                addressing concept.
             defer_execution: Create the record and mark it IN_PROGRESS, but do
                 not start the attempt. Callers creating several bookings at once
                 set this so they can run the whole set as one batch instead of
@@ -888,6 +905,7 @@ class BookingService:
             scheduled_execution_time=execution_time,
             origin_channel_id=origin_channel_id,
             channel=channel,
+            requester_handle=requester_handle,
         )
 
         created_booking = await database_service.create_booking(booking)
@@ -1384,7 +1402,11 @@ class BookingService:
                 details += f"\n\nNote: {result.fallback_reason}"
 
             await sms_service.send_booking_confirmation(
-                booking.phone_number, details, booking.origin_channel_id, booking.channel
+                booking.phone_number,
+                details,
+                booking.origin_channel_id,
+                booking.channel,
+                requester_handle=booking.requester_handle,
             )
             return
 
@@ -1398,6 +1420,7 @@ class BookingService:
             booking_details,
             booking.origin_channel_id,
             booking.channel,
+            requester_handle=booking.requester_handle,
         )
 
     async def get_pending_bookings(self) -> list[TeeTimeBooking]:
