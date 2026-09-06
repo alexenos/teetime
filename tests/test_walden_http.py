@@ -3563,6 +3563,13 @@ class TestOpeningBurst:
             _RESERVE_TIMEOUT_S,
         )
 
+        # The slowest Reserve round trip on record - 2026-08-16, which carried
+        # that morning's grant. The opening budget exists to survive it with room
+        # to spare, so pin that property rather than the literal 10.0: a later
+        # retune to 8s or 12s is somebody's judgement, but creeping back under
+        # ~6s would silently restore the bug this test guards.
+        slowest_round_trip_ms = 2935
+        assert _RESERVE_OPENING_TIMEOUT_S * 1000 >= 2 * slowest_round_trip_ms
         assert _RESERVE_OPENING_TIMEOUT_S > _RESERVE_TIMEOUT_S
 
         recorder = SourceRecorder(
