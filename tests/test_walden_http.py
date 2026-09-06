@@ -3550,13 +3550,13 @@ class TestOpeningBurst:
         assert [o.verdict for o in result.attempt_log].count(RESERVE_TIMEDOUT) == 1
 
     def test_the_opening_spends_a_larger_budget_than_the_serial_walk(self) -> None:
-        """A parked opening ask is the winning path, so it must not die at 3.0s.
+        """The slowest opening answers on record are the ones that won.
 
-        2026-08-16 and 2026-09-06 were both won by a first Reserve the club held
-        for ~2.8s and then granted - 65ms and 226ms inside the serial budget. The
-        burst sends each member on its own thread, so waiting there costs no
-        ladder time; the serial walk still trades a stall against the deadline,
-        and keeps the smaller budget.
+        2026-08-16 and 2026-09-06 were both won by a first Reserve the club took
+        ~2.8s to answer - 65ms and 226ms inside the serial budget. The burst
+        sends each member on its own thread, so waiting there costs no ladder
+        time; the serial walk still trades a stall against the deadline, and
+        keeps the smaller budget.
         """
         from app.providers.walden_http_booker import (
             _RESERVE_OPENING_TIMEOUT_S,
@@ -3607,9 +3607,9 @@ class TestOpeningBurst:
     def test_a_timed_out_burst_member_reports_the_opening_budget(self) -> None:
         """The row's round trip is the budget actually spent, not the walk's.
 
-        A post-mortem dates the club's gate off this field, so a burst row
+        A post-mortem reads how long the club took off this field, so a burst row
         claiming 3000ms after the member waited out the opening budget would
-        misplace the boundary the next morning is aimed at.
+        understate the wait by seven seconds.
         """
         from app.providers.walden_http_booker import _RESERVE_OPENING_TIMEOUT_S
 

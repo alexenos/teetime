@@ -220,32 +220,43 @@ _RESERVE_DEADLINE_MS = 30000
 # burst's is separate and much larger; see _RESERVE_OPENING_TIMEOUT_S.
 _RESERVE_TIMEOUT_S = 3.0
 
-# Budget for a Reserve fired at the opening, where a long round trip is not a
-# stall at all: it is the club holding a request that arrived before its booking
-# gate opened, and then answering it with a grant the moment the gate flips.
+# Budget for a Reserve fired at the opening, where the slowest answers on record
+# are also the ones that won.
 #
-# Established 2026-09-06 from the nine races on record. Every morning whose
-# answer carried a club `Date` inside the 06:30:01 second came back in
-# 456-831ms; the only two mornings with a ~2.8s round trip - 2026-08-16 (2935ms)
-# and 2026-09-06 (2774ms) - are the only two whose answer was stamped 06:30:03.
-# The round trip tracks *when the club chose to decide*, not the network: on
-# 09-06 the other eleven burst members answered in 253-576ms over the same
-# client at the same instant, and member #11 performed the identical grant in
-# 216ms, 42ms after member #0's answer landed. 08-16 rules out contention from
-# our own burst - it fired one Reserve, with no siblings to block on, and still
-# took 2935ms.
+# Twice now the morning's first ask has come back just inside the 3.0s above and
+# carried the grant: 2026-08-16 at 2935ms (65ms of margin) and 2026-09-06 at
+# 2774ms (226ms). A timeout there is the worst outcome available - it latches
+# `timed_out`, which closes the fallback list and reports the run as unknown
+# rather than booked - so the budget would have discarded a tee time the club
+# had already decided to give us.
 #
-# Both of those mornings were *won* by the parked ask: it was already at the
-# head of the club's queue when the gate opened, ahead of anyone clicking at the
-# flip. So the 3.0s above was 226ms (09-06) and 65ms (08-16) from timing out a
-# tee time the club was about to grant - and a timeout is the worst outcome
-# available, because it latches `timed_out`, which closes the fallback list and
-# reports the run as unknown rather than booked.
+# What is established about those two answers, and what is not:
 #
-# The trade that sized 3.0s does not apply here: burst members are each sent on
-# their own thread, so a parked member costs no ladder time. 10s covers a gate
-# drifting to ~9s past the stated window, and stays well inside
-# _RESERVE_DEADLINE_MS.
+# - The delay is on the club's side. On 09-06 the other eleven burst members
+#   answered in 253-576ms over the same client at the same instant, and the
+#   post-response segment was 23ms wall / 20ms cpu (and falls after the round
+#   trip anyway).
+# - Granting is not intrinsically slow: member #11 performed the identical grant
+#   in 216ms, 42ms after member #0's answer landed.
+# - It is not our own burst blocking itself. 08-16 fired a single Reserve, with
+#   no siblings to contend with, and still took 2935ms.
+# - On 09-06 the verdict tracks when the club *answered*, not when we sent:
+#   ordered by answer time, every refusal landed by +3527ms and both grants
+#   after +3768ms, though #0 was sent first and #11 last.
+# - The mechanism is NOT established. A gate opening later than the aim assumes,
+#   a slow first booking transaction on the club's side (which fits both slow
+#   mornings being the morning's first ask, and needs no gate), and a hold taken
+#   by our own in-flight ask all fit. `serverMsPastWindow` cannot separate them:
+#   the HTTP Date header is whole-second, so it only restates
+#   sent + roundTripMs bucketed to the second. Do not read a club-second as
+#   independent evidence about a gate - see docs/booking-post-mortem-2026-09-06.md.
+#
+# The sizing does not depend on which reading is right. Waiting is close to free
+# here, because burst members are each sent on their own thread - on 09-06 member
+# #0 waited 2774ms while all eleven siblings fired and were answered on schedule -
+# whereas the trade that sized 3.0s (a stall spends ladder that is not walked)
+# applies to the serial walk. 10s is ~3.4x the slowest round trip ever recorded
+# and stays well inside _RESERVE_DEADLINE_MS.
 _RESERVE_OPENING_TIMEOUT_S = 10.0
 
 # How far past its instant a ladder rung is still worth firing at once.
