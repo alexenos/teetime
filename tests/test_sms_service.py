@@ -234,7 +234,9 @@ class TestSMSServiceBookingNotifications:
 
         assert result is not None
         message = mock_provider.sent_messages[0]["message"]
-        assert message.startswith("Tee time booking confirmed!")
+        assert (
+            message == "Tee time booking confirmed! Saturday, December 20 at 08:00 AM for 4 players"
+        )
 
     @pytest.mark.asyncio
     async def test_send_booking_failure(
