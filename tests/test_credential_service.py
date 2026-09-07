@@ -21,6 +21,7 @@ TEST_KEY = Fernet.generate_key().decode()
 
 @pytest_asyncio.fixture
 async def test_engine():
+    """Create an in-memory SQLite engine with the app's schema for testing."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -30,11 +31,13 @@ async def test_engine():
 
 @pytest_asyncio.fixture
 async def test_session_local(test_engine):
+    """Create a sessionmaker bound to the test engine."""
     return sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 @pytest.fixture
 def credential_service(test_session_local, monkeypatch) -> CredentialService:
+    """Create a CredentialService that uses the test database and a test encryption key."""
     monkeypatch.setattr("app.services.credential_service.AsyncSessionLocal", test_session_local)
     monkeypatch.setattr("app.config.settings.credential_encryption_key", TEST_KEY)
     return CredentialService()

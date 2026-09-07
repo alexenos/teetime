@@ -19,6 +19,7 @@ class CredentialEncryptionError(RuntimeError):
 
 
 def _fernet() -> Fernet:
+    """Build a Fernet cipher from CREDENTIAL_ENCRYPTION_KEY, or raise."""
     if not settings.credential_encryption_key:
         raise CredentialEncryptionError(
             "CREDENTIAL_ENCRYPTION_KEY is not configured; cannot read or write "

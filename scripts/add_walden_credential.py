@@ -37,6 +37,7 @@ from app.services.credential_service import credential_service
 
 
 async def _set(phone_number: str, member_number: str, label: str | None) -> None:
+    """Prompt for the password and add or update this requester's credential."""
     password = getpass.getpass("Walden password: ")
     if not password:
         raise SystemExit("Password cannot be empty.")
@@ -46,6 +47,7 @@ async def _set(phone_number: str, member_number: str, label: str | None) -> None
 
 
 async def _remove(phone_number: str) -> None:
+    """Delete this requester's stored credential, if one exists."""
     removed = await credential_service.remove_credentials(phone_number)
     print(
         f"Removed credential for {phone_number}"
@@ -55,6 +57,7 @@ async def _remove(phone_number: str) -> None:
 
 
 async def _list() -> None:
+    """Print every requester with a stored credential (never the secrets themselves)."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(WaldenCredentialRecord))
         records = result.scalars().all()
@@ -71,6 +74,7 @@ async def _list() -> None:
 
 
 async def _main() -> None:
+    """Parse the subcommand and dispatch to set/remove/list."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
