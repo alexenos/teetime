@@ -42,10 +42,11 @@ async def _set(phone_number: str, member_number: str | None, label: str | None) 
     The member number is part of the Walden login, same as the password, so
     it's optional on the command line for the same reason: an argument lands
     in shell history and is visible to anyone who can list processes on this
-    machine. Passing it explicitly still works, for scripted use.
+    machine. Prompted with getpass, not input(), so it isn't echoed to the
+    terminal either. Passing it explicitly still works, for scripted use.
     """
     if not member_number:
-        member_number = input("Walden member number: ").strip()
+        member_number = getpass.getpass("Walden member number: ").strip()
     if not member_number:
         raise SystemExit("Member number cannot be empty.")
 
