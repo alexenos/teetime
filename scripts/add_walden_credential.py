@@ -12,10 +12,10 @@ before running this. Generate one with:
 
 Usage:
 
-    poetry run python scripts/add_walden_credential.py set <phone_number> \\
-        --member-number 123456 --label "Alex"
-    (prompts for the password rather than taking it as an argument, so it
-    never lands in shell history)
+    poetry run python scripts/add_walden_credential.py set <phone_number> --label "Alex"
+    (prompts for the member number and password rather than taking them as
+    arguments, so neither lands in shell history; --member-number is still
+    accepted for scripted use)
 
     poetry run python scripts/add_walden_credential.py list
     poetry run python scripts/add_walden_credential.py remove <phone_number>
@@ -36,8 +36,19 @@ from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, init_
 from app.services.credential_service import credential_service
 
 
-async def _set(phone_number: str, member_number: str, label: str | None) -> None:
-    """Prompt for the password and add or update this requester's credential."""
+async def _set(phone_number: str, member_number: str | None, label: str | None) -> None:
+    """Prompt for whatever wasn't passed on the command line, then save.
+
+    The member number is part of the Walden login, same as the password, so
+    it's optional on the command line for the same reason: an argument lands
+    in shell history and is visible to anyone who can list processes on this
+    machine. Passing it explicitly still works, for scripted use.
+    """
+    if not member_number:
+        member_number = input("Walden member number: ").strip()
+    if not member_number:
+        raise SystemExit("Member number cannot be empty.")
+
     password = getpass.getpass("Walden password: ")
     if not password:
         raise SystemExit("Password cannot be empty.")
@@ -82,7 +93,11 @@ async def _main() -> None:
 
     set_parser = subparsers.add_parser("set", help="Add or update a friend's Walden login")
     set_parser.add_argument("phone_number", help="Requester identity used on their bookings")
-    set_parser.add_argument("--member-number", required=True, help="Walden member number")
+    set_parser.add_argument(
+        "--member-number",
+        default=None,
+        help="Walden member number (prompted for if omitted, to avoid shell history)",
+    )
     set_parser.add_argument("--label", default=None, help="Optional note, e.g. a friend's name")
 
     remove_parser = subparsers.add_parser("remove", help="Delete a stored credential")

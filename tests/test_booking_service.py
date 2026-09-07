@@ -3458,3 +3458,137 @@ class TestNotifyUnreportedBookings:
         await booking_service.notify_unreported_bookings([first, second], "timed out")
 
         assert booking_service._notify_booking_result.await_count == 2  # type: ignore[attr-defined]
+
+
+class TestCredentialResolutionFailures:
+    """_provider_for resolves credentials from the database and can raise.
+
+    Before issue #179's credential store, provider resolution was a
+    synchronous, non-raising attribute check, so every caller safely placed
+    its status/notification handling after it. These tests cover that a
+    credential lookup failure (a DB error, or a bad CREDENTIAL_ENCRYPTION_KEY)
+    is now reported the same way any other booking failure is, rather than
+    escaping to the caller or - in a batch - sinking every other requester's
+    bookings along with the one whose credential is broken.
+    """
+
+    @staticmethod
+    def _booking(phone_number: str, booking_id: str, requested_time: time) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id=booking_id,
+            phone_number=phone_number,
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=requested_time,
+                num_players=4,
+            ),
+            status=BookingStatus.SCHEDULED,
+            scheduled_execution_time=datetime(2025, 12, 13, 6, 30),
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_booking_reports_failure_instead_of_raising(
+        self, booking_service: BookingService
+    ) -> None:
+        """A credential lookup failure is reported like any other booking failure."""
+        booking = self._booking("+15551111111", "b1", time(8, 0))
+        provider = MagicMock()
+        provider.book_tee_time = AsyncMock()
+        booking_service.set_reservation_provider(provider)
+
+        async def _raise(phone_number: str) -> None:
+            raise RuntimeError("stored credential could not be decrypted")
+
+        with patch("app.services.booking_service.credential_service") as mock_creds:
+            mock_creds.get_dedicated_credentials = AsyncMock(side_effect=_raise)
+
+            with patch("app.services.booking_service.database_service") as mock_db:
+                mock_db.update_booking = AsyncMock()
+                booking_service.get_booking = AsyncMock(return_value=booking)  # type: ignore[method-assign]
+                booking_service._notify_booking_result = AsyncMock()  # type: ignore[method-assign]
+
+                result = await booking_service.execute_booking("b1")
+
+        assert result is False
+        provider.book_tee_time.assert_not_called()
+        booking_service._notify_booking_result.assert_awaited_once()  # type: ignore[attr-defined]
+        _, notified_result = booking_service._notify_booking_result.await_args.args  # type: ignore[attr-defined]
+        assert notified_result.success is False
+        assert booking.status == BookingStatus.FAILED
+        assert "stored credential could not be decrypted" in (booking.error_message or "")
+
+    @pytest.mark.asyncio
+    async def test_cancel_confirmed_booking_returns_false_instead_of_raising(
+        self, booking_service: BookingService
+    ) -> None:
+        """A credential lookup failure during cancellation returns False, not an exception."""
+        booking = self._booking("+15552222222", "b2", time(8, 0))
+        booking.status = BookingStatus.SUCCESS
+        provider = MagicMock()
+        provider.cancel_booking = AsyncMock()
+        booking_service.set_reservation_provider(provider)
+
+        async def _raise(phone_number: str) -> None:
+            raise RuntimeError("database unavailable")
+
+        with patch("app.services.booking_service.credential_service") as mock_creds:
+            mock_creds.get_dedicated_credentials = AsyncMock(side_effect=_raise)
+
+            with patch("app.services.booking_service.database_service") as mock_db:
+                mock_db.update_booking = AsyncMock()
+                success = await booking_service._cancel_confirmed_booking(booking)
+
+        assert success is False
+        provider.cancel_booking.assert_not_called()
+        assert "database unavailable" in (booking.error_message or "")
+
+    @pytest.mark.asyncio
+    async def test_batch_isolates_one_requesters_credential_failure(
+        self, booking_service: BookingService
+    ) -> None:
+        """One requester's broken credential must not sink another's booking."""
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        broken = self._booking("+15553333333", "broken", time(8, 0))
+        healthy = self._booking("+15554444444", "healthy", time(9, 0))
+
+        async def book_multiple(target_date, requests, execute_at=None) -> BatchBookingResult:  # type: ignore[no-untyped-def]
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=item.booking_id,
+                        result=BookingResult(success=True, booked_time=item.target_time),
+                    )
+                    for item in requests
+                ],
+                total_succeeded=len(requests),
+            )
+
+        provider = MagicMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
+        booking_service.set_reservation_provider(provider)
+
+        async def _resolve(phone_number: str):  # type: ignore[no-untyped-def]
+            if phone_number == "+15553333333":
+                raise RuntimeError("stored credential could not be decrypted")
+            return None
+
+        with patch("app.services.booking_service.credential_service") as mock_creds:
+            mock_creds.get_dedicated_credentials = AsyncMock(side_effect=_resolve)
+
+            with patch("app.services.booking_service.database_service") as mock_db:
+                mock_db.update_booking = AsyncMock()
+                results = await booking_service.execute_bookings_batch([broken, healthy])
+
+        results_by_id = dict(results)
+        assert results_by_id["broken"].success is False
+        assert "stored credential could not be decrypted" in (
+            results_by_id["broken"].error_message or ""
+        )
+        assert results_by_id["healthy"].success is True
+        assert broken.status == BookingStatus.FAILED
+        assert healthy.status == BookingStatus.SUCCESS
+        # The healthy requester's booking still went through the shared provider.
+        provider.book_multiple_tee_times.assert_awaited_once()
+        called_requests = provider.book_multiple_tee_times.await_args.kwargs["requests"]
+        assert [item.booking_id for item in called_requests] == ["healthy"]

@@ -839,16 +839,23 @@ class BookingService:
         Returns:
             True if cancellation was successful, False otherwise.
         """
-        provider = await self._provider_for(booking.phone_number)
-        if not provider:
-            return False
-
         booked_time = booking.actual_booked_time or booking.request.requested_time
         cancellation_id = (
             f"{booking.request.requested_date.strftime('%Y-%m-%d')}_{booked_time.strftime('%H:%M')}"
         )
 
+        # _provider_for resolves this requester's credential from the database
+        # and can therefore raise (a DB error, or a decryption failure if
+        # CREDENTIAL_ENCRYPTION_KEY changed since the row was written) - unlike
+        # the synchronous attribute check this replaced. It runs inside the
+        # same try/except as the cancellation itself so a lookup failure is
+        # reported the same way any other cancellation failure is.
+        provider: ReservationProvider | None = None
         try:
+            provider = await self._provider_for(booking.phone_number)
+            if not provider:
+                return False
+
             success = await provider.cancel_booking(cancellation_id)
 
             if success:
@@ -863,7 +870,8 @@ class BookingService:
             await database_service.update_booking(booking)
             return False
         finally:
-            await self._release_provider(provider)
+            if provider is not None:
+                await self._release_provider(provider)
 
     async def create_booking(
         self,
@@ -1375,22 +1383,30 @@ class BookingService:
         if not booking:
             return False
 
-        provider = await self._provider_for(booking.phone_number)
-        if not provider:
-            booking.status = BookingStatus.FAILED
-            booking.error_message = "Reservation provider not configured"
+        # _provider_for resolves this requester's credential from the database
+        # and can therefore raise (a DB error, or a decryption failure if
+        # CREDENTIAL_ENCRYPTION_KEY changed since the row was written) - unlike
+        # the synchronous attribute check this replaced. It runs inside the
+        # same try/except as the booking attempt itself so a lookup failure is
+        # reported to the user like any other booking failure, instead of
+        # escaping to _execute_booking_in_background's bare log-and-swallow.
+        provider: ReservationProvider | None = None
+        try:
+            provider = await self._provider_for(booking.phone_number)
+            if not provider:
+                booking.status = BookingStatus.FAILED
+                booking.error_message = "Reservation provider not configured"
+                await database_service.update_booking(booking)
+
+                await self._notify_booking_result(
+                    booking,
+                    BookingResult(success=False, error_message="System not configured for booking"),
+                )
+                return False
+
+            booking.status = BookingStatus.IN_PROGRESS
             await database_service.update_booking(booking)
 
-            await self._notify_booking_result(
-                booking,
-                BookingResult(success=False, error_message="System not configured for booking"),
-            )
-            return False
-
-        booking.status = BookingStatus.IN_PROGRESS
-        await database_service.update_booking(booking)
-
-        try:
             result = await provider.book_tee_time(
                 target_date=booking.request.requested_date,
                 target_time=booking.request.requested_time,
@@ -1424,7 +1440,8 @@ class BookingService:
             )
             return False
         finally:
-            await self._release_provider(provider)
+            if provider is not None:
+                await self._release_provider(provider)
 
     async def _notify_booking_result(self, booking: TeeTimeBooking, result: BookingResult) -> None:
         """Tell the user how a finished booking attempt turned out.
@@ -1554,6 +1571,36 @@ class BookingService:
         all_results: list[tuple[str, BookingResult]] = []
 
         for (target_date, phone_number), group_bookings in groups.items():
+            # _provider_for resolves this requester's credential from the
+            # database and can therefore raise (a DB error, or a decryption
+            # failure if CREDENTIAL_ENCRYPTION_KEY changed since the row was
+            # written) - unlike the synchronous attribute check this replaced.
+            # One requester's bad credential must not sink every other
+            # requester's bookings in the same batch, so it's caught here,
+            # per group, rather than left to escape the loop.
+            try:
+                # self._reservation_provider is guaranteed set at this point
+                # (checked above), so _provider_for only ever falls back to it
+                # or returns a dedicated instance - never None.
+                provider = await self._provider_for(phone_number)
+                assert provider is not None
+            except Exception as e:
+                logger.exception(
+                    "Could not resolve a Walden provider for requester %s", phone_number
+                )
+                for booking in group_bookings:
+                    booking_id = booking.id or ""
+                    booking.status = BookingStatus.FAILED
+                    booking.error_message = f"Could not resolve booking credentials: {e}"
+                    await database_service.update_booking(booking)
+                    all_results.append(
+                        (
+                            booking_id,
+                            BookingResult(success=False, error_message=booking.error_message),
+                        )
+                    )
+                continue
+
             for booking in group_bookings:
                 booking.status = BookingStatus.IN_PROGRESS
                 await database_service.update_booking(booking)
@@ -1568,11 +1615,6 @@ class BookingService:
                 for booking in group_bookings
             ]
 
-            # self._reservation_provider is guaranteed set at this point (checked
-            # above), so _provider_for only ever falls back to it or returns a
-            # dedicated instance - never None.
-            provider = await self._provider_for(phone_number)
-            assert provider is not None
             try:
                 batch_result = await provider.book_multiple_tee_times(
                     target_date=target_date,
