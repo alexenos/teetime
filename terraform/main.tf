@@ -44,6 +44,14 @@ locals {
     "TELEGRAM_WEBHOOK_SECRET",
   ]
 
+  # Gated the same way as the channel secrets below: CREDENTIAL_ENCRYPTION_KEY
+  # (issue #179) is added incrementally as friends are onboarded, not at first
+  # deploy, so it must not be an unconditional runtime dependency - a Cloud
+  # Run revision referencing a secret with no version fails to deploy.
+  credential_secrets = [
+    "CREDENTIAL_ENCRYPTION_KEY",
+  ]
+
   # Every secret this project stores. Deliberately NOT scoped by
   # messaging_channel: dropping a secret from this list would have Terraform
   # delete it (and its versions) from Secret Manager, so flipping the channel
@@ -59,14 +67,14 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
-  ], local.discord_secrets, local.telegram_secrets)
+  ], local.discord_secrets, local.telegram_secrets, local.credential_secrets)
 
-  # Credentials for a channel that is switched off. Both channels can be live
-  # at once during the Telegram trial, so this is not one choice between them:
-  # each is withheld independently of the other.
+  # Credentials for a channel (or optional feature) that is switched off.
+  # Each is withheld independently of the others.
   disabled_channel_secrets = concat(
     var.messaging_channel == "discord" ? [] : local.discord_secrets,
     var.telegram_enabled ? [] : local.telegram_secrets,
+    var.credential_store_enabled ? [] : local.credential_secrets,
   )
 
   # Secrets the running container may read. A channel's credentials are only

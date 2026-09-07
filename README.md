@@ -143,10 +143,11 @@ echo -n "your_scheduler_key" | gcloud secrets versions add SCHEDULER_API_KEY --d
 echo -n "+1234567890" | gcloud secrets versions add USER_PHONE_NUMBER --data-file=-
 ```
 
-Discord and Telegram have their own secrets, added the same way, but only when
-that channel is switched on. Terraform creates all of them empty, and a Cloud
-Run revision that references a secret with no version fails to deploy - so add
-the values before enabling the channel, never after:
+Discord, Telegram, and the per-friend credential store each have their own
+secrets, added the same way, but only once that feature is switched on via its
+Terraform variable. Terraform creates all of them empty, and a Cloud Run
+revision that references a secret with no version fails to deploy - so add the
+values before flipping the variable, never after:
 
 ```bash
 # Discord (MESSAGING_CHANNEL=discord)
@@ -158,6 +159,13 @@ echo -n "your_user_id"   | gcloud secrets versions add DISCORD_USER_ID --data-fi
 echo -n "your_bot_token"     | gcloud secrets versions add TELEGRAM_BOT_TOKEN --data-file=-
 echo -n "your_user_id"       | gcloud secrets versions add TELEGRAM_ALLOWED_USER_IDS --data-file=-
 echo -n "your_webhook_secret"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECRET --data-file=-
+
+# Per-friend Walden credential store (credential_store_enabled = true, issue #179).
+# Encrypts friends' own Walden logins at rest in the DB; the single global
+# WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account above keeps working unaffected
+# while this stays off. Generate with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENCRYPTION_KEY --data-file=-
 ```
 
 ### First Deployment

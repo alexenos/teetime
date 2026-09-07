@@ -109,7 +109,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if settings.walden_member_number and settings.walden_password:
         logger.info("Walden Golf credentials configured - using real WaldenGolfProvider")
-        provider: ReservationProvider = WaldenGolfProvider()
+        provider: ReservationProvider = WaldenGolfProvider(
+            settings.walden_member_number, settings.walden_password
+        )
     else:
         logger.warning(
             "Walden Golf credentials not configured - using MockWaldenProvider. "

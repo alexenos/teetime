@@ -21,6 +21,23 @@ from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
 from app.providers.base import BookingResult
 
 
+@pytest.fixture(autouse=True)
+def no_dedicated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test here exercises a requester with no admin-added Walden login
+    of their own (issue #179), so BookingService._provider_for should fall
+    back to whichever mock provider the test wired up, rather than its
+    credential lookup hitting a real database.
+    """
+
+    async def _no_dedicated_credential(phone_number: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.booking_service.credential_service.get_dedicated_credentials",
+        _no_dedicated_credential,
+    )
+
+
 @pytest.fixture
 def test_client() -> TestClient:
     """Create a TestClient for the FastAPI app."""

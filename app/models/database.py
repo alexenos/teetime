@@ -127,6 +127,45 @@ class SessionRecord(Base):
     last_interaction = Column(DateTime, default=datetime.utcnow)
 
 
+class WaldenCredentialRecord(Base):
+    """
+    Database model for a friend's own Walden Golf login (issue #179).
+
+    Each friend already has their own Walden membership and books under it
+    instead of the single shared account in settings.walden_member_number /
+    walden_password. A requester with no row here falls back to that shared
+    account - see app/services/credential_service.py - so existing users keep
+    working while friends are added incrementally.
+
+    Rows are admin-written only (see scripts/add_walden_credential.py); there
+    is no self-service onboarding flow, by design (a credential must never
+    transit chat history).
+
+    Columns:
+        id: Auto-incrementing primary key.
+        phone_number: The same requester identity used on SessionRecord and
+            BookingRecord (a phone number, Discord snowflake, or Telegram user
+            ID depending on channel), unique - one credential per requester.
+        member_number_encrypted: Walden member number, Fernet-encrypted.
+        password_encrypted: Walden password, Fernet-encrypted.
+        label: Optional human-readable note (e.g. a friend's name) purely for
+            admin bookkeeping; never used to resolve which credential to book
+            under.
+        created_at: When this credential was added.
+        updated_at: When this credential was last changed.
+    """
+
+    __tablename__ = "walden_credentials"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    phone_number = Column(String(20), unique=True, nullable=False, index=True)
+    member_number_encrypted = Column(Text, nullable=False)
+    password_encrypted = Column(Text, nullable=False)
+    label = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 def _normalize_database_url(url: str) -> str:
     """Point a bare sqlite:// URL at the async driver, leaving others alone."""
     # Count of 1: only the scheme is being rewritten. A database path may itself

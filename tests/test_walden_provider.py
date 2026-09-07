@@ -38,7 +38,7 @@ from app.utils.timezone import CTDateTime
 @pytest.fixture
 def provider() -> WaldenGolfProvider:
     """Create a WaldenGolfProvider instance."""
-    return WaldenGolfProvider()
+    return WaldenGolfProvider("test_member", "test_password")
 
 
 class TestWaldenProviderParseTime:

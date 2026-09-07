@@ -744,13 +744,19 @@ class WaldenGolfProvider(ReservationProvider):
     NORTHGATE_COURSE_INDEX = "0"
     WALDEN_COURSE_INDEX = "1"
 
-    def __init__(self) -> None:
+    def __init__(self, member_number: str, password: str) -> None:
         """
-        Initialize the WaldenGolfProvider.
+        Initialize the WaldenGolfProvider for one requester's Walden login.
 
-        Validates that required credentials are configured. Logs a warning if
-        credentials are missing - operations will fail at login time.
+        Credentials are taken as a constructor argument rather than read from
+        settings.walden_member_number/walden_password globally, so a provider
+        can be built per requester (issue #179) instead of assuming the one
+        shared account - this also resolves #144's singleton concern via its
+        option 3. Logs a warning if credentials are missing - operations will
+        fail at login time.
         """
+        self._member_number = member_number
+        self._password = password
         self.wait_strategy = WaitStrategy()
         # The tee sheet the slot finder judged from, kept from staging so a
         # morning that ends with no fallbacks can be read against the sheet that
@@ -758,11 +764,8 @@ class WaldenGolfProvider(ReservationProvider):
         # the window has opened and other members have taken slots - which is
         # exactly the difference in question. Uploaded only if the booking fails.
         self._pre_window_sheet: str | None = None
-        if not settings.walden_member_number or not settings.walden_password:
-            logger.warning(
-                "Walden Golf credentials not configured. "
-                "Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD environment variables."
-            )
+        if not member_number or not password:
+            logger.warning("Walden Golf credentials not configured for this provider instance.")
 
     async def __aenter__(self) -> "WaldenGolfProvider":
         """Async context manager entry."""
@@ -857,10 +860,10 @@ class WaldenGolfProvider(ReservationProvider):
 
             logger.info("Entering credentials...")
             member_input.clear()
-            member_input.send_keys(settings.walden_member_number)
+            member_input.send_keys(self._member_number)
 
             password_input.clear()
-            password_input.send_keys(settings.walden_password)
+            password_input.send_keys(self._password)
 
             submit_button = driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button)
             current_url = driver.current_url
@@ -7037,8 +7040,13 @@ class WaldenGolfProvider(ReservationProvider):
 class MockWaldenProvider(ReservationProvider):
     """Mock provider for testing without hitting the real booking system."""
 
-    def __init__(self) -> None:
-        """Initialize mock provider with no-op setup."""
+    def __init__(self, member_number: str = "", password: str = "") -> None:
+        """Initialize mock provider with no-op setup.
+
+        Accepts (and ignores) the same constructor shape as WaldenGolfProvider
+        so callers that construct "whichever provider class is configured"
+        with a requester's credentials don't need to special-case the mock.
+        """
         pass
 
     async def login(self) -> bool:

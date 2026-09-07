@@ -156,6 +156,22 @@ variable "telegram_enabled" {
   default     = true
 }
 
+variable "credential_store_enabled" {
+  description = <<-EOT
+    Expose CREDENTIAL_ENCRYPTION_KEY to the running service.
+
+    Off by default: the per-friend Walden credential store (issue #179) is
+    admin-added incrementally, and a Cloud Run revision referencing a secret
+    with no version fails to deploy - same failure mode as telegram_enabled
+    below. Create a version for CREDENTIAL_ENCRYPTION_KEY in Secret Manager
+    (see README.md) BEFORE setting this to true; until then the single
+    global WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account keeps working
+    exactly as before, unaffected by this flag.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "log_level" {
   description = "Application log level (DEBUG to see BOOKING_DEBUG messages)"
   type        = string
