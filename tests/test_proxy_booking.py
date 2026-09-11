@@ -72,11 +72,10 @@ class TestSplitProxyTarget:
         "message,target,rest",
         [
             ("for @alex book 9/12 at 8a", "alex", "book 9/12 at 8a"),
-            ("for alex book 9/12 at 8a", "alex", "book 9/12 at 8a"),
-            ("For Alex, book 9/12 at 8a", "Alex", "book 9/12 at 8a"),
-            ("for alex: book 9/12 at 8a", "alex", "book 9/12 at 8a"),
+            ("For @Alex, book 9/12 at 8a", "Alex", "book 9/12 at 8a"),
+            ("for @alex: book 9/12 at 8a", "alex", "book 9/12 at 8a"),
             ("  for @alex   book 9/12 at 8a", "alex", "book 9/12 at 8a"),
-            ("FOR @ALEX book 9/12", "@ALEX".lstrip("@"), "book 9/12"),
+            ("FOR @ALEX book 9/12", "ALEX", "book 9/12"),
             ("for @alex", "alex", ""),
         ],
     )
@@ -86,14 +85,22 @@ class TestSplitProxyTarget:
     @pytest.mark.parametrize(
         "message",
         [
-            # The whole reason the clause is anchored at the start: an ordinary
-            # request already contains "for", and a floating match would read
-            # "for 4 players" as a friend named "4".
+            # Anchoring handles the common shape...
             "book 9/12 at 8a for 4 players",
             "book a tee time for tomorrow",
             "yes",
             "cancel my booking",
             "",
+            # ...but not this one, which is why the "@" is required. With it
+            # optional this read as a target named "4", and because an
+            # unresolved target returns before the message is ever parsed, the
+            # booking text was discarded outright. Found in review of #187.
+            "for 4 players, book 9/12 at 8a",
+            "for 4 players book 9/12 at 8a",
+            # A name with no sigil is not lost either - it reaches the parser,
+            # which reads the booking and then asks who it is for.
+            "for alex book 9/12 at 8a",
+            "For Alex, book 9/12 at 8a",
         ],
     )
     def test_ordinary_messages_are_untouched(self, message: str) -> None:
@@ -102,6 +109,13 @@ class TestSplitProxyTarget:
     def test_bare_for_is_not_a_clause(self) -> None:
         """ "for" with nothing usable after it stays an ordinary word."""
         assert proxy_booking.split_proxy_target("for @") == (None, "for @")
+
+    def test_a_name_without_a_sigil_keeps_its_booking(self) -> None:
+        """The cost of requiring "@" is a turn, never the request itself."""
+        assert proxy_booking.split_proxy_target("for alex book 9/12 at 8a") == (
+            None,
+            "for alex book 9/12 at 8a",
+        )
 
     def test_multiline_request_keeps_its_lines(self) -> None:
         """A multi-booking message is one request per line; the split must not fold them."""
@@ -459,6 +473,59 @@ class TestProxyBookingFlow:
         assert "Alex" in echo
         assert admin.pending_proxy_target == ALEX_ID
         assert admin.state == ConversationState.AWAITING_CONFIRMATION
+        assert admin.pending_request is not None
+
+    @pytest.mark.asyncio
+    async def test_name_without_a_sigil_degrades_to_asking(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Requiring "@" costs a turn, not the booking.
+
+        "for alex book ..." is not a proxy clause any more, so the whole string
+        reaches the parser; the booking is read normally and the admin is then
+        asked who it is for. The request survives, which is the entire argument
+        for the stricter grammar - the optional "@" it replaced discarded the
+        booking text whenever the target failed to resolve.
+        """
+        admin = UserSession(phone_number=ADMIN_ID, channel="telegram")
+        sessions = _FakeSessions(admin)
+        db_patch, cred_patch = self._patched(sessions, [self._owner()])
+
+        with db_patch, cred_patch:
+            with patch("app.services.booking_service.gemini_service") as gemini:
+                gemini.parse_message = AsyncMock(return_value=self._booking_intent())
+                asked = await service.handle_incoming_message(
+                    ADMIN_ID, "for alex book 9/12 at 8a", channel="telegram"
+                )
+
+                # Handed over whole - nothing was peeled off the front.
+                assert gemini.parse_message.await_args.args[0] == "for alex book 9/12 at 8a"
+
+        assert "which user" in asked.lower()
+        assert admin.state == ConversationState.AWAITING_PROXY_TARGET
+        assert admin.pending_request is not None
+
+    @pytest.mark.asyncio
+    async def test_player_count_clause_still_reaches_the_parser(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Regression: "for 4 players, book ..." used to lose the booking entirely."""
+        admin = UserSession(phone_number=ADMIN_ID, channel="telegram")
+        sessions = _FakeSessions(admin)
+        db_patch, cred_patch = self._patched(sessions, [])
+
+        with db_patch, cred_patch:
+            with patch("app.services.booking_service.gemini_service") as gemini:
+                gemini.parse_message = AsyncMock(return_value=self._booking_intent())
+                asked = await service.handle_incoming_message(
+                    ADMIN_ID, "for 4 players, book 9/12 at 8a", channel="telegram"
+                )
+
+                assert gemini.parse_message.await_args.args[0] == "for 4 players, book 9/12 at 8a"
+
+        # Asked who it is for, rather than "I don't know who 4 is" with the
+        # date silently dropped.
+        assert "which user" in asked.lower()
         assert admin.pending_request is not None
 
     @pytest.mark.asyncio

@@ -197,9 +197,16 @@ poetry run python scripts/add_walden_credential.py set <telegram user id> \
     --name "Alex" --telegram-username alexenos
 ```
 
-Matching is case-insensitive and the leading `@` is optional. `--label` is
-*not* matched — it stayed a free-text admin note. `list` shows which rows have
-neither and are therefore not addressable.
+Matching is case-insensitive. The leading `@` is **required** in the `for @X`
+clause — it is what separates a target from ordinary English, so that
+`for 4 players, book 9/12` is read as a booking rather than as a friend named
+"4". It is only a marker, not a claim that the word is a Telegram handle: a
+stored `--name` matches through it fine. Omitting it costs a turn rather than
+the request (`for alex book 9/12` is parsed as a booking, then the bot asks who
+it is for), and answering that question takes a bare name either way.
+
+`--label` is *not* matched — it stayed a free-text admin note. `list` shows
+which rows have neither and are therefore not addressable.
 
 Three properties are deliberate, and all three exist to stop a round being
 booked under the wrong membership:

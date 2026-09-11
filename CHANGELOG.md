@@ -41,8 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `walden_credentials` gains `name` and `telegram_username`, set via
   `scripts/add_walden_credential.py set --name / --telegram-username`, and they
-  are what `for @X` matches — case-insensitively, with the leading `@`
-  optional. `--label` was left as what #183 made it, a free-text note that
+  are what `for @X` matches — case-insensitively, and with the leading `@`
+  required, since that sigil is what keeps `for 4 players, book 9/12` a booking
+  rather than a friend named "4". Omitting it costs a turn, not the request. `--label` was left as what #183 made it, a free-text note that
   resolves nothing; `list` now flags rows with neither name nor handle, which
   cannot be proxy-booked for. Updating a friend's password no longer clears
   their label, name, or handle.
