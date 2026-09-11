@@ -255,9 +255,17 @@ async def _run_column_migrations(conn: Any) -> None:
 
     This handles the case where tables already exist but are missing new columns.
     Uses database-specific syntax for idempotent column addition.
+
+    The dialect comes from the connection being migrated, not from
+    settings.database_url. Identical in production - the engine is built from
+    that same setting - but they can disagree anywhere a connection is passed
+    in, and then this emits the other database's syntax at it: Postgres'
+    "ADD COLUMN IF NOT EXISTS" is a syntax error on SQLite, which SQLite's own
+    branch is written to avoid precisely because it has no such clause.
     """
-    is_postgres = settings.database_url.startswith("postgresql")
-    is_sqlite = settings.database_url.startswith("sqlite")
+    dialect = conn.dialect.name
+    is_postgres = dialect == "postgresql"
+    is_sqlite = dialect == "sqlite"
 
     for table, column, sql_type in _ADDED_COLUMNS:
         if is_postgres:

@@ -156,6 +156,14 @@ credential actually works, or just helping someone out. Set
 `TELEGRAM_ALLOWED_USER_IDS`; the allowlist is checked first, so an admin missing
 from it is simply ignored). Every other user keeps booking only for themselves.
 
+**Prerequisite: the per-friend credential store must be on**
+(`credential_store_enabled = true`, with a versioned
+`CREDENTIAL_ENCRYPTION_KEY`). Proxy booking always books under a friend's stored
+login and never falls back to the shared account, so without the decryption key
+mounted every proxy booking fails — at 6:30, days after it was accepted, since
+nothing decrypts until the attempt runs. Terraform enforces this with a
+precondition rather than letting it deploy.
+
 ```
 dax.garner:
 @northgateteetimebot for @alex book 9/12 at 8a

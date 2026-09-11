@@ -178,6 +178,19 @@ resource "google_cloud_run_v2_service" "teetime" {
         "Got min=${var.cloud_run_min_instances}, max=${var.cloud_run_max_instances}.",
       ])
     }
+
+    precondition {
+      condition     = !var.admin_proxy_enabled || var.credential_store_enabled
+      error_message = join(" ", [
+        "admin_proxy_enabled=true requires credential_store_enabled=true.",
+        "Proxy booking resolves its target from the per-friend credential",
+        "store and then books under that friend's login, so without",
+        "CREDENTIAL_ENCRYPTION_KEY mounted every proxy booking fails when it",
+        "tries to decrypt one - and it fails at 06:30, days after the booking",
+        "was accepted, because nothing decrypts until the attempt runs.",
+        "There is deliberately no shared-account fallback on this path.",
+      ])
+    }
   }
 
   template {

@@ -169,7 +169,10 @@ echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENC
 
 # Admin proxy booking (admin_proxy_enabled = true, issue #185). Lets this one
 # Telegram ID book on a friend's behalf ("for @alex book 9/12 at 8a"). The ID
-# must ALSO be in TELEGRAM_ALLOWED_USER_IDS above. See docs/telegram-setup.md.
+# must ALSO be in TELEGRAM_ALLOWED_USER_IDS above. Requires the credential
+# store above (credential_store_enabled = true, with a versioned
+# CREDENTIAL_ENCRYPTION_KEY) - proxy booking always books under a friend's
+# stored login. See docs/telegram-setup.md.
 echo -n "your_user_id" | gcloud secrets versions add TELEGRAM_ADMIN_USER_ID --data-file=-
 ```
 

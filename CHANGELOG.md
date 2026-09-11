@@ -50,12 +50,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cancelling or checking status on someone else's behalf is not supported yet
   and is refused explicitly rather than applied to the admin's own history.
 
-  Deployment: `TELEGRAM_ADMIN_USER_ID` is gated behind a new
-  `admin_proxy_enabled` Terraform variable, **off by default**, for the same
-  reason `credential_store_enabled` is — Terraform creates the secret empty and
-  a Cloud Run revision referencing a versionless secret fails to deploy. Create
+  Deployment: proxy booking requires `credential_store_enabled = true` — it
+  always books under a friend's stored login, so without
+  `CREDENTIAL_ENCRYPTION_KEY` mounted every proxy booking would fail at 6:30,
+  days after being accepted, when the attempt first tries to decrypt one. A
+  Cloud Run precondition enforces that rather than letting it deploy.
+  `TELEGRAM_ADMIN_USER_ID` is itself gated behind a new `admin_proxy_enabled`
+  Terraform variable, **off by default**, for the same reason
+  `credential_store_enabled` is — Terraform creates the secret empty and a
+  Cloud Run revision referencing a versionless secret fails to deploy. Create
   the version first, then flip the flag. With it off, nothing about existing
   bookings changes.
+
+### Fixed
+
+- `_run_column_migrations` took its dialect from `settings.database_url` rather
+  than from the connection it was handed. Identical in production, where the
+  engine is built from that same setting, but it emitted Postgres'
+  `ADD COLUMN IF NOT EXISTS` at any other connection passed in — a syntax error
+  on SQLite. Found in review of #187.
 
 - **Telegram as a messaging channel, running alongside Discord.** Inbound
   messages arrive as HTTP webhooks (`POST /webhooks/telegram`) rather than over

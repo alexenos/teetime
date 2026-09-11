@@ -178,6 +178,13 @@ variable "admin_proxy_enabled" {
     designated Telegram account book on a friend's behalf (issue #185):
     "for @alex book 9/12 at 8a".
 
+    REQUIRES credential_store_enabled = true (enforced by a precondition on
+    the Cloud Run service). Proxy booking resolves its target from the
+    per-friend credential store and books under that friend's login, so
+    without CREDENTIAL_ENCRYPTION_KEY mounted every proxy booking fails when
+    it tries to decrypt one - at 06:30, days after the booking was accepted,
+    since nothing decrypts until the attempt runs.
+
     Off by default, and for the same mechanical reason as
     credential_store_enabled above: Terraform creates the secret empty, and a
     Cloud Run revision referencing a secret with no version fails to deploy.

@@ -352,6 +352,15 @@ class BookingService:
 
         unresolved = await self._resolve_proxy_target(session, target)
         if unresolved is not None:
+            # Drop anything held from an earlier turn. This message named a new
+            # target, so its own request was never parsed - and the next reply
+            # is read as a name, which would otherwise resume a *previous*
+            # booking under it. That is how "for @alex book 9/12" (unconfirmed),
+            # then a mistyped "for @nobdy book 9/20", then "@sam" ended up
+            # offering Sam the 9/12 slot nobody had asked him about.
+            session.pending_request = None
+            session.pending_requests = None
+            session.pending_proxy_target = None
             return unresolved, message
 
         if not remainder:

@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.config import settings
 from app.models.database import (
     _ADDED_COLUMNS,
     _ADDED_CONVERSATION_STATES,
@@ -155,13 +156,23 @@ class TestColumnMigrations:
     }
 
     @pytest.mark.asyncio
-    async def test_every_model_column_reaches_an_existing_install(self) -> None:
+    async def test_every_model_column_reaches_an_existing_install(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A column on a model but not in _ADDED_COLUMNS never reaches production.
 
         Measured against the models rather than against _ADDED_COLUMNS itself:
         checking that the list applies what the list contains would pass happily
         while the one column somebody forgot to add stayed missing.
+
+        DATABASE_URL is pinned to Postgres while a SQLite connection is migrated,
+        so the two deliberately disagree: the migration has to take its dialect
+        from the connection it was handed. Reading the setting instead emits
+        "ADD COLUMN IF NOT EXISTS" at SQLite, which is a syntax error - and this
+        test would then pass or fail depending on whoever ran it had a Postgres
+        URL in their environment.
         """
+        monkeypatch.setattr(settings, "database_url", "postgresql+asyncpg://u:p@h/d")
         models = {
             "sessions": SessionRecord,
             "bookings": BookingRecord,
@@ -187,8 +198,9 @@ class TestColumnMigrations:
             await engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_migrations_are_idempotent(self) -> None:
+    async def test_migrations_are_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Run on every startup, so a second pass must be a no-op, not an error."""
+        monkeypatch.setattr(settings, "database_url", "postgresql+asyncpg://u:p@h/d")
         engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
         try:
             async with engine.begin() as conn:
