@@ -389,7 +389,11 @@ Don't re-litigate these; each was established from artifacts, not reasoning:
   Reserve — same slot, same component id, same ViewState `3d9b5561` — was
   refused at 0ms, refused at 812ms, and **accepted at 1291ms**. 08-12 repeated
   it at 0/817/1239ms. Nothing about the request changed, so "we built it wrong"
-  and "the view was stale" are both out.
+  and "the view was stale" are both out. Re-confirmed 2026-09-11 on the burst:
+  the **accepted** fallback carried the same ViewState `d249ba63` as the twelve
+  refusals before it, and the index→time map was identical pre-window and at
+  +38s. A morning that re-opens "our staging went stale on Fridays" is
+  re-litigating this; see §7e.
 - **It is not contention.** 08-12 targeted a 5:00 PM nobody wanted; the member's
   own screenshot at 7:46 showed every slot from 4:23 to 6:00 PM still Available.
   The club words *every* early refusal "blocked by another user".
@@ -639,6 +643,53 @@ read `burstIndex` for plan order — rows are numbered by plan position, not by
 arrival — and `timing.burstSkipped` for members not sent after a grant. Under
 the burst the hold policy is off and `sheet=closed` in a log line is
 information about our snapshot only. `_RESERVE_DEADLINE_MS` is 30s.
+
+## 7e. Added 2026-09-11: the pre-window control, and the gap nobody has asked in
+
+The first Friday race on the burst. Twelve asks for 08:38, `:01`→`:05`, all
+refused; the first fallback granted on its first ask at +5305ms (club `:06`).
+Full account in `docs/booking-post-mortem-2026-09-11.md`.
+
+**The pre-window view is a control, and it settles "pre-placed vs won in the
+race".** A refusal's body is our own pre-window snapshot (§7d) — which makes it
+a faithful photograph of the sheet at staging time. On 09-11 every Northgate
+row from 07:45 to 09:15 rendered `Empty` with a Reserve button in that
+snapshot, **while the second course on the same sheet already showed real,
+named reservations** identical to the post-race sheet. So the renderer does
+show holdings, and a slot rendering `Empty` there was genuinely available at
+06:28. Use this before reaching for "the rival has a standing booking": on
+09-11 the same foursome had held 08:38 four Fridays running, and this control
+still showed the slot open pre-window, so they win it in the race.
+
+**Read `sentMsPastWindow + roundTripMs` as the receipt bound, then check
+whether the target was ever asked inside a proven-open second.** The club's
+`Date` stamps the *answer*; receipt is only bounded to `[sent, sent+RT]`. On
+09-11 the last target ask could have been received no later than +5123ms and
+the grant no earlier than +5305ms — **the ranges do not overlap.** Across all
+four Fridays on record the target has never been asked in a club-second we can
+prove was open: 08-21 and 08-28 left for fallbacks at `:03` with the first
+grant to anyone at `:05`; 09-11 covered to `:05` and the grant came at `:06`.
+State this explicitly rather than concluding the slot was taken.
+
+**A Friday *has* been probed before `:01`.** 08-14 sent attempt 1 at −14ms and
+was refused with the club's clock inside `:00` (RT 647ms, so receipt bounded
+entirely within that second). With 08-13 (Thu, −7ms) and 08-15 (Sat, −60ms) the
+`:00` second is now refused on three different weekdays. "Maybe Friday opens
+early" is not an open question — do not spend burst members there.
+
+**The two models still standing, and what separates them.** *Model L*: the
+Friday gate opens ~`:05`–`:06` and early refusals are gate refusals. *Model F*:
+the gate opens at `:01` as always and the target is simply gone before +1018ms.
+09-04 is the strongest evidence for F — fourteen asks across four slots out to
++10.7s, all refused, while 09:08 stayed free all morning — and 09-11's fallback
+granted on its first ask says the same. Neither is established. **The artifacts
+cannot separate them**, because every Friday on record is one slot asked
+repeatedly and the body is not live. An independent read of the sheet during
+the window can; see `docs/design-observer-and-fanout.md`.
+
+**Do not propose "lead the post-burst walk with the target" from Model L alone.**
+It was proposed and withdrawn on 09-11: under Model F it delays the one slot
+still winnable, and 09-11's fallback was granted on its first ask at `:06`.
 
 ## 8. Report
 
