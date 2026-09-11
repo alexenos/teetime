@@ -52,6 +52,15 @@ locals {
     "CREDENTIAL_ENCRYPTION_KEY",
   ]
 
+  # Gated for the same reason, and deliberately NOT folded into
+  # telegram_secrets: those already have versions and Telegram is live, so
+  # adding an eighth unversioned secret to that list would fail the very next
+  # deploy of a service that is working fine. Proxy booking (issue #185) is off
+  # until the version exists and admin_proxy_enabled is flipped.
+  admin_proxy_secrets = [
+    "TELEGRAM_ADMIN_USER_ID",
+  ]
+
   # Every secret this project stores. Deliberately NOT scoped by
   # messaging_channel: dropping a secret from this list would have Terraform
   # delete it (and its versions) from Secret Manager, so flipping the channel
@@ -67,7 +76,7 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
-  ], local.discord_secrets, local.telegram_secrets, local.credential_secrets)
+  ], local.discord_secrets, local.telegram_secrets, local.credential_secrets, local.admin_proxy_secrets)
 
   # Credentials for a channel (or optional feature) that is switched off.
   # Each is withheld independently of the others.
@@ -75,6 +84,7 @@ locals {
     var.messaging_channel == "discord" ? [] : local.discord_secrets,
     var.telegram_enabled ? [] : local.telegram_secrets,
     var.credential_store_enabled ? [] : local.credential_secrets,
+    var.admin_proxy_enabled ? [] : local.admin_proxy_secrets,
   )
 
   # Secrets the running container may read. A channel's credentials are only

@@ -137,6 +137,9 @@ class ConversationState(str, Enum):
         AWAITING_CONFIRMATION: All details collected, waiting for user to confirm.
         AWAITING_CANCELLATION_SELECTION: User has multiple bookings and we asked
             which one to cancel. Waiting for them to specify which booking.
+        AWAITING_PROXY_TARGET: The proxy admin asked to book without naming who
+            for, and we asked "for which user?". Waiting for them to name the
+            friend. Only ever reached by the single admin ID (issue #185).
     """
 
     IDLE = "idle"
@@ -145,6 +148,7 @@ class ConversationState(str, Enum):
     AWAITING_PLAYERS = "awaiting_players"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     AWAITING_CANCELLATION_SELECTION = "awaiting_cancellation_selection"
+    AWAITING_PROXY_TARGET = "awaiting_proxy_target"
 
 
 class UserSession(BaseModel):
@@ -165,6 +169,12 @@ class UserSession(BaseModel):
             None when IDLE.
         pending_cancellation_id: ID of a booking awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for them to confirm.
+        pending_proxy_target: The friend the proxy admin is booking on behalf of,
+            as the admin typed it (issue #185). Held on the ADMIN's session, not
+            the friend's: the conversation - the echo-back, the "reply yes" -
+            belongs to the admin, and only the resulting booking record is
+            attributed to the friend. None for every non-admin user, and for an
+            admin booking with no target named yet.
         origin_channel_id: Discord channel the user's current conversation is
             happening in, refreshed on every inbound message. Bookings copy it at
             creation time so their notifications reply in the same place. None for
@@ -187,6 +197,7 @@ class UserSession(BaseModel):
     pending_request: TeeTimeRequest | None = None
     pending_requests: list[TeeTimeRequest] | None = None
     pending_cancellation_id: str | None = None
+    pending_proxy_target: str | None = None
     origin_channel_id: str | None = None
     channel: str | None = None
     requester_handle: str | None = None

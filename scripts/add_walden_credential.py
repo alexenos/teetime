@@ -12,7 +12,8 @@ before running this. Generate one with:
 
 Usage:
 
-    poetry run python scripts/add_walden_credential.py set <phone_number> --label "Alex"
+    poetry run python scripts/add_walden_credential.py set <phone_number> \
+        --name "Alex" --telegram-username alexenos
     (prompts for the member number and password rather than taking them as
     arguments, so neither lands in shell history; --member-number is still
     accepted for scripted use)
@@ -23,6 +24,12 @@ Usage:
 <phone_number> is whatever identity the requester's bookings already use -
 the same phone number, Discord snowflake, or Telegram user ID recorded on
 their SessionRecord/BookingRecord rows.
+
+--name and --telegram-username are what the admin's "for @X" matches against
+when booking on a friend's behalf (issue #185). A row with neither cannot be
+proxy-booked for at all - the lookup fails loudly rather than falling back to
+the shared account - so set at least one on every friend. --label is unrelated:
+a free-text note that resolves nothing.
 """
 
 import argparse
@@ -36,7 +43,13 @@ from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, init_
 from app.services.credential_service import credential_service
 
 
-async def _set(phone_number: str, member_number: str | None, label: str | None) -> None:
+async def _set(
+    phone_number: str,
+    member_number: str | None,
+    label: str | None,
+    name: str | None,
+    telegram_username: str | None,
+) -> None:
     """Prompt for whatever wasn't passed on the command line, then save.
 
     The member number is part of the Walden login, same as the password, so
@@ -54,8 +67,25 @@ async def _set(phone_number: str, member_number: str | None, label: str | None) 
     if not password:
         raise SystemExit("Password cannot be empty.")
 
-    await credential_service.set_credentials(phone_number, member_number, password, label)
-    print(f"Saved Walden credentials for {phone_number}" + (f" ({label})" if label else ""))
+    await credential_service.set_credentials(
+        phone_number,
+        member_number,
+        password,
+        label=label,
+        name=name,
+        telegram_username=telegram_username,
+    )
+    who = name or label
+    print(f"Saved Walden credentials for {phone_number}" + (f" ({who})" if who else ""))
+
+    owner = await credential_service.get_owner(phone_number)
+    if owner is not None and not owner.name and not owner.telegram_username:
+        # Said now rather than discovered later as "I don't know who Alex is"
+        # in the middle of a booking conversation.
+        print(
+            "Warning: this row has neither --name nor --telegram-username, so the admin "
+            "cannot proxy-book for them. Re-run `set` with one to make them addressable."
+        )
 
 
 async def _remove(phone_number: str) -> None:
@@ -79,9 +109,21 @@ async def _list() -> None:
         return
 
     for record in records:
-        label = f" ({record.label})" if record.label else ""
+        # Name and handle are shown because they are what "for @X" matches;
+        # an empty pair is the reason a proxy booking will not resolve.
+        identity = ", ".join(
+            part
+            for part in (
+                f"name={record.name}" if record.name else "",
+                f"telegram=@{record.telegram_username}" if record.telegram_username else "",
+                f"label={record.label}" if record.label else "",
+            )
+            if part
+        )
+        suffix = f" ({identity})" if identity else " (no name or handle - not proxy-bookable)"
         print(
-            f"{record.phone_number}{label} - added {record.created_at}, updated {record.updated_at}"
+            f"{record.phone_number}{suffix} - added {record.created_at}, "
+            f"updated {record.updated_at}"
         )
 
 
@@ -99,7 +141,21 @@ async def _main() -> None:
         default=None,
         help="Walden member number (prompted for if omitted, to avoid shell history)",
     )
-    set_parser.add_argument("--label", default=None, help="Optional note, e.g. a friend's name")
+    set_parser.add_argument(
+        "--name",
+        default=None,
+        help="Friend's display name, matched against the admin's \"for @X\" (issue #185)",
+    )
+    set_parser.add_argument(
+        "--telegram-username",
+        default=None,
+        help="Friend's Telegram @handle, matched the same way as --name",
+    )
+    set_parser.add_argument(
+        "--label",
+        default=None,
+        help="Optional free-text note; never used to resolve a target (see --name)",
+    )
 
     remove_parser = subparsers.add_parser("remove", help="Delete a stored credential")
     remove_parser.add_argument("phone_number")
@@ -113,7 +169,13 @@ async def _main() -> None:
     await init_db()
 
     if args.command == "set":
-        await _set(args.phone_number, args.member_number, args.label)
+        await _set(
+            args.phone_number,
+            args.member_number,
+            args.label,
+            args.name,
+            args.telegram_username,
+        )
     elif args.command == "remove":
         await _remove(args.phone_number)
     elif args.command == "list":

@@ -8,10 +8,24 @@ the job raised "connection is closed" before it could look for a booking. These
 tests pin the pool settings that keep that from recurring.
 """
 
+import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.models.database import _normalize_database_url, _pool_options_for, engine
+from app.models.database import (
+    _ADDED_COLUMNS,
+    _ADDED_CONVERSATION_STATES,
+    Base,
+    BookingRecord,
+    SessionRecord,
+    WaldenCredentialRecord,
+    _normalize_database_url,
+    _pool_options_for,
+    _run_column_migrations,
+    engine,
+)
+from app.models.schemas import ConversationState
 
 POSTGRES_URL = "postgresql+asyncpg://user:pw@host/db"
 
@@ -87,3 +101,112 @@ class TestOptionsReachThePool:
         expected = _pool_options_for(engine.url.drivername)
 
         assert engine.sync_engine.pool._pre_ping is bool(expected)
+
+
+class TestColumnMigrations:
+    """Columns added after a table already exists in a deployed database.
+
+    create_all() only creates missing *tables*, so a column added to a model
+    later never reaches an install that already has that table - the deployed
+    Postgres has carried `bookings` and `sessions` since the first release, and
+    `walden_credentials` since #183. _ADDED_COLUMNS is what backfills them, and
+    a column missing from that list fails only in production, on the first
+    write that touches it.
+    """
+
+    # The columns each table had at its first deployment - what an existing
+    # install already has on disk. Everything a model declares beyond these has
+    # to be in _ADDED_COLUMNS to reach that install, so this is the baseline the
+    # test below measures against. Do not extend it: a new column belongs in
+    # _ADDED_COLUMNS, which is exactly what this is here to prove.
+    ORIGINAL_COLUMNS = {
+        "sessions": [
+            "id INTEGER PRIMARY KEY",
+            "phone_number VARCHAR(20)",
+            "state VARCHAR(40)",
+            "pending_request_json TEXT",
+            "last_interaction DATETIME",
+        ],
+        "bookings": [
+            "id INTEGER PRIMARY KEY",
+            "booking_id VARCHAR(50)",
+            "phone_number VARCHAR(20)",
+            "requested_date DATE",
+            "requested_time TIME",
+            "num_players INTEGER",
+            "fallback_window_minutes INTEGER",
+            "status VARCHAR(20)",
+            "scheduled_execution_time DATETIME",
+            "actual_booked_time TIME",
+            "confirmation_number VARCHAR(100)",
+            "error_message TEXT",
+            "created_at DATETIME",
+            "updated_at DATETIME",
+        ],
+        "walden_credentials": [
+            "id INTEGER PRIMARY KEY",
+            "phone_number VARCHAR(20)",
+            "member_number_encrypted TEXT",
+            "password_encrypted TEXT",
+            "label VARCHAR(100)",
+            "created_at DATETIME",
+            "updated_at DATETIME",
+        ],
+    }
+
+    @pytest.mark.asyncio
+    async def test_every_model_column_reaches_an_existing_install(self) -> None:
+        """A column on a model but not in _ADDED_COLUMNS never reaches production.
+
+        Measured against the models rather than against _ADDED_COLUMNS itself:
+        checking that the list applies what the list contains would pass happily
+        while the one column somebody forgot to add stayed missing.
+        """
+        models = {
+            "sessions": SessionRecord,
+            "bookings": BookingRecord,
+            "walden_credentials": WaldenCredentialRecord,
+        }
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        try:
+            async with engine.begin() as conn:
+                for table, columns in self.ORIGINAL_COLUMNS.items():
+                    await conn.execute(text(f"CREATE TABLE {table} ({', '.join(columns)})"))
+
+                await _run_column_migrations(conn)
+
+                for table, model in models.items():
+                    result = await conn.execute(text(f"PRAGMA table_info({table})"))
+                    present = {row[1] for row in result.fetchall()}
+                    declared = {column.name for column in model.__table__.columns}
+                    assert declared <= present, (
+                        f"{table} is missing {sorted(declared - present)} on an existing "
+                        "install - add it to _ADDED_COLUMNS"
+                    )
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_migrations_are_idempotent(self) -> None:
+        """Run on every startup, so a second pass must be a no-op, not an error."""
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+                await _run_column_migrations(conn)
+                await _run_column_migrations(conn)
+        finally:
+            await engine.dispose()
+
+    def test_added_columns_covers_the_proxy_fields(self) -> None:
+        """The three columns #185 adds to already-deployed tables."""
+        listed = {(table, column) for table, column, _ in _ADDED_COLUMNS}
+
+        assert ("sessions", "pending_proxy_target") in listed
+        assert ("walden_credentials", "name") in listed
+        assert ("walden_credentials", "telegram_username") in listed
+
+    def test_every_added_conversation_state_is_a_real_enum_member(self) -> None:
+        """Postgres pins the enum at CREATE TABLE time; a typo here fails only there."""
+        for value in _ADDED_CONVERSATION_STATES:
+            assert value in ConversationState.__members__

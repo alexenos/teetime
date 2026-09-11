@@ -166,6 +166,11 @@ echo -n "your_webhook_secret"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECR
 # while this stays off. Generate with:
 #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENCRYPTION_KEY --data-file=-
+
+# Admin proxy booking (admin_proxy_enabled = true, issue #185). Lets this one
+# Telegram ID book on a friend's behalf ("for @alex book 9/12 at 8a"). The ID
+# must ALSO be in TELEGRAM_ALLOWED_USER_IDS above. See docs/telegram-setup.md.
+echo -n "your_user_id" | gcloud secrets versions add TELEGRAM_ADMIN_USER_ID --data-file=-
 ```
 
 ### First Deployment
