@@ -160,16 +160,21 @@ variable "credential_store_enabled" {
   description = <<-EOT
     Expose CREDENTIAL_ENCRYPTION_KEY to the running service.
 
-    Off by default: the per-friend Walden credential store (issue #179) is
-    admin-added incrementally, and a Cloud Run revision referencing a secret
-    with no version fails to deploy - same failure mode as telegram_enabled
-    below. Create a version for CREDENTIAL_ENCRYPTION_KEY in Secret Manager
-    (see README.md) BEFORE setting this to true; until then the single
-    global WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account keeps working
-    exactly as before, unaffected by this flag.
+    On: friends are being onboarded with their own Walden logins (issue #179),
+    and a stored row is unreadable without this key mounted. Nothing decrypts
+    until a booking actually runs, so a missing key does not fail the deploy -
+    it fails the 06:30 attempt, days after the request was accepted.
+
+    Ordering still matters when re-creating this project from scratch: Terraform
+    creates the secret empty, and a Cloud Run revision referencing a secret with
+    no version fails to deploy, so the CREDENTIAL_ENCRYPTION_KEY version has to
+    exist BEFORE this is true (see README.md) - the same failure mode as
+    telegram_enabled below. With no credential rows stored, the single global
+    WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account keeps working exactly as
+    before, unaffected by this flag.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "admin_proxy_enabled" {
@@ -185,11 +190,20 @@ variable "admin_proxy_enabled" {
     it tries to decrypt one - at 06:30, days after the booking was accepted,
     since nothing decrypts until the attempt runs.
 
-    Off by default, and for the same mechanical reason as
-    credential_store_enabled above: Terraform creates the secret empty, and a
-    Cloud Run revision referencing a secret with no version fails to deploy.
-    Create a version for TELEGRAM_ADMIN_USER_ID in Secret Manager BEFORE
-    setting this to true.
+    On: TELEGRAM_ADMIN_USER_ID has an enabled version, and the admin books on
+    behalf of family members who each hold their own Walden membership.
+
+    Note what this costs the admin account itself: with this on, every booking
+    it makes is intercepted and asked "for which user?", because it has no
+    Walden login of its own and must never fall back to the shared one. The
+    admin cannot book for itself unless it is also a target in the credential
+    store.
+
+    Ordering matters when re-creating this from scratch, for the same mechanical
+    reason as credential_store_enabled above: Terraform creates the secret
+    empty, and a Cloud Run revision referencing a secret with no version fails
+    to deploy. Create the TELEGRAM_ADMIN_USER_ID version BEFORE setting this
+    to true.
 
     The admin ID must ALSO be in TELEGRAM_ALLOWED_USER_IDS - the allowlist is
     checked first on every inbound update, so an admin missing from it is
@@ -197,11 +211,11 @@ variable "admin_proxy_enabled" {
 
     Unset, every user books only for themselves, exactly as before. The admin
     account has no Walden login of its own by design and never falls back to
-    the shared global account, so leaving this off removes a capability rather
-    than changing how any existing booking runs.
+    the shared global account, so turning this off removes a capability rather
+    than changing how any other user's booking runs.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "log_level" {
