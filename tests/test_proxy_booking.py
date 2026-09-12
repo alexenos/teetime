@@ -149,10 +149,12 @@ class TestStripLeadingFor:
         ],
     )
     def test_a_restated_preposition_is_dropped(self, reply: str, expected: str) -> None:
+        """Case, spacing and a leading "@" all survive; only the "for" goes."""
         assert proxy_booking.strip_leading_for(reply) == expected
 
     @pytest.mark.parametrize("reply", ["Ronald", "@ronald", "Ron Garner"])
     def test_a_bare_name_is_untouched(self, reply: str) -> None:
+        """A reply that never restated the preposition comes back unchanged."""
         assert proxy_booking.strip_leading_for(reply) == reply
 
     @pytest.mark.parametrize("reply", ["for", "  for  ", ""])
@@ -629,6 +631,7 @@ class TestProxyBookingFlow:
         # is handed, so with it this test passes even with the strip removed -
         # it proves the flow runs, not that the right name was looked up.
         async def lookup(target: str) -> list[CredentialOwner]:
+            """Match only this owner's own name or handle, nothing else."""
             wanted = proxy_booking.normalize_target(target)
             candidates = {
                 proxy_booking.normalize_target(v)
@@ -671,6 +674,7 @@ class TestProxyBookingFlow:
         owner = self._owner()
 
         async def lookup(target: str) -> list[CredentialOwner]:
+            """Match "Alex" only, so the literal lookup misses and falls back."""
             # "For Alex" is nobody; "Alex" is. That is what sends the
             # resolution on to the fallback rather than stopping at the first.
             return [owner] if proxy_booking.normalize_target(target) == "alex" else []
@@ -709,6 +713,7 @@ class TestProxyBookingFlow:
         sessions = _FakeSessions(admin)
 
         async def lookup(target: str) -> list[CredentialOwner]:
+            """Only "For Real" is on file - the stripped "Real" matches nobody."""
             return [real] if proxy_booking.normalize_target(target) == "for real" else []
 
         creds = AsyncMock()
@@ -744,6 +749,7 @@ class TestProxyBookingFlow:
         sessions = _FakeSessions(admin)
 
         async def lookup(target: str) -> list[CredentialOwner]:
+            """Both "For Real" and "Real" are on file, so the order decides."""
             wanted = proxy_booking.normalize_target(target)
             return [
                 o

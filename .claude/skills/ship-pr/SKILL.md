@@ -15,28 +15,41 @@ Two separate rules both suppress the automatic pass, and either is enough:
 
 - **Drafts are skipped by default.** The bot says so itself: *"Draft PRs are not
   automatically reviewed by default."*
-- **The repo has fewer than 10 stars**, which suppresses automatic reviews even
-  once the PR is out of draft: *"This repository does not receive automatic
+- **The repo is under the star threshold**, which suppresses automatic reviews
+  even once the PR is out of draft: *"This repository does not receive automatic
   reviews because it has fewer than 10 stars."*
 
-So the trigger is a comment, posted by you:
+The second one is the surprise, and the reason this section exists: taking a PR
+ready-for-review looks like it should start a review, and does not.
+
+Both conditions are mutable, so treat them as observed rather than permanent -
+as of 2026-09-12 the repo had 0 stars, and the bot reported a plan allowing one
+included review per hour. Re-check rather than assume when the behaviour differs
+from this:
 
 ```bash
-gh pr comment <N> --body "@coderabbitai review"
+gh api repos/alexenos/teetime --jq .stargazers_count   # against the threshold above
+```
+
+and read the quota off the bot's own "Included review availability" line, which
+it prints on every review.
+
+So the trigger is a comment, posted by you, naming the commit you want looked at
+(CodeRabbit is incremental and will not re-review commits it has already seen):
+
+```bash
+gh pr comment <N> --body "@coderabbitai review - new commit $(git rev-parse --short HEAD)"
 ```
 
 Post it **when you open the PR**, and **again after every push** you want
-reviewed. Taking a PR out of draft does *not* trigger a review by itself — the
-second rule still applies — so a ready-for-review transition needs the same
-comment. Say in the comment which commit is new, because CodeRabbit is
-incremental and will not re-review commits it has already seen.
+reviewed, including a ready-for-review transition.
 
-Its walkthrough, "Merge Risk", and pre-merge checks are stamped with the commit
-they covered (`up to b3811`). After a later push those are **stale**, not
-approval of the current head — check the commit they name before believing them.
+Its walkthrough, "Merge Risk", and pre-merge checks are each stamped with the
+commit they covered - the summary says `up to <short-sha>`. After a later push
+those are **stale**, not approval of the current head, so compare the sha they
+name against `git rev-parse --short HEAD` before believing them.
 
-Budget: the current plan allows **1 included review per hour**, and the bot says
-how many remain. Spend it on a commit that is ready, not on a work in progress.
+Spend the review on a commit that is ready, not on a work in progress.
 
 ## 1. Branch and push
 
