@@ -485,6 +485,33 @@ class Settings(BaseSettings):
     # Wait strategy for Selenium operations (fixed, event_driven, hybrid)
     wait_mode: WaitMode = WaitMode.FIXED
 
+    # --- The observer job (app/observer/, issue #189) ---------------------
+    #
+    # A separate Cloud Run job that photographs the tee sheet once a second
+    # across the window and never reserves anything. It exists because two
+    # incompatible explanations - a late gate, or a faster rival - fit every
+    # artifact the racer can produce, and only an independent reader of the
+    # sheet separates them. These settings are read by that job alone; none of
+    # them is on the booking path.
+    #
+    # Defaulted on, and wired into terraform/ as env on the observer job: a
+    # flag defaulted off is a flag that never runs, which is how
+    # WALDEN_DIRECT_HTTP_BOOKING sat dead in production for months.
+    observer_enabled: bool = True
+
+    # Whose due booking tells the observer which date to watch. Empty falls
+    # back to user_phone_number, and if that is empty too the earliest due
+    # booking of the morning is used. When the chosen requester has nothing due
+    # the observer still watches today + days_in_advance, because a non-Friday
+    # morning with no booking is still a free control group.
+    observer_phone_number: str = ""
+
+    # Nine snapshots at +0s..+8s. The window is decided inside three seconds
+    # and the first grant to anyone has never been seen later than club :06, so
+    # eight seconds covers the contested span with room either side.
+    observer_snapshot_count: int = 9
+    observer_snapshot_interval_ms: int = 1000
+
     @field_validator("discord_channel_id")
     @classmethod
     def _validate_discord_channel_id(cls, v: str) -> str:

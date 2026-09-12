@@ -500,3 +500,99 @@ variable "debug_artifacts_bucket" {
   type        = string
   default     = "gen-lang-client-0822973627-teetime-debug-artifacts"
 }
+
+###############################################################################
+# The observer job (issue #189). See terraform/observer.tf.
+###############################################################################
+
+variable "observer_enabled" {
+  description = <<-EOT
+    Whether the read-only tee sheet observer runs each morning.
+
+    On by default, and on deliberately: this job exists because two
+    incompatible explanations for four lost Fridays - a late gate, or a faster
+    rival - both fit every artifact the racer can produce, and they call for
+    opposite fixes. Only an independent reader of the sheet during the window
+    separates them. A flag defaulted off is a flag that never runs, which is
+    how WALDEN_DIRECT_HTTP_BOOKING sat dead in production for months.
+
+    Turning this off destroys the Cloud Scheduler entry but keeps the job, so
+    it can still be executed by hand for a dry run.
+
+    The observer never sends a Reserve, so it cannot cost a booking. The one
+    way it could interfere is session contention on the shared credential, and
+    the 06:26/06:28 ordering makes the observer the casualty of that rather
+    than the race.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "observer_schedule" {
+  description = <<-EOT
+    Cron schedule for the observer, in var.timezone.
+
+    06:26, two minutes ahead of the racer's 06:28. Do not move this to or past
+    06:28: the earlier login is what guarantees that any future single-session
+    enforcement by the club would drop the observer rather than the booking.
+
+    Every morning, not just Fridays. Non-Fridays are a control group showing
+    what an uncontested gate looks like, and they come free.
+  EOT
+  type        = string
+  default     = "26 6 * * *"
+}
+
+variable "observer_phone_number" {
+  description = <<-EOT
+    Whose due booking tells the observer which date to watch.
+
+    Empty falls back to USER_PHONE_NUMBER, and then to the earliest booking due
+    that morning. Phase 0 is scoped to a single booking job - the founding
+    member's - so this is normally left empty.
+
+    When the chosen requester has nothing due, the observer still watches
+    today + DAYS_IN_ADVANCE, which is the sheet that opens at the window
+    regardless of whether anyone asked for a tee time on it.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "observer_snapshot_count" {
+  description = <<-EOT
+    How many snapshots to take, one per interval from the window.
+
+    Nine, giving +0s through +8s. The window is decided inside about three
+    seconds and the first grant to anyone has never been observed later than
+    club :06, so eight seconds covers the contested span with room either side.
+  EOT
+  type        = number
+  default     = 9
+}
+
+variable "observer_snapshot_interval_ms" {
+  description = "Milliseconds between snapshots. A day-tab re-render costs ~730ms, so 1000 holds cadence."
+  type        = number
+  default     = 1000
+}
+
+variable "observer_cpu" {
+  description = "CPU for the observer job. Its own container, so it contends with nothing that races."
+  type        = string
+  default     = "1"
+}
+
+variable "observer_memory" {
+  description = <<-EOT
+    Memory for the observer job.
+
+    Headless Chrome peaks around 1 GiB with a 150-slot tee sheet loaded, and
+    the observer additionally holds all nine snapshots in memory until the
+    window has passed (~6MB, uploaded afterwards so no network round trip sits
+    between two snapshots). 2Gi for the same reason the service uses 2Gi: at
+    1Gi the container was OOM-killed mid-booking on 2026-08-02.
+  EOT
+  type        = string
+  default     = "2Gi"
+}
