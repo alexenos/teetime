@@ -8,6 +8,7 @@ processing booking requests, and executing reservations at the scheduled time.
 import asyncio
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from app.config import settings
@@ -23,6 +24,7 @@ from app.providers.base import BatchBookingRequest, BookingResult, ReservationPr
 from app.services.credential_service import credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
+from app.services.proxy_booking import is_proxy_admin, split_proxy_target
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
 
@@ -100,6 +102,45 @@ def _normalize_reply(message: str) -> str:
     return " ".join(message.strip().lower().strip(".,!?;:'\" ").split())
 
 
+# Replies that abandon a "for which user?" prompt instead of answering it.
+# Without these the admin would be stuck re-reading the question: every other
+# reply in that state is treated as a name to look up, so "never mind" would
+# come back as "I don't know who never is".
+PROXY_TARGET_ABORTS = frozenset(
+    {"cancel", "nevermind", "never mind", "stop", "forget it", "no", "nvm", "abort"}
+)
+
+
+@dataclass(frozen=True)
+class _BookingAttribution:
+    """Whose booking this becomes, and where its result is sent.
+
+    For an ordinary requester every field is simply their own session's. For a
+    proxy admin booking on a friend's behalf (issue #185) they are the
+    friend's: the record carries the friend's identity, so it shows up in the
+    friend's history and books under the friend's Walden membership, and the
+    confirmation or failure days later goes to the friend's own conversation -
+    exactly as if they had asked for it themselves. The admin sees only the
+    immediate acknowledgement, in their own chat.
+    """
+
+    phone_number: str
+    origin_channel_id: str | None
+    channel: str | None
+    requester_handle: str | None
+    # What to call the friend when telling the admin what was booked. None when
+    # this is the requester's own booking and there is nobody else to name.
+    display_name: str | None
+
+    @property
+    def is_proxy(self) -> bool:
+        return self.display_name is not None
+
+    def suffix(self) -> str:
+        """ " for Alex", or "" for an ordinary booking - to append to a reply."""
+        return f" for {self.display_name}" if self.display_name else ""
+
+
 class BookingService:
     """
     Manages tee time booking requests and SMS conversations.
@@ -154,6 +195,11 @@ class BookingService:
         follow-up (issue #179 flags real open questions there: Cloud Run
         resource limits and untested club-side behavior under simultaneous
         sessions); callers here still run one requester group at a time.
+
+        Raises ProxyAdminHasNoCredentialError if the booking is somehow
+        attributed to the proxy admin's own identity (issue #185) - the one
+        requester for whom the fallback below must never happen. Every caller
+        already treats an exception from this lookup as a loud booking failure.
         """
         if self._reservation_provider is None:
             return None
@@ -229,6 +275,15 @@ class BookingService:
         if requester_handle is not None:
             session.requester_handle = requester_handle or None
 
+        # Resolve who this message is on behalf of before anything reads it.
+        # Only the single configured admin ID can be booking for someone else;
+        # for everyone else this is a no-op and the message is untouched.
+        if is_proxy_admin(phone_number):
+            early_response, message = await self._prepare_proxy_turn(session, message)
+            if early_response is not None:
+                await self.update_session(session)
+                return early_response
+
         affirmative = self._confirmation_shortcut(session, message)
         if affirmative is not None:
             response = await self._handle_confirmation_shortcut(session, affirmative)
@@ -249,8 +304,183 @@ class BookingService:
 
         return response
 
+    async def _prepare_proxy_turn(
+        self, session: UserSession, message: str
+    ) -> tuple[str | None, str]:
+        """Settle who the admin is booking for, before the message is parsed.
+
+        Returns ``(early_response, message_to_parse)``. A non-None
+        early_response means this turn is already answered - the target could
+        not be resolved, or the admin only named one - and nothing else should
+        run. Otherwise the message comes back with any "for @X" clause peeled
+        off, and session.pending_proxy_target names the friend.
+
+        Called only for the configured admin ID (issue #185).
+        """
+        if session.state == ConversationState.AWAITING_PROXY_TARGET:
+            # We asked "for which user?" last turn, so the whole message is the
+            # answer - not a new request.
+            if _normalize_reply(message) in PROXY_TARGET_ABORTS:
+                session.pending_request = None
+                session.pending_requests = None
+                session.pending_proxy_target = None
+                session.state = ConversationState.IDLE
+                return (
+                    "Okay, I won't book that. Tell me who it's for when you're ready.",
+                    message,
+                )
+
+            unresolved = await self._resolve_proxy_target(session, message)
+            if unresolved is not None:
+                return unresolved, message
+
+            # Target settled; pick the stashed request back up where it left
+            # off, so the admin sees the same confirmation they would have got
+            # had they named the friend in the first message.
+            stashed = ParsedIntent(
+                intent="book",
+                raw_message=message,
+                tee_time_request=session.pending_request,
+                tee_time_requests=session.pending_requests,
+            )
+            session.state = ConversationState.IDLE
+            return await self._handle_book_intent(session, stashed), message
+
+        target, remainder = split_proxy_target(message)
+        if target is None:
+            return None, message
+
+        unresolved = await self._resolve_proxy_target(session, target)
+        if unresolved is not None:
+            # Drop anything held from an earlier turn. This message named a new
+            # target, so its own request was never parsed - and the next reply
+            # is read as a name, which would otherwise resume a *previous*
+            # booking under it. That is how "for @alex book 9/12" (unconfirmed),
+            # then a mistyped "for @nobdy book 9/20", then "@sam" ended up
+            # offering Sam the 9/12 slot nobody had asked him about.
+            session.pending_request = None
+            session.pending_requests = None
+            session.pending_proxy_target = None
+            return unresolved, message
+
+        if not remainder:
+            # "for @alex" and nothing else. The friend is settled; ask for the
+            # booking rather than sending an empty message to the parser.
+            display_name = await self._proxy_display_name(session)
+            return f"Booking for {display_name}. What date and time?", remainder
+
+        return None, remainder
+
+    async def _resolve_proxy_target(self, session: UserSession, target: str) -> str | None:
+        """Look "@X" up in the credential store and remember who it is.
+
+        Returns None on success, having set session.pending_proxy_target.
+        Returns the message to send back when the target cannot be pinned to
+        exactly one friend.
+
+        Both failure modes are deliberately loud, and both leave the session in
+        AWAITING_PROXY_TARGET so the next message is read as another attempt at
+        the name. Falling back to the shared global account would book somebody
+        a round under a membership that isn't theirs - and, with the club's
+        one-round-per-member-per-day rule, could quietly consume the slot the
+        real booking needed.
+        """
+        matches = await credential_service.find_by_name_or_telegram_username(target)
+
+        if not matches:
+            session.state = ConversationState.AWAITING_PROXY_TARGET
+            logger.info("Proxy target %r matched no stored credential", target)
+            return (
+                f'I don\'t know who "{target}" is - nobody with that name or Telegram '
+                "handle has a stored Walden login. Add one with "
+                "add_walden_credential.py set <id> --name ... --telegram-username ..., "
+                "or tell me a different name."
+            )
+
+        if len(matches) > 1:
+            session.state = ConversationState.AWAITING_PROXY_TARGET
+            names = ", ".join(sorted(owner.display_name for owner in matches))
+            logger.warning("Proxy target %r matched %d credentials", target, len(matches))
+            return (
+                f'"{target}" matches more than one person ({names}). '
+                "Tell me which one, using a name or handle that only fits them."
+            )
+
+        owner = matches[0]
+        session.pending_proxy_target = owner.phone_number
+        logger.info("Proxy booking target %r resolved to %s", target, owner.phone_number)
+        return None
+
+    async def _proxy_display_name(self, session: UserSession) -> str:
+        """What to call the friend this session is currently booking for."""
+        attribution = await self._attribution_for(session)
+        return attribution.display_name or attribution.phone_number
+
+    async def _attribution_for(self, session: UserSession) -> _BookingAttribution:
+        """Whose booking this session's pending request becomes.
+
+        The admin's own conversation stays theirs - the echo-back and the
+        "reply yes" land in their chat, where they typed. Only the booking
+        record is the friend's, and with it the notification days later, which
+        goes to wherever that friend last talked to the bot (their group, or
+        their private chat) rather than to the admin.
+        """
+        target = session.pending_proxy_target
+        if not target or not is_proxy_admin(session.phone_number):
+            return _BookingAttribution(
+                phone_number=session.phone_number,
+                origin_channel_id=session.origin_channel_id,
+                channel=session.channel,
+                requester_handle=session.requester_handle,
+                display_name=None,
+            )
+
+        owner = await credential_service.get_owner(target)
+        friend_session = await database_service.get_session(target)
+
+        requester_handle = None
+        if friend_session is not None and friend_session.requester_handle:
+            requester_handle = friend_session.requester_handle
+        elif owner is not None and owner.telegram_username:
+            # They have never spoken to the bot in a group, so there is no
+            # captured mention - build one from the stored handle so a result
+            # landing in a shared chat still names the right person.
+            requester_handle = f"@{owner.telegram_username} "
+
+        return _BookingAttribution(
+            phone_number=target,
+            origin_channel_id=friend_session.origin_channel_id if friend_session else None,
+            # The friend's own channel when we know it; otherwise the admin's,
+            # which is the channel their identity was just resolved on.
+            channel=(friend_session.channel if friend_session else None) or session.channel,
+            requester_handle=requester_handle,
+            display_name=owner.display_name if owner else target,
+        )
+
+    def _clear_pending_proxy_target(self, session: UserSession) -> None:
+        """Forget who the admin was booking for, now that the flow has ended.
+
+        Held only for the length of one booking conversation. Left set, the
+        admin's next unrelated "book 9/20 at 8a" would silently go to whoever
+        they happened to name last - precisely the kind of misattributed
+        booking this feature must not produce.
+        """
+        session.pending_proxy_target = None
+
     async def _process_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
         """Route the parsed intent to the appropriate handler."""
+        # Booking for someone else is the whole of v1 (issue #185). Cancelling
+        # or listing another friend's bookings is a deliberate follow-up, so
+        # "for @alex cancel" is refused rather than quietly applied to the
+        # admin's own (empty) history.
+        if session.pending_proxy_target and parsed.intent in ("cancel", "modify", "status"):
+            display_name = await self._proxy_display_name(session)
+            self._clear_pending_proxy_target(session)
+            session.state = ConversationState.IDLE
+            return (
+                f"I can only book on someone else's behalf right now, not {parsed.intent} "
+                f"for them. {display_name} can ask me to do that themselves."
+            )
         # Check if user is in the middle of selecting a booking to cancel
         # This takes priority over Gemini's parsed intent to avoid misinterpreting
         # date/time responses as new booking requests
@@ -277,6 +507,11 @@ class BookingService:
         if parsed.tee_time_requests and len(parsed.tee_time_requests) > 1:
             session.pending_requests = parsed.tee_time_requests
             session.pending_request = None
+
+            ask_target = self._ask_for_proxy_target(session)
+            if ask_target is not None:
+                return ask_target
+
             session.state = ConversationState.AWAITING_CONFIRMATION
 
             booking_summaries = []
@@ -287,8 +522,9 @@ class BookingService:
                     f"{i}. {date_str} at {time_str} for {request.num_players} players"
                 )
 
+            attribution = await self._attribution_for(session)
             return (
-                f"I'll book {len(parsed.tee_time_requests)} tee times:\n"
+                f"I'll book {len(parsed.tee_time_requests)} tee times{attribution.suffix()}:\n"
                 + "\n".join(booking_summaries)
                 + "\n\nReply 'yes' to confirm all bookings."
             )
@@ -300,15 +536,44 @@ class BookingService:
 
         session.pending_request = parsed.tee_time_request
         session.pending_requests = None
+
+        ask_target = self._ask_for_proxy_target(session)
+        if ask_target is not None:
+            return ask_target
+
         session.state = ConversationState.AWAITING_CONFIRMATION
 
         request = parsed.tee_time_request
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
 
+        attribution = await self._attribution_for(session)
         return (
-            f"I'll book a tee time for {date_str} at {time_str} "
+            f"I'll book a tee time{attribution.suffix()} for {date_str} at {time_str} "
             f"for {request.num_players} players. Reply 'yes' to confirm."
+        )
+
+    def _ask_for_proxy_target(self, session: UserSession) -> str | None:
+        """Ask the admin who a booking is for, when they didn't say.
+
+        Returns the question (and parks the session in AWAITING_PROXY_TARGET,
+        holding the request just parsed) when this is the admin booking with no
+        target named, and None in every other case - which is every non-admin
+        user, and the admin after a "for @X" clause has already been resolved.
+
+        Asked at this point rather than before parsing because the admin may
+        have typed neither a target nor a date ("book me a tee time"). Waiting
+        until there is a request to hold means the two prompts cannot fight
+        over the same turn: details first, then who it's for, then confirm.
+        """
+        if not is_proxy_admin(session.phone_number) or session.pending_proxy_target:
+            return None
+
+        session.state = ConversationState.AWAITING_PROXY_TARGET
+        return (
+            "For which user? This account has no Walden login of its own, so every "
+            "booking has to be made under a friend's. Reply with their name or "
+            "Telegram handle."
         )
 
     def _confirmation_shortcut(self, session: UserSession, message: str) -> bool | None:
@@ -348,6 +613,7 @@ class BookingService:
 
         session.pending_request = None
         session.pending_requests = None
+        self._clear_pending_proxy_target(session)
         session.state = ConversationState.IDLE
         return "Okay, I won't book that. Let me know if you'd like a different date or time."
 
@@ -361,25 +627,36 @@ class BookingService:
         if not session.pending_request:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
+        attribution = await self._attribution_for(session)
+
         try:
             booking = await self.create_booking(
-                session.phone_number,
+                attribution.phone_number,
                 session.pending_request,
-                session.origin_channel_id,
-                channel=session.channel,
-                requester_handle=session.requester_handle,
+                attribution.origin_channel_id,
+                channel=attribution.channel,
+                requester_handle=attribution.requester_handle,
             )
         except ValueError as e:
             session.pending_request = None
+            self._clear_pending_proxy_target(session)
             session.state = ConversationState.IDLE
             return str(e)
 
         session.pending_request = None
+        self._clear_pending_proxy_target(session)
         session.state = ConversationState.IDLE
 
         request = booking.request
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
+        # Who the booking is for, when that is not the person being replied to.
+        # The result itself goes to them, not here - so the admin is told that
+        # explicitly rather than being left waiting for an outcome message.
+        suffix = attribution.suffix()
+        result_note = (
+            f" {attribution.display_name} will get the result." if attribution.is_proxy else ""
+        )
 
         if booking.status == BookingStatus.SUCCESS:
             booked_time_str = (
@@ -389,11 +666,11 @@ class BookingService:
             )
             return (
                 f"Booking confirmed! Reserved {date_str} at {booked_time_str} "
-                f"for {request.num_players} players."
+                f"for {request.num_players} players{suffix}."
             )
         elif booking.status == BookingStatus.FAILED:
             return (
-                f"Booking attempted for {date_str} at {time_str} "
+                f"Booking attempted{suffix} for {date_str} at {time_str} "
                 f"for {request.num_players} players, but it failed. "
                 f"I'll text you with more details."
             )
@@ -403,22 +680,22 @@ class BookingService:
             # up front; the outcome arrives as a separate message.
             return (
                 f"On it - booking {date_str} at {time_str} "
-                f"for {request.num_players} players now. "
-                f"This takes a minute or two; I'll message you with the result."
+                f"for {request.num_players} players{suffix} now. "
+                f"This takes a minute or two; I'll message you with the result." + result_note
             )
 
         exec_time = booking.scheduled_execution_time
         if exec_time:
             exec_str = exec_time.strftime("%A at %I:%M %p CT")
             return (
-                f"Booking scheduled! I'll attempt to reserve {date_str} at {time_str} "
+                f"Booking scheduled{suffix}! I'll attempt to reserve {date_str} at {time_str} "
                 f"for {request.num_players} players. The booking window opens {exec_str}. "
-                f"I'll text you with the result."
+                f"I'll text you with the result." + result_note
             )
         else:
             return (
-                f"Booking request received for {date_str} at {time_str} "
-                f"for {request.num_players} players. I'll text you with updates."
+                f"Booking request received{suffix} for {date_str} at {time_str} "
+                f"for {request.num_players} players. I'll text you with updates." + result_note
             )
 
     async def _handle_confirm_multiple_bookings(self, session: UserSession) -> str:
@@ -429,15 +706,17 @@ class BookingService:
         successful_bookings: list[TeeTimeBooking] = []
         failed_requests: list[tuple[TeeTimeRequest, str]] = []
 
+        attribution = await self._attribution_for(session)
+
         for request in session.pending_requests:
             try:
                 booking = await self.create_booking(
-                    session.phone_number,
+                    attribution.phone_number,
                     request,
-                    session.origin_channel_id,
+                    attribution.origin_channel_id,
                     defer_execution=True,
-                    channel=session.channel,
-                    requester_handle=session.requester_handle,
+                    channel=attribution.channel,
+                    requester_handle=attribution.requester_handle,
                 )
                 successful_bookings.append(booking)
             except ValueError as e:
@@ -445,6 +724,7 @@ class BookingService:
 
         session.pending_requests = None
         session.pending_request = None
+        self._clear_pending_proxy_target(session)
         session.state = ConversationState.IDLE
 
         # Bookings whose window is already open run as ONE batch: a single
@@ -524,7 +804,17 @@ class BookingService:
                 time_str = request.requested_time.strftime("%I:%M %p")
                 response_parts.append(f"Could not schedule {date_str} at {time_str}: {error}")
 
-        return "\n\n".join(response_parts) if response_parts else "No bookings were created."
+        if not response_parts:
+            return "No bookings were created."
+
+        if attribution.is_proxy:
+            # Said once, up front, rather than threaded through every line
+            # above: these are all the same friend's bookings, and the admin
+            # needs to know the outcomes go to them rather than here.
+            response_parts.insert(0, f"Booking for {attribution.display_name}.")
+            response_parts.append(f"{attribution.display_name} will get the results.")
+
+        return "\n\n".join(response_parts)
 
     async def _handle_status_intent(self, session: UserSession) -> str:
         user_bookings = await database_service.get_bookings(phone_number=session.phone_number)
@@ -921,8 +1211,20 @@ class BookingService:
             The created TeeTimeBooking record.
 
         Raises:
-            ValueError: If multi-player booking is requested within 48 hours.
+            ValueError: If multi-player booking is requested within 48 hours, or
+                if the booking is attributed to the proxy admin's own identity.
         """
+        # The proxy admin books as a friend or not at all (issue #185). Refused
+        # here as well as in the credential lookup because this is the point
+        # where it is still a conversation: the admin gets told why, instead of
+        # a booking record being written that can only fail hours later, at
+        # 6:30, with the shared account's slot already committed.
+        if is_proxy_admin(phone_number):
+            raise ValueError(
+                "This admin account has no Walden login of its own, so it can only book "
+                "on a friend's behalf. Say who it's for, e.g. \"for @alex book 9/12 at 8a\"."
+            )
+
         # Check 48-hour restriction for multi-player bookings
         if request.num_players > 1:
             now_ct = CTDateTime.now()

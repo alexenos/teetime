@@ -47,6 +47,9 @@ you are satisfied.
 ```dotenv
 TELEGRAM_BOT_TOKEN=<token from step 2>
 TELEGRAM_ALLOWED_USER_IDS=<id from step 3>
+# Optional: lets this one ID book on a friend's behalf. See "Booking for
+# someone else" below. Leave empty to disable.
+TELEGRAM_ADMIN_USER_ID=
 TELEGRAM_WEBHOOK_SECRET=<secret from step 4>
 TELEGRAM_WEBHOOK_BASE_URL=https://<your Cloud Run URL>
 ```
@@ -79,6 +82,9 @@ those secrets do not exist until Terraform has created them.
 PROJECT_ID="teetime"
 printf '%s' "<bot token>"     | gcloud secrets versions add TELEGRAM_BOT_TOKEN --data-file=- --project=$PROJECT_ID
 printf '%s' "<your user id>"  | gcloud secrets versions add TELEGRAM_ALLOWED_USER_IDS --data-file=- --project=$PROJECT_ID
+# Only if you want proxy booking (see "Booking for someone else"); also set
+# admin_proxy_enabled = true in terraform, AFTER adding this version.
+printf '%s' "<your user id>"  | gcloud secrets versions add TELEGRAM_ADMIN_USER_ID --data-file=- --project=$PROJECT_ID
 printf '%s' "<webhook secret>"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECRET --data-file=- --project=$PROJECT_ID
 ```
 
@@ -140,6 +146,86 @@ Telegram marks it structurally in the update's `entities`, so the removal cuts
 the marked ranges rather than pattern-matching the text: a mention of someone
 else, or a `/command@otherbot` aimed at a different bot in the same group, is
 left alone.
+
+## Booking for someone else (admin proxy)
+
+One designated Telegram account can book under a *specific friend's* Walden
+membership — for diagnosing a failed booking, checking that a newly added
+credential actually works, or just helping someone out. Set
+`TELEGRAM_ADMIN_USER_ID` to that one ID (it must also be in
+`TELEGRAM_ALLOWED_USER_IDS`; the allowlist is checked first, so an admin missing
+from it is simply ignored). Every other user keeps booking only for themselves.
+
+**Prerequisite: the per-friend credential store must be on**
+(`credential_store_enabled = true`, with a versioned
+`CREDENTIAL_ENCRYPTION_KEY`). Proxy booking always books under a friend's stored
+login and never falls back to the shared account, so without the decryption key
+mounted every proxy booking fails — at 6:30, days after it was accepted, since
+nothing decrypts until the attempt runs. Terraform enforces this with a
+precondition rather than letting it deploy.
+
+```
+dax.garner:
+@northgateteetimebot for @alex book 9/12 at 8a
+
+NorthgateTeetimebot:
+@dax.garner I'll book a tee time for Alex for Saturday, September 12 at
+08:00 AM for 4 players. Reply 'yes' to confirm.
+```
+
+Leave the target out and the bot asks for it, holding the request across the
+turn:
+
+```
+dax.garner:
+@northgateteetimebot book 9/12 at 8a
+
+NorthgateTeetimebot:
+@dax.garner For which user? This account has no Walden login of its own, so
+every booking has to be made under a friend's. Reply with their name or
+Telegram handle.
+
+dax.garner:
+@alex
+```
+
+What "@alex" matches is the `--name` and `--telegram-username` fields on that
+friend's credential row:
+
+```bash
+poetry run python scripts/add_walden_credential.py set <telegram user id> \
+    --name "Alex" --telegram-username alexenos
+```
+
+Matching is case-insensitive. The leading `@` is **required** in the `for @X`
+clause — it is what separates a target from ordinary English, so that
+`for 4 players, book 9/12` is read as a booking rather than as a friend named
+"4". It is only a marker, not a claim that the word is a Telegram handle: a
+stored `--name` matches through it fine. Omitting it costs a turn rather than
+the request (`for alex book 9/12` is parsed as a booking, then the bot asks who
+it is for), and answering that question takes a bare name either way.
+
+`--label` is *not* matched — it stayed a free-text admin note. `list` shows
+which rows have neither and are therefore not addressable.
+
+Three properties are deliberate, and all three exist to stop a round being
+booked under the wrong membership:
+
+- **The admin has no Walden login of its own.** No row in `walden_credentials`,
+  and it does not fall back to the shared global account either — a booking
+  attributed to the admin is refused outright, in the conversation and again in
+  the credential lookup.
+- **An unresolved or ambiguous target fails loudly.** A typo, a friend who has
+  not been added yet, or a name colliding with someone else's handle all come
+  back as a question, never as a guess.
+- **The booking is the friend's, the conversation is the admin's.** The record
+  carries the friend's identity, so it runs under their membership and appears
+  in their history, and the confirmation or failure days later goes to *their*
+  conversation. The admin gets only the immediate acknowledgement, in their own
+  chat.
+
+Cancelling or checking status on someone else's behalf is not supported yet;
+the bot says so rather than applying it to the admin's own history.
 
 ## How it maps onto the existing design
 

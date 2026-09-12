@@ -1,7 +1,7 @@
 import logging
 from enum import Enum
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     # Comma-separated Telegram user IDs allowed to talk to the bot. Empty means
     # nobody, matching the Discord allowlist - fail closed.
     telegram_allowed_user_ids: str = ""
+    # The single Telegram user ID allowed to book on another friend's behalf
+    # (issue #185): "for @alex book 9/12 at 8a". Not a role any allowed user
+    # can hold - exactly one ID, and it must also appear in
+    # telegram_allowed_user_ids to reach the bot at all; this is an extra flag
+    # on top of the allowlist, never a substitute for it. Empty (the default)
+    # means nobody can proxy-book and every user books only for themselves.
+    #
+    # The admin deliberately has no Walden login of its own: every booking it
+    # makes is attributed to a real friend, and an unresolved target fails
+    # loudly rather than falling back to the shared global account. See
+    # app/services/proxy_booking.py.
+    telegram_admin_user_id: str = ""
     # Shared secret Telegram echoes back in X-Telegram-Bot-Api-Secret-Token.
     # This is the entire authentication story for a public webhook, so an unset
     # value means the endpoint refuses every update rather than trusting the
@@ -513,11 +525,57 @@ class Settings(BaseSettings):
                 )
         return v
 
+    @field_validator("telegram_admin_user_id")
+    @classmethod
+    def _validate_telegram_admin_user_id(cls, v: str) -> str:
+        """Reject a TELEGRAM_ADMIN_USER_ID that is not a single numeric ID.
+
+        Same reasoning as the allowlist above, plus one of its own: this value
+        decides who may book under someone else's Walden account, so a typo
+        that silently parses to nothing must be caught at load time rather
+        than discovered as "the bot ignored my 'for @alex'".
+        """
+        v = v.strip()
+        if not v:
+            return v
+        if not v.isdigit():
+            raise ValueError(
+                "TELEGRAM_ADMIN_USER_ID must be a single numeric Telegram user ID; "
+                f"got {v!r}. A @username is not an ID - message @userinfobot in "
+                "Telegram to get yours. Leave it unset to disable proxy booking."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _warn_if_admin_not_allowlisted(self) -> "Settings":
+        """Warn when the proxy admin cannot actually reach the bot.
+
+        The allowlist is checked first on every inbound update, so an admin ID
+        missing from it is not a smaller problem than a wrong ID - it is the
+        same problem, and its symptom is total silence. Warned rather than
+        raised: the allowlist is loaded from a secret whose value this process
+        may legitimately not control, and a hard failure here would take the
+        6:30 booking run down over a feature it does not use.
+        """
+        admin = self.telegram_admin_user_id.strip()
+        if admin and admin not in self.telegram_allowed_ids():
+            logger.warning(
+                "TELEGRAM_ADMIN_USER_ID (%s) is not in TELEGRAM_ALLOWED_USER_IDS; the admin "
+                "cannot talk to the bot at all, so proxy booking is effectively off. "
+                "Add the ID to the allowlist as well.",
+                admin,
+            )
+        return self
+
     def telegram_allowed_ids(self) -> frozenset[str]:
         """The Telegram allowlist as a set of IDs, empty when unset."""
         return frozenset(
             piece.strip() for piece in self.telegram_allowed_user_ids.split(",") if piece.strip()
         )
+
+    def telegram_admin_id(self) -> str | None:
+        """The single proxy-booking admin's Telegram ID, or None when unset."""
+        return self.telegram_admin_user_id.strip() or None
 
     def walden_sweep_offsets_ms(self) -> tuple[int, ...]:
         """The sweep ladder as ordered, deduplicated, non-negative offsets.

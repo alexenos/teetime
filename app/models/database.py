@@ -103,6 +103,10 @@ class SessionRecord(Base):
             through the conversation. NULL when state is IDLE.
         pending_cancellation_id: Booking ID awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for confirmation.
+        pending_proxy_target: The friend the proxy admin is booking for, as
+            typed (issue #185). Held on the admin's own session row - the
+            conversation is theirs; only the resulting booking is attributed to
+            the friend. NULL for everyone else.
         channel: Messaging channel this conversation is happening over
             ("discord", "telegram" or "twilio"). NULL on rows written before
             this column existed, which fall back to MESSAGING_CHANNEL.
@@ -121,6 +125,7 @@ class SessionRecord(Base):
     state: Column[Any] = Column(Enum(ConversationState), default=ConversationState.IDLE)
     pending_request_json = Column(Text, nullable=True)
     pending_cancellation_id = Column(String(50), nullable=True)
+    pending_proxy_target = Column(String(64), nullable=True)
     origin_channel_id = Column(String(32), nullable=True)
     channel = Column(String(16), nullable=True)
     requester_handle = Column(String(64), nullable=True)
@@ -148,9 +153,16 @@ class WaldenCredentialRecord(Base):
             ID depending on channel), unique - one credential per requester.
         member_number_encrypted: Walden member number, Fernet-encrypted.
         password_encrypted: Walden password, Fernet-encrypted.
-        label: Optional human-readable note (e.g. a friend's name) purely for
-            admin bookkeeping; never used to resolve which credential to book
-            under.
+        name: The friend's display name, matched against what the proxy admin
+            types after "for @" (issue #185). Unlike label this IS used to
+            resolve a credential, so a row without one cannot be proxy-booked
+            for by name.
+        telegram_username: The friend's Telegram @handle, without the "@",
+            matched the same way as name - for when the handle is more natural
+            to type than the name.
+        label: Optional free-text note purely for admin bookkeeping; never used
+            to resolve which credential to book under. Distinct from name for
+            exactly that reason - see credential_service.
         created_at: When this credential was added.
         updated_at: When this credential was last changed.
     """
@@ -161,6 +173,8 @@ class WaldenCredentialRecord(Base):
     phone_number = Column(String(20), unique=True, nullable=False, index=True)
     member_number_encrypted = Column(Text, nullable=False)
     password_encrypted = Column(Text, nullable=False)
+    name = Column(String(100), nullable=True)
+    telegram_username = Column(String(64), nullable=True)
     label = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -229,6 +243,9 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("bookings", "channel", "VARCHAR(16)"),
     ("sessions", "requester_handle", "VARCHAR(64)"),
     ("bookings", "requester_handle", "VARCHAR(64)"),
+    ("sessions", "pending_proxy_target", "VARCHAR(64)"),
+    ("walden_credentials", "name", "VARCHAR(100)"),
+    ("walden_credentials", "telegram_username", "VARCHAR(64)"),
 ]
 
 
@@ -238,9 +255,17 @@ async def _run_column_migrations(conn: Any) -> None:
 
     This handles the case where tables already exist but are missing new columns.
     Uses database-specific syntax for idempotent column addition.
+
+    The dialect comes from the connection being migrated, not from
+    settings.database_url. Identical in production - the engine is built from
+    that same setting - but they can disagree anywhere a connection is passed
+    in, and then this emits the other database's syntax at it: Postgres'
+    "ADD COLUMN IF NOT EXISTS" is a syntax error on SQLite, which SQLite's own
+    branch is written to avoid precisely because it has no such clause.
     """
-    is_postgres = settings.database_url.startswith("postgresql")
-    is_sqlite = settings.database_url.startswith("sqlite")
+    dialect = conn.dialect.name
+    is_postgres = dialect == "postgresql"
+    is_sqlite = dialect == "sqlite"
 
     for table, column, sql_type in _ADDED_COLUMNS:
         if is_postgres:
@@ -258,6 +283,16 @@ async def _run_column_migrations(conn: Any) -> None:
                     logger.debug(f"{column} column already exists on {table}")
                 else:
                     raise
+
+
+# ConversationState members added after the initial deployment. Postgres pins
+# an enum type at CREATE TABLE time, so a member added to the Python enum later
+# does not exist in the database until it is added explicitly - writing a
+# session in that state would fail at runtime. Append here when adding a state.
+_ADDED_CONVERSATION_STATES: list[str] = [
+    "AWAITING_CANCELLATION_SELECTION",
+    "AWAITING_PROXY_TARGET",
+]
 
 
 async def _run_enum_migrations() -> None:
@@ -278,22 +313,23 @@ async def _run_enum_migrations() -> None:
 
     try:
         with sync_engine.connect() as conn:
-            result = conn.execute(
-                text(
-                    "SELECT 1 FROM pg_enum "
-                    "WHERE enumlabel = 'AWAITING_CANCELLATION_SELECTION' "
-                    "AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'conversationstate')"
+            for value in _ADDED_CONVERSATION_STATES:
+                result = conn.execute(
+                    text(
+                        "SELECT 1 FROM pg_enum "
+                        "WHERE enumlabel = :value AND enumtypid = "
+                        "(SELECT oid FROM pg_type WHERE typname = 'conversationstate')"
+                    ),
+                    {"value": value},
                 )
-            )
-            if result.fetchone() is None:
-                conn.execute(
-                    text("ALTER TYPE conversationstate ADD VALUE 'AWAITING_CANCELLATION_SELECTION'")
-                )
-                logger.info("Added AWAITING_CANCELLATION_SELECTION to conversationstate enum")
-            else:
-                logger.debug(
-                    "AWAITING_CANCELLATION_SELECTION already exists in conversationstate enum"
-                )
+                if result.fetchone() is None:
+                    # Not parameterizable: ALTER TYPE takes a literal, not a
+                    # bind parameter. Safe because the values are this module's
+                    # own constants, never anything user-supplied.
+                    conn.execute(text(f"ALTER TYPE conversationstate ADD VALUE '{value}'"))
+                    logger.info("Added %s to conversationstate enum", value)
+                else:
+                    logger.debug("%s already exists in conversationstate enum", value)
     finally:
         sync_engine.dispose()
 

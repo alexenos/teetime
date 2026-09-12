@@ -9,6 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One designated admin account can book on a friend's behalf** (issue #185).
+  `TELEGRAM_ADMIN_USER_ID` names exactly one Telegram ID — not a role any
+  allowed user can hold — which may write `for @alex book 9/12 at 8a`, or just
+  `book 9/12 at 8a` and be asked "for which user?" (a new
+  `AWAITING_PROXY_TARGET` conversation state holds the request across that
+  turn, the same shape as `AWAITING_CANCELLATION_SELECTION`). The admin must
+  still be on `TELEGRAM_ALLOWED_USER_IDS` to reach the bot at all; the app logs
+  a warning at startup when it is not.
+
+  This exists so a booking failure can be diagnosed, or a newly added
+  credential verified, under the account it actually concerns — rather than
+  under whoever happened to send the message, which was the only option before.
+
+  The resulting booking *is* the friend's: it carries their identity, runs
+  under their Walden membership, shows up in their history, and its
+  confirmation or failure days later goes to their own conversation. The admin
+  sees only the immediate acknowledgement, in their own chat.
+
+  Three things fail loudly rather than quietly, because every one of them would
+  otherwise book a round under the wrong membership — and with the club's
+  one-round-per-member-per-day rule, possibly consume the slot the real booking
+  needed:
+
+  - The admin account has **no Walden login of its own** and does not fall back
+    to the shared global account. A booking attributed to it is refused when it
+    is created, and again in the credential lookup underneath.
+  - A target matching **no** stored friend is a question, not a guess.
+  - A target matching **more than one** friend (a name colliding with someone
+    else's handle) is a question too, naming the candidates.
+
+  `walden_credentials` gains `name` and `telegram_username`, set via
+  `scripts/add_walden_credential.py set --name / --telegram-username`, and they
+  are what `for @X` matches — case-insensitively, and with the leading `@`
+  required, since that sigil is what keeps `for 4 players, book 9/12` a booking
+  rather than a friend named "4". Omitting it costs a turn, not the request. `--label` was left as what #183 made it, a free-text note that
+  resolves nothing; `list` now flags rows with neither name nor handle, which
+  cannot be proxy-booked for. Updating a friend's password no longer clears
+  their label, name, or handle.
+
+  Cancelling or checking status on someone else's behalf is not supported yet
+  and is refused explicitly rather than applied to the admin's own history.
+
+  Deployment: proxy booking requires `credential_store_enabled = true` — it
+  always books under a friend's stored login, so without
+  `CREDENTIAL_ENCRYPTION_KEY` mounted every proxy booking would fail at 6:30,
+  days after being accepted, when the attempt first tries to decrypt one. A
+  Cloud Run precondition enforces that rather than letting it deploy.
+  `TELEGRAM_ADMIN_USER_ID` is itself gated behind a new `admin_proxy_enabled`
+  Terraform variable, **off by default**, for the same reason
+  `credential_store_enabled` is — Terraform creates the secret empty and a
+  Cloud Run revision referencing a versionless secret fails to deploy. Create
+  the version first, then flip the flag. With it off, nothing about existing
+  bookings changes.
+
+### Fixed
+
+- `_run_column_migrations` took its dialect from `settings.database_url` rather
+  than from the connection it was handed. Identical in production, where the
+  engine is built from that same setting, but it emitted Postgres'
+  `ADD COLUMN IF NOT EXISTS` at any other connection passed in — a syntax error
+  on SQLite. Found in review of #187.
+
 - **Telegram as a messaging channel, running alongside Discord.** Inbound
   messages arrive as HTTP webhooks (`POST /webhooks/telegram`) rather than over
   a persistent WebSocket, so the service does not need `min-instances=1` and can

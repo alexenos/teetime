@@ -172,6 +172,38 @@ variable "credential_store_enabled" {
   default     = false
 }
 
+variable "admin_proxy_enabled" {
+  description = <<-EOT
+    Expose TELEGRAM_ADMIN_USER_ID to the running service, letting one
+    designated Telegram account book on a friend's behalf (issue #185):
+    "for @alex book 9/12 at 8a".
+
+    REQUIRES credential_store_enabled = true (enforced by a precondition on
+    the Cloud Run service). Proxy booking resolves its target from the
+    per-friend credential store and books under that friend's login, so
+    without CREDENTIAL_ENCRYPTION_KEY mounted every proxy booking fails when
+    it tries to decrypt one - at 06:30, days after the booking was accepted,
+    since nothing decrypts until the attempt runs.
+
+    Off by default, and for the same mechanical reason as
+    credential_store_enabled above: Terraform creates the secret empty, and a
+    Cloud Run revision referencing a secret with no version fails to deploy.
+    Create a version for TELEGRAM_ADMIN_USER_ID in Secret Manager BEFORE
+    setting this to true.
+
+    The admin ID must ALSO be in TELEGRAM_ALLOWED_USER_IDS - the allowlist is
+    checked first on every inbound update, so an admin missing from it is
+    simply ignored. The app logs a warning at startup when that is the case.
+
+    Unset, every user books only for themselves, exactly as before. The admin
+    account has no Walden login of its own by design and never falls back to
+    the shared global account, so leaving this off removes a capability rather
+    than changing how any existing booking runs.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "log_level" {
   description = "Application log level (DEBUG to see BOOKING_DEBUG messages)"
   type        = string
