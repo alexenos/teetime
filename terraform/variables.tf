@@ -532,15 +532,25 @@ variable "observer_schedule" {
   description = <<-EOT
     Cron schedule for the observer, in var.timezone.
 
-    06:26, two minutes ahead of the racer's 06:28. Do not move this to or past
+    06:24, four minutes ahead of the racer's 06:28. Do not move this to or past
     06:28: the earlier login is what guarantees that any future single-session
     enforcement by the club would drop the observer rather than the booking.
+
+    Why 06:24 rather than 06:26, which is the time issue #189 names: the issue
+    requires the observer to be *logged in and date-selected by* 06:26, and this
+    is when the job STARTS. A cold start has to pull the image, boot Python,
+    launch Chrome, log in, load the tee sheet and park on the date - normally
+    well under a minute, but a slow one at 06:26 would still be preparing when
+    the racer logs in at 06:28, which inverts the ordering the whole fail-safe
+    rests on. Four minutes of margin costs nothing but idle time.
+    _report_readiness logs an ERROR if preparation still lands late, so a
+    recurring squeeze is visible rather than silent.
 
     Every morning, not just Fridays. Non-Fridays are a control group showing
     what an uncontested gate looks like, and they come free.
   EOT
   type        = string
-  default     = "26 6 * * *"
+  default     = "24 6 * * *"
 }
 
 variable "observer_phone_number" {
@@ -569,12 +579,26 @@ variable "observer_snapshot_count" {
   EOT
   type        = number
   default     = 9
+
+  # Both this and the interval below fail silently when non-positive: a count of
+  # zero captures nothing, and a non-positive interval collapses every snapshot
+  # onto the window instant while the run still reports itself fine. Rejected
+  # here as well as in Settings, so a bad tfvars never reaches the container.
+  validation {
+    condition     = var.observer_snapshot_count >= 1 && floor(var.observer_snapshot_count) == var.observer_snapshot_count
+    error_message = "observer_snapshot_count must be a whole number of at least 1; a non-positive count captures no snapshots at all."
+  }
 }
 
 variable "observer_snapshot_interval_ms" {
   description = "Milliseconds between snapshots. A day-tab re-render costs ~730ms, so 1000 holds cadence."
   type        = number
   default     = 1000
+
+  validation {
+    condition     = var.observer_snapshot_interval_ms >= 1 && floor(var.observer_snapshot_interval_ms) == var.observer_snapshot_interval_ms
+    error_message = "observer_snapshot_interval_ms must be a whole number of at least 1; a non-positive interval fires every snapshot at the window instant, recording one moment instead of nine."
+  }
 }
 
 variable "observer_cpu" {
@@ -595,4 +619,20 @@ variable "observer_memory" {
   EOT
   type        = string
   default     = "2Gi"
+
+  # Same guard, same reasoning, and the same single-try() shape as
+  # cloud_run_memory: the default only applies when a caller omits the variable,
+  # so an override could still set 1Gi and reintroduce the OOM - here it would
+  # kill Chrome mid-window and lose the morning's evidence. Written as one try()
+  # because Terraform does not guarantee short-circuit evaluation of &&, so a
+  # malformed value must fall through to false rather than erroring out of the
+  # check. Avoids endswith(), which needs Terraform 1.3 (this module allows 1.0).
+  validation {
+    condition = try(
+      tonumber(regex("^([0-9]+)(Mi|Gi)$", var.observer_memory)[0]) *
+      (regex("^([0-9]+)(Mi|Gi)$", var.observer_memory)[1] == "Gi" ? 1024 : 1) >= 2048,
+      false
+    )
+    error_message = "observer_memory must be at least 2Gi (or 2048Mi), formatted like \"2Gi\" or \"2048Mi\". The observer runs the same headless Chrome that was OOM-killed at 1Gi, and additionally holds all nine snapshots in memory until the window has passed."
+  }
 }

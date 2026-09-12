@@ -17,7 +17,7 @@
 #     already 44% of the race budget. A second browser in the racing container
 #     attacks the exact three seconds that decide the morning.
 #
-# Why it starts at 06:26 and the racer at 06:28: concurrent sessions on one
+# Why it starts at 06:24 and the racer at 06:28: concurrent sessions on one
 # credential are proven fine in production, but if the club ever did start
 # enforcing one session per member the *newer* login wins - so the observer
 # logs in first and the casualty would be the observer, never the booking.
@@ -99,7 +99,7 @@ resource "google_cloud_run_v2_job" "observer" {
       # worth retrying: the morning is gone.
       max_retries = 0
 
-      # 06:26 start, nine snapshots to 06:30:08, then nine uploads of ~670KB.
+      # 06:24 start, nine snapshots to 06:30:08, then nine uploads of ~670KB.
       # Fifteen minutes is generous by design - the timeout exists to stop a
       # hung browser holding an instance, not to bound the work.
       timeout = "900s"
@@ -228,10 +228,11 @@ resource "google_cloud_run_v2_job_iam_member" "observer_scheduler_invoker" {
   member   = "serviceAccount:${google_service_account.scheduler.email}"
 }
 
-# 06:26, two minutes before the racer's 06:28. See the ordering note at the top
+# 06:24, four minutes before the racer's 06:28. See the ordering note at the top
 # of this file: this is a safety property, not a preference. Changing this to
 # run at or after 06:28 would make the booking the casualty of any future
-# single-session enforcement.
+# single-session enforcement, and starting later than 06:24 leaves a cold start
+# no room to finish logging in before the racer does.
 resource "google_cloud_scheduler_job" "observe_window" {
   count = var.observer_enabled ? 1 : 0
 
@@ -244,10 +245,19 @@ resource "google_cloud_scheduler_job" "observe_window" {
   # own timeout above is what bounds the work.
   attempt_deadline = "60s"
 
-  # A failed *start* is worth one retry; the morning is only lost if the
-  # execution never begins.
+  # No retries, and this is the opposite of the usual instinct. `jobs:run`
+  # creates the execution and returns immediately, so a request that started an
+  # execution but whose acknowledgement was lost in transit would be retried
+  # into a *second* execution - Cloud Run has no singleton guarantee for jobs.
+  # That means two browsers and two logins on the shared credential inside the
+  # booking window, and the newer of them is the one that survives any future
+  # single-session enforcement.
+  #
+  # The asymmetry decides it: a duplicate execution can disturb a real booking,
+  # while a start that never happened costs one morning of data that is free
+  # anyway - and there is another one tomorrow.
   retry_config {
-    retry_count = 1
+    retry_count = 0
   }
 
   http_target {

@@ -1,7 +1,7 @@
 import logging
 from enum import Enum
 
-from pydantic import field_validator, model_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
@@ -511,6 +511,27 @@ class Settings(BaseSettings):
     # eight seconds covers the contested span with room either side.
     observer_snapshot_count: int = 9
     observer_snapshot_interval_ms: int = 1000
+
+    @field_validator("observer_snapshot_count", "observer_snapshot_interval_ms")
+    @classmethod
+    def _validate_observer_cadence(cls, v: int, info: ValidationInfo) -> int:
+        """Reject a snapshot cadence that would quietly produce nothing useful.
+
+        Both failure modes are silent, which is why they are worth a load-time
+        error rather than a comment. A count of 0 or less makes ``range(count)``
+        empty, so the run captures nothing; an interval of 0 or less leaves every
+        planned offset at or below zero, so all nine snapshots fire in a burst at
+        the window and the run *looks* fine while recording one instant instead
+        of nine. Neither is discoverable until someone reads the artifacts, by
+        which point the morning is spent.
+        """
+        if v < 1:
+            raise ValueError(
+                f"{info.field_name} must be at least 1, got {v}. "
+                "A non-positive count captures no snapshots, and a non-positive "
+                "interval collapses all of them onto the window instant."
+            )
+        return v
 
     @field_validator("discord_channel_id")
     @classmethod

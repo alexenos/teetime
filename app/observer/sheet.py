@@ -360,7 +360,7 @@ def capture_across_window(
 
     Each tick re-requests the sheet before reading it. That is the whole point
     of the job: a parked browser asked for its ``page_source`` nine times hands
-    back nine copies of its 06:26 DOM, which is precisely the trap that makes
+    back nine copies of its pre-window DOM, which is precisely the trap that makes
     the racer's own refusal bodies useless as evidence (§7d - the verdict is
     live, the body is not). A snapshot is only worth storing if the club
     re-rendered it.

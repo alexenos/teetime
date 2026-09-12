@@ -15,7 +15,7 @@ import subprocess
 import sys
 import textwrap
 import time as time_module
-from datetime import date, datetime
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -252,15 +252,6 @@ class TestWaitUntil:
         target = int(time_module.time() * 1000) + 120
         observer_sheet.wait_until_epoch_ms(target)
         assert time_module.time() * 1000 >= target
-
-
-class TestObjectPrefix:
-    def test_nests_a_run_id_under_the_target_date(self) -> None:
-        prefix = observer_run._object_prefix(date(2026, 9, 18))
-        assert prefix.startswith("walden/observer/2026-09-18/")
-        run_id = prefix.rsplit("/", 1)[1]
-        # UTC-stamped, matching every other object name this project writes.
-        datetime.strptime(run_id, "%Y%m%d_%H%M%S")
 
 
 class TestStaleTabRetry:

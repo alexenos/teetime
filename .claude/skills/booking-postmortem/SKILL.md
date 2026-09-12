@@ -695,7 +695,7 @@ still winnable, and 09-11's fallback was granted on its first ask at `:06`.
 ## 7f. Added 2026-09-11: the observer's snapshots, from 09-18 onward
 
 The reader §7e asks for exists as of issue #189: a separate Cloud Run job
-(`teetime-observer`, 06:26 CT, every morning) that photographs the tee sheet
+(`teetime-observer`, 06:24 CT, every morning) that photographs the tee sheet
 once a second from the window and never reserves anything. **Check for its
 artifacts before concluding anything about the gate** — for mornings from
 2026-09-18 on, they answer the question the ledger cannot.
@@ -705,9 +705,11 @@ gcloud storage ls -r "gs://gen-lang-client-0822973627-teetime-debug-artifacts/wa
 ```
 
 `<target date>` is the date that was *raced for* (`YYYY-MM-DD`), not the morning
-it was raced on. Under it, one directory per run (UTC `%Y%m%d_%H%M%S`, so a
-06:26 CDT run reads `1126`), holding `snapshot_+NNNNms.html` for each tick plus
-`manifest.jsonl` and `run.json`.
+it was raced on. Under it sits one directory per run, named
+`<UTC %Y%m%d_%H%M%S>_<Cloud Run execution id>` — stamped when the job *starts*,
+so a 06:24 CDT run reads `1124`, and the execution id is the same handle the
+Cloud Run console and its logs use. Each holds `snapshot_+NNNNms.html` for every
+tick plus `manifest.jsonl` and `run.json`.
 
 **Read the offset in a snapshot's name as when its re-render was *requested*** —
 that is the instant the sheet describes. Compare it with the ledger's

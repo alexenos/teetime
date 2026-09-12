@@ -104,12 +104,12 @@ Mirrors the race ledger's conventions so the post-mortem skill can read both.
 ### Phase 0 as built (issue #189)
 
 Implemented in `app/observer/` as the Cloud Run job `teetime-observer`
-(`terraform/observer.tf`), scheduled at 06:26 CT every morning. Three details
+(`terraform/observer.tf`), scheduled at 06:24 CT every morning. Three details
 differ from the sketch above and one is load-bearing.
 
 **The sheet is re-requested before every snapshot.** This is the correction
 that matters. A browser parked on the tee sheet and asked for its
-`page_source` nine times hands back nine copies of its own 06:26 DOM — the
+`page_source` nine times hands back nine copies of its own pre-window DOM — the
 identical trap that makes the racer's refusal bodies useless as evidence
 (§7d: the verdict is live, the body is not), and a run shaped that way would
 tick every box in the issue while proving exactly nothing. So each tick clicks
@@ -139,12 +139,25 @@ its own run record.
 | `manifest.jsonl` | per snapshot: planned / sent / settled / captured offsets, byte count, `refreshOk`, and a note when a re-render did not land |
 | `run.json` | target date, the window instant, the day tab's own text, `northgateRowCount`, readiness offset, counts captured and stored |
 
-The run id is a UTC `%Y%m%d_%H%M%S` stamp, matching `walden/race/<run id>/`. It
-is nested under the target date rather than replacing it so that a dry run and
-the real morning can watch the same sheet without overwriting each other.
-Deriving `observations.jsonl` — `{ tMs, slotTime, slotIndex, state, holders }`
-rows — is post-hoc work and deliberately not in this job; parsing a 670KB sheet
-costs ~37ms and none of that may land inside the window.
+The run id is a UTC `%Y%m%d_%H%M%S` stamp — taken when the job *starts*, so it
+reads as the 06:24 execution rather than the ~06:30:08 the last snapshot lands
+at — followed by the Cloud Run execution id. Two executions of a Cloud Run job
+can overlap, and the bucket is written with `objectCreator`, which grants create
+but not delete: a colliding prefix would not merge, it would make the second
+run's uploads fail. The execution id also ties a directory back to exactly one
+run in the console. It is nested under the target date rather than replacing it
+so that a dry run and the real morning can watch the same sheet without
+overwriting each other. Deriving `observations.jsonl` — `{ tMs, slotTime,
+slotIndex, state, holders }` rows — is post-hoc work and deliberately not in
+this job; parsing a 670KB sheet costs ~37ms and none of that may land inside
+the window.
+
+**Losing the bytes is a failed run.** Each upload is independent, so one
+failure does not cost the other eight and a partial morning still separates the
+two models. But storing *nothing* exits non-zero: the only product of this job
+is evidence, and a run that captured nine snapshots, lost every upload and
+exited 0 would be indistinguishable from a good one until someone went looking
+for the bytes a Friday later.
 
 **What it refuses to do.** If it cannot confirm the view is on the target date,
 it captures nothing and exits non-zero. Bytes from the wrong date carrying the
