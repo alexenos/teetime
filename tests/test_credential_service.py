@@ -14,7 +14,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.database import Base
 from app.services import credential_crypto
-from app.services.credential_service import CredentialService, WaldenCredentials
+from app.services.credential_service import (
+    CredentialService,
+    WaldenCredentialRequiredError,
+    WaldenCredentials,
+)
 
 TEST_KEY = Fernet.generate_key().decode()
 
@@ -71,49 +75,55 @@ class TestCredentialCrypto:
             credential_crypto.encrypt("hunter2")
 
 
-class TestCredentialServiceResolve:
-    @pytest.mark.asyncio
-    async def test_resolve_falls_back_to_global_default(
-        self, credential_service: CredentialService, monkeypatch
-    ) -> None:
-        monkeypatch.setattr(
-            "app.services.credential_service.settings.walden_member_number", "GLOBAL"
-        )
-        monkeypatch.setattr("app.services.credential_service.settings.walden_password", "globalpw")
+class TestCredentialServiceRequire:
+    """require_credentials replaces #179's resolve().
 
-        result = await credential_service.resolve("+15551234567")
-
-        assert result == WaldenCredentials(member_number="GLOBAL", password="globalpw")
+    The three tests here previously asserted the shared-account fallback:
+    that an unknown requester resolved to the global WALDEN_MEMBER_NUMBER,
+    that resolve() returned None when even that was unset, and that a stored
+    login merely took *precedence* over it. All three encoded the behaviour
+    this change removes - there is no second account to rank against, so
+    "precedence" no longer means anything and the only two outcomes are the
+    requester's own login or a refusal.
+    """
 
     @pytest.mark.asyncio
-    async def test_resolve_returns_none_when_nothing_configured(
+    async def test_unknown_requester_is_refused_not_given_the_global_account(
         self, credential_service: CredentialService, monkeypatch
     ) -> None:
-        monkeypatch.setattr("app.services.credential_service.settings.walden_member_number", "")
-        monkeypatch.setattr("app.services.credential_service.settings.walden_password", "")
+        """The old test asserted this returned the global account."""
+        monkeypatch.setattr("app.config.settings.walden_member_number", "GLOBAL")
+        monkeypatch.setattr("app.config.settings.walden_password", "globalpw")
 
-        result = await credential_service.resolve("+15551234567")
-
-        assert result is None
+        with pytest.raises(WaldenCredentialRequiredError):
+            await credential_service.require_credentials("+15551234567")
 
     @pytest.mark.asyncio
-    async def test_dedicated_credential_takes_precedence(
+    async def test_refused_the_same_way_when_no_global_account_exists(
         self, credential_service: CredentialService, monkeypatch
     ) -> None:
-        monkeypatch.setattr(
-            "app.services.credential_service.settings.walden_member_number", "GLOBAL"
-        )
-        monkeypatch.setattr("app.services.credential_service.settings.walden_password", "globalpw")
+        """One outcome, not two: the global settings no longer change anything."""
+        monkeypatch.setattr("app.config.settings.walden_member_number", "")
+        monkeypatch.setattr("app.config.settings.walden_password", "")
+
+        with pytest.raises(WaldenCredentialRequiredError):
+            await credential_service.require_credentials("+15551234567")
+
+    @pytest.mark.asyncio
+    async def test_returns_the_requesters_own_login(
+        self, credential_service: CredentialService, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("app.config.settings.walden_member_number", "GLOBAL")
+        monkeypatch.setattr("app.config.settings.walden_password", "globalpw")
 
         await credential_service.set_credentials(
             "+15551234567", "friend_member", "friend_pw", label="Alex"
         )
 
-        resolved = await credential_service.resolve("+15551234567")
-        dedicated = await credential_service.get_dedicated_credentials("+15551234567")
+        required = await credential_service.require_credentials("+15551234567")
 
-        assert resolved == WaldenCredentials(member_number="friend_member", password="friend_pw")
-        assert dedicated == resolved
+        assert required == WaldenCredentials(member_number="friend_member", password="friend_pw")
+        assert required == await credential_service.get_dedicated_credentials("+15551234567")
 
     @pytest.mark.asyncio
     async def test_get_dedicated_credentials_none_for_unknown_requester(

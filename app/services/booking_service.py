@@ -8,6 +8,7 @@ processing booking requests, and executing reservations at the scheduled time.
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -162,6 +163,10 @@ class BookingService:
     def __init__(self) -> None:
         """Initialize the booking service."""
         self._reservation_provider: ReservationProvider | None = None
+        # Set instead of _reservation_provider when a provider is built per
+        # requester from their own credentials - see _provider_for and the two
+        # setters below.
+        self._reservation_provider_factory: Callable[[str, str], ReservationProvider] | None = None
         # Strong references to in-flight background booking tasks. asyncio only
         # holds weak references to tasks, so without this a booking run could be
         # garbage collected mid-attempt.
@@ -172,46 +177,93 @@ class BookingService:
         self._started_at = datetime.now(UTC).replace(tzinfo=None)
 
     def set_reservation_provider(self, provider: ReservationProvider) -> None:
-        """Set the default reservation provider for executing bookings.
+        """Use this one provider instance for every requester.
 
-        This is the provider used for any requester without their own
-        admin-added Walden login - see _provider_for.
+        No longer what production installs - see
+        set_reservation_provider_factory, which builds one per requester from
+        their own login. This mode remains for the cases where a single
+        instance is the honest answer: MockWaldenProvider in local development,
+        where there are no credentials at all, and tests that assert against a
+        provider they configured.
+
+        It does NOT bypass the credential requirement. _provider_for still
+        refuses a requester with no login on file before it gets here, in this
+        mode exactly as in the other, so nothing reaches the club under an
+        account that is not theirs.
         """
         self._reservation_provider = provider
+        self._reservation_provider_factory = None
+
+    def set_reservation_provider_factory(
+        self, factory: Callable[[str, str], ReservationProvider]
+    ) -> None:
+        """Build a fresh provider per requester from their own Walden login.
+
+        This is what production installs (see app/main.py). The factory is the
+        provider class itself, called with (member_number, password), so each
+        booking drives a session logged in as the person it is for - a provider
+        per run, which is #144's option 3.
+        """
+        self._reservation_provider_factory = factory
+        self._reservation_provider = None
 
     async def _provider_for(self, phone_number: str) -> ReservationProvider | None:
         """The provider this requester's booking should run under.
 
-        Most requesters have no credential of their own and fall back to the
-        single shared account (settings.walden_member_number/walden_password),
-        in which case the existing default provider instance is reused
-        unchanged. A requester with their own admin-added Walden login (issue
-        #179) instead gets a dedicated instance of the same provider class,
-        constructed with their credentials - a provider per run, resolving
-        #144's singleton concern via its option 3 - rather than running under
-        someone else's account.
+        Every requester books under their own admin-added Walden login (issue
+        #179), as a provider built for that one run - #144's option 3. None is
+        returned only when no provider is configured at all, which is the
+        "system not set up" case every caller already reports.
 
-        Making these dedicated runs execute concurrently with each other is a
-        follow-up (issue #179 flags real open questions there: Cloud Run
+        Raises WaldenCredentialRequiredError when the requester has no login on
+        file. There is deliberately nothing to fall back to: the shared account
+        this used to reach for meant an unconfigured friend silently booked
+        under someone else's membership, and the club's
+        one-round-per-member-per-day rule made that actively harmful rather than
+        merely untidy. ProxyAdminHasNoCredentialError is the same refusal for
+        the proxy admin (issue #185), which has no login by design.
+
+        Every caller already treats an exception from this lookup as a loud
+        booking failure, so refusing here cannot be mistaken for a success.
+
+        Making these per-requester runs execute concurrently with each other is
+        a follow-up (issue #179 flags real open questions there: Cloud Run
         resource limits and untested club-side behavior under simultaneous
         sessions); callers here still run one requester group at a time.
-
-        Raises ProxyAdminHasNoCredentialError if the booking is somehow
-        attributed to the proxy admin's own identity (issue #185) - the one
-        requester for whom the fallback below must never happen. Every caller
-        already treats an exception from this lookup as a loud booking failure.
         """
-        if self._reservation_provider is None:
+        if self._reservation_provider is None and self._reservation_provider_factory is None:
             return None
 
-        dedicated = await credential_service.get_dedicated_credentials(phone_number)
-        if dedicated is None:
-            return self._reservation_provider
+        # Checked before either mode builds anything, so a single installed
+        # instance is no more of a way around the requirement than a factory is.
+        dedicated = await credential_service.require_credentials(phone_number)
 
-        return type(self._reservation_provider)(dedicated.member_number, dedicated.password)
+        if self._reservation_provider_factory is not None:
+            return self._reservation_provider_factory(dedicated.member_number, dedicated.password)
+
+        # One fixed instance (local Mock, or a test's own stub): hand it back as
+        # it was installed rather than reconstructing its class, which for a
+        # mock would produce a different object than the caller is asserting on.
+        assert self._reservation_provider is not None
+        return self._reservation_provider
+
+    async def close_reservation_provider(self) -> None:
+        """Close the one fixed provider instance, if that is what is installed.
+
+        In factory mode there is nothing to close here: each requester's run
+        builds its own provider and _release_provider closes it when that run
+        ends, so no provider outlives the booking it was made for.
+        """
+        if self._reservation_provider is not None:
+            await self._reservation_provider.close()
 
     async def _release_provider(self, provider: ReservationProvider) -> None:
-        """Close a provider built for one requester's run; leave the shared default alone."""
+        """Close a provider built for one requester's run.
+
+        Leaves a fixed installed instance alone - that one is owned by whoever
+        installed it (local Mock, or a test) and closed at shutdown instead. In
+        factory mode every provider is per-run, so every provider is closed.
+        """
         if provider is not self._reservation_provider:
             await provider.close()
 
@@ -1217,12 +1269,23 @@ class BookingService:
         # The proxy admin books as a friend or not at all (issue #185). Refused
         # here as well as in the credential lookup because this is the point
         # where it is still a conversation: the admin gets told why, instead of
-        # a booking record being written that can only fail hours later, at
-        # 6:30, with the shared account's slot already committed.
+        # a booking record being written that can only fail hours later, at 6:30.
         if is_proxy_admin(phone_number):
             raise ValueError(
                 "This admin account has no Walden login of its own, so it can only book "
                 "on a friend's behalf. Say who it's for, e.g. \"for @alex book 9/12 at 8a\"."
+            )
+
+        # Everyone else needs a login of their own, for the same reason and at
+        # the same point. _provider_for refuses this too, but that happens when
+        # the attempt runs - which for a scheduled booking is 6:30 a week later,
+        # long after the user was told it was booked. Asked and answered here
+        # instead, while there is still someone reading the reply.
+        if await credential_service.get_dedicated_credentials(phone_number) is None:
+            raise ValueError(
+                "Your account isn't set up for booking yet - I don't have a Walden "
+                "login on file for you, and I won't book under anyone else's. Ask Dax "
+                "to add yours, then try again."
             )
 
         # Check 48-hour restriction for multi-player bookings
@@ -1847,7 +1910,7 @@ class BookingService:
         if not bookings:
             return []
 
-        if not self._reservation_provider:
+        if self._reservation_provider is None and self._reservation_provider_factory is None:
             results = []
             for booking in bookings:
                 booking_id = booking.id or ""
@@ -1874,16 +1937,17 @@ class BookingService:
 
         for (target_date, phone_number), group_bookings in groups.items():
             # _provider_for resolves this requester's credential from the
-            # database and can therefore raise (a DB error, or a decryption
-            # failure if CREDENTIAL_ENCRYPTION_KEY changed since the row was
-            # written) - unlike the synchronous attribute check this replaced.
-            # One requester's bad credential must not sink every other
-            # requester's bookings in the same batch, so it's caught here,
-            # per group, rather than left to escape the loop.
+            # database and can therefore raise: no login on file at all
+            # (WaldenCredentialRequiredError, a refusal now rather than a fall
+            # back to the shared account), a DB error, or a decryption failure
+            # if CREDENTIAL_ENCRYPTION_KEY changed since the row was written.
+            # One requester's missing or bad credential must not sink every
+            # other requester's bookings in the same batch, so it's caught
+            # here, per group, rather than left to escape the loop.
             try:
-                # self._reservation_provider is guaranteed set at this point
-                # (checked above), so _provider_for only ever falls back to it
-                # or returns a dedicated instance - never None.
+                # A provider is configured at this point (checked above), so
+                # _provider_for either returns one or raises for a requester
+                # with no login on file - never None.
                 provider = await self._provider_for(phone_number)
                 assert provider is not None
             except Exception as e:

@@ -156,6 +156,11 @@ credential actually works, or just helping someone out. Set
 `TELEGRAM_ALLOWED_USER_IDS`; the allowlist is checked first, so an admin missing
 from it is simply ignored). Every other user keeps booking only for themselves.
 
+Everyone who books needs their own login on file - including the friends the
+admin books for. There is no shared account: a requester with no row in
+`walden_credentials` is told "your account isn't set up for booking yet" rather
+than quietly booking under someone else's membership.
+
 **Prerequisite: the per-friend credential store must be on**
 (`credential_store_enabled = true`, with a versioned
 `CREDENTIAL_ENCRYPTION_KEY`). Proxy booking always books under a friend's stored

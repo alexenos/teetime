@@ -23,23 +23,35 @@ from app.models.schemas import (
 )
 from app.providers.base import BookingResult
 from app.services.booking_service import BookingService
+from app.services.credential_service import (
+    WaldenCredentialRequiredError,
+    WaldenCredentials,
+)
 from app.utils.timezone import CTDateTime
 
 
 @pytest.fixture(autouse=True)
-def no_dedicated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test here exercises a requester with no admin-added Walden login
-    of their own (issue #179), so _provider_for should fall back to whichever
-    mock provider the test wired up via set_reservation_provider, rather than
-    _provider_for's credential lookup hitting a real database.
+def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every requester in this module a Walden login of their own.
+
+    Was `no_dedicated_credentials`, returning None so that _provider_for fell
+    back to the shared global account and handed back whichever mock the test
+    installed. That fallback is gone: a requester with no login on file is now
+    refused outright, so a fixture asserting "nobody has a credential" would
+    make every booking test in this file fail for a reason none of them is
+    about. They get a credential instead, and the refusal has its own tests -
+    see TestCredentialIsRequired.
+
+    Still stubbed rather than hitting a real database, for the same reason as
+    before: none of these tests is about credential storage.
     """
 
-    async def _no_dedicated_credential(phone_number: str) -> None:
-        return None
+    async def _credential(phone_number: str) -> WaldenCredentials:
+        return WaldenCredentials(member_number=f"member-{phone_number}", password="pw")
 
     monkeypatch.setattr(
         "app.services.booking_service.credential_service.get_dedicated_credentials",
-        _no_dedicated_credential,
+        _credential,
     )
 
 
@@ -3466,9 +3478,10 @@ class TestCredentialResolutionFailures:
     Before issue #179's credential store, provider resolution was a
     synchronous, non-raising attribute check, so every caller safely placed
     its status/notification handling after it. These tests cover that a
-    credential lookup failure (a DB error, or a bad CREDENTIAL_ENCRYPTION_KEY)
-    is now reported the same way any other booking failure is, rather than
-    escaping to the caller or - in a batch - sinking every other requester's
+    credential lookup failure - a DB error, a bad CREDENTIAL_ENCRYPTION_KEY, or
+    no login on file at all now that there is no shared account to fall back
+    on - is reported the same way any other booking failure is, rather than
+    escaping to the caller or, in a batch, sinking every other requester's
     bookings along with the one whose credential is broken.
     """
 
@@ -3500,7 +3513,7 @@ class TestCredentialResolutionFailures:
             raise RuntimeError("stored credential could not be decrypted")
 
         with patch("app.services.booking_service.credential_service") as mock_creds:
-            mock_creds.get_dedicated_credentials = AsyncMock(side_effect=_raise)
+            mock_creds.require_credentials = AsyncMock(side_effect=_raise)
 
             with patch("app.services.booking_service.database_service") as mock_db:
                 mock_db.update_booking = AsyncMock()
@@ -3532,7 +3545,7 @@ class TestCredentialResolutionFailures:
             raise RuntimeError("database unavailable")
 
         with patch("app.services.booking_service.credential_service") as mock_creds:
-            mock_creds.get_dedicated_credentials = AsyncMock(side_effect=_raise)
+            mock_creds.require_credentials = AsyncMock(side_effect=_raise)
 
             with patch("app.services.booking_service.database_service") as mock_db:
                 mock_db.update_booking = AsyncMock()
@@ -3571,10 +3584,13 @@ class TestCredentialResolutionFailures:
         async def _resolve(phone_number: str):  # type: ignore[no-untyped-def]
             if phone_number == "+15553333333":
                 raise RuntimeError("stored credential could not be decrypted")
-            return None
+            # Returned None here before, meaning "fall back to the shared
+            # account". require_credentials has no such answer - it returns a
+            # login or raises - so the healthy requester gets one.
+            return WaldenCredentials(member_number="member-healthy", password="pw")
 
         with patch("app.services.booking_service.credential_service") as mock_creds:
-            mock_creds.get_dedicated_credentials = AsyncMock(side_effect=_resolve)
+            mock_creds.require_credentials = AsyncMock(side_effect=_resolve)
 
             with patch("app.services.booking_service.database_service") as mock_db:
                 mock_db.update_booking = AsyncMock()
@@ -3592,3 +3608,138 @@ class TestCredentialResolutionFailures:
         provider.book_multiple_tee_times.assert_awaited_once()
         called_requests = provider.book_multiple_tee_times.await_args.kwargs["requests"]
         assert [item.booking_id for item in called_requests] == ["healthy"]
+
+
+class TestCredentialIsRequired:
+    """No shared account: a requester with no login of their own is refused.
+
+    #179 shipped a deliberate migration aid - a requester with no row fell back
+    to the single global WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD - so that friends
+    could be onboarded one at a time without breaking anyone. The cost was that
+    an unconfigured friend silently booked under somebody else's membership: no
+    error, no warning, and because the club allows one round per member per day,
+    that booking could spend the slot the real one needed. These tests pin the
+    refusal that replaces it.
+    """
+
+    @staticmethod
+    def _request() -> TeeTimeRequest:
+        return TeeTimeRequest(
+            requested_date=date(2026, 12, 20), requested_time=time(8, 0), num_players=4
+        )
+
+    @pytest.fixture
+    def no_credential(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Override the module fixture: this requester has no login on file."""
+
+        async def _none(phone_number: str) -> None:
+            return None
+
+        monkeypatch.setattr(
+            "app.services.booking_service.credential_service.get_dedicated_credentials",
+            _none,
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_booking_refuses_and_says_why(
+        self, booking_service: BookingService, no_credential: None
+    ) -> None:
+        """Refused while someone is still reading the reply, not at 6:30."""
+        with pytest.raises(ValueError, match="isn't set up for booking yet"):
+            await booking_service.create_booking("+15551234567", self._request())
+
+    @pytest.mark.asyncio
+    async def test_no_booking_row_is_written(
+        self, booking_service: BookingService, no_credential: None
+    ) -> None:
+        """A row would look scheduled to the user and fail a week later."""
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.create_booking = AsyncMock()
+
+            with pytest.raises(ValueError):
+                await booking_service.create_booking("+15551234567", self._request())
+
+            mock_db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_reaches_the_user_as_a_chat_message(
+        self, booking_service: BookingService, no_credential: None
+    ) -> None:
+        """create_booking's ValueError is already rendered into the reply."""
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=self._request(),
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock(return_value=session)
+            mock_db.create_booking = AsyncMock()
+
+            response = await booking_service.handle_incoming_message("+15551234567", "yes")
+
+        assert "isn't set up for booking yet" in response
+        assert session.state == ConversationState.IDLE
+        mock_db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_provider_for_refuses_rather_than_returning_the_shared_one(
+        self, booking_service: BookingService, no_credential: None
+    ) -> None:
+        """The second layer: a row already in the database cannot run either.
+
+        create_booking is the kind refusal, but it only sees new bookings. A row
+        written before this change - or by any path that skipped it - must still
+        not reach the club under an account that is not the requester's.
+        """
+        installed = MagicMock()
+        booking_service.set_reservation_provider(installed)
+
+        with pytest.raises(WaldenCredentialRequiredError):
+            await booking_service._provider_for("+15551234567")
+
+    @pytest.mark.asyncio
+    async def test_factory_mode_refuses_before_building_anything(
+        self, booking_service: BookingService, no_credential: None
+    ) -> None:
+        """Production mode: the factory must never be called without a login."""
+        factory = MagicMock()
+        booking_service.set_reservation_provider_factory(factory)
+
+        with pytest.raises(WaldenCredentialRequiredError):
+            await booking_service._provider_for("+15551234567")
+
+        factory.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_factory_builds_one_provider_per_requesters_own_login(
+        self, booking_service: BookingService
+    ) -> None:
+        """Each booking drives a session logged in as the person it is for."""
+        built: list[tuple[str, str]] = []
+
+        def factory(member_number: str, password: str) -> MagicMock:
+            built.append((member_number, password))
+            return MagicMock()
+
+        booking_service.set_reservation_provider_factory(factory)
+
+        first = await booking_service._provider_for("+15551111111")
+        second = await booking_service._provider_for("+15552222222")
+
+        # The module fixture gives each requester a login keyed to their id.
+        assert built == [("member-+15551111111", "pw"), ("member-+15552222222", "pw")]
+        assert first is not second
+
+    @pytest.mark.asyncio
+    async def test_no_provider_configured_is_still_its_own_answer(
+        self, booking_service: BookingService, no_credential: None
+    ) -> None:
+        """None means "system not set up", which every caller already reports.
+
+        Checked before the credential lookup, so a service with no provider at
+        all does not report a missing credential it never got far enough to
+        need.
+        """
+        assert await booking_service._provider_for("+15551234567") is None
