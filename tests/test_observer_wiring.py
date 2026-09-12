@@ -147,6 +147,7 @@ class TestObserveWithoutCredentials:
     """
 
     async def test_it_gives_up_before_starting_a_browser(self) -> None:
+        """No login on file means no Chrome, and a morning reported unproductive."""
         create_driver = MagicMock()
         with (
             _due([]),
