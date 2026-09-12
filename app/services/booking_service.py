@@ -549,7 +549,14 @@ class BookingService:
         elif parsed.intent == "cancel":
             return await self._handle_cancel_intent(session, parsed)
         elif parsed.intent == "help":
-            return parsed.response_message or self._get_help_message()
+            # Always the curated text, never the parser's own prose. The system
+            # prompt describes the bot as able to book, check, cancel and
+            # modify, so a model-written help reply advertises all four - while
+            # the curated one deliberately offers only what is trusted to work
+            # (see app/services/help_text.py). Letting response_message win
+            # made the examples someone is shown depend on what the LLM said
+            # that turn, which is the one thing help text must not do.
+            return self._get_help_message()
         else:
             return (
                 parsed.response_message

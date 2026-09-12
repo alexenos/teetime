@@ -152,8 +152,11 @@ left alone.
 Tagging the bot and then typing the request as a *second* message — `@teetimebot`
 followed by `Book 9/20 at 12p` — leaves the request unanswered: with privacy mode
 on Telegram never delivers that second message, and with privacy mode off the app
-drops it as unaddressed. The bot used to ignore the bare tag too, so the whole
-exchange looked like it had been ignored.
+drops it as unaddressed, since the bare tag started no conversation to continue.
+(An unaddressed message *is* accepted while the sender has a live session — the
+bot asked them something within the last 15 minutes — but a bare tag never
+opens one.) The bot used to ignore the bare tag too, so the whole exchange
+looked like it had been ignored.
 
 A message that is only addressing is now answered with a short usage reply — what
 to do differently (keep the request in the same message as the tag) and example
