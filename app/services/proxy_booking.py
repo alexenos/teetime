@@ -99,8 +99,11 @@ def normalize_target(target: str) -> str:
 # "For" being part of the name.
 #
 # Separate from normalize_target on purpose: that one also folds the *stored*
-# side, so stripping there would break any friend whose name genuinely starts
-# with "for".
+# side, so stripping there would strip both halves of the comparison and a
+# friend named "For Real" could never be named at all. Keeping it here is not
+# by itself enough to protect that friend - this function still strips the
+# reply - which is why the caller tries the verbatim form first and reaches for
+# this one only when nothing matched it.
 _LEADING_FOR_RE = re.compile(r"^\s*for\s+(?P<target>\S.*)$", re.IGNORECASE | re.DOTALL)
 
 
@@ -116,6 +119,11 @@ def strip_leading_for(reply: str) -> str:
     to stop "for 4 players, book ..." being read as a target inside an ordinary
     request; in this state the whole message is already known to be an answer
     naming somebody, so there is no competing reading to guard against.
+
+    This is a blunt transform and is meant to be: it will happily turn a real
+    name like "For Real" into "Real". Deciding whether that was the right thing
+    to do is the caller's job, not this function's - see the ordering in
+    BookingService._resolve_proxy_target.
     """
     match = _LEADING_FOR_RE.match(reply)
     if not match:

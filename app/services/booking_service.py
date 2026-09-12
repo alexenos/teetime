@@ -25,11 +25,7 @@ from app.providers.base import BatchBookingRequest, BookingResult, ReservationPr
 from app.services.credential_service import credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
-from app.services.proxy_booking import (
-    is_proxy_admin,
-    split_proxy_target,
-    strip_leading_for,
-)
+from app.services.proxy_booking import is_proxy_admin, split_proxy_target, strip_leading_for
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
 
@@ -386,10 +382,7 @@ class BookingService:
                     message,
                 )
 
-            # "For Ronald" is the natural answer to "reply with their name",
-            # and the preposition is not part of the name. Stripped only for
-            # the lookup; the unresolved message still quotes what was typed.
-            unresolved = await self._resolve_proxy_target(session, strip_leading_for(message))
+            unresolved = await self._resolve_proxy_target(session, message)
             if unresolved is not None:
                 return unresolved, message
 
@@ -445,6 +438,23 @@ class BookingService:
         real booking needed.
         """
         matches = await credential_service.find_by_name_or_telegram_username(target)
+
+        # Verbatim first, the stripped form only as a fallback. "For Ronald" is
+        # the natural answer to "reply with their name" and the preposition is
+        # not part of the name - but a friend stored as "For Real" has to keep
+        # working too, and the order is what makes both true.
+        #
+        # The reverse order is unsafe rather than merely different: with "For
+        # Real" and "Real" both on file, stripping first resolves a reply of
+        # "For Real" to "Real" and books a round under the wrong membership -
+        # the one outcome this whole path exists to make impossible. Trying the
+        # literal first means an exact stored name always wins, and the strip
+        # only ever runs when nothing matched it, where there is no competing
+        # reading left to get wrong.
+        if not matches:
+            stripped = strip_leading_for(target)
+            if stripped != target:
+                matches = await credential_service.find_by_name_or_telegram_username(stripped)
 
         if not matches:
             session.state = ConversationState.AWAITING_PROXY_TARGET
