@@ -160,16 +160,21 @@ variable "credential_store_enabled" {
   description = <<-EOT
     Expose CREDENTIAL_ENCRYPTION_KEY to the running service.
 
-    Off by default: the per-friend Walden credential store (issue #179) is
-    admin-added incrementally, and a Cloud Run revision referencing a secret
-    with no version fails to deploy - same failure mode as telegram_enabled
-    below. Create a version for CREDENTIAL_ENCRYPTION_KEY in Secret Manager
-    (see README.md) BEFORE setting this to true; until then the single
-    global WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account keeps working
-    exactly as before, unaffected by this flag.
+    On: friends are being onboarded with their own Walden logins (issue #179),
+    and a stored row is unreadable without this key mounted. Nothing decrypts
+    until a booking actually runs, so a missing key does not fail the deploy -
+    it fails the 06:30 attempt, days after the request was accepted.
+
+    Ordering still matters when re-creating this project from scratch: Terraform
+    creates the secret empty, and a Cloud Run revision referencing a secret with
+    no version fails to deploy, so the CREDENTIAL_ENCRYPTION_KEY version has to
+    exist BEFORE this is true (see README.md) - the same failure mode as
+    telegram_enabled below. With no credential rows stored, the single global
+    WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account keeps working exactly as
+    before, unaffected by this flag.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "admin_proxy_enabled" {
