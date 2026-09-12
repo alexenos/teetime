@@ -25,7 +25,10 @@ from datetime import date, datetime, timedelta
 
 from app.config import settings
 from app.observer import artifacts, sheet
-from app.services.credential_service import credential_service
+from app.services.credential_service import (
+    WaldenCredentialRequiredError,
+    credential_service,
+)
 from app.services.database_service import database_service
 from app.utils.timezone import CTDateTime
 
@@ -58,8 +61,8 @@ def _window_instant(now_ct: datetime) -> datetime:
 async def _resolve_target(window_ct: datetime) -> tuple[date, str, str] | None:
     """Which date to watch, and the login to watch it with.
 
-    Returns ``(target_date, member_number, requester)``, or None when no
-    credential is available at all.
+    Returns ``(target_date, member_number, password)``, or None when the
+    requester has no login on file.
 
     The date comes from the booking the racer will run this morning, so the
     observer always parks on the sheet that job is racing for. When the
@@ -103,11 +106,18 @@ async def _resolve_target(window_ct: datetime) -> tuple[date, str, str] | None:
             settings.days_in_advance,
         )
 
-    credentials = await credential_service.resolve(requester)
-    if credentials is None:
+    # require_credentials(), not #179's resolve(): #193 removed the shared-account
+    # fallback and with it the method this called, so every morning between that
+    # merge and this one the observer would have died on an AttributeError here.
+    # It refuses by raising rather than returning None, and the observer's answer
+    # to "no login" is unchanged - skip the morning, never take one down.
+    try:
+        credentials = await credential_service.require_credentials(requester)
+    except WaldenCredentialRequiredError as exc:
         logger.error(
-            "OBSERVER: no Walden credentials resolve for %s; nothing to log in with",
+            "OBSERVER: no Walden login on file for %s; nothing to log in with (%s)",
             _redacted(requester),
+            type(exc).__name__,
         )
         return None
 

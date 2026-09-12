@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.observer import run as observer_run
 from app.observer import sheet as observer_sheet
+from app.services.credential_service import WaldenCredentialRequiredError
 from app.utils.timezone import CTDateTime
 
 
@@ -40,9 +41,19 @@ def _due(bookings: list[SimpleNamespace]) -> Any:
 
 
 def _creds(credentials: object | None) -> Any:
-    return patch.object(
-        observer_run.credential_service, "resolve", new=AsyncMock(return_value=credentials)
-    )
+    """Patch the credential lookup the observer actually makes.
+
+    None means "this requester has no login on file", which
+    require_credentials() signals by raising rather than returning - so the
+    absent case has to be a side_effect, not a return value. Patching the
+    return value alone is what let the observer ship calling a method that had
+    already been removed.
+    """
+    if credentials is None:
+        lookup = AsyncMock(side_effect=WaldenCredentialRequiredError("no login on file"))
+    else:
+        lookup = AsyncMock(return_value=credentials)
+    return patch.object(observer_run.credential_service, "require_credentials", new=lookup)
 
 
 class TestResolveTarget:
@@ -111,16 +122,16 @@ class TestResolveTarget:
         """The observer must read the sheet as the member who will race for it."""
         creds = SimpleNamespace(member_number="m2", password="p2")
         due = [_booking("b1", "+15550002", date(2026, 9, 18), dtime(8, 38))]
-        resolve = AsyncMock(return_value=creds)
+        lookup = AsyncMock(return_value=creds)
         with (
             _due(due),
-            patch.object(observer_run.credential_service, "resolve", new=resolve),
+            patch.object(observer_run.credential_service, "require_credentials", new=lookup),
             patch.object(observer_run.settings, "observer_phone_number", ""),
             patch.object(observer_run.settings, "user_phone_number", ""),
         ):
             resolved = await observer_run._resolve_target(WINDOW)
         assert resolved == (date(2026, 9, 18), "m2", "p2")
-        resolve.assert_awaited_once_with("+15550002")
+        lookup.assert_awaited_once_with("+15550002")
 
 
 class TestStore:
