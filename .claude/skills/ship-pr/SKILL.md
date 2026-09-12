@@ -9,6 +9,35 @@ This repo reviews every PR with **CodeRabbit** (a GitHub App, so it does not
 appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`,
 `lint`, and `test`.
 
+**CodeRabbit never reviews this repo on its own. You have to ask, every time.**
+Do not wait for a review that is not coming; do not re-derive this each session.
+Two separate rules both suppress the automatic pass, and either is enough:
+
+- **Drafts are skipped by default.** The bot says so itself: *"Draft PRs are not
+  automatically reviewed by default."*
+- **The repo has fewer than 10 stars**, which suppresses automatic reviews even
+  once the PR is out of draft: *"This repository does not receive automatic
+  reviews because it has fewer than 10 stars."*
+
+So the trigger is a comment, posted by you:
+
+```bash
+gh pr comment <N> --body "@coderabbitai review"
+```
+
+Post it **when you open the PR**, and **again after every push** you want
+reviewed. Taking a PR out of draft does *not* trigger a review by itself — the
+second rule still applies — so a ready-for-review transition needs the same
+comment. Say in the comment which commit is new, because CodeRabbit is
+incremental and will not re-review commits it has already seen.
+
+Its walkthrough, "Merge Risk", and pre-merge checks are stamped with the commit
+they covered (`up to b3811`). After a later push those are **stale**, not
+approval of the current head — check the commit they name before believing them.
+
+Budget: the current plan allows **1 included review per hour**, and the bot says
+how many remain. Spend it on a commit that is ready, not on a work in progress.
+
 ## 1. Branch and push
 
 Never commit to `main` — a commit there redeploys to Cloud Run. Branch first.
@@ -59,7 +88,15 @@ echo "still pending after 800s"; gh pr checks <N>; exit 1
 ```
 
 CodeRabbit posts an initial summary comment within a minute of the PR opening —
-that is **not** the review. The review lands later as inline comments.
+that is **not** the review, and on this repo no review follows it unless you ask
+(see the top of this file). Once triggered, the review lands later as inline
+comments; the summary comment is edited in place as it goes, so its content
+changing is not a review landing either.
+
+Its `CodeRabbit` commit status also lags: it has sat on `pending — Review in
+progress` after the review comment was already posted, and cleared only on a
+later event. Trust the review text over the status badge, but do not call the
+PR done until the status itself settles.
 
 ## 4. Read the review properly
 
