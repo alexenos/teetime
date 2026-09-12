@@ -1081,11 +1081,16 @@ class TestBookingServiceProcessIntent:
     async def test_process_intent_help(
         self, booking_service: BookingService, sample_session: UserSession
     ) -> None:
-        """Test routing help intent."""
+        """The curated help text wins over anything the parser wrote.
+
+        A model-written help reply advertises whatever the system prompt lists,
+        including the flows the curated text deliberately leaves out.
+        """
         parsed = ParsedIntent(intent="help", response_message="Here's how to use me!")
 
         response = await booking_service._process_intent(sample_session, parsed)
-        assert response == "Here's how to use me!"
+        assert response == booking_service._get_help_message()
+        assert response != "Here's how to use me!"
 
     @pytest.mark.asyncio
     async def test_process_intent_unclear(
@@ -1339,7 +1344,7 @@ class TestBookingServiceIncomingMessage:
 
                 response = await booking_service.handle_incoming_message("+15551234567", "help")
 
-            assert response == "I can help you book tee times!"
+            assert response == booking_service._get_help_message()
 
     @pytest.mark.asyncio
     async def test_handle_incoming_message_with_context(

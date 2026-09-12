@@ -343,6 +343,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> tuple[DiscordGateway, AsyncMock]
     gw = DiscordGateway(handler)
     gw.client = MagicMock()  # type: ignore[assignment]
     gw.client.user.id = BOT_ID
+    gw.client.user.name = "NorthgateTeetime"
     return gw, handler
 
 
@@ -425,14 +426,30 @@ class TestGatewayOnMessage:
         )
 
     @pytest.mark.parametrize("mention_fmt", ["<@{id}>", "<@!{id}>"])
-    async def test_mention_only_message_ignored(self, gateway, mention_fmt: str) -> None:  # type: ignore[no-untyped-def]
+    async def test_mention_only_message_gets_help(self, gateway, mention_fmt: str) -> None:  # type: ignore[no-untyped-def]
+        """A mention with the request typed as a separate, unmentioned message
+        used to get silence - which reads as the request being ignored."""
         gw, handler = gateway
         message = make_message(content=mention_fmt.format(id=BOT_ID), in_guild=True)
 
         await gw._on_message(message)
 
         handler.assert_not_awaited()
-        message.channel.send.assert_not_awaited()
+        message.channel.send.assert_awaited_once()
+        reply = message.channel.send.await_args.args[0]
+        assert "@NorthgateTeetime Book Saturday 8am for 4 players" in reply
+
+    async def test_mention_only_dm_gets_help_without_mention(self, gateway) -> None:  # type: ignore[no-untyped-def]
+        """A DM needs no mention, so the examples are plain messages."""
+        gw, handler = gateway
+        message = make_message(content=f"<@{BOT_ID}>")
+
+        await gw._on_message(message)
+
+        handler.assert_not_awaited()
+        reply = message.channel.send.await_args.args[0]
+        assert "- Book Saturday 8am for 4 players" in reply
+        assert "@NorthgateTeetime" not in reply
 
     async def test_handler_error_reported_to_user(self, gateway) -> None:  # type: ignore[no-untyped-def]
         gw, handler = gateway

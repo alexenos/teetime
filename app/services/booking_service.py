@@ -25,6 +25,7 @@ from app.providers.base import BatchBookingRequest, BookingResult, ReservationPr
 from app.services.credential_service import credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
+from app.services.help_text import help_message
 from app.services.proxy_booking import is_proxy_admin, split_proxy_target, strip_leading_for
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
@@ -565,7 +566,14 @@ class BookingService:
         elif parsed.intent == "cancel":
             return await self._handle_cancel_intent(session, parsed)
         elif parsed.intent == "help":
-            return parsed.response_message or self._get_help_message()
+            # Always the curated text, never the parser's own prose. The system
+            # prompt describes the bot as able to book, check, cancel and
+            # modify, so a model-written help reply advertises all four - while
+            # the curated one deliberately offers only what is trusted to work
+            # (see app/services/help_text.py). Letting response_message win
+            # made the examples someone is shown depend on what the LLM said
+            # that turn, which is the one thing help text must not do.
+            return self._get_help_message()
         else:
             return (
                 parsed.response_message
@@ -1733,15 +1741,13 @@ class BookingService:
         return CTDateTime.to_naive_ct(execution_time)
 
     def _get_help_message(self) -> str:
-        """Return a help message explaining how to use the booking service."""
-        return (
-            "I can help you book tee times at Northgate Country Club!\n\n"
-            "Try saying:\n"
-            "- 'Book Saturday 8am for 4 players'\n"
-            "- 'Check my bookings'\n"
-            "- 'Cancel my booking'\n\n"
-            "Reservations open 7 days in advance at 6:30am CT."
-        )
+        """Return a help message explaining how to use the booking service.
+
+        The text lives in app/services/help_text.py so that the inbound edges,
+        which answer a bare mention without ever reaching this service, offer
+        the same examples.
+        """
+        return help_message()
 
     async def execute_booking(self, booking_id: str) -> bool:
         """

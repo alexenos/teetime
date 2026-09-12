@@ -25,6 +25,7 @@ import discord
 
 from app.config import settings
 from app.providers.discord_provider import DM_ORIGIN, split_message
+from app.services.help_text import addressing_help_message
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,15 @@ class DiscordGateway:
             return
         content = strip_bot_mention(message.content, getattr(self.client.user, "id", None))
         if not content:
-            logger.info("Discord message was only a bot mention; nothing to parse")
+            # A mention and nothing else, with the request typed as a separate
+            # message that never mentions the bot - and so never reaches it.
+            # Silence looks like the request was ignored, so say what to do
+            # instead. Mirrors the Telegram webhook's bare-mention reply.
+            logger.info("Discord message was only a bot mention; replying with help")
+            bot_name = getattr(self.client.user, "name", None)
+            mention = f"@{bot_name} " if bot_name and not is_dm else ""
+            for chunk in split_message(addressing_help_message(mention)):
+                await message.channel.send(chunk)
             return
         source = "DM" if is_dm else f"guild channel #{getattr(message.channel, 'name', '?')}"
         logger.info(f"Discord message received from {author_id} via {source}: {content[:80]}")

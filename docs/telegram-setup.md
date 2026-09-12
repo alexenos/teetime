@@ -147,6 +147,23 @@ the marked ranges rather than pattern-matching the text: a mention of someone
 else, or a `/command@otherbot` aimed at a different bot in the same group, is
 left alone.
 
+### A bare mention gets usage help, not silence
+
+Tagging the bot and then typing the request as a *second* message — `@teetimebot`
+followed by `Book 9/20 at 12p` — leaves the request unanswered: with privacy mode
+on Telegram never delivers that second message, and with privacy mode off the app
+drops it as unaddressed, since the bare tag started no conversation to continue.
+(An unaddressed message *is* accepted while the sender has a live session — the
+bot asked them something within the last 15 minutes — but a bare tag never
+opens one.) The bot used to ignore the bare tag too, so the whole exchange
+looked like it had been ignored.
+
+A message that is only addressing is now answered with a short usage reply — what
+to do differently (keep the request in the same message as the tag) and example
+commands, each one shown with the tag. In a private chat, where there is no
+addressing to get wrong, the same reply shows the examples untagged. The Discord
+gateway answers a bare `@mention` the same way.
+
 ## Booking for someone else (admin proxy)
 
 One designated Telegram account can book under a *specific friend's* Walden
