@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from datetime import time as dtime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -132,6 +132,33 @@ class TestResolveTarget:
             resolved = await observer_run._resolve_target(WINDOW)
         assert resolved == (date(2026, 9, 18), "m2", "p2")
         lookup.assert_awaited_once_with("+15550002")
+
+
+class TestObserveWithoutCredentials:
+    """The whole run, not just the resolution step, when there is no login.
+
+    _resolve_target returning None is the unit of the decision, but the
+    property that matters at 06:24 is what observe() does with it: give up
+    before the browser starts, and report the morning as unproductive rather
+    than raising into the job's exit code. Nothing asserted that end to end -
+    the gap CodeRabbit flagged on #195 - so a future change that launched
+    Chrome before resolving, or let the refusal propagate, would pass every
+    other test in this file.
+    """
+
+    async def test_it_gives_up_before_starting_a_browser(self) -> None:
+        create_driver = MagicMock()
+        with (
+            _due([]),
+            _creds(None),
+            patch.object(observer_run.settings, "observer_enabled", True),
+            patch.object(observer_run.settings, "observer_phone_number", "+15550001"),
+            patch.object(observer_run.sheet, "create_driver", new=create_driver),
+        ):
+            produced = await observer_run.observe()
+
+        assert produced is False, "a morning with no login produced no evidence"
+        create_driver.assert_not_called()
 
 
 class TestStore:
