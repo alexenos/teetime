@@ -19,11 +19,15 @@ gateway - can answer a bare mention without importing the service singleton.
 
 # Examples of things the bot understands, shown wherever it explains itself.
 # Written as whole messages so a user can copy one and send it as is.
+#
+# Booking only, deliberately. "Check my bookings" and "Cancel my booking" still
+# work as intents - nothing here disables them - but they are not reliable
+# enough yet to put in front of someone who has just been told what to type.
+# An example is a promise, and the two that are not ready do not belong in one.
+# Put them back once the status and cancellation flows are trusted.
 COMMAND_EXAMPLES = (
     "Book Saturday 8am for 4 players",
     "Book 9/20 at 12p for 2",
-    "Check my bookings",
-    "Cancel my booking",
 )
 
 # Repeated at the end of every help reply: the single fact that explains why a

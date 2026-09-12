@@ -15,6 +15,11 @@ class TestCommandExamples:
         for example in COMMAND_EXAMPLES:
             assert f"- {example}" in block
 
+    def test_only_booking_is_advertised(self) -> None:
+        """Status and cancellation still work as intents, but are not reliable
+        enough to hand someone as an example - an example is a promise."""
+        assert all(example.lower().startswith("book") for example in COMMAND_EXAMPLES)
+
     def test_mention_prefixes_every_example(self) -> None:
         """In a group the addressing is the part the user has to get right, so
         it belongs in the examples rather than only in prose."""
