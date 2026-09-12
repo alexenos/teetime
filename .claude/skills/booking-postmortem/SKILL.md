@@ -685,11 +685,57 @@ the gate opens at `:01` as always and the target is simply gone before +1018ms.
 granted on its first ask says the same. Neither is established. **The artifacts
 cannot separate them**, because every Friday on record is one slot asked
 repeatedly and the body is not live. An independent read of the sheet during
-the window can; see `docs/design-observer-and-fanout.md`.
+the window can, and as of issue #189 one runs every morning - see §7f before
+reaching a verdict on a morning from 2026-09-18 on.
 
 **Do not propose "lead the post-burst walk with the target" from Model L alone.**
 It was proposed and withdrawn on 09-11: under Model F it delays the one slot
 still winnable, and 09-11's fallback was granted on its first ask at `:06`.
+
+## 7f. Added 2026-09-11: the observer's snapshots, from 09-18 onward
+
+The reader §7e asks for exists as of issue #189: a separate Cloud Run job
+(`teetime-observer`, 06:24 CT, every morning) that photographs the tee sheet
+once a second from the window and never reserves anything. **Check for its
+artifacts before concluding anything about the gate** — for mornings from
+2026-09-18 on, they answer the question the ledger cannot.
+
+```bash
+gcloud storage ls -r "gs://gen-lang-client-0822973627-teetime-debug-artifacts/walden/observer/<target date>/"
+```
+
+`<target date>` is the date that was *raced for* (`YYYY-MM-DD`), not the morning
+it was raced on. Under it sits one directory per run, named
+`<UTC %Y%m%d_%H%M%S>_<Cloud Run execution id>` — stamped when the job *starts*,
+so a 06:24 CDT run reads `1124`, and the execution id is the same handle the
+Cloud Run console and its logs use. Each holds `snapshot_+NNNNms.html` for every
+tick plus `manifest.jsonl` and `run.json`.
+
+**Read the offset in a snapshot's name as when its re-render was *requested*** —
+that is the instant the sheet describes. Compare it with the ledger's
+`sentMsPastWindow` directly; both are measured from the stated window,
+06:30:00.000 CT, and the observer deliberately does not use the racer's aiming
+offset so that it stays an independent frame.
+
+**Two checks before trusting a snapshot.** In `manifest.jsonl`, `refreshOk:
+false` on a row means the club's re-render did not land inside the timeout, so
+those bytes may simply repeat the previous snapshot — the same staleness trap
+as §7d, and the row carries a `note` saying so. And in `run.json`,
+`northgateRowCount: 0` means the parked sheet did not contain the contested
+block at all; read nothing about Northgate from that run.
+
+**What separates the models.** Model L (late gate) predicts the target's block
+sits untouched at +1s and +2s with the first holdings appearing around +5s.
+Model F (fast rival) predicts the target is *already taken* at +1s while the
+fallbacks sit free. One Friday of snapshots decides it. Non-Fridays are the
+control group and run for free — a quiet morning is what an uncontested gate
+looks like, and it is worth reading once before the first Friday so the Friday
+pattern has something to be different from.
+
+An empty or missing prefix is not evidence about the club: read the job's own
+logs first (`resource.labels.job_name="teetime-observer"`), since the observer
+declines to capture at all when it cannot confirm it is parked on the target
+date.
 
 ## 8. Report
 

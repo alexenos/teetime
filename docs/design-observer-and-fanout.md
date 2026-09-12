@@ -1,6 +1,7 @@
 # Design: the observer job, and the per-member fan-out
 
-**Status:** draft, for review. No change to the booking path in Phase 0 or 1.
+**Status:** Part A (phase 0) built — see "Phase 0 as built" below. Part B still
+draft, for review. No change to the booking path in phase 0 or 1.
 **Date:** 2026-09-11
 **Companion:** `docs/booking-post-mortem-2026-09-11.md`
 
@@ -99,6 +100,78 @@ concurrency evidence above.
 `walden/observer/<date>/snapshot_+NNNNms.html`, plus an `observations.jsonl`
 of `{ tMs, slotTime, slotIndex, state, holders }` rows derived afterwards.
 Mirrors the race ledger's conventions so the post-mortem skill can read both.
+
+### Phase 0 as built (issue #189)
+
+Implemented in `app/observer/` as the Cloud Run job `teetime-observer`
+(`terraform/observer.tf`), scheduled at 06:24 CT every morning. Three details
+differ from the sketch above and one is load-bearing.
+
+**The sheet is re-requested before every snapshot.** This is the correction
+that matters. A browser parked on the tee sheet and asked for its
+`page_source` nine times hands back nine copies of its own pre-window DOM — the
+identical trap that makes the racer's refusal bodies useless as evidence
+(§7d: the verdict is live, the body is not), and a run shaped that way would
+tick every box in the issue while proving exactly nothing. So each tick clicks
+the already-selected day tab, whose `PrimeFaces.ab` handler carries
+`u:` = the whole tee time form, and waits for the old element to go stale
+before reading. That is the same element the direct-HTTP booker replays for its
+own view refresh, and it re-renders the same date rather than changing it.
+
+Consequently a snapshot is named for the offset at which its **re-render was
+requested**, not when the bytes were read: that is the instant the returned
+sheet describes. `manifest.jsonl` carries both, so the two can be read against
+the ledger's `sentMsPastWindow` + `roundTripMs` bound on one clock.
+
+**No course is selected.** The racer selects Northgate because a Reserve is
+addressed against the form's selected course. The rendered sheet is not
+filtered by it — 09-04's captured pre-window sheet carries 1052 row ids under
+`teeTimeCourses:0` and 686 under `:1` — so the observer skips the ~400 lines of
+course-dropdown fallbacks and records `northgateRowCount` from the parked sheet
+instead, which makes a sheet that somehow lacks the contested block say so in
+its own run record.
+
+**Object layout.** `walden/observer/<target date>/<run id>/`, holding:
+
+| object | contents |
+|---|---|
+| `snapshot_+NNNNms.html` | raw page bytes, unparsed, one per tick |
+| `manifest.jsonl` | per snapshot: planned / sent / settled / captured offsets, byte count, `refreshOk`, and a note when a re-render did not land |
+| `run.json` | target date, the window instant, the day tab's own text, `northgateRowCount`, readiness offset, counts captured and stored |
+
+The run id is a UTC `%Y%m%d_%H%M%S` stamp — taken when the job *starts*, so it
+reads as the 06:24 execution rather than the ~06:30:08 the last snapshot lands
+at — followed by the Cloud Run execution id. Two executions of a Cloud Run job
+can overlap, and the bucket is written with `objectCreator`, which grants create
+but not delete: a colliding prefix would not merge, it would make the second
+run's uploads fail. The execution id also ties a directory back to exactly one
+run in the console. It is nested under the target date rather than replacing it
+so that a dry run and the real morning can watch the same sheet without
+overwriting each other. Deriving `observations.jsonl` — `{ tMs, slotTime,
+slotIndex, state, holders }` rows — is post-hoc work and deliberately not in
+this job; parsing a 670KB sheet costs ~37ms and none of that may land inside
+the window.
+
+**Losing the bytes is a failed run.** Each upload is independent, so one
+failure does not cost the other eight and a partial morning still separates the
+two models. But storing *nothing* exits non-zero: the only product of this job
+is evidence, and a run that captured nine snapshots, lost every upload and
+exited 0 would be indistinguishable from a good one until someone went looking
+for the bytes a Friday later.
+
+**What it refuses to do.** If it cannot confirm the view is on the target date,
+it captures nothing and exits non-zero. Bytes from the wrong date carrying the
+right date's name would be read by a later post-mortem as evidence, which is
+worse than an empty morning — and an observer that gives up costs nothing,
+because it never had a tee time at stake.
+
+**Dry run**, any time of day — the waits are no-ops once the window has passed,
+so the nine snapshots simply bunch and the whole path still executes:
+
+```bash
+gcloud run jobs execute teetime-observer --region=us-central1 \
+  --project=gen-lang-client-0822973627 --wait
+```
 
 ### What the first Friday settles
 

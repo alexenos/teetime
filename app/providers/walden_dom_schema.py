@@ -166,6 +166,18 @@ class DateSelectionSelectors:
     day_tabs: str = (
         ".day-tab, [class*='day-tab'], a[href*='day'], [data-day], .teetime-day-tab, .nav-tabs a"
     )
+    # The horizontal date strip the tee sheet actually renders, and the one tab
+    # in it the sheet considers current. Verified against the 2026-09-04
+    # pre-window sheet: `.horizontal-dates` holds one `<a class="ui-commandlink
+    # ... selected-date">` plus six forward days, each carrying a
+    # `PrimeFaces.ab` handler whose `u:` re-renders the whole tee time form.
+    #
+    # Used by the observer job (app/observer/, issue #189) to park on the target
+    # date and to re-read the sheet during the window. `selected_day_tab` is the
+    # same `selected-date` class the direct-HTTP booker replays for its view
+    # refresh (`_SELECTED_DATE_CLASS` in walden_http_booker).
+    day_tab_links: str = ".horizontal-dates a"
+    selected_day_tab: str = "a.selected-date"
 
 
 @dataclass(frozen=True)
