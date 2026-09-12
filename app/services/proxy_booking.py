@@ -91,6 +91,38 @@ def normalize_target(target: str) -> str:
     return target.strip().lstrip("@").strip().casefold()
 
 
+# A reply to "for which user?" that restates the preposition the question was
+# asked with. "For Ronald" is the natural answer to "Reply with their name or
+# Telegram handle", and before this it was looked up verbatim - folding to
+# "for ronald", matching nobody, and reporting `I don't know who "For Ronald"
+# is`, which reads as the friend not being configured rather than the word
+# "For" being part of the name.
+#
+# Separate from normalize_target on purpose: that one also folds the *stored*
+# side, so stripping there would break any friend whose name genuinely starts
+# with "for".
+_LEADING_FOR_RE = re.compile(r"^\s*for\s+(?P<target>\S.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def strip_leading_for(reply: str) -> str:
+    """Drop a leading "for " from an answer to the "for which user?" prompt.
+
+    Only when something survives it: a bare "for" is more likely a truncated
+    message than a request to look up the empty string, and is left alone so
+    the caller reports it as an unresolved name rather than silently widening
+    the search.
+
+    Unlike split_proxy_target, no "@" is required here. The sigil exists there
+    to stop "for 4 players, book ..." being read as a target inside an ordinary
+    request; in this state the whole message is already known to be an answer
+    naming somebody, so there is no competing reading to guard against.
+    """
+    match = _LEADING_FOR_RE.match(reply)
+    if not match:
+        return reply
+    return match.group("target").strip()
+
+
 def split_proxy_target(text: str) -> tuple[str | None, str]:
     """Peel a leading "for @X" clause off a message.
 

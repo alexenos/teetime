@@ -25,7 +25,11 @@ from app.providers.base import BatchBookingRequest, BookingResult, ReservationPr
 from app.services.credential_service import credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
-from app.services.proxy_booking import is_proxy_admin, split_proxy_target
+from app.services.proxy_booking import (
+    is_proxy_admin,
+    split_proxy_target,
+    strip_leading_for,
+)
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
 
@@ -382,7 +386,10 @@ class BookingService:
                     message,
                 )
 
-            unresolved = await self._resolve_proxy_target(session, message)
+            # "For Ronald" is the natural answer to "reply with their name",
+            # and the preposition is not part of the name. Stripped only for
+            # the lookup; the unresolved message still quotes what was typed.
+            unresolved = await self._resolve_proxy_target(session, strip_leading_for(message))
             if unresolved is not None:
                 return unresolved, message
 

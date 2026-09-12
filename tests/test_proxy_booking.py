@@ -135,6 +135,36 @@ class TestNormalizeTarget:
         assert proxy_booking.normalize_target("@") == ""
 
 
+class TestStripLeadingFor:
+    """Answering "for which user?" with "For Ronald" names Ronald, not "For Ronald"."""
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ("For Ronald", "Ronald"),
+            ("for ronald", "ronald"),
+            ("FOR @ronald", "@ronald"),
+            ("  for   Ronald  ", "Ronald"),
+            ("for Ron Garner", "Ron Garner"),
+        ],
+    )
+    def test_a_restated_preposition_is_dropped(self, reply: str, expected: str) -> None:
+        assert proxy_booking.strip_leading_for(reply) == expected
+
+    @pytest.mark.parametrize("reply", ["Ronald", "@ronald", "Ron Garner"])
+    def test_a_bare_name_is_untouched(self, reply: str) -> None:
+        assert proxy_booking.strip_leading_for(reply) == reply
+
+    @pytest.mark.parametrize("reply", ["for", "  for  ", ""])
+    def test_nothing_after_for_is_left_alone(self, reply: str) -> None:
+        """Stripping to the empty string would search for nobody in particular."""
+        assert proxy_booking.strip_leading_for(reply) == reply
+
+    def test_only_a_leading_for_counts(self) -> None:
+        """ "Fortnight" starts with the letters but is not the preposition."""
+        assert proxy_booking.strip_leading_for("Fortnight") == "Fortnight"
+
+
 class TestIsProxyAdmin:
     def test_matches_only_the_configured_id(self, admin_configured: None) -> None:
         assert proxy_booking.is_proxy_admin(ADMIN_ID) is True
@@ -573,6 +603,76 @@ class TestProxyBookingFlow:
         assert "more than one person" in response
         assert "Sam" in response and "@sam" in response
         assert admin.pending_proxy_target is None
+
+    @pytest.mark.asyncio
+    async def test_answering_with_for_still_names_the_friend(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """The reported case: "for which user?" answered "For Ronald".
+
+        The prompt asks for a name, so restating the preposition is the
+        natural reply. Looked up verbatim it folded to "for ronald", matched
+        nobody, and came back as `I don't know who "For Ronald" is` - which
+        reads as the friend being unconfigured rather than the word "For"
+        being taken as part of his name.
+        """
+        admin = UserSession(
+            phone_number=ADMIN_ID,
+            channel="telegram",
+            state=ConversationState.AWAITING_PROXY_TARGET,
+            pending_request=self._booking_intent().tee_time_request,
+        )
+        sessions = _FakeSessions(admin)
+        owner = self._owner()
+
+        # Argument-sensitive on purpose. _patched returns a match whatever it
+        # is handed, so with it this test passes even with the strip removed -
+        # it proves the flow runs, not that the right name was looked up.
+        async def lookup(target: str) -> list[CredentialOwner]:
+            wanted = proxy_booking.normalize_target(target)
+            candidates = {
+                proxy_booking.normalize_target(v)
+                for v in (owner.name, owner.telegram_username)
+                if v
+            }
+            return [owner] if wanted in candidates else []
+
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=lookup)
+        creds.get_owner = AsyncMock(return_value=owner)
+
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+        ):
+            await service.handle_incoming_message(ADMIN_ID, "For Alex", channel="telegram")
+
+        assert admin.pending_proxy_target == ALEX_ID
+        assert admin.state != ConversationState.AWAITING_PROXY_TARGET
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_sees_the_name_without_the_preposition(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Strip before the query, not after: the stored side is never folded."""
+        admin = UserSession(
+            phone_number=ADMIN_ID,
+            channel="telegram",
+            state=ConversationState.AWAITING_PROXY_TARGET,
+            pending_request=self._booking_intent().tee_time_request,
+        )
+        sessions = _FakeSessions(admin)
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(return_value=[self._owner()])
+        creds.get_owner = AsyncMock(return_value=self._owner())
+
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+        ):
+            await service.handle_incoming_message(ADMIN_ID, "For Alex", channel="telegram")
+
+        creds.find_by_name_or_telegram_username.assert_awaited_once_with("Alex")
 
     @pytest.mark.asyncio
     async def test_abort_leaves_no_pending_booking(
