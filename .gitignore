@@ -69,3 +69,18 @@ scripts/captures/
 # Claude Code per-machine settings (absolute paths, personal permission allowlist).
 # .claude/launch.json is shared; this one is not.
 .claude/settings.local.json
+
+# Service-account keys. key.json / key.json.b64 hold the credential for
+# teetime-artifact-reader (read-only: logging.viewer plus objectViewer on the
+# debug-artifacts bucket), used to read booking artifacts back from a remote
+# session - see docs/debug-artifact-access.md.
+#
+# Ignored for two independent reasons. A broad `git add -A` would otherwise
+# commit a live credential, and the Dockerfile ends with `COPY . .`, so any
+# local `docker build` bakes whatever sits at the repo root into the image.
+# Cloud Build is unaffected (it builds from a git checkout, where these have
+# never existed - verified across all 213 commits), but a laptop build is not.
+key.json
+key.json.b64
+*-service-account.json
+*.pem
