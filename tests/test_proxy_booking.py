@@ -481,6 +481,50 @@ class TestProxyBookingFlow:
         assert admin.state == ConversationState.AWAITING_PROXY_TARGET
 
     @pytest.mark.asyncio
+    async def test_retyping_the_full_command_while_awaiting_a_target_still_resolves(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Regression: seen live on 2026-09-12 with a real "for @rongarner" typo.
+
+        After a failed target the admin is expected to reply with just a name
+        - but the natural thing to do after a typo is retype the *whole*
+        command, "for @alex book 9/20 at 8a", not just "alex". Read as a bare
+        name (the old behavior), "book 9/20 at 8a" stayed glued to the target
+        and "alexbook9/20at8a" matched nobody, even though Alex is on file.
+        """
+        admin = UserSession(phone_number=ADMIN_ID, channel="telegram")
+        sessions = _FakeSessions(admin)
+
+        creds = AsyncMock()
+        creds.get_owner = AsyncMock(return_value=self._owner())
+        # Turn 1's typo resolves nobody; turn 2's retyped target resolves Alex.
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=[[], [self._owner()]])
+
+        with patch("app.services.booking_service.database_service", sessions):
+            with patch("app.services.booking_service.credential_service", creds):
+                with patch("app.services.booking_service.gemini_service") as gemini:
+                    gemini.parse_message = AsyncMock(side_effect=AssertionError("must not parse"))
+                    await service.handle_incoming_message(
+                        ADMIN_ID, "for @nobdy book 9/20 at 8a", channel="telegram"
+                    )
+
+                assert admin.state == ConversationState.AWAITING_PROXY_TARGET
+
+                with patch("app.services.booking_service.gemini_service") as gemini:
+                    gemini.parse_message = AsyncMock(return_value=self._booking_intent())
+                    echo = await service.handle_incoming_message(
+                        ADMIN_ID, "for @alex book 9/20 at 8a", channel="telegram"
+                    )
+
+                # The retyped target is peeled off, same as a first turn -
+                # the parser never sees "for @alex".
+                assert gemini.parse_message.await_args.args[0] == "book 9/20 at 8a"
+
+        assert "Alex" in echo
+        assert admin.pending_proxy_target == ALEX_ID
+        assert admin.state == ConversationState.AWAITING_CONFIRMATION
+
+    @pytest.mark.asyncio
     async def test_missing_target_is_asked_for_and_held(
         self, service: BookingService, admin_configured: None
     ) -> None:
