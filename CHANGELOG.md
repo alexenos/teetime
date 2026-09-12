@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A message that only addresses the bot now gets usage help instead of
+  silence.** Tagging the bot and sending the request as a separate message —
+  `@NorthgateTeetimebot`, then `Book 9/20 at 12p` — used to produce no reply at
+  all: the follow-up never reaches the bot (Telegram's group privacy mode does
+  not deliver it, and `app/api/webhooks.py` drops unaddressed group text), and
+  the bare tag was dropped as having nothing to parse. From the user's side the
+  booking request simply went unanswered.
+
+  The bare tag is now answered with what to do differently — keep the request in
+  the same message as the tag — followed by example commands, each shown with
+  the tag so one can be copied as is. A private chat, and a bot whose own handle
+  could not be resolved, get the same reply with untagged examples. The Discord
+  gateway answers a bare `@mention` the same way.
+
+  The text lives in the new `app/services/help_text.py`, shared with the
+  existing `help` intent so both offer the same examples.
+
 ### Changed
 
 - **Every booking now runs under the requester's own Walden login; there is no

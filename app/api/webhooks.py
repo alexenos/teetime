@@ -15,6 +15,7 @@ from app.providers.telegram_provider import (
 )
 from app.providers.twilio_provider import TwilioSMSProvider
 from app.services.booking_service import booking_service
+from app.services.help_text import addressing_help_message
 from app.services.sms_service import sms_service
 
 logger = logging.getLogger(__name__)
@@ -184,30 +185,38 @@ async def handle_telegram_update(
     # Strip that addressing before the parser sees it, the same way the Discord
     # gateway strips "<@1533...>".
     text = strip_bot_prefix(raw_text, entities, bot_username)
+
     if not text:
-        logger.info(f"Telegram message from {user_id} was only addressing; nothing to parse")
-        return {"status": "ignored"}
+        # Addressing and nothing else: "@NorthgateTeetimebot" on its own, with
+        # the actual request typed as a second, untagged message. That second
+        # message never gets here (privacy mode keeps Telegram from delivering
+        # it, and the check above drops it when privacy mode is off), so
+        # staying silent reads as the bot ignoring a booking request. Answer
+        # with what to do instead.
+        logger.info(f"Telegram message from {user_id} was only addressing; replying with help")
+        mention = f"@{bot_username} " if bot_username and chat.get("type") != "private" else ""
+        response_message = addressing_help_message(mention)
+    else:
+        logger.info(f"Telegram message received from {user_id} in chat {chat_id}: {text[:80]}")
 
-    logger.info(f"Telegram message received from {user_id} in chat {chat_id}: {text[:80]}")
+        # Only a group conversation needs a mention baked into the booking - a
+        # private chat has no one else to name it for, and would just read the
+        # user their own handle back. "" (rather than omitting the argument)
+        # explicitly clears any stale mention left over from an earlier group
+        # conversation with this same user.
+        requester_handle = addressee_prefix(sender) if chat.get("type") != "private" else ""
 
-    # Only a group conversation needs a mention baked into the booking - a
-    # private chat has no one else to name it for, and would just read the
-    # user their own handle back. "" (rather than omitting the argument)
-    # explicitly clears any stale mention left over from an earlier group
-    # conversation with this same user.
-    requester_handle = addressee_prefix(sender) if chat.get("type") != "private" else ""
-
-    try:
-        response_message = await booking_service.handle_incoming_message(
-            user_id,
-            text,
-            origin_channel_id=chat_id,
-            channel="telegram",
-            requester_handle=requester_handle,
-        )
-    except Exception:
-        logger.exception("Error handling Telegram message")
-        response_message = "Sorry, something went wrong processing that message."
+        try:
+            response_message = await booking_service.handle_incoming_message(
+                user_id,
+                text,
+                origin_channel_id=chat_id,
+                channel="telegram",
+                requester_handle=requester_handle,
+            )
+        except Exception:
+            logger.exception("Error handling Telegram message")
+            response_message = "Sorry, something went wrong processing that message."
 
     reply_to_message_id: str | None = None
     if chat.get("type") != "private":

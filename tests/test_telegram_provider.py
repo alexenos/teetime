@@ -546,9 +546,12 @@ class TestTelegramWebhookRoute:
         assert resp.status_code == 200
         assert seen["message"] == "book 9/5 at 9a"
 
-    def test_message_that_is_only_addressing_ignored(
+    def test_group_message_that_is_only_addressing_gets_help(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Tagging the bot and typing the request as a separate, untagged
+        message is the most common way to get no answer at all - that second
+        message never reaches the bot. Answer the tag with how to do it."""
         from app.api import webhooks
 
         monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
@@ -557,7 +560,62 @@ class TestTelegramWebhookRoute:
         async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("a bare mention has nothing to parse")
 
+        sent: dict = {}
+
+        async def fake_send(  # type: ignore[no-untyped-def]
+            to_number, message, origin_channel_id=None, channel=None, reply_to_message_id=None
+        ):
+            sent.update(
+                to_number=to_number,
+                message=message,
+                origin_channel_id=origin_channel_id,
+                reply_to_message_id=reply_to_message_id,
+            )
+            return "msg-1"
+
         monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fail)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
+
+        update = self._update(text="@teetimebot", chat_id=-1001234567890, chat_type="group")
+        update["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 11}]
+
+        resp = client.post(
+            "/webhooks/telegram",
+            json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+        # Examples carry the tag, since tagging is the part that went wrong,
+        # and the reply is addressed and threaded like any other group answer.
+        assert "@teetimebot Book Saturday 8am for 4 players" in sent["message"]
+        assert sent["message"].startswith("Alex, ")
+        assert sent["origin_channel_id"] == "-1001234567890"
+        assert sent["reply_to_message_id"] == "2"
+
+    def test_private_message_that_is_only_addressing_gets_help(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """In a private chat there is no tagging to get wrong, so the examples
+        are plain messages."""
+        from app.api import webhooks
+
+        monkeypatch.setattr(telegram_provider, "_bot_username", "teetimebot")
+        monkeypatch.setattr(telegram_provider, "_bot_username_resolved", True)
+
+        async def fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("a bare mention has nothing to parse")
+
+        sent: dict = {}
+
+        async def fake_send(  # type: ignore[no-untyped-def]
+            to_number, message, origin_channel_id=None, channel=None, reply_to_message_id=None
+        ):
+            sent.update(message=message)
+            return "msg-1"
+
+        monkeypatch.setattr(webhooks.booking_service, "handle_incoming_message", fail)
+        monkeypatch.setattr(webhooks.sms_service, "send_sms", fake_send)
 
         update = self._update(text="@teetimebot")
         update["message"]["entities"] = [{"type": "mention", "offset": 0, "length": 11}]
@@ -568,7 +626,9 @@ class TestTelegramWebhookRoute:
             headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ignored"}
+        assert resp.json() == {"status": "ok"}
+        assert "- Book Saturday 8am for 4 players" in sent["message"]
+        assert "@teetimebot" not in sent["message"]
 
     def test_leading_whitespace_does_not_shift_entity_offsets(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
