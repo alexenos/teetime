@@ -525,6 +525,72 @@ class TestProxyBookingFlow:
         assert admin.state == ConversationState.AWAITING_CONFIRMATION
 
     @pytest.mark.asyncio
+    async def test_failed_retyped_target_drops_an_unconfirmed_request(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Regression: found in review of this PR.
+
+        The retyped-command branch above must clear stale proxy state on
+        failure exactly like the plain first-turn path does - otherwise a
+        request held from *before* the retype survives a failed retype and
+        gets resumed under whoever the admin names next. Three turns:
+
+          1. "book 9/12 at 8a"              -> no target named; held, asked
+             "for which user?"
+          2. "for @nobdy book 9/20 at 8a"   -> retyped command, but the typo
+             resolves nobody; this turn's own 9/20 is never parsed
+          3. "@sam"                         -> resolves
+
+        Turn 3 must not read the 9/12 request still sitting on the session
+        from turn 1 and offer Sam a slot nobody asked him about.
+        """
+        admin = UserSession(phone_number=ADMIN_ID, channel="telegram")
+        sessions = _FakeSessions(admin)
+        sam = CredentialOwner(phone_number=SAM_ID, name="Sam", telegram_username="sam")
+
+        creds = AsyncMock()
+        # Turn 2's typo resolves nobody; turn 3's "@sam" resolves Sam.
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=[[], [sam]])
+        creds.get_owner = AsyncMock(return_value=sam)
+
+        with patch("app.services.booking_service.database_service", sessions):
+            with patch("app.services.booking_service.credential_service", creds):
+                with patch("app.services.booking_service.gemini_service") as gemini:
+                    gemini.parse_message = AsyncMock(return_value=self._booking_intent())
+                    asked = await service.handle_incoming_message(
+                        ADMIN_ID, "book 9/12 at 8a", channel="telegram"
+                    )
+
+                assert "which user" in asked.lower()
+                assert admin.pending_request is not None
+                assert admin.state == ConversationState.AWAITING_PROXY_TARGET
+
+                with patch("app.services.booking_service.gemini_service") as gemini:
+                    gemini.parse_message = AsyncMock(side_effect=AssertionError("must not parse"))
+                    response = await service.handle_incoming_message(
+                        ADMIN_ID, "for @nobdy book 9/20 at 8a", channel="telegram"
+                    )
+
+                assert "don't know who" in response
+                # The 9/12 request must not survive this failed retype.
+                assert admin.pending_request is None
+                assert admin.pending_requests is None
+                assert admin.pending_proxy_target is None
+                assert admin.state == ConversationState.AWAITING_PROXY_TARGET
+
+                with patch("app.services.booking_service.gemini_service") as gemini:
+                    gemini.parse_message = AsyncMock(side_effect=AssertionError("must not parse"))
+                    echo = await service.handle_incoming_message(
+                        ADMIN_ID, "@sam", channel="telegram"
+                    )
+
+        # Sam is named, but there is no request left to resume - the bot
+        # must ask for one rather than confirming the stale 9/12 booking.
+        assert admin.pending_proxy_target == SAM_ID
+        assert "9/12" not in echo
+        assert admin.state != ConversationState.AWAITING_CONFIRMATION
+
+    @pytest.mark.asyncio
     async def test_missing_target_is_asked_for_and_held(
         self, service: BookingService, admin_configured: None
     ) -> None:

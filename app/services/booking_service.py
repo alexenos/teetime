@@ -396,6 +396,18 @@ class BookingService:
 
             unresolved = await self._resolve_proxy_target(session, target_reply)
             if unresolved is not None:
+                if retyped_target is not None:
+                    # This turn named its own target - a retyped command, not
+                    # a bare-name answer - so whatever was held from before
+                    # (e.g. a "book ..." from a still-earlier turn) is not
+                    # this request either. Leaving it would let a *later*
+                    # bare name resume it and book a stranger's stale request
+                    # under the wrong friend - the same failure mode
+                    # test_failed_target_drops_an_unconfirmed_request guards
+                    # against for the non-retyped case.
+                    session.pending_request = None
+                    session.pending_requests = None
+                    session.pending_proxy_target = None
                 return unresolved, message
 
             if retyped_target is not None:
