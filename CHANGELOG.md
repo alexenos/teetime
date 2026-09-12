@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Every booking now runs under the requester's own Walden login; there is no
+  shared account to fall back on.** A requester with no row in
+  `walden_credentials` is refused - in the conversation, with "your account
+  isn't set up for booking yet" - instead of quietly booking under
+  `WALDEN_MEMBER_NUMBER`/`WALDEN_PASSWORD`.
+
+  #179 added that fallback deliberately, so friends could be onboarded one at a
+  time without breaking anyone. The cost only became clear once people were
+  actually being added: an unconfigured friend booked under somebody else's
+  membership with no error and no warning, and because the club allows each
+  member one round per day, that booking could spend the slot the real one
+  needed. Silence was the wrong default for something that cannot be undone
+  from chat.
+
+  Refused at two layers, for the same reason #185's admin guard is:
+
+  - `create_booking` refuses while someone is still reading the reply, so no
+    row is written that would look scheduled for a week and then fail at 6:30.
+  - `_provider_for` raises `WaldenCredentialRequiredError`, so a row that
+    already exists - written before this change, or by any path that skipped
+    the first check - still cannot reach the club under an account that is not
+    the requester's.
+
+  `ProxyAdminHasNoCredentialError` (#185) is now a subclass of that, since the
+  proxy admin was always a special case of the same rule.
+
+  Providers are built per requester from their own login: `app/main.py` installs
+  the provider *class* via the new `set_reservation_provider_factory`, rather
+  than one instance built from the shared credentials.
+  `set_reservation_provider` remains for a single fixed instance -
+  `MockWaldenProvider` in local development, and tests - and does **not** bypass
+  the credential requirement, which is checked before either mode builds
+  anything.
+
+  `CredentialService.resolve()` is replaced by `require_credentials()`, whose
+  return type is no longer optional because there is no second choice to
+  return.
+
+  **`WALDEN_MEMBER_NUMBER`/`WALDEN_PASSWORD` no longer log anything in.** They
+  survive only as the "this is a real deployment, not a laptop" signal that
+  picks the real provider class over the mock. Retiring the two secrets is a
+  follow-up: dropping them from Terraform's `secrets` list would have Terraform
+  delete them from Secret Manager, so that wants its own change.
+
+  **Before deploying:** every user who books must already have a row. Check with
+  `poetry run python scripts/add_walden_credential.py list` against the
+  production database, and confirm no `SCHEDULED` booking belongs to a requester
+  without one - those would fail at 6:30 rather than falling back.
+
 ### Added
 
 - **One designated admin account can book on a friend's behalf** (issue #185).

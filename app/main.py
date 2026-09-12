@@ -10,7 +10,6 @@ from fastapi import FastAPI
 from app.api import bookings, health, jobs, webhooks
 from app.config import settings
 from app.models.database import init_db
-from app.providers.base import ReservationProvider
 from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
 from app.services.booking_service import booking_service
 
@@ -107,18 +106,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Set SCHEDULER_API_KEY environment variable for production use."
         )
 
+    # WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD no longer log anything in: every
+    # booking runs under the requester's own stored login, and a requester
+    # without one is refused rather than borrowing this account. They survive
+    # only as the signal for "this is a real deployment, not a laptop", which is
+    # why the class - not an instance built from them - is what gets installed.
+    # Retiring the two secrets is a follow-up: dropping them from terraform's
+    # list would have Terraform delete them from Secret Manager, so that wants
+    # its own change.
     if settings.walden_member_number and settings.walden_password:
-        logger.info("Walden Golf credentials configured - using real WaldenGolfProvider")
-        provider: ReservationProvider = WaldenGolfProvider(
-            settings.walden_member_number, settings.walden_password
-        )
+        logger.info("Walden Golf configured - bookings run under each requester's own login")
+        booking_service.set_reservation_provider_factory(WaldenGolfProvider)
     else:
         logger.warning(
             "Walden Golf credentials not configured - using MockWaldenProvider. "
             "Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD for real bookings."
         )
-        provider = MockWaldenProvider()
-    booking_service.set_reservation_provider(provider)
+        booking_service.set_reservation_provider(MockWaldenProvider())
 
     # Any booking still IN_PROGRESS is left over from a process that died
     # mid-attempt, since no attempt survives a restart. Resolve those and tell
@@ -149,7 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await booking_service.wait_for_background_bookings(timeout=SHUTDOWN_BOOKING_TIMEOUT_SECONDS)
     if discord_gateway is not None:
         await discord_gateway.stop()
-    await provider.close()
+    await booking_service.close_reservation_provider()
 
 
 async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> None:

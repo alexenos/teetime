@@ -19,22 +19,26 @@ from app.api.jobs import (
 )
 from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
 from app.providers.base import BookingResult
+from app.services.credential_service import WaldenCredentials
 
 
 @pytest.fixture(autouse=True)
-def no_dedicated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test here exercises a requester with no admin-added Walden login
-    of their own (issue #179), so BookingService._provider_for should fall
-    back to whichever mock provider the test wired up, rather than its
-    credential lookup hitting a real database.
+def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every requester in this module a Walden login of their own.
+
+    Was `no_dedicated_credentials`, returning None to make _provider_for fall
+    back to the shared global account. That fallback is gone - a requester with
+    no login on file is refused - so these job tests supply a credential
+    instead. Still stubbed rather than hitting a real database: none of them is
+    about credential storage.
     """
 
-    async def _no_dedicated_credential(phone_number: str) -> None:
-        return None
+    async def _credential(phone_number: str) -> WaldenCredentials:
+        return WaldenCredentials(member_number=f"member-{phone_number}", password="pw")
 
     monkeypatch.setattr(
         "app.services.booking_service.credential_service.get_dedicated_credentials",
-        _no_dedicated_credential,
+        _credential,
     )
 
 

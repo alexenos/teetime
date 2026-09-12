@@ -13,6 +13,27 @@ import pytz
 from fastapi.testclient import TestClient
 
 from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
+from app.services.credential_service import WaldenCredentials
+
+
+@pytest.fixture(autouse=True)
+def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every requester a Walden login of their own.
+
+    POST /bookings/ goes through the same create_booking as a chat message, so
+    it now refuses a requester with no login on file - there is no shared
+    account to fall back on. Without this the credential lookup would reach a
+    real database and these endpoint tests would fail on connection errors
+    rather than on anything they are testing.
+    """
+
+    async def _credential(phone_number: str) -> WaldenCredentials:
+        return WaldenCredentials(member_number=f"member-{phone_number}", password="pw")
+
+    monkeypatch.setattr(
+        "app.services.booking_service.credential_service.get_dedicated_credentials",
+        _credential,
+    )
 
 
 def _future_date(days_ahead: int = 30) -> date:

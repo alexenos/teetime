@@ -34,6 +34,8 @@ from app.services.credential_service import (
     CredentialOwner,
     CredentialService,
     ProxyAdminHasNoCredentialError,
+    WaldenCredentialRequiredError,
+    WaldenCredentials,
 )
 
 TEST_KEY = Fernet.generate_key().decode()
@@ -260,42 +262,43 @@ class TestAdminHasNoCredentialOfItsOwn:
             await credential_service.get_dedicated_credentials(ADMIN_ID)
 
     @pytest.mark.asyncio
-    async def test_resolve_raises_too(
-        self, credential_service: CredentialService, admin_configured: None, monkeypatch
+    async def test_require_credentials_raises_for_the_admin(
+        self, credential_service: CredentialService, admin_configured: None
     ) -> None:
-        monkeypatch.setattr(
-            "app.services.credential_service.settings.walden_member_number", "GLOBAL"
-        )
-        monkeypatch.setattr("app.services.credential_service.settings.walden_password", "globalpw")
-
         with pytest.raises(ProxyAdminHasNoCredentialError):
-            await credential_service.resolve(ADMIN_ID)
+            await credential_service.require_credentials(ADMIN_ID)
 
     @pytest.mark.asyncio
-    async def test_other_requesters_still_fall_back(
-        self, credential_service: CredentialService, admin_configured: None, monkeypatch
+    async def test_nobody_falls_back_to_a_shared_account(
+        self, credential_service: CredentialService, admin_configured: None
     ) -> None:
-        monkeypatch.setattr(
-            "app.services.credential_service.settings.walden_member_number", "GLOBAL"
-        )
-        monkeypatch.setattr("app.services.credential_service.settings.walden_password", "globalpw")
+        """Replaces test_other_requesters_still_fall_back.
 
-        resolved = await credential_service.resolve(ALEX_ID)
-
-        assert resolved is not None
-        assert resolved.member_number == "GLOBAL"
+        That test asserted an ordinary requester with no row of their own
+        resolved to the global WALDEN_MEMBER_NUMBER. That was #179's migration
+        aid and is exactly what this change removes: booking under a login that
+        is not the requester's own is the failure being prevented, so the
+        refusal now applies to everyone, not only the admin.
+        """
+        with pytest.raises(WaldenCredentialRequiredError):
+            await credential_service.require_credentials(ALEX_ID)
 
 
 @pytest.fixture(autouse=True)
-def no_dedicated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep BookingService._provider_for off a real database in the flow tests below."""
+def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the flow tests below off a real database, with a login on file.
 
-    async def _no_dedicated_credential(phone_number: str) -> None:
-        return None
+    Returned None before; a requester with no credential is now refused rather
+    than falling back to the shared account, which would stop these tests at
+    create_booking for a reason none of them is about.
+    """
+
+    async def _credential(phone_number: str) -> WaldenCredentials:
+        return WaldenCredentials(member_number=f"member-{phone_number}", password="pw")
 
     monkeypatch.setattr(
         "app.services.booking_service.credential_service.get_dedicated_credentials",
-        _no_dedicated_credential,
+        _credential,
     )
 
 

@@ -3,9 +3,16 @@ Per-requester Walden Golf credential resolution (issue #179).
 
 Each friend already has their own Walden membership; Dax adds their login
 here himself (see scripts/add_walden_credential.py) once, encrypted at rest.
-A requester with no row of their own falls back to the single shared account
-in settings.walden_member_number / walden_password, so the existing flow
-keeps working while friends are added incrementally.
+
+There is no shared account any more. A requester with no row of their own is
+refused - see WaldenCredentialRequiredError - rather than falling back to
+settings.walden_member_number / walden_password the way #179 originally had
+it. That fallback was a deliberate migration aid, meant to keep existing
+users working while friends were added one at a time, but it meant an
+unconfigured friend silently booked under somebody else's membership: no
+error, no warning, and under the club's one-round-per-member-per-day rule it
+could consume the slot the real booking needed. Every booking now runs under
+a login belonging to the person it is for, or it does not run.
 
 Two things here serve admin proxy booking (issue #185) rather than that flow:
 find_by_name_or_telegram_username, which resolves the admin's "for @X" to a
@@ -18,13 +25,28 @@ from dataclasses import dataclass
 
 from sqlalchemy import select
 
-from app.config import settings
 from app.models.database import AsyncSessionLocal, WaldenCredentialRecord
 from app.services import credential_crypto
 from app.services.proxy_booking import is_proxy_admin, normalize_target
 
 
-class ProxyAdminHasNoCredentialError(RuntimeError):
+class WaldenCredentialRequiredError(RuntimeError):
+    """Raised when a booking has no Walden login of its own to run under.
+
+    Every requester needs their own row in walden_credentials. There is
+    deliberately nothing to fall back to: booking under a login that is not
+    the requester's own is the failure this prevents, and it is worse than not
+    booking at all, because the club allows each member one round per day and a
+    misattributed booking spends somebody else's.
+
+    Raised from the lookup path, where it is a loud booking failure. Callers
+    that are still in a conversation with the user refuse earlier and more
+    kindly - see BookingService.create_booking, which turns "you have no login
+    on file" into a message the user can act on instead of a failed booking.
+    """
+
+
+class ProxyAdminHasNoCredentialError(WaldenCredentialRequiredError):
     """Raised when something tries to book under the proxy admin's own identity.
 
     The admin account is proxy-only by design (issue #185): it has no row in
@@ -105,23 +127,22 @@ class CredentialService:
             password=credential_crypto.decrypt(str(record.password_encrypted)),
         )
 
-    async def resolve(self, phone_number: str) -> WaldenCredentials | None:
-        """The credentials this requester's booking should run under.
+    async def require_credentials(self, phone_number: str) -> WaldenCredentials:
+        """This requester's own login, or refuse.
 
-        Their own admin-added login if one exists, else the single shared
-        global account. None if neither is configured.
+        Replaces #179's resolve(), whose entire purpose was the shared-account
+        fallback this removes. There is no second choice to return, so the
+        return type is no longer optional: either the caller gets a login
+        belonging to the person the booking is for, or it raises.
         """
         dedicated = await self.get_dedicated_credentials(phone_number)
-        if dedicated is not None:
-            return dedicated
-
-        if settings.walden_member_number and settings.walden_password:
-            return WaldenCredentials(
-                member_number=settings.walden_member_number,
-                password=settings.walden_password,
+        if dedicated is None:
+            raise WaldenCredentialRequiredError(
+                f"No Walden login is on file for requester {phone_number}, and there is "
+                "no shared account to fall back on. Add one with "
+                "scripts/add_walden_credential.py before booking for them."
             )
-
-        return None
+        return dedicated
 
     async def get_owner(self, phone_number: str) -> CredentialOwner | None:
         """The naming fields on this requester's credential row, without secrets.
