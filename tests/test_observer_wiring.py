@@ -140,7 +140,10 @@ class TestObserveWithoutCredentials:
     _resolve_target returning None is the unit of the decision, but the
     property that matters at 06:24 is what observe() does with it: give up
     before the browser starts, and report the morning as unproductive rather
-    than raising into the job's exit code.
+    than raising into the job's exit code. Nothing asserted that end to end -
+    the gap CodeRabbit flagged on #195 - so a future change that launched
+    Chrome before resolving, or let the refusal propagate, would pass every
+    other test in this file.
     """
 
     async def test_it_gives_up_before_starting_a_browser(self) -> None:

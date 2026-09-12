@@ -9,6 +9,48 @@ This repo reviews every PR with **CodeRabbit** (a GitHub App, so it does not
 appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`,
 `lint`, and `test`.
 
+**CodeRabbit never reviews this repo on its own. You have to ask, every time.**
+Do not wait for a review that is not coming; do not re-derive this each session.
+Two separate rules both suppress the automatic pass, and either is enough:
+
+- **Drafts are skipped by default.** The bot says so itself: *"Draft PRs are not
+  automatically reviewed by default."*
+- **The repo is under the star threshold**, which suppresses automatic reviews
+  even once the PR is out of draft: *"This repository does not receive automatic
+  reviews because it has fewer than 10 stars."*
+
+The second one is the surprise, and the reason this section exists: taking a PR
+ready-for-review looks like it should start a review, and does not.
+
+Both conditions are mutable, so treat them as observed rather than permanent -
+as of 2026-09-12 the repo had 0 stars, and the bot reported a plan allowing one
+included review per hour. Re-check rather than assume when the behaviour differs
+from this:
+
+```bash
+gh api repos/alexenos/teetime --jq .stargazers_count   # against the threshold above
+```
+
+and read the quota off the bot's own "Included review availability" line, which
+it prints on every review.
+
+So the trigger is a comment, posted by you, naming the commit you want looked at
+(CodeRabbit is incremental and will not re-review commits it has already seen):
+
+```bash
+gh pr comment <N> --body "@coderabbitai review - new commit $(git rev-parse --short HEAD)"
+```
+
+Post it **when you open the PR**, and **again after every push** you want
+reviewed, including a ready-for-review transition.
+
+Its walkthrough, "Merge Risk", and pre-merge checks are each stamped with the
+commit they covered - the summary says `up to <short-sha>`. After a later push
+those are **stale**, not approval of the current head, so compare the sha they
+name against `git rev-parse --short HEAD` before believing them.
+
+Spend the review on a commit that is ready, not on a work in progress.
+
 ## 1. Branch and push
 
 Never commit to `main` — a commit there redeploys to Cloud Run. Branch first.
@@ -59,7 +101,15 @@ echo "still pending after 800s"; gh pr checks <N>; exit 1
 ```
 
 CodeRabbit posts an initial summary comment within a minute of the PR opening —
-that is **not** the review. The review lands later as inline comments.
+that is **not** the review, and on this repo no review follows it unless you ask
+(see the top of this file). Once triggered, the review lands later as inline
+comments; the summary comment is edited in place as it goes, so its content
+changing is not a review landing either.
+
+Its `CodeRabbit` commit status also lags: it has sat on `pending — Review in
+progress` after the review comment was already posted, and cleared only on a
+later event. Trust the review text over the status badge, but do not call the
+PR done until the status itself settles.
 
 ## 4. Read the review properly
 

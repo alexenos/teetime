@@ -135,6 +135,38 @@ class TestNormalizeTarget:
         assert proxy_booking.normalize_target("@") == ""
 
 
+class TestStripLeadingFor:
+    """Answering "for which user?" with "For Ronald" names Ronald, not "For Ronald"."""
+
+    @pytest.mark.parametrize(
+        ("reply", "expected"),
+        [
+            ("For Ronald", "Ronald"),
+            ("for ronald", "ronald"),
+            ("FOR @ronald", "@ronald"),
+            ("  for   Ronald  ", "Ronald"),
+            ("for Ron Garner", "Ron Garner"),
+        ],
+    )
+    def test_a_restated_preposition_is_dropped(self, reply: str, expected: str) -> None:
+        """Case, spacing and a leading "@" all survive; only the "for" goes."""
+        assert proxy_booking.strip_leading_for(reply) == expected
+
+    @pytest.mark.parametrize("reply", ["Ronald", "@ronald", "Ron Garner"])
+    def test_a_bare_name_is_untouched(self, reply: str) -> None:
+        """A reply that never restated the preposition comes back unchanged."""
+        assert proxy_booking.strip_leading_for(reply) == reply
+
+    @pytest.mark.parametrize("reply", ["for", "  for  ", ""])
+    def test_nothing_after_for_is_left_alone(self, reply: str) -> None:
+        """Stripping to the empty string would search for nobody in particular."""
+        assert proxy_booking.strip_leading_for(reply) == reply
+
+    def test_only_a_leading_for_counts(self) -> None:
+        """ "Fortnight" starts with the letters but is not the preposition."""
+        assert proxy_booking.strip_leading_for("Fortnight") == "Fortnight"
+
+
 class TestIsProxyAdmin:
     def test_matches_only_the_configured_id(self, admin_configured: None) -> None:
         assert proxy_booking.is_proxy_admin(ADMIN_ID) is True
@@ -573,6 +605,169 @@ class TestProxyBookingFlow:
         assert "more than one person" in response
         assert "Sam" in response and "@sam" in response
         assert admin.pending_proxy_target is None
+
+    @pytest.mark.asyncio
+    async def test_answering_with_for_still_names_the_friend(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """The reported case: "for which user?" answered "For Ronald".
+
+        The prompt asks for a name, so restating the preposition is the
+        natural reply. Looked up verbatim it folded to "for ronald", matched
+        nobody, and came back as `I don't know who "For Ronald" is` - which
+        reads as the friend being unconfigured rather than the word "For"
+        being taken as part of his name.
+        """
+        admin = UserSession(
+            phone_number=ADMIN_ID,
+            channel="telegram",
+            state=ConversationState.AWAITING_PROXY_TARGET,
+            pending_request=self._booking_intent().tee_time_request,
+        )
+        sessions = _FakeSessions(admin)
+        owner = self._owner()
+
+        # Argument-sensitive on purpose. _patched returns a match whatever it
+        # is handed, so with it this test passes even with the strip removed -
+        # it proves the flow runs, not that the right name was looked up.
+        async def lookup(target: str) -> list[CredentialOwner]:
+            """Match only this owner's own name or handle, nothing else."""
+            wanted = proxy_booking.normalize_target(target)
+            candidates = {
+                proxy_booking.normalize_target(v)
+                for v in (owner.name, owner.telegram_username)
+                if v
+            }
+            return [owner] if wanted in candidates else []
+
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=lookup)
+        creds.get_owner = AsyncMock(return_value=owner)
+
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+        ):
+            await service.handle_incoming_message(ADMIN_ID, "For Alex", channel="telegram")
+
+        assert admin.pending_proxy_target == ALEX_ID
+        assert admin.state != ConversationState.AWAITING_PROXY_TARGET
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_tries_the_literal_form_before_the_stripped_one(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Both forms are queried, and the order is the safety property.
+
+        Previously this asserted a single lookup for "Alex". That encoded the
+        unconditional strip CodeRabbit found: it also meant a friend stored as
+        "For Real" could never be named. The literal now goes first, and the
+        stripped form is only reached because nothing matched it.
+        """
+        admin = UserSession(
+            phone_number=ADMIN_ID,
+            channel="telegram",
+            state=ConversationState.AWAITING_PROXY_TARGET,
+            pending_request=self._booking_intent().tee_time_request,
+        )
+        sessions = _FakeSessions(admin)
+        owner = self._owner()
+
+        async def lookup(target: str) -> list[CredentialOwner]:
+            """Match "Alex" only, so the literal lookup misses and falls back."""
+            # "For Alex" is nobody; "Alex" is. That is what sends the
+            # resolution on to the fallback rather than stopping at the first.
+            return [owner] if proxy_booking.normalize_target(target) == "alex" else []
+
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=lookup)
+        creds.get_owner = AsyncMock(return_value=owner)
+
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+        ):
+            await service.handle_incoming_message(ADMIN_ID, "For Alex", channel="telegram")
+
+        assert [c.args[0] for c in creds.find_by_name_or_telegram_username.await_args_list] == [
+            "For Alex",
+            "Alex",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_friend_whose_name_starts_with_for_still_resolves(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """CodeRabbit's finding on #195: the strip must not eat a real name.
+
+        A friend stored as "For Real" is named by typing "For Real". Stripping
+        unconditionally turned that into "Real" and matched nobody.
+        """
+        real = CredentialOwner(phone_number=SAM_ID, name="For Real", telegram_username=None)
+        admin = UserSession(
+            phone_number=ADMIN_ID,
+            channel="telegram",
+            state=ConversationState.AWAITING_PROXY_TARGET,
+            pending_request=self._booking_intent().tee_time_request,
+        )
+        sessions = _FakeSessions(admin)
+
+        async def lookup(target: str) -> list[CredentialOwner]:
+            """Only "For Real" is on file - the stripped "Real" matches nobody."""
+            return [real] if proxy_booking.normalize_target(target) == "for real" else []
+
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=lookup)
+        creds.get_owner = AsyncMock(return_value=real)
+
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+        ):
+            await service.handle_incoming_message(ADMIN_ID, "For Real", channel="telegram")
+
+        assert admin.pending_proxy_target == SAM_ID
+
+    @pytest.mark.asyncio
+    async def test_a_literal_name_wins_over_the_stripped_one(
+        self, service: BookingService, admin_configured: None
+    ) -> None:
+        """Order is a safety property, not a preference.
+
+        With both "For Real" and "Real" on file, stripping first would resolve
+        a reply of "For Real" to Real and book the round under the wrong
+        membership - the outcome this path exists to make impossible.
+        """
+        for_real = CredentialOwner(phone_number=SAM_ID, name="For Real", telegram_username=None)
+        plain_real = CredentialOwner(phone_number=ALEX_ID, name="Real", telegram_username=None)
+        admin = UserSession(
+            phone_number=ADMIN_ID,
+            channel="telegram",
+            state=ConversationState.AWAITING_PROXY_TARGET,
+            pending_request=self._booking_intent().tee_time_request,
+        )
+        sessions = _FakeSessions(admin)
+
+        async def lookup(target: str) -> list[CredentialOwner]:
+            """Both "For Real" and "Real" are on file, so the order decides."""
+            wanted = proxy_booking.normalize_target(target)
+            return [
+                o
+                for o in (for_real, plain_real)
+                if proxy_booking.normalize_target(o.name) == wanted
+            ]
+
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(side_effect=lookup)
+        creds.get_owner = AsyncMock(return_value=for_real)
+
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+        ):
+            await service.handle_incoming_message(ADMIN_ID, "For Real", channel="telegram")
+
+        assert admin.pending_proxy_target == SAM_ID, "resolved to Real instead of For Real"
 
     @pytest.mark.asyncio
     async def test_abort_leaves_no_pending_booking(
