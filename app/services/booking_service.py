@@ -371,8 +371,16 @@ class BookingService:
         Called only for the configured admin ID (issue #185).
         """
         if session.state == ConversationState.AWAITING_PROXY_TARGET:
-            # We asked "for which user?" last turn, so the whole message is the
-            # answer - not a new request.
+            # We asked "for which user?" last turn, so the whole message is
+            # normally the answer - not a new request. But nothing stops the
+            # admin from retyping the entire command instead of just a name
+            # (naturally, after a typo: "for @rongarner book 9/15 at 12:02p").
+            # split_proxy_target only matches that shape (it requires a
+            # leading "for @"), so trying it first and falling back to the
+            # raw message keeps a bare name working exactly as before, while
+            # separating a fresh command's trailing booking text from the
+            # target instead of searching for it as part of the name - which
+            # never matches, even when the target itself is on file.
             if _normalize_reply(message) in PROXY_TARGET_ABORTS:
                 session.pending_request = None
                 session.pending_requests = None
@@ -383,9 +391,36 @@ class BookingService:
                     message,
                 )
 
-            unresolved = await self._resolve_proxy_target(session, message)
+            retyped_target, retyped_remainder = split_proxy_target(message)
+            target_reply = retyped_target if retyped_target is not None else message
+
+            unresolved = await self._resolve_proxy_target(session, target_reply)
             if unresolved is not None:
+                if retyped_target is not None:
+                    # This turn named its own target - a retyped command, not
+                    # a bare-name answer - so whatever was held from before
+                    # (e.g. a "book ..." from a still-earlier turn) is not
+                    # this request either. Leaving it would let a *later*
+                    # bare name resume it and book a stranger's stale request
+                    # under the wrong friend - the same failure mode
+                    # test_failed_target_drops_an_unconfirmed_request guards
+                    # against for the non-retyped case.
+                    session.pending_request = None
+                    session.pending_requests = None
+                    session.pending_proxy_target = None
                 return unresolved, message
+
+            if retyped_target is not None:
+                # A fresh command, not a bare name - this turn's own request
+                # (if any) hasn't been parsed yet, same as the normal
+                # first-turn path below.
+                session.pending_request = None
+                session.pending_requests = None
+                session.state = ConversationState.IDLE
+                if not retyped_remainder:
+                    display_name = await self._proxy_display_name(session)
+                    return f"Booking for {display_name}. What date and time?", retyped_remainder
+                return None, retyped_remainder
 
             # Target settled; pick the stashed request back up where it left
             # off, so the admin sees the same confirmation they would have got
