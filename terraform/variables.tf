@@ -89,7 +89,7 @@ variable "cloud_run_min_instances" {
 
     0 now that the live channel is Telegram (issue #201): inbound updates
     arrive as HTTP webhooks, so the service can scale to zero between them.
-    See cloud_run_max_instances and the 6:20 AM warm-up scheduler job, which
+    See cloud_run_max_instances and the 6:27 AM warm-up scheduler job, which
     exists to absorb the resulting cold start ahead of the 6:28 AM race
     trigger.
   EOT

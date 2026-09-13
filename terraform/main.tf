@@ -529,19 +529,29 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
   member   = "serviceAccount:${google_service_account.scheduler.email}"
 }
 
-# Wakes a scaled-to-zero instance ahead of the 6:28 AM race trigger (issue
-# #201). With cloud_run_min_instances=0, the first request after an idle
-# period pays a cold start - image already warm from the last deploy, but
-# still a fresh Python process and FastAPI startup (DB init, provider setup)
-# - and that cost must not land on the 6:28 job itself, which is already
-# racing a clock measured in milliseconds. 8 minutes of margin costs nothing
-# but one idle instance-minute or so; GET /health is public and does no work
-# beyond confirming the process is up, so this ping cannot itself interfere
-# with anything on the booking path.
+# Wakes a scaled-to-zero instance one minute ahead of the 6:28 AM race
+# trigger (issue #201). With cloud_run_min_instances=0, the first request
+# after an idle period pays a cold start - image already warm from the last
+# deploy, but still a fresh Python process and FastAPI startup (DB init,
+# provider setup) - and that cost must not land on the 6:28 job itself,
+# which is already racing a clock measured in milliseconds.
+#
+# One minute, not eight: Cloud Run documents idle instances as kept warm for
+# "up to 15 minutes" after their last request, and that "up to" is
+# discretionary, not a floor - Cloud Run can reclaim an idle instance sooner
+# if it wants the capacity back. A bigger gap between this ping and the 6:28
+# job doesn't buy more safety, it just widens the window in which the
+# instance this ping woke could be scaled back down before the request that
+# actually needs it - defeating the point of pinging at all. One minute
+# gives roughly 5x the margin a worst-case ~11s cold start needs, without
+# leaving that window open any longer than it has to be.
+#
+# GET /health is public and does no work beyond confirming the process is
+# up, so this ping cannot itself interfere with anything on the booking path.
 resource "google_cloud_scheduler_job" "warmup" {
   name        = "${local.service_name}-warmup"
-  description = "Wake a scaled-to-zero instance ahead of the 6:28 AM booking run (issue #201)"
-  schedule    = "20 6 * * *"
+  description = "Wake a scaled-to-zero instance one minute ahead of the 6:28 AM booking run (issue #201)"
+  schedule    = "27 6 * * *"
   time_zone   = var.timezone
 
   attempt_deadline = "30s"
