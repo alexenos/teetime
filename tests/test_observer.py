@@ -115,6 +115,9 @@ class TestCaptureRereadsTheSheet:
         assert len(snaps) == 1
         assert snaps[0].refresh_ok is False
         assert "may repeat the previous snapshot" in (snaps[0].note or "")
+        # The note must quote the timeout that actually governed the wait, not a
+        # second copy of it that could drift - a post-mortem reads this number.
+        assert f"within {walden_date_selection.STRIP_SETTLE_TIMEOUT_S}s" in (snaps[0].note or "")
 
     def test_no_selected_tab_is_recorded_as_unrefreshed(self) -> None:
         driver = MagicMock()

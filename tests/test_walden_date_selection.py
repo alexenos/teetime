@@ -13,7 +13,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from bs4 import BeautifulSoup
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+)
 
 from app.providers import walden_date_selection as wds
 
@@ -358,6 +361,34 @@ class TestReachingADatePastTheStrip:
         with patch.object(wds, "await_rerender", return_value=True):
             assert not wds.select_via_strip(driver, date(2027, 5, 1), log_prefix=PREFIX)
         assert driver.advances == wds.MAX_STRIP_ADVANCES
+
+    def test_a_stale_forward_control_is_refound_and_the_page_still_advances(self) -> None:
+        """The sheet's own refresh timers detach elements; that must not cost a morning."""
+        driver = StripDriver(self.TODAY)
+        clicks: list[object] = []
+        real_click = driver.execute_script
+
+        def flaky(script: str, element: object) -> None:
+            clicks.append(element)
+            if len(clicks) == 1:
+                raise StaleElementReferenceException("detached by the page's own refresh")
+            real_click(script, element)
+
+        driver.execute_script = flaky  # type: ignore[method-assign]
+        with patch.object(wds, "await_rerender", return_value=True):
+            assert wds.select_via_strip(driver, self.TARGET, log_prefix=PREFIX)
+        assert driver.selected == self.TARGET
+        assert driver.advances == 1, "the retried click must page the strip exactly once"
+
+    def test_stale_on_both_attempts_gives_up(self) -> None:
+        driver = StripDriver(self.TODAY)
+
+        def always_stale(script: str, element: object) -> None:
+            raise StaleElementReferenceException("detached")
+
+        driver.execute_script = always_stale  # type: ignore[method-assign]
+        with patch.object(wds, "await_rerender", return_value=True):
+            assert not wds.select_via_strip(driver, self.TARGET, log_prefix=PREFIX)
 
     def test_the_day_control_is_preferred_over_the_week_jump(self) -> None:
         week, day = Control("fa fa-angle-double-right"), Control("fa fa-angle-right")

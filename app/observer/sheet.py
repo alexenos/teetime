@@ -59,10 +59,6 @@ TEE_TIME_URL = f"{BASE_URL}/group/pages/book-a-tee-time"
 
 LOGIN_TIMEOUT_S = 15
 PAGE_LOAD_TIMEOUT_S = 20
-# The measured cost of a day-tab re-render is ~730ms (the racer spent that on
-# 2026-08-07), so a second is enough headroom to notice a stall without eating
-# into the next snapshot's slot.
-REFRESH_SETTLE_TIMEOUT_S = 4.0
 
 # Northgate is course 0 in every element id the site emits; the racer relies on
 # the same constant (WaldenGolfProvider.NORTHGATE_COURSE_INDEX).
@@ -342,7 +338,8 @@ def capture_across_window(
                 settled_epoch_ms = int(time_module.time() * 1000)
                 if not refresh_ok:
                     note = (
-                        f"re-render did not land within {REFRESH_SETTLE_TIMEOUT_S}s; "
+                        "re-render did not land within "
+                        f"{walden_date_selection.STRIP_SETTLE_TIMEOUT_S}s; "
                         "these bytes may repeat the previous snapshot"
                     )
                     logger.warning("OBSERVER: snapshot %d - %s", index, note)

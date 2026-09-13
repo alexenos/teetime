@@ -36,6 +36,7 @@ from datetime import date, datetime
 from selenium import webdriver
 from selenium.common.exceptions import (
     NoSuchElementException,
+    StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
 )
@@ -57,8 +58,12 @@ logger = logging.getLogger(__name__)
 # target a fortnight out, at roughly 730ms a click.
 MAX_STRIP_ADVANCES = 8
 
-# The measured cost of a day-tab re-render is ~730ms (the racer spent that on
-# 2026-08-07), so a second is enough headroom to notice a stall.
+# How long any strip click - a day tab or a forward control - is given to
+# re-render. The measured cost is ~730ms (the racer spent that on 2026-08-07),
+# so this is enough headroom to notice a stall without eating into the next
+# snapshot's slot. The observer's per-snapshot replay is timed by this too, and
+# quotes it in the note it files against a snapshot that did not settle, so the
+# number a post-mortem reads is the one the code actually waited.
 STRIP_SETTLE_TIMEOUT_S = 4.0
 
 
@@ -473,30 +478,48 @@ def _advance_strip(driver: webdriver.Chrome, *, log_prefix: str) -> bool:
     the real check rather than the re-render landing: a strip the club refuses
     to page past its horizon would answer the click without moving, and clicking
     it another seven times would just burn the pre-window budget.
+
+    Two attempts, because the one likely failure is a benign race: the sheet runs
+    its own refresh timers (the racer was caught by the same thing - see PR #166,
+    which cleared them mid-race), and one firing between finding the control and
+    clicking it detaches the element. Giving up there would cost the observer a
+    whole morning, and the timer re-renders the same view, so the strip the
+    retry finds is the one already measured into ``before``.
     """
-    try:
-        controls = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.strip_forward_links)
-    except WebDriverException as e:
-        logger.error("%s: could not read the strip's forward controls: %s", log_prefix, e)
-        return False
-
-    if not controls:
-        logger.error(
-            "%s: the date strip offers no enabled forward control, so nothing past its "
-            "horizon can be reached; it spans %s",
-            log_prefix,
-            strip_tab_texts(driver),
-        )
-        return False
-
     before = strip_tab_texts(driver)
-    control = _single_day_control(controls)
-    try:
-        driver.execute_script("arguments[0].click();", control)
-    except WebDriverException as e:
-        logger.error("%s: the strip's forward control could not be clicked: %s", log_prefix, e)
-        return False
-    await_rerender(driver, control)
+
+    for attempt in (1, 2):
+        try:
+            controls = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.strip_forward_links)
+            if not controls:
+                logger.error(
+                    "%s: the date strip offers no enabled forward control, so nothing past "
+                    "its horizon can be reached; it spans %s",
+                    log_prefix,
+                    before,
+                )
+                return False
+
+            control = _single_day_control(controls)
+            driver.execute_script("arguments[0].click();", control)
+        except StaleElementReferenceException as e:
+            if attempt == 1:
+                logger.info(
+                    "%s: the strip's forward control went stale under the page's own "
+                    "refresh; re-finding it",
+                    log_prefix,
+                )
+                continue
+            logger.error(
+                "%s: the strip's forward control was stale on both attempts: %s", log_prefix, e
+            )
+            return False
+        except WebDriverException as e:
+            logger.error("%s: the strip's forward control could not be clicked: %s", log_prefix, e)
+            return False
+
+        await_rerender(driver, control)
+        break
 
     after = strip_tab_texts(driver)
     if after == before:
