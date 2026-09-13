@@ -63,15 +63,38 @@ variable "cloud_run_cpu" {
 }
 
 variable "cloud_run_max_instances" {
-  description = "Maximum number of Cloud Run instances. Must be 1 while the Discord gateway runs in-process: a second instance would open a second gateway session and double-process every message."
+  description = <<-EOT
+    Maximum number of Cloud Run instances.
+
+    Must be exactly 1 while messaging_channel="discord": the gateway holds a
+    persistent WebSocket, and a second instance would open a second session
+    on the same bot token and double-process every message (enforced by a
+    precondition on the Cloud Run service). Now that the live channel is
+    Telegram (issue #201), nothing else in this app depends on a single
+    instance, but there's also no reason yet to scale beyond one - kept at 1
+    until there's an actual need to raise it.
+  EOT
   type        = number
   default     = 1
 }
 
 variable "cloud_run_min_instances" {
-  description = "Minimum number of Cloud Run instances. Must be 1 while the Discord gateway runs in-process (a persistent WebSocket needs an always-on instance; with cpu_idle=false this bills roughly USD 50/month for 1 vCPU + 1GiB)."
+  description = <<-EOT
+    Minimum number of Cloud Run instances.
+
+    Must be exactly 1 while messaging_channel="discord": the gateway needs an
+    always-on instance to keep its WebSocket connected, and with
+    cpu_idle=false that billed roughly USD 50/month for 1 vCPU + 1GiB
+    (enforced by a precondition on the Cloud Run service).
+
+    0 now that the live channel is Telegram (issue #201): inbound updates
+    arrive as HTTP webhooks, so the service can scale to zero between them.
+    See cloud_run_max_instances and the 6:27 AM warm-up scheduler job, which
+    exists to absorb the resulting cold start ahead of the 6:28 AM race
+    trigger.
+  EOT
   type        = number
-  default     = 1
+  default     = 0
 }
 
 variable "timezone" {
@@ -123,16 +146,25 @@ variable "container_image" {
 }
 
 variable "messaging_channel" {
-  description = "User messaging channel: 'discord' (gateway in-process, requires min/max instances = 1 and always-on CPU) or 'twilio'"
+  description = <<-EOT
+    Where a conversation with no channel recorded of its own is answered:
+    "telegram" (default, HTTP webhooks, no always-on instance needed),
+    "discord" (gateway runs in-process, requires min/max instances = 1 and
+    always-on CPU - see cloud_run_min_instances) or "twilio".
+
+    Telegram itself is controlled independently by telegram_enabled; this
+    variable only decides the fallback channel and, for "discord" alone,
+    forces the Cloud Run instance settings above (issue #201).
+  EOT
   type        = string
-  default     = "discord"
+  default     = "telegram"
 
   validation {
     # Matched exactly (not case-folded) by both the cpu_idle expression here
     # and settings.messaging_channel in the app, so a near-miss like "Discord"
     # would silently run with no gateway at all.
-    condition     = contains(["discord", "twilio"], var.messaging_channel)
-    error_message = "messaging_channel must be exactly \"discord\" or \"twilio\" (lowercase)."
+    condition     = contains(["discord", "twilio", "telegram"], var.messaging_channel)
+    error_message = "messaging_channel must be exactly \"discord\", \"twilio\" or \"telegram\" (lowercase)."
   }
 }
 
