@@ -1,10 +1,16 @@
 """Driving a browser to the target tee sheet, and re-reading it once a second.
 
 Read-only throughout. The only interactions performed here are logging in,
-loading the tee sheet, paging the date strip forward, and clicking a day tab -
-and the day tab that is clicked during the window is the one already selected,
-which the club re-renders as the same date (see ``_refresh_view`` in
-``walden_http_booker``, which replays the same element for the racer).
+loading the tee sheet, reaching the target date, and re-reading it - and the day
+tab clicked during the window is the one already selected, which the club
+re-renders as the same date (see ``_refresh_view`` in ``walden_http_booker``,
+which replays the same element for the racer).
+
+Reaching the date is not done here at all. It is
+``walden_date_selection.select_date``, the same routine the racer drives, so
+that the two cannot drift apart and a markup change has one answer rather than
+two (issue #199). That module is careful to import nothing that can reserve,
+which is what makes it shareable with a job that must stay read-only.
 
 Two things this module does *not* do, both deliberate:
 
@@ -25,7 +31,6 @@ Two things this module does *not* do, both deliberate:
 
 import logging
 import os
-import re
 import time as time_module
 from dataclasses import dataclass, field
 from datetime import date
@@ -39,10 +44,11 @@ from selenium.common.exceptions import (
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import WebDriverWait
 
+from app.providers import walden_date_selection
+from app.providers.wait_helper import WaitStrategy
 from app.providers.walden_dom_schema import DOM
 
 logger = logging.getLogger(__name__)
@@ -57,14 +63,6 @@ PAGE_LOAD_TIMEOUT_S = 20
 # 2026-08-07), so a second is enough headroom to notice a stall without eating
 # into the next snapshot's slot.
 REFRESH_SETTLE_TIMEOUT_S = 4.0
-
-# How many times the date strip may be paged forward while looking for the
-# target date. One click is what an ordinary morning needs - the strip spans
-# seven days from today and the target is the eighth - so this is mostly a
-# ceiling on a strip that pages without ever reaching the date, which would
-# otherwise spend the whole pre-window budget on round trips. Eight covers a
-# target a fortnight out, at roughly 730ms a click.
-MAX_STRIP_ADVANCES = 8
 
 # Northgate is course 0 in every element id the site emits; the racer relies on
 # the same constant (WaldenGolfProvider.NORTHGATE_COURSE_INDEX).
@@ -189,30 +187,6 @@ def open_tee_sheet(driver: webdriver.Chrome) -> bool:
         return False
 
 
-def _tab_matches(tab_text: str, target: date) -> bool:
-    """Whether a day tab's rendered text names ``target``.
-
-    The tabs render as e.g. ``"Friday Fri 11 September Sep"`` - weekday long and
-    short, day of month, month long and short (verified against the 2026-09-04
-    pre-window sheet). All three of weekday, day number and month are required,
-    so a strip spanning a month boundary cannot match the wrong tab, and the day
-    number is matched as a whole word so ``1`` never matches ``11``.
-    """
-    text = " ".join(tab_text.split())
-    if not text:
-        return False
-    day_ok = re.search(rf"(?<!\d){target.day}(?!\d)", text) is not None
-    month_ok = target.strftime("%B").lower() in text.lower()
-    weekday_ok = target.strftime("%A").lower() in text.lower()
-    return day_ok and month_ok and weekday_ok
-
-
-def _selected_tab(driver: webdriver.Chrome) -> WebElement | None:
-    """The day tab the sheet currently considers selected, if any."""
-    tabs = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.selected_day_tab)
-    return tabs[0] if tabs else None
-
-
 def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | None:
     """Point this session's view at ``target_date`` and confirm it landed there.
 
@@ -227,11 +201,11 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
     """
     notes: list[str] = []
 
-    selected = _selected_tab(driver)
+    selected = walden_date_selection.selected_tab(driver)
     selected_text = selected.text if selected is not None else ""
     clicked = False
 
-    if selected is not None and _tab_matches(selected_text, target_date):
+    if selected is not None and walden_date_selection.tab_matches(selected_text, target_date):
         logger.info(
             "OBSERVER: sheet already parked on %s (tab=%r)",
             target_date,
@@ -240,11 +214,16 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
     else:
         notes.append(f"selected tab was {' '.join(selected_text.split())!r}, wanted {target_date}")
         logger.info(
-            "OBSERVER: sheet is on %r, clicking the day tab for %s",
+            "OBSERVER: sheet is on %r, selecting %s",
             " ".join(selected_text.split()),
             target_date,
         )
-        if not _reach_day_tab(driver, target_date):
+        if not walden_date_selection.select_date(
+            driver,
+            target_date,
+            wait_strategy=WaitStrategy(),
+            log_prefix="OBSERVER",
+        ):
             logger.error(
                 "OBSERVER: could not put the sheet on %s - capturing nothing rather than "
                 "photographing the wrong date",
@@ -253,11 +232,15 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
             return None
         clicked = True
 
-        selected = _selected_tab(driver)
+        # The shared routine reports that it clicked something, never where the
+        # sheet landed - so the observer's own contract is enforced here, as it
+        # was before the routine was shared. Nothing is stored until the day tab
+        # the club now calls current names the date this run is filed under.
+        selected = walden_date_selection.selected_tab(driver)
         selected_text = selected.text if selected is not None else ""
-        if not _tab_matches(selected_text, target_date):
+        if not walden_date_selection.tab_matches(selected_text, target_date):
             logger.error(
-                "OBSERVER: after clicking, the sheet reports %r rather than %s",
+                "OBSERVER: after selecting, the sheet reports %r rather than %s",
                 " ".join(selected_text.split()),
                 target_date,
             )
@@ -293,149 +276,6 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
         ready_at_epoch_ms=int(time_module.time() * 1000),
         notes=notes,
     )
-
-
-def _strip_tab_texts(driver: webdriver.Chrome) -> list[str]:
-    """What the date strip currently spans, as rendered text. For the log."""
-    try:
-        tabs = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.day_tab_links)
-        return [" ".join(tab.text.split()) for tab in tabs]
-    except WebDriverException:
-        return []
-
-
-def _reach_day_tab(driver: webdriver.Chrome, target_date: date) -> bool:
-    """Click the day tab naming ``target_date``, paging the strip to find it.
-
-    The strip renders the club's seven-day horizon starting at the selected
-    date, and the observer's target is the date that *opens* at the window -
-    today plus ``days_in_advance``, the eighth day. So the target is one page
-    past the end of the strip as the sheet first renders it, on every single
-    morning: paging forward is the normal path here and not a fallback, which is
-    why a day-tab search alone never once succeeded (issue #199).
-    """
-    advances = 0
-    while True:
-        if _click_day_tab(driver, target_date):
-            return True
-        if advances >= MAX_STRIP_ADVANCES:
-            logger.error(
-                "OBSERVER: %s is still not in the date strip after paging forward %d time(s); "
-                "the strip offers %s",
-                target_date,
-                advances,
-                _strip_tab_texts(driver),
-            )
-            return False
-        if not _advance_strip(driver):
-            return False
-        advances += 1
-
-
-def _advance_strip(driver: webdriver.Chrome) -> bool:
-    """Page the date strip a day forward. False when it did not move.
-
-    The forward control re-renders the whole tee time form exactly as a day tab
-    does, so the click is awaited the same way. The before/after comparison is
-    the real check rather than the re-render landing: a strip the club refuses
-    to page past its horizon would answer the click without moving, and clicking
-    it another seven times would just burn the pre-window budget.
-    """
-    try:
-        controls = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.strip_forward_links)
-    except WebDriverException as e:
-        logger.error("OBSERVER: could not read the strip's forward controls: %s", e)
-        return False
-
-    if not controls:
-        logger.error(
-            "OBSERVER: the date strip offers no enabled forward control, so nothing past its "
-            "horizon can be reached; it spans %s",
-            _strip_tab_texts(driver),
-        )
-        return False
-
-    before = _strip_tab_texts(driver)
-    control = _single_day_control(controls)
-    try:
-        driver.execute_script("arguments[0].click();", control)
-    except WebDriverException as e:
-        logger.error("OBSERVER: the strip's forward control could not be clicked: %s", e)
-        return False
-    _await_rerender(driver, control)
-
-    after = _strip_tab_texts(driver)
-    if after == before:
-        logger.error("OBSERVER: the date strip did not move; it still offers %s", before)
-        return False
-    logger.info("OBSERVER: paged the date strip forward; it now offers %s", after)
-    return True
-
-
-def _single_day_control(controls: list[WebElement]) -> WebElement:
-    """The one-day-forward link among the strip's forward controls.
-
-    The two are told apart only by the icon they carry - ``fa-angle-right`` for
-    a day, ``fa-angle-double-right`` for a week. Picking the wrong one is not
-    fatal, which is why an unrecognised pair falls back to the last rather than
-    refusing: either brings a target seven days out into view, a day forward
-    putting it last in the strip and a week forward putting it first.
-    """
-    for control in controls:
-        try:
-            icons = control.find_elements(By.TAG_NAME, "i")
-        except WebDriverException:
-            continue
-        if any("fa-angle-right" in (icon.get_attribute("class") or "") for icon in icons):
-            return control
-    return controls[-1]
-
-
-def _click_day_tab(driver: webdriver.Chrome, target_date: date) -> bool:
-    """Click the day tab naming ``target_date``, if the strip offers one."""
-    try:
-        tabs = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.day_tab_links)
-    except WebDriverException as e:
-        logger.error("OBSERVER: could not read the date strip: %s", e)
-        return False
-
-    logger.info("OBSERVER: date strip offers %d tab(s)", len(tabs))
-    for tab in tabs:
-        try:
-            if not _tab_matches(tab.text, target_date):
-                continue
-            previous = _selected_tab(driver)
-            driver.execute_script("arguments[0].click();", tab)
-            if previous is not None:
-                _await_rerender(driver, previous)
-            else:
-                WebDriverWait(driver, REFRESH_SETTLE_TIMEOUT_S).until(
-                    expected_conditions.presence_of_element_located(
-                        (By.CSS_SELECTOR, DOM.DATE_SELECTION.selected_day_tab)
-                    )
-                )
-            return True
-        except WebDriverException as e:
-            logger.warning("OBSERVER: a day tab could not be clicked (%s); trying the next", e)
-            continue
-    return False
-
-
-def _await_rerender(driver: webdriver.Chrome, previous: WebElement) -> bool:
-    """Wait for the day-tab AJAX to replace the form.
-
-    The handler's ``u:`` renders the whole tee time form, so the element that
-    was clicked is detached when the response is applied. Staleness is therefore
-    the signal that the *club's* answer has landed, rather than a fixed sleep
-    that could photograph a half-applied render.
-    """
-    try:
-        WebDriverWait(driver, REFRESH_SETTLE_TIMEOUT_S).until(
-            expected_conditions.staleness_of(previous)
-        )
-        return True
-    except TimeoutException:
-        return False
 
 
 def wait_until_epoch_ms(target_epoch_ms: int) -> None:
@@ -491,14 +331,14 @@ def capture_across_window(
         # Re-finding costs a few milliseconds and saves the snapshot.
         for attempt in (1, 2):
             try:
-                previous = _selected_tab(driver)
+                previous = walden_date_selection.selected_tab(driver)
                 if previous is None:
                     note = "no selected day tab to replay; captured without a refresh"
                     logger.warning("OBSERVER: snapshot %d - %s", index, note)
                     break
 
                 driver.execute_script("arguments[0].click();", previous)
-                refresh_ok = _await_rerender(driver, previous)
+                refresh_ok = walden_date_selection.await_rerender(driver, previous)
                 settled_epoch_ms = int(time_module.time() * 1000)
                 if not refresh_ok:
                     note = (
