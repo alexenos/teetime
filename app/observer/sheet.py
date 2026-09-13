@@ -1,10 +1,10 @@
 """Driving a browser to the target tee sheet, and re-reading it once a second.
 
 Read-only throughout. The only interactions performed here are logging in,
-loading the tee sheet, and clicking a day tab - and the day tab that is clicked
-during the window is the one already selected, which the club re-renders as the
-same date (see ``_refresh_view`` in ``walden_http_booker``, which replays the
-same element for the racer).
+loading the tee sheet, paging the date strip forward, and clicking a day tab -
+and the day tab that is clicked during the window is the one already selected,
+which the club re-renders as the same date (see ``_refresh_view`` in
+``walden_http_booker``, which replays the same element for the racer).
 
 Two things this module does *not* do, both deliberate:
 
@@ -57,6 +57,14 @@ PAGE_LOAD_TIMEOUT_S = 20
 # 2026-08-07), so a second is enough headroom to notice a stall without eating
 # into the next snapshot's slot.
 REFRESH_SETTLE_TIMEOUT_S = 4.0
+
+# How many times the date strip may be paged forward while looking for the
+# target date. One click is what an ordinary morning needs - the strip spans
+# seven days from today and the target is the eighth - so this is mostly a
+# ceiling on a strip that pages without ever reaching the date, which would
+# otherwise spend the whole pre-window budget on round trips. Eight covers a
+# target a fortnight out, at roughly 730ms a click.
+MAX_STRIP_ADVANCES = 8
 
 # Northgate is course 0 in every element id the site emits; the racer relies on
 # the same constant (WaldenGolfProvider.NORTHGATE_COURSE_INDEX).
@@ -236,10 +244,10 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
             " ".join(selected_text.split()),
             target_date,
         )
-        if not _click_day_tab(driver, target_date):
+        if not _reach_day_tab(driver, target_date):
             logger.error(
-                "OBSERVER: no day tab for %s in the date strip - capturing nothing rather "
-                "than photographing the wrong date",
+                "OBSERVER: could not put the sheet on %s - capturing nothing rather than "
+                "photographing the wrong date",
                 target_date,
             )
             return None
@@ -285,6 +293,102 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
         ready_at_epoch_ms=int(time_module.time() * 1000),
         notes=notes,
     )
+
+
+def _strip_tab_texts(driver: webdriver.Chrome) -> list[str]:
+    """What the date strip currently spans, as rendered text. For the log."""
+    try:
+        tabs = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.day_tab_links)
+        return [" ".join(tab.text.split()) for tab in tabs]
+    except WebDriverException:
+        return []
+
+
+def _reach_day_tab(driver: webdriver.Chrome, target_date: date) -> bool:
+    """Click the day tab naming ``target_date``, paging the strip to find it.
+
+    The strip renders the club's seven-day horizon starting at the selected
+    date, and the observer's target is the date that *opens* at the window -
+    today plus ``days_in_advance``, the eighth day. So the target is one page
+    past the end of the strip as the sheet first renders it, on every single
+    morning: paging forward is the normal path here and not a fallback, which is
+    why a day-tab search alone never once succeeded (issue #199).
+    """
+    advances = 0
+    while True:
+        if _click_day_tab(driver, target_date):
+            return True
+        if advances >= MAX_STRIP_ADVANCES:
+            logger.error(
+                "OBSERVER: %s is still not in the date strip after paging forward %d time(s); "
+                "the strip offers %s",
+                target_date,
+                advances,
+                _strip_tab_texts(driver),
+            )
+            return False
+        if not _advance_strip(driver):
+            return False
+        advances += 1
+
+
+def _advance_strip(driver: webdriver.Chrome) -> bool:
+    """Page the date strip a day forward. False when it did not move.
+
+    The forward control re-renders the whole tee time form exactly as a day tab
+    does, so the click is awaited the same way. The before/after comparison is
+    the real check rather than the re-render landing: a strip the club refuses
+    to page past its horizon would answer the click without moving, and clicking
+    it another seven times would just burn the pre-window budget.
+    """
+    try:
+        controls = driver.find_elements(By.CSS_SELECTOR, DOM.DATE_SELECTION.strip_forward_links)
+    except WebDriverException as e:
+        logger.error("OBSERVER: could not read the strip's forward controls: %s", e)
+        return False
+
+    if not controls:
+        logger.error(
+            "OBSERVER: the date strip offers no enabled forward control, so nothing past its "
+            "horizon can be reached; it spans %s",
+            _strip_tab_texts(driver),
+        )
+        return False
+
+    before = _strip_tab_texts(driver)
+    control = _single_day_control(controls)
+    try:
+        driver.execute_script("arguments[0].click();", control)
+    except WebDriverException as e:
+        logger.error("OBSERVER: the strip's forward control could not be clicked: %s", e)
+        return False
+    _await_rerender(driver, control)
+
+    after = _strip_tab_texts(driver)
+    if after == before:
+        logger.error("OBSERVER: the date strip did not move; it still offers %s", before)
+        return False
+    logger.info("OBSERVER: paged the date strip forward; it now offers %s", after)
+    return True
+
+
+def _single_day_control(controls: list[WebElement]) -> WebElement:
+    """The one-day-forward link among the strip's forward controls.
+
+    The two are told apart only by the icon they carry - ``fa-angle-right`` for
+    a day, ``fa-angle-double-right`` for a week. Picking the wrong one is not
+    fatal, which is why an unrecognised pair falls back to the last rather than
+    refusing: either brings a target seven days out into view, a day forward
+    putting it last in the strip and a week forward putting it first.
+    """
+    for control in controls:
+        try:
+            icons = control.find_elements(By.TAG_NAME, "i")
+        except WebDriverException:
+            continue
+        if any("fa-angle-right" in (icon.get_attribute("class") or "") for icon in icons):
+            return control
+    return controls[-1]
 
 
 def _click_day_tab(driver: webdriver.Chrome, target_date: date) -> bool:
