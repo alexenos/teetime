@@ -4,6 +4,10 @@ Scheduled job endpoints for Cloud Scheduler integration.
 This module provides endpoints that are called by Cloud Scheduler to execute
 scheduled booking operations. These endpoints are secured with OIDC token
 authentication (preferred) or a legacy API key.
+
+The run-and-report half of the morning job, run_bookings_and_report, is also
+what each racer job task calls (app/racer/, issue #184), so a member's message
+reads the same whichever path raced their booking.
 """
 
 import asyncio
@@ -18,6 +22,7 @@ from google.oauth2 import id_token
 from pydantic import BaseModel
 
 from app.config import settings
+from app.models.schemas import TeeTimeBooking
 from app.services.booking_service import booking_service
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
@@ -159,19 +164,22 @@ async def execute_due_bookings(
     """
     Execute all bookings that are due for execution.
 
-    This endpoint is called by Cloud Scheduler at 6:28am CT daily (2 minutes early).
-    It finds all SCHEDULED bookings where scheduled_execution_time <= booking_open_time
-    (6:30am CT) and executes them using batch booking for efficiency.
+    With racer_fanout_enabled (the default), Cloud Scheduler no longer calls
+    this: the morning race runs as one racer job task per requester instead
+    (app/racer/, issue #184), so each requester gets their own container,
+    browser and CPU. This endpoint is the rollback path when that flag is off,
+    and stays callable by hand.
+
+    When scheduled, it is called at 6:28am CT daily (2 minutes early). It finds
+    all SCHEDULED bookings where scheduled_execution_time <= booking_open_time
+    (6:30am CT) and executes them using batch booking.
 
     The early trigger allows the system to log in and navigate to the booking page
     before the booking window opens, then wait until exactly 6:30am to book.
 
-    Optimizations for speed:
-    1. Uses batch booking to process multiple bookings with a single login session
-    2. Defers SMS notifications until after ALL bookings are complete
-    3. Groups bookings by date and requester to minimize navigation overhead,
-       while keeping different requesters' credentials isolated (issue #179)
-    4. Logs in early and waits until booking window opens
+    Every requester's group runs one after another in this one process, so a
+    second requester reaches the sheet well after the window - the reason the
+    fan-out exists.
 
     Security: Accepts OIDC token from Cloud Scheduler (preferred) or legacy API key.
 
@@ -203,23 +211,49 @@ async def execute_due_bookings(
             results=[],
         )
 
-    logger.info(f"BATCH_JOB: Starting batch execution of {len(due_bookings)} bookings")
-
-    booking_map = {b.id: b for b in due_bookings if b.id is not None}
-
-    # Strip timezone for passing to batch booking (expects naive datetime in CT)
-    booking_open_time_naive = CTDateTime.to_naive_ct(booking_open_time)
-
     logger.info(
         f"BATCH_JOB: Booking window opens at {booking_open_time.strftime('%H:%M:%S')}, "
         f"current time is {now.strftime('%H:%M:%S')}"
     )
 
+    # Strip timezone for passing to batch booking (expects naive datetime in CT)
+    return await run_bookings_and_report(
+        due_bookings,
+        execute_at=CTDateTime.to_naive_ct(booking_open_time),
+        executed_at=now,
+    )
+
+
+async def run_bookings_and_report(
+    due_bookings: list[TeeTimeBooking],
+    execute_at: datetime,
+    executed_at: datetime,
+) -> JobExecutionResult:
+    """Race a set of due bookings and tell each requester how theirs went.
+
+    Shared by the endpoint above and by every racer job task. Deferring every
+    message until the whole set has finished is what lets pre-window work start
+    as early as possible; for a racer task the set is one requester's group, so
+    that deferral no longer makes one member wait on another's race.
+
+    Every path out ends in one message per booking: success, failure, timeout
+    and an unexpected error alike.
+
+    Args:
+        due_bookings: The bookings to race. Already claimed (IN_PROGRESS) when
+            a racer task calls this; SCHEDULED when the endpoint does.
+        execute_at: The window instant, as a naive CT datetime.
+        executed_at: When the caller started, reported back in the result.
+    """
+    logger.info(f"BATCH_JOB: Starting batch execution of {len(due_bookings)} bookings")
+
+    booking_map = {b.id: b for b in due_bookings if b.id is not None}
+
     try:
         batch_results = await asyncio.wait_for(
             booking_service.execute_bookings_batch(
                 bookings=due_bookings,
-                execute_at=booking_open_time_naive,
+                execute_at=execute_at,
             ),
             timeout=BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings),
         )
@@ -237,12 +271,12 @@ async def execute_due_bookings(
                     error="Batch execution timed out",
                 )
             )
-        # Every other path out of this endpoint ends in a message per booking.
+        # Every other path out of this function ends in a message per booking.
         # This one did not, so a batch that ran out of time was indistinguishable
         # to the member from one that never fired at all.
         await booking_service.notify_unreported_bookings(due_bookings, TIMEOUT_NOTIFICATION_MESSAGE)
         return JobExecutionResult(
-            executed_at=now,
+            executed_at=executed_at,
             total_due=len(due_bookings),
             succeeded=0,
             failed=len(due_bookings),
@@ -265,7 +299,7 @@ async def execute_due_bookings(
         # Same reasoning as the timeout branch above.
         await booking_service.notify_unreported_bookings(due_bookings, str(e))
         return JobExecutionResult(
-            executed_at=now,
+            executed_at=executed_at,
             total_due=len(due_bookings),
             succeeded=0,
             failed=len(due_bookings),
@@ -359,7 +393,7 @@ async def execute_due_bookings(
     )
 
     return JobExecutionResult(
-        executed_at=now,
+        executed_at=executed_at,
         total_due=len(due_bookings),
         succeeded=succeeded,
         failed=failed,

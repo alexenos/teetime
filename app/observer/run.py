@@ -35,11 +35,12 @@ from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
 
-# How far ahead of the window the *racer* logs in - the 06:28 of
-# google_cloud_scheduler_job.execute_bookings, against a 06:30 window. Not a
-# setting: it is a fact about the other job's schedule, and the observer only
-# reads it to check that its own login came first. Keep in step with that
-# scheduler entry if it ever moves.
+# How far ahead of the window the *racer* logs in - 06:28 against a 06:30
+# window. The racer job is triggered earlier than that, but each task holds its
+# login to this lead (app/racer/run.py, LOGIN_LEAD_S). Not a setting: it is a
+# fact about the other job, and the observer only reads it to check that its own
+# login came first. Mirrored rather than imported, because nothing in this
+# package may link booking code; tests/test_racer.py keeps the two equal.
 RACER_LOGIN_LEAD_S = 120
 
 
