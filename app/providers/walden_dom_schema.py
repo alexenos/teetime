@@ -178,6 +178,14 @@ class DateSelectionSelectors:
     # refresh (`_SELECTED_DATE_CLASS` in walden_http_booker).
     day_tab_links: str = ".horizontal-dates a"
     selected_day_tab: str = "a.selected-date"
+    # The strip's own pagination. `.forward-controls` holds two command links -
+    # one day and one week forward - each carrying the same kind of
+    # `PrimeFaces.ab` handler as a day tab. The backward pair in
+    # `.backward-controls` renders as `<span class="... ui-state-disabled">` on a
+    # strip that starts at today, so matching only `<a>` here is what keeps a
+    # disabled control from being clicked. Reaching a date past the strip's
+    # horizon needs these (issue #199).
+    strip_forward_links: str = ".forward-controls a"
 
 
 @dataclass(frozen=True)

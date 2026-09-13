@@ -18,7 +18,6 @@ import time as time_module
 from datetime import date
 from unittest.mock import MagicMock, patch
 
-import pytest
 from selenium.common.exceptions import (
     StaleElementReferenceException,
     WebDriverException,
@@ -26,6 +25,7 @@ from selenium.common.exceptions import (
 
 from app.observer import run as observer_run
 from app.observer import sheet as observer_sheet
+from app.providers import walden_date_selection
 from app.utils.timezone import CTDateTime
 
 NORTHGATE_ROW = "teeTimeCourses:0:teeTimeSlots:"
@@ -95,7 +95,7 @@ class TestCaptureRereadsTheSheet:
 
     def test_clicks_the_selected_tab_once_per_snapshot(self) -> None:
         driver = self._driver([f"<html>{i}</html>" for i in range(3)])
-        with patch.object(observer_sheet, "_await_rerender", return_value=True):
+        with patch.object(walden_date_selection, "await_rerender", return_value=True):
             snaps = observer_sheet.capture_across_window(
                 driver, window_epoch_ms=int(time_module.time() * 1000), count=3, interval_ms=0
             )
@@ -108,13 +108,16 @@ class TestCaptureRereadsTheSheet:
     def test_a_re_render_that_never_lands_is_flagged_not_hidden(self) -> None:
         """A stale snapshot is still stored - but it must not look trustworthy."""
         driver = self._driver(["<html>stale</html>"])
-        with patch.object(observer_sheet, "_await_rerender", return_value=False):
+        with patch.object(walden_date_selection, "await_rerender", return_value=False):
             snaps = observer_sheet.capture_across_window(
                 driver, window_epoch_ms=int(time_module.time() * 1000), count=1, interval_ms=0
             )
         assert len(snaps) == 1
         assert snaps[0].refresh_ok is False
         assert "may repeat the previous snapshot" in (snaps[0].note or "")
+        # The note must quote the timeout that actually governed the wait, not a
+        # second copy of it that could drift - a post-mortem reads this number.
+        assert f"within {walden_date_selection.STRIP_SETTLE_TIMEOUT_S}s" in (snaps[0].note or "")
 
     def test_no_selected_tab_is_recorded_as_unrefreshed(self) -> None:
         driver = MagicMock()
@@ -145,7 +148,7 @@ class TestCaptureRereadsTheSheet:
             raise WebDriverException("gone")
 
         type(driver).page_source = property(_raise)
-        with patch.object(observer_sheet, "_await_rerender", return_value=True):
+        with patch.object(walden_date_selection, "await_rerender", return_value=True):
             snaps = observer_sheet.capture_across_window(
                 driver, window_epoch_ms=int(time_module.time() * 1000), count=2, interval_ms=0
             )
@@ -154,35 +157,13 @@ class TestCaptureRereadsTheSheet:
     def test_offsets_are_measured_from_the_window(self) -> None:
         window = int(time_module.time() * 1000) - 5000
         driver = self._driver(["<html/>"])
-        with patch.object(observer_sheet, "_await_rerender", return_value=True):
+        with patch.object(walden_date_selection, "await_rerender", return_value=True):
             snaps = observer_sheet.capture_across_window(
                 driver, window_epoch_ms=window, count=1, interval_ms=1000
             )
         assert snaps[0].sent_offset_ms >= 5000
         assert snaps[0].captured_offset_ms >= snaps[0].sent_offset_ms
         assert snaps[0].planned_offset_ms == 0
-
-
-class TestTabMatching:
-    """Which day tab names the target date."""
-
-    @pytest.mark.parametrize(
-        "text,target,expected",
-        [
-            ("Friday Fri 11 September Sep", date(2026, 9, 11), True),
-            ("Saturday Sat 12 September Sep", date(2026, 9, 11), False),
-            ("Friday Fri 11 September Sep", date(2026, 9, 12), False),
-            # Same day number, wrong month - a strip spanning a boundary.
-            ("Sunday Sun 11 October Oct", date(2026, 9, 11), False),
-            # 1 must not match inside 11.
-            ("Friday Fri 11 September Sep", date(2026, 9, 1), False),
-            ("Tuesday Tue 1 September Sep", date(2026, 9, 1), True),
-            ("", date(2026, 9, 11), False),
-            ("   \n  ", date(2026, 9, 11), False),
-        ],
-    )
-    def test_matches(self, text: str, target: date, expected: bool) -> None:
-        assert observer_sheet._tab_matches(text, target) is expected
 
 
 class TestParkOnDate:
@@ -206,25 +187,32 @@ class TestParkOnDate:
         assert prep.target_date == date(2026, 9, 11)
         driver.execute_script.assert_not_called()
 
-    def test_wrong_date_with_no_matching_tab_refuses_to_capture(self) -> None:
+    def test_a_date_that_cannot_be_reached_refuses_to_capture(self) -> None:
         """Bytes from the wrong date, named for the right one, would be read as evidence."""
         driver = self._driver("Saturday Sat 12 September Sep", "")
-        assert observer_sheet.park_on_date(driver, date(2026, 9, 11)) is None
+        with patch.object(walden_date_selection, "select_date", return_value=False):
+            assert observer_sheet.park_on_date(driver, date(2026, 9, 11)) is None
 
-    def test_clicks_the_matching_tab_and_reverifies(self) -> None:
+    def test_selects_the_date_and_then_reverifies(self) -> None:
         driver = MagicMock()
         wrong, right = MagicMock(), MagicMock()
         wrong.text = "Saturday Sat 12 September Sep"
         right.text = "Friday Fri 11 September Sep"
-        # selected tab (wrong), then the strip, then the selected tab (right).
-        driver.find_elements.side_effect = [[wrong], [wrong, right], [right], [right]]
+        # The selected tab before selection, then after it.
+        driver.find_elements.side_effect = [[wrong], [right], [right]]
         type(driver).page_source = property(lambda self: NORTHGATE_ROW * 5)
-        with patch.object(observer_sheet, "_await_rerender", return_value=True):
+        with patch.object(walden_date_selection, "select_date", return_value=True) as select:
             prep = observer_sheet.park_on_date(driver, date(2026, 9, 11))
         assert prep is not None
         assert prep.clicked_tab is True
         assert prep.northgate_row_count == 5
-        driver.execute_script.assert_called_once()
+        select.assert_called_once()
+
+    def test_a_routine_that_claims_success_is_still_not_believed(self) -> None:
+        """The shared routine reports a click, never where the sheet landed."""
+        driver = self._driver("Saturday Sat 12 September Sep", NORTHGATE_ROW * 5)
+        with patch.object(walden_date_selection, "select_date", return_value=True):
+            assert observer_sheet.park_on_date(driver, date(2026, 9, 11)) is None
 
     def test_a_sheet_with_no_northgate_rows_is_noted_but_still_captured(self) -> None:
         driver = self._driver("Friday Fri 11 September Sep", "<html>nothing useful</html>")
@@ -263,7 +251,7 @@ class TestStaleTabRetry:
         type(driver).page_source = property(lambda self: "<html>fresh</html>")
         driver.execute_script.side_effect = [StaleElementReferenceException("detached"), None]
 
-        with patch.object(observer_sheet, "_await_rerender", return_value=True):
+        with patch.object(walden_date_selection, "await_rerender", return_value=True):
             snaps = observer_sheet.capture_across_window(
                 driver, window_epoch_ms=int(time_module.time() * 1000), count=1, interval_ms=0
             )
