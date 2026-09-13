@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from app.api import bookings, health, jobs, webhooks
 from app.config import settings
+from app.log_safety import silence_wire_loggers
 from app.models.database import init_db
 from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
 from app.services.booking_service import booking_service
@@ -37,16 +38,9 @@ def configure_logging() -> None:
     # Ensure our app loggers use the configured level
     logging.getLogger("app").setLevel(log_level)
 
-    # Silence the WebDriver wire loggers unconditionally - NOT gated on LOG_LEVEL.
-    #
-    # selenium.webdriver.remote.remote_connection logs every command payload at
-    # DEBUG, which includes the send_keys body used to fill the login form. With
-    # LOG_LEVEL=DEBUG (how this runs in production, to get BOOKING_DEBUG output)
-    # that wrote the Walden member number and password to Cloud Logging in
-    # cleartext on every booking run. These loggers must never be allowed to
-    # emit below WARNING regardless of how verbose the app itself is.
-    for wire_logger in ("selenium", "urllib3", "websockets", "httpcore"):
-        logging.getLogger(wire_logger).setLevel(logging.WARNING)
+    # Silence the WebDriver wire loggers unconditionally - NOT gated on
+    # LOG_LEVEL. See app/log_safety.py for why these leak credentials.
+    silence_wire_loggers()
 
 
 configure_logging()

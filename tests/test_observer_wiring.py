@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from app import log_safety
 from app.config import Settings
 from app.observer import run as observer_run
 from app.observer import sheet as observer_sheet
@@ -379,6 +380,37 @@ class TestRedaction:
             asyncio.run(observer_run._resolve_target(WINDOW))
         assert phone not in caplog.text
         assert "...0123" in caplog.text
+
+
+class TestWireLoggersAreSilenced:
+    """The observer's own basicConfig must not re-expose the login payload (CWE-532).
+
+    selenium logs every command payload at DEBUG, including the send_keys body
+    that carries the member number and password. The observer ran at
+    LOG_LEVEL=DEBUG on 2026-09-13 and wrote both to Cloud Logging in cleartext.
+    """
+
+    @pytest.mark.parametrize("name", log_safety.WIRE_LOGGERS)
+    def test_main_pins_each_wire_logger_at_warning(self, name: str) -> None:
+        def _close_without_running(coro: Any) -> bool:
+            coro.close()  # main() builds observe(); nothing here should drive a browser
+            return True
+
+        logging.getLogger(name).setLevel(logging.DEBUG)
+        with (
+            patch.object(observer_run.settings, "log_level", "DEBUG"),
+            patch.object(observer_run.asyncio, "run", side_effect=_close_without_running),
+        ):
+            observer_run.main()
+        assert logging.getLogger(name).level == logging.WARNING
+
+    def test_basic_config_alone_would_leave_them_verbose(self) -> None:
+        """Guards the ordering: silencing has to happen after basicConfig."""
+        logging.getLogger("selenium").setLevel(logging.DEBUG)
+        logging.basicConfig(level=logging.DEBUG, force=True)
+        assert logging.getLogger("selenium").level == logging.DEBUG
+        log_safety.silence_wire_loggers()
+        assert logging.getLogger("selenium").level == logging.WARNING
 
 
 class TestCadenceSettingsValidation:
