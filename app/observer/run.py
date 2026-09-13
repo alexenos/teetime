@@ -24,6 +24,7 @@ import uuid
 from datetime import date, datetime, timedelta
 
 from app.config import settings
+from app.log_safety import silence_wire_loggers
 from app.observer import artifacts, sheet
 from app.services.credential_service import (
     WaldenCredentialRequiredError,
@@ -388,6 +389,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         stream=sys.stdout,
     )
+    silence_wire_loggers()
     try:
         ok = asyncio.run(observe())
     except Exception:
