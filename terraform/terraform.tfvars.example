@@ -9,20 +9,21 @@ github_owner  = "alexenos"
 github_repo   = "teetime"
 github_branch = "main"
 
-# Messaging channel: "discord" (gateway runs in-process) or "twilio"
-messaging_channel = "discord"
+# Messaging channel: "telegram" (HTTP webhooks, no always-on instance needed),
+# "discord" (gateway runs in-process) or "twilio"
+messaging_channel = "telegram"
 
 # Cloud Run settings
 # NOTE: with messaging_channel = "discord" both instance counts must be exactly
 # 1 (enforced by a precondition): the gateway holds a persistent WebSocket, so
-# 0 drops the connection and >1 double-processes every message. Switch to
-# twilio before relaxing these.
-# 2Gi is the floor: headless Chrome plus the always-on gateway OOM-kills a 1Gi
-# container mid-booking, which silently loses the result notification.
+# 0 drops the connection and >1 double-processes every message. Switch away
+# from discord before relaxing these.
+# 2Gi is the floor: headless Chrome OOM-kills a 1Gi container mid-booking,
+# which silently loses the result notification.
 cloud_run_memory        = "2Gi"
 cloud_run_cpu           = "1"
 cloud_run_max_instances = 1
-cloud_run_min_instances = 1
+cloud_run_min_instances = 0
 
 # Application settings
 timezone           = "America/Chicago"

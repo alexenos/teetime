@@ -529,6 +529,31 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
   member   = "serviceAccount:${google_service_account.scheduler.email}"
 }
 
+# Wakes a scaled-to-zero instance ahead of the 6:28 AM race trigger (issue
+# #201). With cloud_run_min_instances=0, the first request after an idle
+# period pays a cold start - image already warm from the last deploy, but
+# still a fresh Python process and FastAPI startup (DB init, provider setup)
+# - and that cost must not land on the 6:28 job itself, which is already
+# racing a clock measured in milliseconds. 8 minutes of margin costs nothing
+# but one idle instance-minute or so; GET /health is public and does no work
+# beyond confirming the process is up, so this ping cannot itself interfere
+# with anything on the booking path.
+resource "google_cloud_scheduler_job" "warmup" {
+  name        = "${local.service_name}-warmup"
+  description = "Wake a scaled-to-zero instance ahead of the 6:28 AM booking run (issue #201)"
+  schedule    = "20 6 * * *"
+  time_zone   = var.timezone
+
+  attempt_deadline = "30s"
+
+  http_target {
+    http_method = "GET"
+    uri         = "${local.cloud_run_url}/health"
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
 resource "google_cloud_scheduler_job" "execute_bookings" {
   name        = "${local.service_name}-execute-bookings"
   description = "Execute due tee time bookings"
