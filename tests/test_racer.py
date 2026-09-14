@@ -157,6 +157,28 @@ class TestClaimNextDueGroup:
         assert reads.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_a_booking_inserted_during_the_claim_joins_its_group(
+        self, database_service: DatabaseService
+    ) -> None:
+        """A booking for the same requester and date, committed between the claim's
+        read and its update, must not be left SCHEDULED for a second task to race
+        concurrently under the same login."""
+        await database_service.create_booking(_booking("first", "8501282320"))
+        read_before_insert = await database_service.get_due_bookings(DUE_BEFORE)
+        await database_service.create_booking(_booking("second", "8501282320", at=time(12, 8)))
+
+        with patch.object(
+            database_service,
+            "get_due_bookings",
+            new=AsyncMock(return_value=read_before_insert),
+        ):
+            claimed = await database_service.claim_next_due_group(DUE_BEFORE)
+
+        assert [b.id for b in claimed] == ["first", "second"]
+        assert all(b.status == BookingStatus.IN_PROGRESS for b in claimed)
+        assert await database_service.claim_next_due_group(DUE_BEFORE) == []
+
+    @pytest.mark.asyncio
     async def test_concurrent_claims_never_share_a_group(
         self, database_service: DatabaseService
     ) -> None:
@@ -218,16 +240,21 @@ def _result(succeeded: int = 1, failed: int = 0) -> JobExecutionResult:
 
 
 class _RaceHarness:
-    """Stubs for everything one task touches, so a test can say what happened."""
+    """Stubs for everything one task touches, so a test can say what happened.
 
-    def __init__(self, claimed: list[TeeTimeBooking], now: datetime) -> None:
-        self.claim = AsyncMock(return_value=claimed)
+    ``claims`` is what successive claim_next_due_group calls return; an empty
+    group ends the sequence, as an exhausted due set does.
+    """
+
+    def __init__(self, claims: list[list[TeeTimeBooking]], now: datetime) -> None:
+        self.claim = AsyncMock(side_effect=[*claims, []])
         # Synchronous in the code, so a MagicMock: an AsyncMock's side_effect
         # only fires when the returned coroutine is awaited, and nobody awaits it.
         self.install = MagicMock()
         self.run = AsyncMock(return_value=_result())
         self.sleep = AsyncMock()
         self.notify = AsyncMock()
+        self.clock = MagicMock(return_value=0.0)
         self.now = now
 
     def __enter__(self) -> "_RaceHarness":
@@ -238,6 +265,7 @@ class _RaceHarness:
             patch.object(racer_run.asyncio, "sleep", new=self.sleep),
             patch.object(racer_run.booking_service, "notify_unreported_bookings", new=self.notify),
             patch.object(racer_run.CTDateTime, "now", return_value=self.now),
+            patch.object(racer_run, "_clock", new=self.clock),
         ]
         for p in self._patches:
             p.start()
@@ -248,10 +276,18 @@ class _RaceHarness:
             p.stop()
 
 
+def _ron() -> TeeTimeBooking:
+    return _booking("ron", "8501282320", status=BookingStatus.IN_PROGRESS)
+
+
+def _melissa() -> TeeTimeBooking:
+    return _booking("melissa", "8537795292", status=BookingStatus.IN_PROGRESS)
+
+
 class TestRace:
     @pytest.mark.asyncio
     async def test_nothing_to_claim_exits_cleanly_without_touching_the_club(self) -> None:
-        with _RaceHarness(claimed=[], now=_at(6, 27)) as h:
+        with _RaceHarness(claims=[], now=_at(6, 27)) as h:
             assert await racer_run.race() is True
 
         h.claim.assert_awaited_once_with(datetime(2026, 9, 13, 6, 30))
@@ -260,8 +296,8 @@ class TestRace:
 
     @pytest.mark.asyncio
     async def test_races_the_claimed_group_at_the_window_after_holding_to_0628(self) -> None:
-        claimed = [_booking("ron", "8501282320", status=BookingStatus.IN_PROGRESS)]
-        with _RaceHarness(claimed=claimed, now=_at(6, 27)) as h:
+        claimed = [_ron()]
+        with _RaceHarness(claims=[claimed], now=_at(6, 27)) as h:
             assert await racer_run.race() is True
 
         h.install.assert_called_once_with(racer_run.booking_service)
@@ -272,10 +308,9 @@ class TestRace:
 
     @pytest.mark.asyncio
     async def test_a_late_start_races_at_once_and_says_so(self, caplog: Any) -> None:
-        claimed = [_booking("ron", "8501282320", status=BookingStatus.IN_PROGRESS)]
         with (
             caplog.at_level(logging.ERROR, logger="app.racer.run"),
-            _RaceHarness(claimed=claimed, now=_at(6, 28, 30)) as h,
+            _RaceHarness(claims=[[_ron()]], now=_at(6, 28, 30)) as h,
         ):
             assert await racer_run.race() is True
 
@@ -286,21 +321,91 @@ class TestRace:
     @pytest.mark.asyncio
     async def test_a_refused_booking_is_not_a_failed_task(self) -> None:
         """The member has been told; a red task per lost slot would bury real breakage."""
-        claimed = [_booking("melissa", "8537795292", status=BookingStatus.IN_PROGRESS)]
-        with _RaceHarness(claimed=claimed, now=_at(6, 27)) as h:
+        with _RaceHarness(claims=[[_melissa()]], now=_at(6, 27)) as h:
             h.run.return_value = _result(succeeded=0, failed=1)
             assert await racer_run.race() is True
 
     @pytest.mark.asyncio
     async def test_a_failure_around_the_race_still_tells_the_members(self) -> None:
         """Claimed rows belong to this task alone - if it goes quiet, nobody reports them."""
-        claimed = [_booking("ron", "8501282320", status=BookingStatus.IN_PROGRESS)]
-        with _RaceHarness(claimed=claimed, now=_at(6, 27)) as h:
+        claimed = [_ron()]
+        with _RaceHarness(claims=[claimed], now=_at(6, 27)) as h:
             h.install.side_effect = RuntimeError("no provider")
             assert await racer_run.race() is False
 
         h.run.assert_not_awaited()
         h.notify.assert_awaited_once_with(claimed, "no provider")
+
+
+class TestTaskBudget:
+    """However large a group is, its race must end in time to be reported."""
+
+    @pytest.mark.asyncio
+    async def test_a_races_timeout_is_capped_by_the_budget_left(self) -> None:
+        """Five bookings would be 1500s at 300s each - past Cloud Run's task timeout,
+        which would kill the container before the timeout branch messages anyone."""
+        group = [
+            _booking(f"b{i}", "8501282320", status=BookingStatus.IN_PROGRESS) for i in range(5)
+        ]
+        with _RaceHarness(claims=[group], now=_at(6, 27)) as h:
+            h.clock.side_effect = [0.0, 150.0]
+            await racer_run.race()
+
+        assert h.run.await_args.kwargs["timeout_s"] == racer_run.TASK_BUDGET_S - 150.0
+
+    @pytest.mark.asyncio
+    async def test_a_small_groups_timeout_is_the_usual_per_booking_allowance(self) -> None:
+        with _RaceHarness(claims=[[_ron()]], now=_at(6, 27)) as h:
+            await racer_run.race()
+
+        assert h.run.await_args.kwargs["timeout_s"] == 300
+
+    def test_the_budget_ends_before_cloud_runs_task_timeout_and_the_orphan_age(self) -> None:
+        from app.services.booking_service import INTERRUPTED_MIN_AGE
+
+        job_task_timeout_s = 1500  # terraform/racer.tf
+        assert racer_run.TASK_BUDGET_S < job_task_timeout_s
+        assert job_task_timeout_s < INTERRUPTED_MIN_AGE.total_seconds()
+
+
+class TestLeftoverGroups:
+    """More groups due than racer tasks must not strand the extras silently."""
+
+    @pytest.mark.asyncio
+    async def test_a_group_nobody_claimed_is_raced_late_after_this_tasks_own(
+        self, caplog: Any
+    ) -> None:
+        own, leftover = [_ron()], [_melissa()]
+        with (
+            caplog.at_level(logging.ERROR, logger="app.racer.run"),
+            _RaceHarness(claims=[own, leftover], now=_at(6, 27)) as h,
+        ):
+            assert await racer_run.race() is True
+
+        assert [c.args[0] for c in h.run.await_args_list] == [own, leftover]
+        h.sleep.assert_awaited_once()  # the hold is for the first race only
+        h.notify.assert_not_awaited()
+        assert "raise racer_max_requesters" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_a_leftover_there_is_no_time_to_race_is_reported_not_stranded(self) -> None:
+        own, leftover = [_ron()], [_melissa()]
+        with _RaceHarness(claims=[own, leftover], now=_at(6, 27)) as h:
+            # started, first race, then the leftover check with 1000s gone
+            h.clock.side_effect = [0.0, 0.0, 1000.0]
+            assert await racer_run.race() is True
+
+        h.run.assert_awaited_once()
+        h.notify.assert_awaited_once_with(leftover, racer_run.NOT_RACED_MESSAGE)
+
+    @pytest.mark.asyncio
+    async def test_a_failure_in_a_late_race_is_reported_and_fails_the_task(self) -> None:
+        own, leftover = [_ron()], [_melissa()]
+        with _RaceHarness(claims=[own, leftover], now=_at(6, 27)) as h:
+            h.run.side_effect = [_result(), RuntimeError("browser died")]
+            assert await racer_run.race() is False
+
+        h.notify.assert_awaited_once_with(leftover, "browser died")
 
 
 class TestLoginLead:

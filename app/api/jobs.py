@@ -228,6 +228,7 @@ async def run_bookings_and_report(
     due_bookings: list[TeeTimeBooking],
     execute_at: datetime,
     executed_at: datetime,
+    timeout_s: float | None = None,
 ) -> JobExecutionResult:
     """Race a set of due bookings and tell each requester how theirs went.
 
@@ -244,6 +245,11 @@ async def run_bookings_and_report(
             a racer task calls this; SCHEDULED when the endpoint does.
         execute_at: The window instant, as a naive CT datetime.
         executed_at: When the caller started, reported back in the result.
+        timeout_s: How long to wait for the race before reporting a timeout.
+            Defaults to BOOKING_EXECUTION_TIMEOUT_SECONDS per booking. A racer
+            task passes less when its container has less time left than that,
+            so the timeout branch still reaches the members before Cloud Run
+            kills the task.
     """
     logger.info(f"BATCH_JOB: Starting batch execution of {len(due_bookings)} bookings")
 
@@ -255,7 +261,11 @@ async def run_bookings_and_report(
                 bookings=due_bookings,
                 execute_at=execute_at,
             ),
-            timeout=BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings),
+            timeout=(
+                timeout_s
+                if timeout_s is not None
+                else BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings)
+            ),
         )
     except TimeoutError:
         logger.error("BATCH_JOB: Batch execution timed out")

@@ -20,7 +20,9 @@
 # unclaimed (date, requester) group with a conditional UPDATE
 # (DatabaseService.claim_next_due_group). Two tasks cannot claim the same group,
 # and tasks with nothing left to claim exit in seconds. So task_count is a
-# ceiling on requesters per morning, not a count of them.
+# ceiling on requesters raced *at the window*, not a count of them: a group no
+# task claimed at the start is raced late by the first task to finish its own
+# race, or reported unraced if no task has the time left.
 #
 # Toggle with racer_fanout_enabled. Off restores the service's 06:28 scheduler
 # entry, which is the rollback path.
@@ -51,11 +53,13 @@ resource "google_cloud_run_v2_job" "racer" {
       # is already spent, so it would find nothing to race anyway.
       max_retries = 0
 
-      # Trigger at 06:25, a ~2 minute cold start, a hold to 06:28, then up to
-      # 300s of race per booking in the group (BOOKING_EXECUTION_TIMEOUT_SECONDS)
-      # and the reporting. Must stay shorter than INTERRUPTED_MIN_AGE in
-      # app/services/booking_service.py, so a claim can only look orphaned once
-      # the container that made it is certainly gone.
+      # The task spends at most TASK_BUDGET_S (1200s, app/racer/run.py) on the
+      # hold and its races, and caps every race's timeout by what is left of it
+      # however many bookings a group holds, so the 300s beyond that is for
+      # reporting a timed-out race before this kills the container. Must stay
+      # shorter than INTERRUPTED_MIN_AGE in app/services/booking_service.py, so a
+      # claim can only look orphaned once the container that made it is gone.
+      # tests/test_racer.py pins all three.
       timeout = "1500s"
 
       containers {

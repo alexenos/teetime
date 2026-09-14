@@ -713,8 +713,10 @@ variable "racer_max_requesters" {
 
     Each task claims one requester's due bookings for a date and exits in
     seconds if none are left, so spare tasks cost a few seconds of container
-    each. A morning with more requesters than this leaves the extra groups
-    SCHEDULED and unraced, so keep it above the number of friends onboarded.
+    each. On a morning with more requesters than this, the extra groups are
+    raced late - after the window, by whichever task finishes its own race
+    first - or reported to their members as not attempted, so keep it above
+    the number of friends onboarded.
   EOT
   type        = number
   default     = 4

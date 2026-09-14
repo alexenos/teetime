@@ -292,6 +292,14 @@ class DatabaseService:
         loser updates nothing and goes back for the next group. Nothing here
         needs an advisory lock, and SQLite behaves the same way for tests.
 
+        The UPDATE selects by the group's (date, requester) key, not by the ids
+        the read returned, so a booking committed for the same requester and
+        date between the read and the update joins this claim instead of being
+        left SCHEDULED for another task to race concurrently. One created after
+        the claim commits still forms a group of its own later; a second
+        booking for a member already racing that date is refused by the club's
+        one-round-per-day rule regardless, and refusing it at creation is #134.
+
         Returns the claimed bookings, marked IN_PROGRESS, or an empty list when
         no unclaimed group is left. Raises rather than returning empty if
         claims keep coming back empty while rows are still due, because an
@@ -303,30 +311,34 @@ class DatabaseService:
                 return []
 
             first = due[0]
-            key = (first.request.requested_date, first.phone_number)
-            group = [b for b in due if (b.request.requested_date, b.phone_number) == key]
 
             claimed_at = datetime.now(UTC).replace(tzinfo=None)
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
                     update(BookingRecord)
                     .where(
-                        BookingRecord.booking_id.in_([b.id for b in group]),
+                        BookingRecord.requested_date == first.request.requested_date,
+                        BookingRecord.phone_number == first.phone_number,
                         BookingRecord.status == BookingStatus.SCHEDULED,
+                        BookingRecord.scheduled_execution_time <= due_before,
                     )
                     .values(status=BookingStatus.IN_PROGRESS, updated_at=claimed_at)
                     .returning(BookingRecord.booking_id)
                     .execution_options(synchronize_session=False)
                 )
-                won = {row[0] for row in result.all()}
+                won = [row[0] for row in result.all()]
                 await db.commit()
 
             if won:
-                claimed = [b for b in group if b.id in won]
-                for booking in claimed:
-                    booking.status = BookingStatus.IN_PROGRESS
-                    booking.updated_at = claimed_at
-                return claimed
+                # Re-read rather than reuse the earlier read: the claim may
+                # include a row that read never saw.
+                async with AsyncSessionLocal() as db:
+                    rows = await db.execute(
+                        select(BookingRecord)
+                        .where(BookingRecord.booking_id.in_(won))
+                        .order_by(BookingRecord.requested_time, BookingRecord.booking_id)
+                    )
+                    return [self._record_to_booking(r) for r in rows.scalars().all()]
             # Another task claimed (or someone cancelled) this group between
             # the read and the update. Those rows are no longer SCHEDULED, so
             # the next read cannot return them again.
