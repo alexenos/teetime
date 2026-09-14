@@ -2977,6 +2977,33 @@ class TestReconcileInterruptedBookings:
         mock_sms.send_booking_failure.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_a_recent_claim_from_a_racer_container_is_left_alone(
+        self, booking_service: BookingService
+    ) -> None:
+        """A racer task's claim predates this process but is still racing.
+
+        The 6:30 race runs in racer job containers (issue #184), so a service
+        instance cold-starting at 06:29 finds rows claimed at 06:27 by a process
+        it knows nothing about. "Touched before I started" is not enough to call
+        those orphans - failing them would message every member mid-race.
+        """
+        claimed_by_a_racer = self._in_progress_booking(
+            updated_at=booking_service._started_at - timedelta(minutes=2)
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[claimed_by_a_racer])
+            mock_db.update_booking = AsyncMock()
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_failure = AsyncMock()
+                result = await booking_service.reconcile_interrupted_bookings()
+
+        assert result == []
+        mock_db.update_booking.assert_not_awaited()
+        mock_sms.send_booking_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unwritable_row_does_not_strand_the_others(
         self, booking_service: BookingService
     ) -> None:

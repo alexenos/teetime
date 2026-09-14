@@ -93,6 +93,39 @@ locals {
     toset(local.secrets),
     toset(local.disabled_channel_secrets)
   )
+
+  # Plain env shared by the booking service and the racer job (terraform/racer.tf),
+  # so the booking path reads the same flags wherever it runs.
+  #
+  # WALDEN_DIRECT_HTTP_BOOKING landed in #123 but was never wired through, so the
+  # deployed service could only ever run the code default - the direct path had
+  # never actually executed in production. A flag added here reaches both.
+  #
+  # To change one of these for the deployed service, edit its default in
+  # variables.tf. cloudbuild.yaml applies with only four -var flags and *.tfvars
+  # is gitignored, so terraform.tfvars is not in the Cloud Build checkout and
+  # every other variable resolves to its default.
+  booking_env = {
+    TIMEZONE                             = var.timezone
+    BOOKING_OPEN_HOUR                    = tostring(var.booking_open_hour)
+    BOOKING_OPEN_MINUTE                  = tostring(var.booking_open_minute)
+    DAYS_IN_ADVANCE                      = tostring(var.days_in_advance)
+    LOG_LEVEL                            = var.log_level
+    MESSAGING_CHANNEL                    = var.messaging_channel
+    DEBUG_ARTIFACTS_BUCKET               = var.debug_artifacts_bucket
+    WALDEN_DIRECT_HTTP_BOOKING           = tostring(var.walden_direct_http_booking)
+    WALDEN_REFRESH_VIEW_AT_WINDOW        = tostring(var.walden_refresh_view_at_window)
+    WALDEN_MEASURE_CLOCK_SKEW            = tostring(var.walden_measure_clock_skew)
+    WALDEN_WINDOW_OPENS_OFFSET_MS        = tostring(var.walden_window_opens_offset_ms)
+    WALDEN_RESERVE_AIM_MARGIN_MS         = tostring(var.walden_reserve_aim_margin_ms)
+    WALDEN_RESERVE_SWEEP_OFFSETS_MS      = var.walden_reserve_sweep_offsets_ms
+    WALDEN_RESERVE_PIPELINE_OPENING_PAIR = tostring(var.walden_reserve_pipeline_opening_pair)
+    WALDEN_CAPTURE_RACE_LEDGER           = tostring(var.walden_capture_race_ledger)
+    WALDEN_FAST_BOOKING_BATCH            = tostring(var.walden_fast_booking_batch)
+    WALDEN_ADHOC_EXECUTE_DELAY_S         = tostring(var.walden_adhoc_execute_delay_s)
+    WALDEN_ADHOC_UNTIMED_RETRY           = tostring(var.walden_adhoc_untimed_retry)
+    WALDEN_FAST_BOOKING_IMMEDIATE        = tostring(var.walden_fast_booking_immediate)
+  }
 }
 
 # The Discord secrets were created (with versions) via gcloud before this
@@ -215,24 +248,13 @@ resource "google_cloud_run_v2_service" "teetime" {
         cpu_idle = var.messaging_channel == "discord" ? false : true
       }
 
-      env {
-        name  = "TIMEZONE"
-        value = var.timezone
-      }
-
-      env {
-        name  = "BOOKING_OPEN_HOUR"
-        value = tostring(var.booking_open_hour)
-      }
-
-      env {
-        name  = "BOOKING_OPEN_MINUTE"
-        value = tostring(var.booking_open_minute)
-      }
-
-      env {
-        name  = "DAYS_IN_ADVANCE"
-        value = tostring(var.days_in_advance)
+      # Shared with the racer job - see local.booking_env.
+      dynamic "env" {
+        for_each = local.booking_env
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
 
       env {
@@ -243,90 +265,6 @@ resource "google_cloud_run_v2_service" "teetime" {
       env {
         name  = "OIDC_AUDIENCE"
         value = local.cloud_run_url
-      }
-
-      env {
-        name  = "LOG_LEVEL"
-        value = var.log_level
-      }
-
-      env {
-        name  = "MESSAGING_CHANNEL"
-        value = var.messaging_channel
-      }
-
-      env {
-        name  = "DEBUG_ARTIFACTS_BUCKET"
-        value = var.debug_artifacts_bucket
-      }
-
-      # Booking-path flags. WALDEN_DIRECT_HTTP_BOOKING landed in #123 but was
-      # never wired through here, so the deployed service could only ever run
-      # the code default - the direct path has never actually executed in
-      # production.
-      #
-      # To change one of these for the deployed service, edit its default in
-      # variables.tf. cloudbuild.yaml applies with only four -var flags and
-      # *.tfvars is gitignored, so terraform.tfvars is not in the Cloud Build
-      # checkout and every other variable resolves to its default.
-      env {
-        name  = "WALDEN_DIRECT_HTTP_BOOKING"
-        value = tostring(var.walden_direct_http_booking)
-      }
-
-      env {
-        name  = "WALDEN_REFRESH_VIEW_AT_WINDOW"
-        value = tostring(var.walden_refresh_view_at_window)
-      }
-
-      env {
-        name  = "WALDEN_MEASURE_CLOCK_SKEW"
-        value = tostring(var.walden_measure_clock_skew)
-      }
-
-      env {
-        name  = "WALDEN_WINDOW_OPENS_OFFSET_MS"
-        value = tostring(var.walden_window_opens_offset_ms)
-      }
-
-      env {
-        name  = "WALDEN_RESERVE_AIM_MARGIN_MS"
-        value = tostring(var.walden_reserve_aim_margin_ms)
-      }
-
-      env {
-        name  = "WALDEN_RESERVE_SWEEP_OFFSETS_MS"
-        value = var.walden_reserve_sweep_offsets_ms
-      }
-
-      env {
-        name  = "WALDEN_RESERVE_PIPELINE_OPENING_PAIR"
-        value = tostring(var.walden_reserve_pipeline_opening_pair)
-      }
-
-      env {
-        name  = "WALDEN_CAPTURE_RACE_LEDGER"
-        value = tostring(var.walden_capture_race_ledger)
-      }
-
-      env {
-        name  = "WALDEN_FAST_BOOKING_BATCH"
-        value = tostring(var.walden_fast_booking_batch)
-      }
-
-      env {
-        name  = "WALDEN_ADHOC_EXECUTE_DELAY_S"
-        value = tostring(var.walden_adhoc_execute_delay_s)
-      }
-
-      env {
-        name  = "WALDEN_ADHOC_UNTIMED_RETRY"
-        value = tostring(var.walden_adhoc_untimed_retry)
-      }
-
-      env {
-        name  = "WALDEN_FAST_BOOKING_IMMEDIATE"
-        value = tostring(var.walden_fast_booking_immediate)
       }
 
       # Where Telegram registers its webhook at startup. Not a secret - it is
@@ -548,7 +486,15 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
 #
 # GET /health is public and does no work beyond confirming the process is
 # up, so this ping cannot itself interfere with anything on the booking path.
+#
+# Only while the service races (racer_fanout_enabled = false). With the fan-out
+# the race runs in racer job containers, which are created fresh for every
+# execution and cannot be warmed ahead of time - their cold start is absorbed by
+# the racer's earlier trigger and its hold to the 06:28 login instead - and
+# nothing on the race path touches this service, so waking it buys nothing.
 resource "google_cloud_scheduler_job" "warmup" {
+  count = var.racer_fanout_enabled ? 0 : 1
+
   name        = "${local.service_name}-warmup"
   description = "Wake a scaled-to-zero instance one minute ahead of the 6:28 AM booking run (issue #201)"
   schedule    = "27 6 * * *"
@@ -565,6 +511,11 @@ resource "google_cloud_scheduler_job" "warmup" {
 }
 
 resource "google_cloud_scheduler_job" "execute_bookings" {
+  # The in-service race, kept as the rollback path. With racer_fanout_enabled
+  # the racer job's race_window entry (terraform/racer.tf) races instead, and
+  # running both would race every booking twice.
+  count = var.racer_fanout_enabled ? 0 : 1
+
   name        = "${local.service_name}-execute-bookings"
   description = "Execute due tee time bookings"
   # Run 2 minutes early (6:28 AM CT) to allow login before booking window opens at 6:30 AM

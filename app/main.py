@@ -11,7 +11,7 @@ from app.api import bookings, health, jobs, webhooks
 from app.config import settings
 from app.log_safety import silence_wire_loggers
 from app.models.database import init_db
-from app.providers.walden_provider import MockWaldenProvider, WaldenGolfProvider
+from app.providers.setup import install_reservation_provider
 from app.services.booking_service import booking_service
 
 if TYPE_CHECKING:
@@ -100,23 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "Set SCHEDULER_API_KEY environment variable for production use."
         )
 
-    # WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD no longer log anything in: every
-    # booking runs under the requester's own stored login, and a requester
-    # without one is refused rather than borrowing this account. They survive
-    # only as the signal for "this is a real deployment, not a laptop", which is
-    # why the class - not an instance built from them - is what gets installed.
-    # Retiring the two secrets is a follow-up: dropping them from terraform's
-    # list would have Terraform delete them from Secret Manager, so that wants
-    # its own change.
-    if settings.walden_member_number and settings.walden_password:
-        logger.info("Walden Golf configured - bookings run under each requester's own login")
-        booking_service.set_reservation_provider_factory(WaldenGolfProvider)
-    else:
-        logger.warning(
-            "Walden Golf credentials not configured - using MockWaldenProvider. "
-            "Set WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD for real bookings."
-        )
-        booking_service.set_reservation_provider(MockWaldenProvider())
+    install_reservation_provider(booking_service)
 
     # Any booking still IN_PROGRESS is left over from a process that died
     # mid-attempt, since no attempt survives a restart. Resolve those and tell

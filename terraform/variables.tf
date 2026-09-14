@@ -668,3 +668,90 @@ variable "observer_memory" {
     error_message = "observer_memory must be at least 2Gi (or 2048Mi), formatted like \"2Gi\" or \"2048Mi\". The observer runs the same headless Chrome that was OOM-killed at 1Gi, and additionally holds all nine snapshots in memory until the window has passed."
   }
 }
+
+variable "racer_fanout_enabled" {
+  description = <<-EOT
+    Race the 6:30 AM window as the racer job (terraform/racer.tf), one task per
+    requester in its own container, instead of through the booking service's
+    /jobs/execute-due-bookings endpoint (issue #184).
+
+    On. The service raced every requester one after another in one process, so
+    on 2026-09-13 the second requester's Reserves went out about 74 seconds
+    into the window. Running them concurrently in that one process instead would
+    put N headless Chromes on one vCPU inside the same three seconds.
+
+    Turning this off destroys the racer's scheduler entry and restores the
+    service's 06:28 entry - the rollback path. The job itself stays, so it can
+    still be executed by hand.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "racer_schedule" {
+  description = <<-EOT
+    Cron schedule that starts the racer job, in var.timezone.
+
+    06:25, three minutes earlier than the service's 06:28 entry. On 2026-09-13 the
+    observer job was triggered at 06:24:00 and its Python process first logged at
+    06:26:10, so a job started at 06:28 would reach the tee sheet after the
+    window. Each task holds its login to 06:28 regardless (LOGIN_LEAD_S in
+    app/racer/run.py), so starting earlier only buys margin for the cold start -
+    and a task that is still late logs an ERROR saying to move this earlier.
+
+    Do not move this before observer_schedule: a racer task logs in at 06:28 no
+    matter when it starts, but the observer must still be the older session.
+  EOT
+  type        = string
+  default     = "25 6 * * *"
+}
+
+variable "racer_max_requesters" {
+  description = <<-EOT
+    How many racer tasks start each morning - a ceiling on the number of
+    requesters whose races run concurrently, not a count of them.
+
+    Each task claims one requester's due bookings for a date and exits in
+    seconds if none are left, so spare tasks cost a few seconds of container
+    each. On a morning with more requesters than this, the extra groups are
+    raced late - after the window, by whichever task finishes its own race
+    first - or reported to their members as not attempted, so keep it above
+    the number of friends onboarded.
+  EOT
+  type        = number
+  default     = 4
+
+  # Ten is the ceiling docs/design-observer-and-fanout.md sets before rate
+  # limiting and the club's terms need revisiting.
+  validation {
+    condition     = var.racer_max_requesters >= 1 && var.racer_max_requesters <= 10 && floor(var.racer_max_requesters) == var.racer_max_requesters
+    error_message = "racer_max_requesters must be a whole number from 1 to 10. Past 10, revisit rate limiting and the club's terms first (docs/design-observer-and-fanout.md)."
+  }
+}
+
+variable "racer_cpu" {
+  description = "CPU for each racer task. Each task is one browser in its own container, so nothing else contends for it."
+  type        = string
+  default     = "1"
+}
+
+variable "racer_memory" {
+  description = <<-EOT
+    Memory for each racer task.
+
+    The same headless Chrome as the service, which was OOM-killed at 1Gi
+    mid-booking on 2026-08-02 and lost the result notification.
+  EOT
+  type        = string
+  default     = "2Gi"
+
+  # Same single-try() guard as cloud_run_memory and observer_memory.
+  validation {
+    condition = try(
+      tonumber(regex("^([0-9]+)(Mi|Gi)$", var.racer_memory)[0]) *
+      (regex("^([0-9]+)(Mi|Gi)$", var.racer_memory)[1] == "Gi" ? 1024 : 1) >= 2048,
+      false
+    )
+    error_message = "racer_memory must be at least 2Gi (or 2048Mi), formatted like \"2Gi\" or \"2048Mi\". Headless Chrome OOM-killed the container at 1Gi, losing the booking result."
+  }
+}

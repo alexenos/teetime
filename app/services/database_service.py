@@ -7,7 +7,7 @@ handling conversion between Pydantic schemas and SQLAlchemy models.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.models.database import AsyncSessionLocal, BookingRecord, SessionRecord
 from app.models.schemas import (
@@ -16,6 +16,12 @@ from app.models.schemas import (
     TeeTimeRequest,
     UserSession,
 )
+
+# How many times claim_next_due_group re-reads after losing a group to another
+# task. Each loss removes that group from the due set, so a handful of racer
+# tasks never needs more than a few; this bound only turns a bug into an error
+# instead of a loop.
+_MAX_CLAIM_ATTEMPTS = 20
 
 
 class DatabaseService:
@@ -252,13 +258,95 @@ class DatabaseService:
             List of bookings that are due for execution.
         """
         async with AsyncSessionLocal() as db:
-            query = select(BookingRecord).where(
-                BookingRecord.status == BookingStatus.SCHEDULED,
-                BookingRecord.scheduled_execution_time <= due_before,
+            query = (
+                select(BookingRecord)
+                .where(
+                    BookingRecord.status == BookingStatus.SCHEDULED,
+                    BookingRecord.scheduled_execution_time <= due_before,
+                )
+                # A stated order, not whatever the query planner returns. On
+                # 2026-09-13 two requesters' groups ran in the reverse of the
+                # order insertion predicted, and nobody had decided either one.
+                .order_by(
+                    BookingRecord.requested_date,
+                    BookingRecord.phone_number,
+                    BookingRecord.requested_time,
+                    BookingRecord.booking_id,
+                )
             )
             result = await db.execute(query)
             records = result.scalars().all()
             return [self._record_to_booking(r) for r in records]
+
+    async def claim_next_due_group(self, due_before: datetime) -> list[TeeTimeBooking]:
+        """Take one requester's due bookings for a date, so no other racer can.
+
+        Each racer task (``app/racer/``, issue #184) calls this once and races
+        whatever it gets. A group is every due booking sharing a requested date
+        and a requester - the same grouping ``execute_bookings_batch`` uses,
+        so a group is exactly one login's work.
+
+        The claim is a conditional UPDATE that only moves rows still SCHEDULED
+        to IN_PROGRESS. Two tasks going for the same group cannot both win it:
+        Postgres re-checks the status once the first writer commits, so the
+        loser updates nothing and goes back for the next group. Nothing here
+        needs an advisory lock, and SQLite behaves the same way for tests.
+
+        The UPDATE selects by the group's (date, requester) key, not by the ids
+        the read returned, so a booking committed for the same requester and
+        date between the read and the update joins this claim instead of being
+        left SCHEDULED for another task to race concurrently. One created after
+        the claim commits still forms a group of its own later; a second
+        booking for a member already racing that date is refused by the club's
+        one-round-per-day rule regardless, and refusing it at creation is #134.
+
+        Returns the claimed bookings, marked IN_PROGRESS, or an empty list when
+        no unclaimed group is left. Raises rather than returning empty if
+        claims keep coming back empty while rows are still due, because an
+        empty answer would leave those bookings unraced and unreported.
+        """
+        for _ in range(_MAX_CLAIM_ATTEMPTS):
+            due = await self.get_due_bookings(due_before)
+            if not due:
+                return []
+
+            first = due[0]
+
+            claimed_at = datetime.now(UTC).replace(tzinfo=None)
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    update(BookingRecord)
+                    .where(
+                        BookingRecord.requested_date == first.request.requested_date,
+                        BookingRecord.phone_number == first.phone_number,
+                        BookingRecord.status == BookingStatus.SCHEDULED,
+                        BookingRecord.scheduled_execution_time <= due_before,
+                    )
+                    .values(status=BookingStatus.IN_PROGRESS, updated_at=claimed_at)
+                    .returning(BookingRecord.booking_id)
+                    .execution_options(synchronize_session=False)
+                )
+                won = [row[0] for row in result.all()]
+                await db.commit()
+
+            if won:
+                # Re-read rather than reuse the earlier read: the claim may
+                # include a row that read never saw.
+                async with AsyncSessionLocal() as db:
+                    rows = await db.execute(
+                        select(BookingRecord)
+                        .where(BookingRecord.booking_id.in_(won))
+                        .order_by(BookingRecord.requested_time, BookingRecord.booking_id)
+                    )
+                    return [self._record_to_booking(r) for r in rows.scalars().all()]
+            # Another task claimed (or someone cancelled) this group between
+            # the read and the update. Those rows are no longer SCHEDULED, so
+            # the next read cannot return them again.
+
+        raise RuntimeError(
+            f"Could not claim a due booking group after {_MAX_CLAIM_ATTEMPTS} attempts "
+            "while bookings were still due"
+        )
 
 
 database_service = DatabaseService()

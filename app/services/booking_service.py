@@ -41,6 +41,15 @@ INTERRUPTED_ERROR_MESSAGE = (
     "please check the club website before rebooking."
 )
 
+# How long an IN_PROGRESS row must sit untouched before startup reconciliation
+# may call it orphaned. The 6:30 race now runs in racer job containers (issue
+# #184), not in this process, so "last touched before this process started" no
+# longer means "nobody is working on it": a service instance cold-starting at
+# 06:29 would otherwise fail every live claim and message the members. Longer
+# than the racer job's task timeout (terraform/racer.tf), so any row this old has
+# outlived the container that claimed it.
+INTERRUPTED_MIN_AGE = timedelta(minutes=30)
+
 # Replies that settle a pending booking confirmation without asking the LLM
 # what they mean. The bot just printed the bookings and said "Reply 'yes' to
 # confirm", so a bare "yes" needs no interpretation - and sending it to Gemini
@@ -997,6 +1006,11 @@ class BookingService:
         attempts are still running, so failing them here would both lie to the
         user and clobber the real outcome they are about to write.
 
+        Rows must also be older than INTERRUPTED_MIN_AGE, because the morning
+        race runs in separate racer containers whose claims this process knows
+        nothing about. The cost is that a row orphaned by a crash here is only
+        resolved by a startup at least that long afterwards.
+
         Each orphan is marked FAILED with an explanation that the reservation's
         true state is unknown, and the user is notified. Callers should invoke
         this once at startup, after the messaging channel is ready.
@@ -1005,14 +1019,18 @@ class BookingService:
             The bookings that were successfully reconciled.
         """
         in_progress = await database_service.get_bookings(status=BookingStatus.IN_PROGRESS)
-        orphaned = [b for b in in_progress if b.updated_at < self._started_at]
+        cutoff = min(
+            self._started_at,
+            datetime.now(UTC).replace(tzinfo=None) - INTERRUPTED_MIN_AGE,
+        )
+        orphaned = [b for b in in_progress if b.updated_at < cutoff]
         if not orphaned:
             return []
 
         live = len(in_progress) - len(orphaned)
         logger.warning(
             "Found %d booking(s) stuck IN_PROGRESS from a previous run; marking failed "
-            "(%d in-progress booking(s) started by this instance left alone)",
+            "(%d in-progress booking(s) too recent to be orphans left alone)",
             len(orphaned),
             live,
         )
