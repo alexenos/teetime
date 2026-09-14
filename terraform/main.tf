@@ -486,7 +486,15 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
 #
 # GET /health is public and does no work beyond confirming the process is
 # up, so this ping cannot itself interfere with anything on the booking path.
+#
+# Only while the service races (racer_fanout_enabled = false). With the fan-out
+# the race runs in racer job containers, which are created fresh for every
+# execution and cannot be warmed ahead of time - their cold start is absorbed by
+# the racer's earlier trigger and its hold to the 06:28 login instead - and
+# nothing on the race path touches this service, so waking it buys nothing.
 resource "google_cloud_scheduler_job" "warmup" {
+  count = var.racer_fanout_enabled ? 0 : 1
+
   name        = "${local.service_name}-warmup"
   description = "Wake a scaled-to-zero instance one minute ahead of the 6:28 AM booking run (issue #201)"
   schedule    = "27 6 * * *"
