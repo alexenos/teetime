@@ -320,6 +320,11 @@ def format_flip_table(
         f"{'stopped being Empty':<22}  {'became':<9}  held by"
     )
     lines += ["", header, "-" * len(header)]
+    # A mistyped --course must not render as a real course with nothing in range:
+    # an empty table reads as "no slot flipped", which is a finding about the club.
+    available = sorted({row["course"] for row in rows}, key=str.casefold)
+    if course is not None and course.casefold() not in {name.casefold() for name in available}:
+        lines.append(f"No course named {course!r} on this sheet; it has: {', '.join(available)}")
     for flip in flip_table(rows, course=course, start=start, end=end):
         if flip.first_state != "empty":
             when, became, held = "never Empty", "", ""

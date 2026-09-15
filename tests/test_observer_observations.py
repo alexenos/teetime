@@ -180,3 +180,12 @@ class TestFlipTable:
         text = obs.format_flip_table(rows, start="16:30", end="16:40")
         assert "04:34 PM" in text and "(+0, +1003]ms" in text
         assert "WARNING snapshot_+1003ms.html" in text
+
+    def test_unknown_course_is_reported_not_rendered_as_an_empty_table(self, run_dir: Path) -> None:
+        rows = obs.build_observations(run_dir)
+        typo = obs.format_flip_table(rows, course="Northgat")
+        assert "No course named 'Northgat'" in typo
+        assert "Northgate, Walden on Lake Conroe" in typo
+        # A real course with nothing in the tee-time range stays a plain empty table.
+        empty_range = obs.format_flip_table(rows, course="northgate", start="05:00", end="05:30")
+        assert "No course named" not in empty_range
