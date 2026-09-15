@@ -103,6 +103,15 @@ or a constant it changed — settles which side of the deploy you are on. On
 2026-08-15 no `RESERVATION_CHECK` line appeared, which places the morning run
 before PR #150 (merged 16:32 CT the same day) without ever listing a revision.
 
+**This "find the revision" trick is specific to the `teetime` service.** As
+of #184/#204 (2026-09-15) the race itself runs as the `teetime-racer` Cloud
+Run *job*, and jobs don't carry the same `revision_name` label — behavior is
+still bounded from commit timestamps the same way (§1's `git log`), but
+`resource.labels.revision_name` in the query above will simply be absent on
+a job-era log line. Confirm which mode a given morning used the same way §3
+tells `RESERVATION_CHECK` apart from `phase=complete`: read the log lines
+themselves (`RACER: task N/M ...` means the job).
+
 **Date a run by `RESERVATION_CHECK` and the rung offsets, never by the ledger's
 `targetTimestampMs`.** Corrected 2026-08-20: that field records the *stated
 window* on every run by design, so the aim can move without rescaling ten
@@ -115,13 +124,27 @@ Step 7 log prints the true target, which is why the two disagree.
 
 ## 2. Pull the run
 
-Project `gen-lang-client-0822973627`, Cloud Run service `teetime`, region
-`us-central1`. The job fires at 06:28 CT and the window opens at 06:30 CT —
-11:30 UTC during CDT, 12:30 UTC during CST.
+Project `gen-lang-client-0822973627`, region `us-central1`. The job fires at
+06:28 CT and the window opens at 06:30 CT — 11:30 UTC during CDT, 12:30 UTC
+during CST.
+
+**The race is split across a service and two jobs, and which one matters
+depends on the morning.** Through 2026-09-14 the whole batch ran inside the
+Cloud Run *service* `teetime`, reached by Cloud Scheduler hitting
+`/jobs/execute-due-bookings`. As of #184/#204 (2026-09-15) the race itself
+runs as the Cloud Run *job* `teetime-racer`, one task per requester;
+`teetime-observer` has been a separate job since #189. A query scoped to the
+service alone now returns a clean, silent zero rows on a morning that raced —
+2026-09-15 was misread as "no booking ran" this way, and the only thing that
+caught it was cross-checking the GCS artifact listing, which showed a full
+race. **Don't trust an empty `logs` result on its own — check
+`fetch_debug_artifacts.py list --date <YYYYMMDD>` before concluding nothing
+happened.**
 
 **The short form, and the only one that works without `gcloud`.** It takes CT
 wall-clock times and does the UTC conversion, the DST offset and the
-`discord.gateway` exclusion itself:
+`discord.gateway` exclusion itself, and queries the service and both jobs
+together by default:
 
 ```bash
 poetry run python scripts/fetch_debug_artifacts.py logs \
@@ -129,14 +152,17 @@ poetry run python scripts/fetch_debug_artifacts.py logs \
 ```
 
 Widen `--to` to `08:00` when the question is about what happened *after* the
-race — a later manual booking, or the SMS the member got.
+race — a later manual booking, or the SMS the member got. Narrow to one
+resource with `--service ''` (jobs only) or `--jobs ''` (service only) once
+you know which one you want.
 
 **Use the Bash tool, not PowerShell** — PowerShell mangles the quoting inside
 the filter and gcloud rejects it with "Unparseable filter".
 
 The `gcloud` form, for a machine that has it. Set the date once and derive the
 UTC bounds from it, so the same command works for any morning and picks the
-right offset either side of a DST change:
+right offset either side of a DST change. The resource filter ORs the service
+and both jobs together for the same reason the script does:
 
 ```bash
 DAY=2026-08-09
@@ -149,7 +175,8 @@ fmt = lambda d: d.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
 print(fmt(day.replace(hour=6, minute=20)), fmt(day.replace(hour=6, minute=40)))
 PY
 )"
-gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"teetime\" AND timestamp>=\"$START\" AND timestamp<=\"$END\" AND textPayload!~\"discord\\.gateway\"" --project=gen-lang-client-0822973627 --format="value(timestamp,textPayload)" --limit=2000 --order=asc > run.txt
+RESOURCE='(resource.type="cloud_run_revision" AND resource.labels.service_name="teetime") OR (resource.type="cloud_run_job" AND resource.labels.job_name=("teetime-racer" OR "teetime-observer"))'
+gcloud logging read "($RESOURCE) AND timestamp>=\"$START\" AND timestamp<=\"$END\" AND textPayload!~\"discord\\.gateway\"" --project=gen-lang-client-0822973627 --format="value(timestamp,textPayload)" --limit=2000 --order=asc > run.txt
 ```
 
 Python rather than `date -d`: Git Bash here ignores `TZ=America/Chicago` when
