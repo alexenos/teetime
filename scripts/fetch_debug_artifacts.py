@@ -27,6 +27,19 @@ so **artifact dates are UTC**. The member and the club are on CT. A 6:30 AM CT
 run lands under the same date either way; an evening run does not. ``logs``
 takes CT wall-clock times and converts them, so pass the times you actually
 mean.
+
+A second note, added 2026-09-15: ``logs`` queries a Cloud Run *service*
+(``resource.type="cloud_run_revision"``) and Cloud Run *jobs*
+(``resource.type="cloud_run_job"``) together, because the booking run is
+split across both and which one matters shifts under you. Through 2026-09-14
+the whole batch ran inside the ``teetime`` service, reached by Cloud
+Scheduler hitting ``/jobs/execute-due-bookings``. As of #184/#204
+(2026-09-15) the race itself runs as the ``teetime-racer`` job, one task per
+requester; ``teetime-observer`` has been a separate job since #189. A query
+scoped to the service alone now returns a clean, silent zero rows on a
+morning that raced - which reads exactly like "no booking ran". ``--service``
+and ``--jobs`` can narrow it back down when you already know which one you
+want.
 """
 
 import argparse
@@ -49,6 +62,7 @@ except ImportError:  # pragma: no cover - only bites outside the project venv
 DEFAULT_PROJECT = "gen-lang-client-0822973627"
 DEFAULT_BUCKET = f"{DEFAULT_PROJECT}-teetime-debug-artifacts"
 DEFAULT_SERVICE = "teetime"
+DEFAULT_JOBS = ("teetime-racer", "teetime-observer")
 CLUB_TZ = ZoneInfo("America/Chicago")
 
 SCOPES = [
@@ -158,12 +172,41 @@ def _as_utc_z(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def read_logs(project: str, service: str, start: datetime, end: datetime) -> list[tuple[str, str]]:
+def _resource_filter(service: str | None, jobs: list[str]) -> str:
+    """Match the ``teetime`` service and/or its Cloud Run jobs.
+
+    The two resource types use different label keys (``service_name`` vs.
+    ``job_name``), so each becomes its own parenthesized clause and the two
+    are OR'd together - a query that only knows about the service goes quiet
+    on a morning the race ran as a job, and vice versa. See the module
+    docstring's 2026-09-15 note.
+    """
+    clauses = []
+    if service:
+        clauses.append(
+            f'(resource.type="cloud_run_revision" AND resource.labels.service_name="{service}")'
+        )
+    if jobs:
+        job_match = " OR ".join(f'"{j}"' for j in jobs)
+        clauses.append(
+            f'(resource.type="cloud_run_job" AND resource.labels.job_name=({job_match}))'
+        )
+    if not clauses:
+        raise ValueError("need at least one of a service or a job to query logs for")
+    return " OR ".join(clauses)
+
+
+def read_logs(
+    project: str,
+    service: str | None,
+    jobs: list[str],
+    start: datetime,
+    end: datetime,
+) -> list[tuple[str, str]]:
     """Read Cloud Run log entries between two aware datetimes, oldest first."""
     token = access_token()
     log_filter = (
-        'resource.type="cloud_run_revision" '
-        f'AND resource.labels.service_name="{service}" '
+        f"({_resource_filter(service, jobs)}) "
         f'AND timestamp>="{_as_utc_z(start)}" '
         f'AND timestamp<="{_as_utc_z(end)}" '
         'AND textPayload!~"discord\\.gateway"'
@@ -259,7 +302,16 @@ def main() -> None:
     p_logs.add_argument("--date", required=True, help="CT calendar date, e.g. 2026-08-13")
     p_logs.add_argument("--from", dest="start", default="06:20", help="CT start time HH:MM")
     p_logs.add_argument("--to", dest="end", default="08:00", help="CT end time HH:MM")
-    p_logs.add_argument("--service", default=DEFAULT_SERVICE)
+    p_logs.add_argument(
+        "--service",
+        default=DEFAULT_SERVICE,
+        help="Cloud Run service to include, or '' to skip it",
+    )
+    p_logs.add_argument(
+        "--jobs",
+        default=",".join(DEFAULT_JOBS),
+        help="comma-separated Cloud Run job names to include, or '' to skip them",
+    )
     p_logs.add_argument("--out", type=Path, help="write here instead of stdout")
 
     p_ledger = sub.add_parser("ledger", help="summarize a downloaded ledger.jsonl")
@@ -313,7 +365,8 @@ def main() -> None:
         if end_ct <= start_ct:
             end_ct += timedelta(days=1)
 
-        entries = read_logs(args.project, args.service, start_ct, end_ct)
+        jobs = [j.strip() for j in args.jobs.split(",") if j.strip()]
+        entries = read_logs(args.project, args.service, jobs, start_ct, end_ct)
         lines = [f"{timestamp} {text}" for timestamp, text in entries]
         if args.out:
             args.out.write_text("\n".join(lines) + "\n")
