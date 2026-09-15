@@ -738,6 +738,18 @@ so a 06:24 CDT run reads `1124`, and the execution id is the same handle the
 Cloud Run console and its logs use. Each holds `snapshot_+NNNNms.html` for every
 tick plus `manifest.jsonl` and `run.json`.
 
+**Read the observations ledger before speculating about the gate.** `poetry run
+python scripts/fetch_debug_artifacts.py fetch --date <UTC stamp of the morning>`
+pulls the observer's run directories with the race artifacts, writes
+`observations.jsonl` into each (one row per snapshot × slot: `tMs`, `course`,
+`slotIndex`, `slotTime`, `state`, `holders`, `tbd`, `openSeats`, `refreshOk`)
+and prints a flip table — per Northgate slot, the interval `(last Empty, first
+not Empty]` on the window clock. Re-read one run with `observations <run dir>
+--from 07:30 --to 09:30` (or `--course all` for the second-course control).
+"never Empty" means held or closed at the first look, not won in the race; and
+`holders` counts named members while `tbd` counts `(Name)` placeholders, which
+is the member-plus-guests vs. real-foursome distinction from §7e.
+
 **Read the offset in a snapshot's name as when its re-render was *requested*** —
 that is the instant the sheet describes. Compare it with the ledger's
 `sentMsPastWindow` directly; both are measured from the stated window,
