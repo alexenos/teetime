@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time as time_module
+import uuid
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from typing import Any, TypeVar
@@ -68,6 +69,29 @@ TRANSIENT_EXCEPTIONS = (
 # refusal is a whole tee sheet at 500-680KB and consecutive ones are the same
 # sheet, so the ends are what get read. Ledger rows are kept for every attempt.
 _RACE_LEDGER_MAX_PAYLOADS = 8
+
+
+def _race_run_id() -> str:
+    """A race directory name two concurrent racer tasks cannot collide on.
+
+    ``datetime.now()`` alone is whole-second resolution, and one racer job
+    execution fans out a task per requester (#184) - so two tasks racing the
+    same 06:30 window land in the same second. On 2026-09-15 two requesters
+    both raced, both landed attempts 1-4 on identical verdicts at the same
+    attempt number, and the second task's ``ledger.jsonl`` and four attempt
+    payloads all failed to upload with 403s. The bucket grants only
+    ``roles/storage.objectCreator`` (see the observer's own ``_run_id``, which
+    solved this for overlapping executions the same way), which permits
+    creating an object but not overwriting one a sibling task just created -
+    so a colliding prefix does not merge, it silently drops the second task's
+    artifacts. ``CLOUD_RUN_TASK_INDEX`` disambiguates tasks within one
+    execution; a random suffix stands in for it during a local run, which has
+    neither the variable nor a sibling to collide with.
+    """
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    task_index = os.getenv("CLOUD_RUN_TASK_INDEX")
+    discriminator = task_index if task_index is not None else uuid.uuid4().hex[:8]
+    return f"{stamp}_{discriminator}"
 
 
 def with_retry(
@@ -5286,7 +5310,7 @@ class WaldenGolfProvider(ReservationProvider):
         backfill_reserve_telemetry(attempts)
 
         bucket_name = os.getenv("DEBUG_ARTIFACTS_BUCKET")
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = _race_run_id()
         summary = " | ".join(
             f"#{o.attempt} {o.slot_time.strftime('%I:%M %p') if o.slot_time else '?'} "
             f"@{o.sent_ms_past_window if o.sent_ms_past_window is not None else '?'}ms "
