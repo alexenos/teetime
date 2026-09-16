@@ -248,6 +248,19 @@ poetry run python scripts/fetch_debug_artifacts.py list  --date 20260815
 poetry run python scripts/fetch_debug_artifacts.py fetch --date 20260815 --out ./artifacts
 ```
 
+**Pull and read the observer's snapshots every morning, win or lose — this is not
+optional and not just for a contested Friday.** `fetch` above already pulls the
+`walden/observer/<target date>/` run alongside the race artifacts; run the
+`observations` subcommand on it (§7f) and read the flip table before writing the
+report. On a win it is the independent second line of evidence that the target
+slot was open at the window and taken in the race, not pre-held — cheap
+corroboration that costs nothing beyond reading a table. On a loss it is very
+often the only way to tell "we lost the gate" from "someone was faster," per
+§7f's two models. Don't skip it because the racer's own ledger already looks
+conclusive — a win still gets the corroboration, and it takes no morning to
+read: the artifacts are already sitting in the bucket by the time this step
+runs.
+
 Artifact object names come from `datetime.now()` inside Cloud Run with no `TZ`
 set, so **they are stamped UTC**. A 06:30 CT run lands under the same date
 either way; an evening run does not.
@@ -719,13 +732,20 @@ reaching a verdict on a morning from 2026-09-18 on.
 It was proposed and withdrawn on 09-11: under Model F it delays the one slot
 still winnable, and 09-11's fallback was granted on its first ask at `:06`.
 
-## 7f. Added 2026-09-11: the observer's snapshots, from 09-18 onward
+## 7f. Added 2026-09-11: the observer's snapshots, from 09-18 onward, read every morning
 
 The reader §7e asks for exists as of issue #189: a separate Cloud Run job
 (`teetime-observer`, 06:24 CT, every morning) that photographs the tee sheet
 once a second from the window and never reserves anything. **Check for its
 artifacts before concluding anything about the gate** — for mornings from
 2026-09-18 on, they answer the question the ledger cannot.
+
+**This is a standing step (§4), not a special one reached for only when the
+gate is in question.** Run it on every morning's post-mortem, win or lose:
+read the flip table below and fold whatever it shows — corroboration on a
+win, discrimination between Model L and Model F on a loss — into the report
+(§8). The "from 09-18 onward" in this section's title is a fact about when
+the observer started existing, not a condition on when to bother reading it.
 
 ```bash
 gcloud storage ls -r "gs://gen-lang-client-0822973627-teetime-debug-artifacts/walden/observer/<target date>/"
@@ -780,6 +800,13 @@ date.
 
 State separately: what the run did, what is established from artifacts, what is
 hypothesis, and the single cheapest experiment that would discriminate.
+
+Include the observer's flip table (§7f) every time — a line stating what it
+showed for the target slot(s), even on a clean win where it only corroborates
+the ledger. If the observer has no artifacts for that target date (job did not
+run, or declined to capture per §7f's last paragraph), say that explicitly
+rather than omitting the check; an absent observer is itself worth a sentence,
+not silence.
 
 Booking itself still cannot be exercised locally — testing it means deploying to
 main behind a flag, so that kind of experiment costs a morning. Say which morning
