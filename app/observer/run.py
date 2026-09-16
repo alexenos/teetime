@@ -363,6 +363,7 @@ async def observe() -> bool:
             window_epoch_ms=window_epoch_ms,
             count=settings.observer_snapshot_count,
             interval_ms=settings.observer_snapshot_interval_ms,
+            start_offset_ms=settings.observer_snapshot_start_offset_ms,
         )
     finally:
         try:

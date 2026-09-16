@@ -420,6 +420,7 @@ class TestCadenceSettingsValidation:
         config = Settings(_env_file=None)
         assert config.observer_snapshot_count == 9
         assert config.observer_snapshot_interval_ms == 1000
+        assert config.observer_snapshot_start_offset_ms == -500
 
     @pytest.mark.parametrize("count", [0, -1])
     def test_a_non_positive_count_is_rejected(self, count: int) -> None:

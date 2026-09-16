@@ -165,6 +165,20 @@ class TestCaptureRereadsTheSheet:
         assert snaps[0].captured_offset_ms >= snaps[0].sent_offset_ms
         assert snaps[0].planned_offset_ms == 0
 
+    def test_a_negative_start_offset_shifts_every_tick_the_same_amount(self) -> None:
+        """The default control shot: one before the window, the rest half a beat later."""
+        window = int(time_module.time() * 1000) - 5000
+        driver = self._driver(["<html/>", "<html/>", "<html/>"])
+        with patch.object(walden_date_selection, "await_rerender", return_value=True):
+            snaps = observer_sheet.capture_across_window(
+                driver,
+                window_epoch_ms=window,
+                count=3,
+                interval_ms=1000,
+                start_offset_ms=-500,
+            )
+        assert [s.planned_offset_ms for s in snaps] == [-500, 500, 1500]
+
 
 class TestParkOnDate:
     """Parking the view, and refusing to guess."""

@@ -633,6 +633,21 @@ variable "observer_snapshot_interval_ms" {
   }
 }
 
+variable "observer_snapshot_start_offset_ms" {
+  description = <<-EOT
+    Milliseconds to shift every planned snapshot tick, relative to the window.
+
+    Negative by default: -500 puts the first snapshot half a second before the
+    window as a control, and moves the first post-window snapshot to +500ms
+    instead of +0ms, so a slot already gone at +0.5s can be compared against
+    the same slot's own -0.5s reading rather than only against another
+    morning's. May be negative or zero; unlike count and interval, there is no
+    silent-failure mode here for a validation to guard against.
+  EOT
+  type        = number
+  default     = -500
+}
+
 variable "observer_cpu" {
   description = "CPU for the observer job. Its own container, so it contends with nothing that races."
   type        = string
