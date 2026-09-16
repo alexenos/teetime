@@ -84,13 +84,24 @@ def _race_run_id() -> str:
     solved this for overlapping executions the same way), which permits
     creating an object but not overwriting one a sibling task just created -
     so a colliding prefix does not merge, it silently drops the second task's
-    artifacts. ``CLOUD_RUN_TASK_INDEX`` disambiguates tasks within one
-    execution; a random suffix stands in for it during a local run, which has
-    neither the variable nor a sibling to collide with.
+    artifacts.
+
+    ``CLOUD_RUN_TASK_INDEX`` alone disambiguates tasks only *within* one
+    execution - two overlapping executions (a retry racing a scheduled run,
+    say) each have their own task 0 and would collide again. Pairing it with
+    ``CLOUD_RUN_EXECUTION`` closes that gap the same way the observer's
+    ``_run_id`` does. A random suffix stands in for both during a local run,
+    which has neither variable nor a sibling to collide with.
     """
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_index = os.getenv("CLOUD_RUN_TASK_INDEX")
-    discriminator = task_index if task_index is not None else uuid.uuid4().hex[:8]
+    execution = os.getenv("CLOUD_RUN_EXECUTION")
+    if task_index is not None and execution is not None:
+        discriminator = f"{execution}_{task_index}"
+    elif task_index is not None:
+        discriminator = task_index
+    else:
+        discriminator = f"local-{uuid.uuid4().hex[:8]}"
     return f"{stamp}_{discriminator}"
 
 
