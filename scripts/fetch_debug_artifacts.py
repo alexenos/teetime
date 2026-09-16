@@ -20,6 +20,14 @@ Usage::
     python scripts/fetch_debug_artifacts.py fetch --date 20260813 --out ./artifacts
     python scripts/fetch_debug_artifacts.py logs  --date 2026-08-13 --from 06:20 --to 08:00
     python scripts/fetch_debug_artifacts.py ledger ./artifacts/walden/race/*/ledger.jsonl
+    python scripts/fetch_debug_artifacts.py observations ./artifacts/walden/observer/2026-09-25/<run id>
+
+The observer's objects live under ``walden/observer/<target date>/<run id>/``,
+and the run id starts with the UTC stamp of the morning it ran, so ``--date``
+with that morning's stamp lists and fetches them alongside the race ledgers.
+``fetch`` parses every observer run it downloads into ``observations.jsonl``
+and prints its Northgate flip table (see scripts/observer_observations.py);
+``observations`` re-reads one directory with a different course or time range.
 
 A note on the two clocks, because every post-mortem trips over it. Object names
 come from :func:`datetime.now` inside Cloud Run, and nothing sets ``TZ`` there,
@@ -281,6 +289,37 @@ def summarize_ledger(path: Path) -> None:
         )
 
 
+def summarize_observer_run(
+    run_dir: Path,
+    course: str | None = "Northgate",
+    start: str | None = None,
+    end: str | None = None,
+) -> None:
+    """Write ``observations.jsonl`` for an observer run directory and print its flip table."""
+    try:
+        try:
+            import observer_observations as observations  # run as a script: scripts/ is on sys.path
+        except ModuleNotFoundError as exc:
+            if exc.name != "observer_observations":
+                raise
+            from scripts import observer_observations as observations
+    except ModuleNotFoundError as exc:
+        if exc.name != "bs4":
+            raise
+        sys.exit(
+            "Parsing observer snapshots needs beautifulsoup4, a dev dependency - run inside "
+            "the project venv (poetry run)."
+        )
+
+    rows = observations.build_observations(run_dir)
+    if not rows:
+        print(f"{run_dir}: no snapshots to parse")
+        return
+    path = observations.write_observations(run_dir, rows)
+    print(f"{run_dir} - {len(rows)} observation(s) -> {path}")
+    print(observations.format_flip_table(rows, course=course, start=start, end=end))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -316,6 +355,14 @@ def main() -> None:
 
     p_ledger = sub.add_parser("ledger", help="summarize a downloaded ledger.jsonl")
     p_ledger.add_argument("path", type=Path)
+
+    p_obs = sub.add_parser(
+        "observations", help="parse a downloaded observer run into observations.jsonl"
+    )
+    p_obs.add_argument("run_dir", type=Path, help="walden/observer/<target date>/<run id>")
+    p_obs.add_argument("--course", default="Northgate", help="course heading, or 'all'")
+    p_obs.add_argument("--from", dest="start", help="first tee time to show, HH:MM")
+    p_obs.add_argument("--to", dest="end", help="last tee time to show, HH:MM")
 
     args = parser.parse_args()
 
@@ -354,6 +401,15 @@ def main() -> None:
                     print()
                     summarize_ledger(destination)
 
+        for item in items:
+            if item["name"].startswith("walden/observer/") and item["name"].endswith(
+                "/manifest.jsonl"
+            ):
+                destination = _contained_destination(root, item["name"])
+                if destination is not None and destination.exists():
+                    print()
+                    summarize_observer_run(destination.parent)
+
     elif args.command == "logs":
         day = datetime.strptime(args.date, "%Y-%m-%d")
         start_ct = day.replace(
@@ -377,6 +433,10 @@ def main() -> None:
 
     elif args.command == "ledger":
         summarize_ledger(args.path)
+
+    elif args.command == "observations":
+        course = None if args.course.casefold() == "all" else args.course
+        summarize_observer_run(args.run_dir, course=course, start=args.start, end=args.end)
 
 
 if __name__ == "__main__":
