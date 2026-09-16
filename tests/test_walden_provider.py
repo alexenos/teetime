@@ -4518,3 +4518,56 @@ class TestChainSummaryLogging:
         assert "untimed (no window to lead)" in line
         assert "sent=" not in line
         assert "booked=05:00 PM" in line
+
+
+class TestRaceRunId:
+    """The race ledger's GCS directory name must not collide across tasks.
+
+    2026-09-15: two racer tasks fired in the same second and both derived
+    ``walden/race/<run_id>/`` from ``datetime.now()`` alone. The bucket only
+    grants ``roles/storage.objectCreator``, so the second task's writes to
+    the first task's object names came back 403 and its ledger was lost.
+
+    CodeRabbit caught a gap in the first fix: ``CLOUD_RUN_TASK_INDEX`` alone
+    only disambiguates tasks *within* one execution. Two overlapping
+    executions each have their own task 0 and would collide again, so the
+    discriminator must pair the task index with ``CLOUD_RUN_EXECUTION``.
+    """
+
+    def test_different_task_indices_do_not_collide(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.providers.walden_provider import _race_run_id
+
+        monkeypatch.delenv("CLOUD_RUN_EXECUTION", raising=False)
+        monkeypatch.setenv("CLOUD_RUN_TASK_INDEX", "0")
+        run_id_task_0 = _race_run_id()
+        monkeypatch.setenv("CLOUD_RUN_TASK_INDEX", "1")
+        run_id_task_1 = _race_run_id()
+
+        assert run_id_task_0 != run_id_task_1
+        assert run_id_task_0.endswith("_0")
+        assert run_id_task_1.endswith("_1")
+
+    def test_different_executions_with_the_same_task_index_do_not_collide(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two overlapping executions can each have a task 0 in the same second."""
+        from app.providers.walden_provider import _race_run_id
+
+        monkeypatch.setenv("CLOUD_RUN_TASK_INDEX", "0")
+        monkeypatch.setenv("CLOUD_RUN_EXECUTION", "execution-aaa")
+        run_id_execution_a = _race_run_id()
+        monkeypatch.setenv("CLOUD_RUN_EXECUTION", "execution-bbb")
+        run_id_execution_b = _race_run_id()
+
+        assert run_id_execution_a != run_id_execution_b
+        assert run_id_execution_a.endswith("_execution-aaa_0")
+        assert run_id_execution_b.endswith("_execution-bbb_0")
+
+    def test_local_runs_without_the_env_var_do_not_collide(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.providers.walden_provider import _race_run_id
+
+        monkeypatch.delenv("CLOUD_RUN_TASK_INDEX", raising=False)
+        monkeypatch.delenv("CLOUD_RUN_EXECUTION", raising=False)
+        assert _race_run_id() != _race_run_id()
