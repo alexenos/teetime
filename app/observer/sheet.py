@@ -295,6 +295,7 @@ def capture_across_window(
     window_epoch_ms: int,
     count: int,
     interval_ms: int,
+    start_offset_ms: int = 0,
 ) -> list[Snapshot]:
     """Photograph the sheet ``count`` times, ``interval_ms`` apart, from the window.
 
@@ -305,6 +306,15 @@ def capture_across_window(
     live, the body is not). A snapshot is only worth storing if the club
     re-rendered it.
 
+    ``start_offset_ms`` shifts every planned tick by the same amount and may be
+    negative - the first capture then lands before the window, as a control for
+    whatever the first post-window one shows. A snapshot's cost is one full
+    click-and-re-render round trip (roughly a second in practice), not the
+    ``interval_ms`` value, so shifting the whole sequence earlier or later is
+    the reliable way to move a tick; shrinking ``interval_ms`` below that
+    natural cost just makes ``wait_until_epoch_ms`` return immediately without
+    changing when the capture actually happens.
+
     Nothing is uploaded here. The bytes are held in memory - nine sheets is
     about 6MB - and written to GCS after the last one, so no network round trip
     sits between two snapshots.
@@ -312,7 +322,7 @@ def capture_across_window(
     snapshots: list[Snapshot] = []
 
     for index in range(count):
-        planned_offset_ms = index * interval_ms
+        planned_offset_ms = start_offset_ms + index * interval_ms
         wait_until_epoch_ms(window_epoch_ms + planned_offset_ms)
 
         sent_epoch_ms = int(time_module.time() * 1000)
@@ -381,10 +391,10 @@ def capture_across_window(
             )
         )
         logger.info(
-            "OBSERVER: snapshot %d - sent +%dms, settled %s, read +%dms, %d bytes%s",
+            "OBSERVER: snapshot %d - sent %+dms, settled %s, read %+dms, %d bytes%s",
             index,
             sent_epoch_ms - window_epoch_ms,
-            ("never" if settled_epoch_ms is None else f"+{settled_epoch_ms - window_epoch_ms}ms"),
+            ("never" if settled_epoch_ms is None else f"{settled_epoch_ms - window_epoch_ms:+d}ms"),
             captured_epoch_ms - window_epoch_ms,
             len(html),
             "" if refresh_ok else " (STALE RISK)",

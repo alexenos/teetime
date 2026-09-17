@@ -633,6 +633,29 @@ variable "observer_snapshot_interval_ms" {
   }
 }
 
+variable "observer_snapshot_start_offset_ms" {
+  description = <<-EOT
+    Milliseconds to shift every planned snapshot tick, relative to the window.
+
+    Negative by default: -500 puts the first snapshot half a second before the
+    window as a control, and moves the first post-window snapshot to +500ms
+    instead of +0ms, so a slot already gone at +0.5s can be compared against
+    the same slot's own -0.5s reading rather than only against another
+    morning's. May be negative or zero, unlike count and interval - but a
+    fractional value (e.g. -500.5) is its own silent-failure mode: Terraform's
+    `number` type accepts it, `tostring()` passes it straight through as the
+    env var, and only then does Settings' `int` field reject it, crashing the
+    observer job at startup instead of at `terraform plan`.
+  EOT
+  type        = number
+  default     = -500
+
+  validation {
+    condition     = floor(var.observer_snapshot_start_offset_ms) == var.observer_snapshot_start_offset_ms
+    error_message = "observer_snapshot_start_offset_ms must be a whole number; a fractional value passes terraform but is rejected by Settings at container startup."
+  }
+}
+
 variable "observer_cpu" {
   description = "CPU for the observer job. Its own container, so it contends with nothing that races."
   type        = string

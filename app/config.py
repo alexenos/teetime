@@ -506,11 +506,21 @@ class Settings(BaseSettings):
     # morning with no booking is still a free control group.
     observer_phone_number: str = ""
 
-    # Nine snapshots at +0s..+8s. The window is decided inside three seconds
-    # and the first grant to anyone has never been seen later than club :06, so
-    # eight seconds covers the contested span with room either side.
+    # Nine snapshots at -0.5s, +0.5s, +1.5s..+7.5s. The window is decided inside
+    # three seconds and the first grant to anyone has never been seen later than
+    # club :06, so this span covers the contested range with room either side.
+    #
+    # The -500ms start offset (rather than 0) puts one control shot just before
+    # the window and moves the first post-window shot half a second earlier than
+    # a plain +0s start would - the two together are what can show a slot already
+    # gone at +0.5s that was still there at -0.5s, which a same-day comparison
+    # against every other weekday can attribute to a specific morning rather than
+    # to the observer's own timing. Applies to every morning, not only Fridays:
+    # the whole point is a same-mechanism baseline to compare a contested morning
+    # against.
     observer_snapshot_count: int = 9
     observer_snapshot_interval_ms: int = 1000
+    observer_snapshot_start_offset_ms: int = -500
 
     @field_validator("observer_snapshot_count", "observer_snapshot_interval_ms")
     @classmethod

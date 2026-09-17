@@ -173,6 +173,11 @@ resource "google_cloud_run_v2_job" "observer" {
           value = tostring(var.observer_snapshot_interval_ms)
         }
 
+        env {
+          name  = "OBSERVER_SNAPSHOT_START_OFFSET_MS"
+          value = tostring(var.observer_snapshot_start_offset_ms)
+        }
+
         dynamic "env" {
           for_each = toset(local.observer_secrets)
           content {
