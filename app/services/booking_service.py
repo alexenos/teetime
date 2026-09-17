@@ -7,8 +7,11 @@ processing booking requests, and executing reservations at the scheduled time.
 
 import asyncio
 import logging
+import re
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -40,6 +43,44 @@ INTERRUPTED_ERROR_MESSAGE = (
     "restarted mid-attempt). The reservation may or may not have gone through - "
     "please check the club website before rebooking."
 )
+
+# The longest failure reason worth sending a member, and the markers that a
+# driver exception rather than the club is talking.
+MEMBER_ERROR_MAX_LEN = 200
+_DOCS_LINK_RE = re.compile(r"\s*;?\s*For documentation on this error.*", re.DOTALL)
+
+# A dropped notification leaves a member waiting on a reply that never comes,
+# so a transient send failure is retried before it is given up on.
+NOTIFY_MAX_ATTEMPTS = 3
+NOTIFY_RETRY_DELAY_S = 2
+
+
+def _member_safe_error(error: str | None) -> str:
+    """Reduce a failure to the one line a member should read.
+
+    Failure text reaches a member's phone verbatim. On 2026-09-17 a Selenium
+    crash arrived as "session not created: DevToolsActivePort file doesn't
+    exist", nineteen frames of hex addresses, and a docs URL that Telegram
+    then expanded into a link-preview card - sent, because these are proxy
+    bookings, to the member the tee time was for rather than to whoever asked
+    for it.
+
+    Only the message is trimmed: the booking row keeps the full text, which is
+    what the next post-mortem reads. Nothing here claims an outcome - a driver
+    that died mid-session may still have sent a Reserve.
+    """
+    if not error:
+        return "Unknown error"
+    message = error.split("Stacktrace:", 1)[0].strip()
+    message = message.splitlines()[0].strip() if message.splitlines() else ""
+    message = _DOCS_LINK_RE.sub("", message)
+    message = message.removeprefix("Message:").strip()
+    if not message:
+        return "Unknown error"
+    if len(message) > MEMBER_ERROR_MAX_LEN:
+        message = message[: MEMBER_ERROR_MAX_LEN - 1].rstrip() + "…"
+    return message
+
 
 # How long an IN_PROGRESS row must sit untouched before startup reconciliation
 # may call it orphaned. The 6:30 race now runs in racer job containers (issue
@@ -181,6 +222,15 @@ class BookingService:
         # holds weak references to tasks, so without this a booking run could be
         # garbage collected mid-attempt.
         self._background_tasks: set[asyncio.Task[None]] = set()
+        # One browser at a time, per process. Cloud Run gives this container
+        # 2Gi against a headless Chrome that peaks near 1Gi on a loaded tee
+        # sheet (see cloud_run_memory), so a second concurrent session is
+        # what the box cannot afford rather than merely what it dislikes:
+        # on 2026-09-17 three ad-hoc bookings arrived 90s apart, the second
+        # and third died with "DevToolsActivePort file doesn't exist" before
+        # Chrome came up, and the first hung until chromedriver stopped
+        # answering. Queueing is slower than failing and is the point.
+        self._browser_slot = asyncio.Semaphore(1)
         # When this instance came up, in the same naive-UTC space the database
         # stamps onto updated_at. Startup reconciliation uses it to tell rows
         # orphaned by a previous process from attempts running right now.
@@ -276,6 +326,30 @@ class BookingService:
         """
         if provider is not self._reservation_provider:
             await provider.close()
+
+    @asynccontextmanager
+    async def _browser_slot_held(self, label: str) -> AsyncIterator[None]:
+        """Hold the process's single browser slot for one provider session.
+
+        Wrap the provider call itself rather than the caller, so a run that
+        goes on to start a second session (``_retry_blocked_untimed``) queues
+        for it again instead of holding the slot across both.
+
+        The wait is logged because a post-mortem otherwise cannot tell a
+        booking that queued from one that was simply slow.
+        """
+        waiting = self._browser_slot.locked()
+        queued_at = time.monotonic()
+        if waiting:
+            logger.info("BROWSER_SLOT: %s is waiting for the in-flight browser session", label)
+        async with self._browser_slot:
+            if waiting:
+                logger.info(
+                    "BROWSER_SLOT: %s waited %.1fs for the browser",
+                    label,
+                    time.monotonic() - queued_at,
+                )
+            yield
 
     async def get_session(self, phone_number: str) -> UserSession:
         """Get or create a session for the given phone number."""
@@ -1276,7 +1350,8 @@ class BookingService:
             if not provider:
                 return False
 
-            success = await provider.cancel_booking(cancellation_id)
+            async with self._browser_slot_held(f"cancellation {cancellation_id}"):
+                success = await provider.cancel_booking(cancellation_id)
 
             if success:
                 booking.status = BookingStatus.CANCELLED
@@ -1629,21 +1704,59 @@ class BookingService:
         for booking in bookings:
             await self._try_notify_unreported_booking(booking, error)
 
+    async def _notify_with_retry(
+        self, send: Callable[[], Awaitable[None]], booking_id: str | None, what: str
+    ) -> None:
+        """Deliver one notification, retrying a transient send failure.
+
+        A booking that reports nothing is indistinguishable to the user from
+        one still running: on 2026-09-17 a Thursday tee time's failure notice
+        hit a Telegram ConnectTimeout, was logged and dropped, and the member
+        was left on "I'll message you with the result" with no result ever
+        arriving. The send is retried rather than the attempt - the booking has
+        already run, and only the message is missing.
+
+        Re-running the notify path is safe: it re-reads the row and rewrites
+        the same terminal status, so a retry after a partial first pass lands
+        on the same values.
+        """
+        for attempt in range(1, NOTIFY_MAX_ATTEMPTS + 1):
+            try:
+                await send()
+                if attempt > 1:
+                    logger.info(
+                        "Reported %s for booking %s on attempt %d", what, booking_id, attempt
+                    )
+                return
+            except Exception:
+                if attempt == NOTIFY_MAX_ATTEMPTS:
+                    logger.exception("Could not report %s for booking %s", what, booking_id)
+                    return
+                logger.warning(
+                    "Reporting %s for booking %s failed (attempt %d/%d); retrying in %ds",
+                    what,
+                    booking_id,
+                    attempt,
+                    NOTIFY_MAX_ATTEMPTS,
+                    NOTIFY_RETRY_DELAY_S * attempt,
+                )
+                await asyncio.sleep(NOTIFY_RETRY_DELAY_S * attempt)
+
     async def _try_notify_booking_result(
         self, booking: TeeTimeBooking, result: BookingResult
     ) -> None:
         """Report one outcome, keeping a send failure from stranding the batch."""
-        try:
-            await self._notify_booking_result(booking, result)
-        except Exception:
-            logger.exception("Could not report the outcome of booking %s", booking.id)
+        await self._notify_with_retry(
+            lambda: self._notify_booking_result(booking, result), booking.id, "the outcome"
+        )
 
     async def _try_notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
         """Same, for a booking the batch never accounted for."""
-        try:
-            await self._notify_unreported_booking(booking, error)
-        except Exception:
-            logger.exception("Could not report unaccounted booking %s", booking.id)
+        await self._notify_with_retry(
+            lambda: self._notify_unreported_booking(booking, error),
+            booking.id,
+            "an unaccounted attempt",
+        )
 
     async def _notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
         """Report a booking the batch left unaccounted for.
@@ -1848,12 +1961,13 @@ class BookingService:
             booking.status = BookingStatus.IN_PROGRESS
             await database_service.update_booking(booking)
 
-            result = await provider.book_tee_time(
-                target_date=booking.request.requested_date,
-                target_time=booking.request.requested_time,
-                num_players=booking.request.num_players,
-                fallback_window_minutes=booking.request.fallback_window_minutes,
-            )
+            async with self._browser_slot_held(f"booking {booking.id}"):
+                result = await provider.book_tee_time(
+                    target_date=booking.request.requested_date,
+                    target_time=booking.request.requested_time,
+                    num_players=booking.request.num_players,
+                    fallback_window_minutes=booking.request.fallback_window_minutes,
+                )
 
             if result.success:
                 booking.status = BookingStatus.SUCCESS
@@ -1916,7 +2030,7 @@ class BookingService:
 
         await sms_service.send_booking_failure(
             booking.phone_number,
-            result.error_message or "Unknown error",
+            _member_safe_error(result.error_message),
             result.alternatives,
             booking_details,
             booking.origin_channel_id,
@@ -2058,11 +2172,12 @@ class BookingService:
             ]
 
             try:
-                batch_result = await provider.book_multiple_tee_times(
-                    target_date=target_date,
-                    requests=batch_requests,
-                    execute_at=execute_at,
-                )
+                async with self._browser_slot_held(f"batch {target_date} x{len(batch_requests)}"):
+                    batch_result = await provider.book_multiple_tee_times(
+                        target_date=target_date,
+                        requests=batch_requests,
+                        execute_at=execute_at,
+                    )
             finally:
                 await self._release_provider(provider)
 

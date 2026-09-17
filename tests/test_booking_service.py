@@ -22,7 +22,12 @@ from app.models.schemas import (
     UserSession,
 )
 from app.providers.base import BookingResult
-from app.services.booking_service import BookingService
+from app.services.booking_service import (
+    MEMBER_ERROR_MAX_LEN,
+    NOTIFY_MAX_ATTEMPTS,
+    BookingService,
+    _member_safe_error,
+)
 from app.services.credential_service import (
     WaldenCredentialRequiredError,
     WaldenCredentials,
@@ -2563,10 +2568,12 @@ class TestImmediateMultiBookingRunsAsOneBatch:
 
     @pytest.mark.asyncio
     async def test_one_undeliverable_message_does_not_strand_the_other_booking(
-        self, booking_service: BookingService
+        self, booking_service: BookingService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A send that raises must not cut the reporting loop short."""
         import pytz
+
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
 
         from app.providers.base import BatchBookingItemResult, BatchBookingResult
 
@@ -2609,7 +2616,11 @@ class TestImmediateMultiBookingRunsAsOneBatch:
                     await booking_service.wait_for_background_bookings()
 
         # The second booking was still attempted even though the first raised.
-        assert mock_sms.send_booking_confirmation.await_count == 2
+        # Counted by distinct booking rather than by call: an undeliverable
+        # message is now retried before it is given up on, so the first
+        # booking accounts for several of these calls on its own.
+        reported = {call.args[1] for call in mock_sms.send_booking_confirmation.await_args_list}
+        assert len(reported) == 2
 
     @pytest.mark.asyncio
     async def test_a_batch_that_raises_still_reports_every_booking(
@@ -3775,3 +3786,176 @@ class TestCredentialIsRequired:
         need.
         """
         assert await booking_service._provider_for("+15551234567") is None
+
+
+class TestMemberSafeError:
+    """Tests for _member_safe_error, which trims what a member is told."""
+
+    def test_strips_selenium_stacktrace_and_docs_link(self) -> None:
+        """The 2026-09-17 crash, exactly as it reached a member's phone."""
+        raw = (
+            "Message: session not created: DevToolsActivePort file doesn't exist; "
+            "For documentation on this error, please visit: "
+            "https://www.selenium.dev/documentation/webdriver/troubleshooting/errors"
+            "#sessionnotcreatedexception\n"
+            "Stacktrace:\n"
+            "#0 0x559add5339f2 <unknown>\n"
+            "#1 0x559adce9f418 <unknown>\n"
+        )
+
+        assert (
+            _member_safe_error(raw) == "session not created: DevToolsActivePort file doesn't exist"
+        )
+
+    def test_keeps_a_plain_single_line_reason(self) -> None:
+        """A readable reason from the club is passed through untouched."""
+        raw = "Restriction: only one round per member per day"
+        assert _member_safe_error(raw) == raw
+
+    def test_keeps_the_read_timeout_gist(self) -> None:
+        """The other 2026-09-17 shape: no stacktrace, already one line."""
+        raw = "HTTPConnectionPool(host='localhost', port=64371): Read timed out. (read timeout=120)"
+        assert _member_safe_error(raw) == raw
+
+    def test_caps_a_runaway_message(self) -> None:
+        result = _member_safe_error("x" * 500)
+        assert len(result) == MEMBER_ERROR_MAX_LEN
+        assert result.endswith("…")
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "Stacktrace:\n#0 0x1 <unknown>"])
+    def test_falls_back_when_nothing_is_left(self, raw: str | None) -> None:
+        """Never send an empty reason - "Unknown error" at least reads as one."""
+        assert _member_safe_error(raw) == "Unknown error"
+
+    @pytest.mark.asyncio
+    async def test_failure_notification_is_trimmed(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """The trim is applied on the path that actually messages a member."""
+        with patch("app.services.booking_service.sms_service") as mock_sms:
+            mock_sms.send_booking_failure = AsyncMock()
+            await booking_service._notify_booking_result(
+                sample_booking,
+                BookingResult(
+                    success=False,
+                    error_message="Message: session not created: DevToolsActivePort file "
+                    "doesn't exist\nStacktrace:\n#0 0x559add5339f2 <unknown>",
+                ),
+            )
+
+        sent = mock_sms.send_booking_failure.call_args[0][1]
+        assert sent == "session not created: DevToolsActivePort file doesn't exist"
+        assert "Stacktrace" not in sent
+
+
+class TestOneBrowserAtATime:
+    """The container fits one headless Chrome; two bookings must queue."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_bookings_never_overlap_in_the_provider(
+        self, booking_service: BookingService, sample_request: TeeTimeRequest
+    ) -> None:
+        """Two ad-hoc bookings launched together run their sessions in series.
+
+        The 2026-09-17 failure in miniature: three requests arrived while one
+        browser was already up, and the ones that could not get a second
+        Chrome died at driver creation.
+        """
+        bookings = {
+            booking_id: TeeTimeBooking(
+                id=booking_id,
+                phone_number="+15551234567",
+                request=sample_request,
+                status=BookingStatus.SCHEDULED,
+            )
+            for booking_id in ("first", "second")
+        }
+
+        in_provider = 0
+        peak = 0
+
+        async def book_tee_time(**_kwargs: object) -> BookingResult:
+            nonlocal in_provider, peak
+            in_provider += 1
+            peak = max(peak, in_provider)
+            try:
+                await asyncio.sleep(0.05)
+                return BookingResult(success=True, booked_time=time(8, 0))
+            finally:
+                in_provider -= 1
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(side_effect=lambda bid: bookings.get(bid))
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(side_effect=book_tee_time)
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock()
+                results = await asyncio.gather(
+                    booking_service.execute_booking("first"),
+                    booking_service.execute_booking("second"),
+                )
+
+        assert results == [True, True]
+        assert peak == 1, f"{peak} concurrent browser sessions - the slot did not hold"
+        assert mock_provider.book_tee_time.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_slot_is_released_when_a_session_raises(
+        self, booking_service: BookingService
+    ) -> None:
+        """A crashed session must not strand the slot for the next booking."""
+        with pytest.raises(RuntimeError):
+            async with booking_service._browser_slot_held("first"):
+                raise RuntimeError("Chrome died")
+
+        async with booking_service._browser_slot_held("second"):
+            pass
+
+        assert not booking_service._browser_slot.locked()
+
+
+class TestNotificationRetry:
+    """A booking that reports nothing reads as one still running."""
+
+    @pytest.mark.asyncio
+    async def test_a_transient_send_failure_is_retried(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """The 9/24 booking's ConnectTimeout, which used to end the matter."""
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+        attempts = 0
+
+        async def flaky() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise TimeoutError("ConnectTimeout")
+
+        await booking_service._notify_with_retry(flaky, sample_booking.id, "the outcome")
+
+        assert attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_a_persistent_failure_is_given_up_on_quietly(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """Still never raises: one lost message must not strand the batch."""
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+        attempts = 0
+
+        async def always_fails() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise TimeoutError("ConnectTimeout")
+
+        await booking_service._notify_with_retry(always_fails, sample_booking.id, "the outcome")
+
+        assert attempts == NOTIFY_MAX_ATTEMPTS
