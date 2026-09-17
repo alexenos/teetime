@@ -391,10 +391,14 @@ def capture_across_window(
             )
         )
         logger.info(
-            "OBSERVER: snapshot %d - sent +%dms, settled %s, read +%dms, %d bytes%s",
+            "OBSERVER: snapshot %d - sent %+dms, settled %s, read %+dms, %d bytes%s",
             index,
             sent_epoch_ms - window_epoch_ms,
-            ("never" if settled_epoch_ms is None else f"+{settled_epoch_ms - window_epoch_ms}ms"),
+            (
+                "never"
+                if settled_epoch_ms is None
+                else f"{settled_epoch_ms - window_epoch_ms:+d}ms"
+            ),
             captured_epoch_ms - window_epoch_ms,
             len(html),
             "" if refresh_ok else " (STALE RISK)",
