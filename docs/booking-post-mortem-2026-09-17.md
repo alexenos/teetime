@@ -166,41 +166,44 @@ The job's own logs say why, and it is not the club:
          Container called exit(1).
 ```
 
-Read `_resolve_target` (`app/observer/run.py:63`) against that. `requester`
-comes from `settings.observer_phone_number or settings.user_phone_number`, and
-`_redacted` printed "any requester", so **both are unset** — consistent with
-the Telegram migration (#203) retiring phone numbers. On a morning with a due
-booking that does not matter, because line 100 reassigns `requester =
-booking.phone_number` and borrows that member's login. On a morning with *no*
-due booking, the fallback picks a date to watch but leaves `requester` empty,
-`require_credentials("")` raises, and the observer declines the morning.
+Read `_resolve_target` (`app/observer/run.py:63`) against that. It picks whose
+login to watch with in three steps, as `config.py:502` describes them:
 
-So the no-booking fallback — added in #189/#191, and the "control group [that]
-runs for free" §7f is built on — cannot actually run, because the only path
-that supplies it a credential is the one it exists to cover. It is not a
-regression from #210.
+1. `observer_phone_number`, if set,
+2. otherwise `user_phone_number`, if set,
+3. otherwise whoever has the earliest booking due that morning — the empty
+   `requester` makes `not requester` true, so the scoped list keeps every due
+   booking and line 100 reassigns `requester = booking.phone_number`.
+
+`_redacted` printed "any requester", so neither phone number is set in the
+observer job's environment and **step 3 is what has been carrying every
+successful run**: the observer borrows the credential of whoever had a booking
+due. On a morning with none due there is no step 3 to reach,
+`require_credentials("")` raises, and the job returns False — which `main()`
+maps to `exit 1`.
 
 **This was reviewed on the day and left as-is.** The maintainer's call: if no
-tee time is scheduled to book at 06:30, the observer does not need to run.
-That makes the `exit(1)` above expected behaviour on a quiet morning rather
-than a fault to fix, and this section a record of what the job does, not a bug
-report.
+tee time is scheduled to book at 06:30, the observer does not need to run, and
+on the mornings that do have one it should behave identically every day. That
+is what the code already does, so the `exit(1)` above is expected behaviour on
+a quiet morning rather than a fault, and this section is a record of what the
+job does, not a bug report.
 
-Worth knowing when reading it that way, because two things in the tree still
-argue the other side and should be squared with the decision before anyone
-trusts them:
+Two things worth keeping straight when reading it:
 
-- `_resolve_target`'s own docstring says the fallback exists so the control
-  group "should not be lost just because nobody asked for a tee time that
-  day". Under this decision that branch is unreachable — it computes a target
-  date it can never open a session for.
-- #210's commit message describes the shifted cadence as applying "every day
-  (not Friday-only): the daily runs are the baseline a contested morning gets
-  compared against". With the observer running only on booking mornings,
-  that baseline is whatever those mornings happen to cover.
-
-Neither is a defect on its own. Both are now documentation of an intent the
-code no longer serves.
+- **The fallback branch is not dead code.** It computes `today +
+  days_in_advance` and would run normally if `OBSERVER_PHONE_NUMBER` (or
+  `USER_PHONE_NUMBER`) were ever set for the observer job, since that supplies
+  a credential independent of the morning's bookings. It is inert today only
+  because both are empty. An earlier draft of this document called the branch
+  unreachable; that was wrong.
+- **There is no Friday-specific behaviour anywhere in this codebase.** Every
+  "Friday" in `walden_http_booker.py`, `walden_provider.py` and `config.py` is
+  a comment explaining why a timing constant is sized as it is; the only code
+  that branches on a weekday is `gemini_service.py` parsing a date out of a
+  text message. The observer and the racer do the same thing every morning.
+  §7f of the `booking-postmortem` skill discusses Fridays because that is when
+  the club is contested — it describes the club's behaviour, not the bot's.
 
 **This also means #210 has never produced a snapshot in production.** It merged
 at 20:22 CT on 09-16, after that morning's run, so its first scheduled firing
@@ -262,11 +265,15 @@ the ad-hoc path needs no 6:30 window.
 - **#211** — serialize browser sessions behind one slot; trim the member-facing
   error; retry a dropped notification. Covers §3 and §4.
 - **Closed, no change:** the observer's behaviour on a quiet morning (§5). A
-  morning with nothing to book does not need an observer, so the `exit(1)`
-  stays. Two leftovers from the previous intent are worth a follow-up if
-  anyone is in there anyway: the unreachable fallback branch in
-  `_resolve_target`, and the docstring and #210 commit message that still
-  describe daily control-group runs.
+  morning with nothing to book does not need an observer, and on the mornings
+  that do have one the job already behaves identically every day, so the
+  `exit(1)` stays.
+- **Open, small:** that `exit(1)` makes Cloud Run record a *failed execution*
+  on every quiet morning, for an outcome that is now the intended one. Nothing
+  alerts on it today; if anything ever does, it will fire on exactly the
+  mornings where nothing was supposed to happen. Returning 0 on the
+  no-requester path would separate "declined, as designed" from "tried and
+  broke".
 - **Consequence to remember:** #210's shifted cadence is exercised only on
   mornings that have a booking. It has still never produced a snapshot; the
   first booking morning after 2026-09-16 will be its first real run, and is
