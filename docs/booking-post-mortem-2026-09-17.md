@@ -178,7 +178,29 @@ due booking, the fallback picks a date to watch but leaves `requester` empty,
 So the no-booking fallback — added in #189/#191, and the "control group [that]
 runs for free" §7f is built on — cannot actually run, because the only path
 that supplies it a credential is the one it exists to cover. It is not a
-regression from #210; #210 is what makes it matter.
+regression from #210.
+
+**This was reviewed on the day and left as-is.** The maintainer's call: if no
+tee time is scheduled to book at 06:30, the observer does not need to run.
+That makes the `exit(1)` above expected behaviour on a quiet morning rather
+than a fault to fix, and this section a record of what the job does, not a bug
+report.
+
+Worth knowing when reading it that way, because two things in the tree still
+argue the other side and should be squared with the decision before anyone
+trusts them:
+
+- `_resolve_target`'s own docstring says the fallback exists so the control
+  group "should not be lost just because nobody asked for a tee time that
+  day". Under this decision that branch is unreachable — it computes a target
+  date it can never open a session for.
+- #210's commit message describes the shifted cadence as applying "every day
+  (not Friday-only): the daily runs are the baseline a contested morning gets
+  compared against". With the observer running only on booking mornings,
+  that baseline is whatever those mornings happen to cover.
+
+Neither is a defect on its own. Both are now documentation of an intent the
+code no longer serves.
 
 **This also means #210 has never produced a snapshot in production.** It merged
 at 20:22 CT on 09-16, after that morning's run, so its first scheduled firing
@@ -218,7 +240,8 @@ would have lost an already-typed booking.
 - Booking 3's failure was never reported to anyone; the notification raised
   `ConnectTimeout` and was swallowed.
 - The observer captured nothing for 2026-09-24, because it has no credential to
-  borrow on a morning with no due booking.
+  borrow on a morning with no due booking. Reviewed and kept: no booking, no
+  observer (§5).
 
 **Hypothesis**
 
@@ -238,10 +261,15 @@ the ad-hoc path needs no 6:30 window.
 
 - **#211** — serialize browser sessions behind one slot; trim the member-facing
   error; retry a dropped notification. Covers §3 and §4.
-- **Open, not yet filed:** the observer's credential gap (§5). The fix is to
-  give the no-booking path a login to borrow — an explicit observer credential,
-  or the most recent requester's — rather than letting it pick a date it cannot
-  open. Until then the control-group mornings #210 was built for produce
-  nothing, silently, and the only signal is an `exit(1)` nobody reads.
+- **Closed, no change:** the observer's behaviour on a quiet morning (§5). A
+  morning with nothing to book does not need an observer, so the `exit(1)`
+  stays. Two leftovers from the previous intent are worth a follow-up if
+  anyone is in there anyway: the unreachable fallback branch in
+  `_resolve_target`, and the docstring and #210 commit message that still
+  describe daily control-group runs.
+- **Consequence to remember:** #210's shifted cadence is exercised only on
+  mornings that have a booking. It has still never produced a snapshot; the
+  first booking morning after 2026-09-16 will be its first real run, and is
+  the one to check it on.
 - **Open:** `roles/monitoring.viewer` on the post-mortem service account, which
   would have settled §3 in one query.
