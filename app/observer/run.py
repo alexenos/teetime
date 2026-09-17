@@ -44,6 +44,18 @@ logger = logging.getLogger(__name__)
 RACER_LOGIN_LEAD_S = 120
 
 
+class NothingToWatchError(Exception):
+    """This morning asked the observer for nothing, so there is nothing to do.
+
+    Raised only when no booking is due *and* no watcher is configured, which
+    together mean the job has neither a sheet worth photographing nor a login
+    to photograph it with. Deliberately distinct from
+    ``WaldenCredentialRequiredError``: a requester who is racing this morning
+    but has no login on file is a fault worth a non-zero exit, and a quiet
+    morning is not.
+    """
+
+
 def _window_instant(now_ct: datetime) -> datetime:
     """This morning's stated window open, 06:30:00.000 CT.
 
@@ -63,16 +75,19 @@ def _window_instant(now_ct: datetime) -> datetime:
 async def _resolve_target(window_ct: datetime) -> tuple[date, str, str] | None:
     """Which date to watch, and the login to watch it with.
 
-    Returns ``(target_date, member_number, password)``, or None when the
-    requester has no login on file.
+    Returns ``(target_date, member_number, password)``. Returns None when
+    there is a morning to watch but no login on file for whoever would be
+    watched, and raises ``NothingToWatchError`` when there is no morning to
+    watch at all - the two are different outcomes and the job's exit code
+    tells them apart.
 
     The date comes from the booking the racer will run this morning, so the
-    observer always parks on the sheet that job is racing for. When the
-    configured member has nothing due, it falls back to the date that opens
-    today anyway (``today + days_in_advance``): the control group is the cheap
-    half of this job's value - a non-Friday morning shows what an uncontested
-    gate looks like - and it should not be lost just because nobody asked for a
-    tee time that day.
+    observer always parks on the sheet that job is racing for. A configured
+    ``observer_phone_number`` (or ``user_phone_number``) with nothing due
+    still watches the date that opens today anyway
+    (``today + days_in_advance``), since that login is available whether or
+    not anyone booked. With no configured watcher there is no such login, and
+    a morning with nothing due is simply a morning off.
     """
     requester = settings.observer_phone_number or settings.user_phone_number
 
@@ -99,6 +114,14 @@ async def _resolve_target(window_ct: datetime) -> tuple[date, str, str] | None:
         )
         requester = booking.phone_number
     else:
+        # With no configured watcher there is also no login to borrow: the
+        # requester is normally taken from the morning's own due booking, and
+        # there isn't one. Nothing to watch and no way to watch it.
+        if not requester:
+            raise NothingToWatchError(
+                f"no booking due at {window_ct.strftime('%H:%M')} CT and no watcher configured"
+            )
+
         target_date = window_ct.date() + timedelta(days=settings.days_in_advance)
         logger.info(
             "OBSERVER: no booking due for %s this morning - watching %s anyway "
@@ -322,7 +345,13 @@ def _report_readiness(ready_ct: datetime, window_ct: datetime) -> None:
 
 
 async def observe() -> bool:
-    """One morning's observation. Returns whether it produced stored evidence."""
+    """One morning's observation. Returns whether the run is to be called a success.
+
+    True for a morning that stored evidence, and equally for one that was
+    never asked to - the job switched off, or nothing due to book. False is
+    reserved for a morning that had work to do and did not do it, because that
+    is what the exit code tells Cloud Run.
+    """
     if not settings.observer_enabled:
         logger.info("OBSERVER: observer_enabled is false - nothing to do")
         return True
@@ -339,7 +368,14 @@ async def observe() -> bool:
         (window_ct - now_ct).total_seconds(),
     )
 
-    resolved = await _resolve_target(window_ct)
+    try:
+        resolved = await _resolve_target(window_ct)
+    except NothingToWatchError as reason:
+        # A clean no-op, reported as one. Falling through to the job's failure
+        # exit would mark a Cloud Run execution failed on every morning nobody
+        # booked, which is the majority of them.
+        logger.info("OBSERVER: nothing to watch this morning (%s) - exiting cleanly", reason)
+        return True
     if resolved is None:
         return False
     target_date, member_number, password = resolved
