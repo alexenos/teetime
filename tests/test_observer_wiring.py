@@ -115,8 +115,39 @@ class TestResolveTarget:
         assert resolved is not None
         assert resolved[0] == WINDOW.date() + timedelta(days=7)
 
-    async def test_no_credentials_means_no_run(self) -> None:
-        with _due([]), _creds(None):
+    async def test_nothing_due_and_no_watcher_is_nothing_to_watch(self) -> None:
+        """The quiet morning: not a credential failure, just no work.
+
+        Previously this returned None and the job exited 1, marking a failed
+        Cloud Run execution on every morning nobody had booked.
+        """
+        with (
+            _due([]),
+            _creds(None),
+            patch.object(observer_run.settings, "observer_phone_number", ""),
+            patch.object(observer_run.settings, "user_phone_number", ""),
+        ):
+            with pytest.raises(observer_run.NothingToWatchError):
+                await observer_run._resolve_target(WINDOW)
+
+    async def test_a_configured_watcher_without_a_login_is_still_a_failure(self) -> None:
+        """Someone was meant to be watched, so this one is a fault, not a no-op."""
+        with (
+            _due([]),
+            _creds(None),
+            patch.object(observer_run.settings, "observer_phone_number", "+15550001"),
+        ):
+            assert await observer_run._resolve_target(WINDOW) is None
+
+    async def test_a_due_booking_without_a_login_is_still_a_failure(self) -> None:
+        """A requester racing this morning with no login on file is news."""
+        due = [_booking("b1", "+15550002", date(2026, 9, 18), dtime(8, 38))]
+        with (
+            _due(due),
+            _creds(None),
+            patch.object(observer_run.settings, "observer_phone_number", ""),
+            patch.object(observer_run.settings, "user_phone_number", ""),
+        ):
             assert await observer_run._resolve_target(WINDOW) is None
 
     async def test_uses_the_credentials_of_the_booking_it_watches(self) -> None:
@@ -161,6 +192,39 @@ class TestObserveWithoutCredentials:
 
         assert produced is False, "a morning with no login produced no evidence"
         create_driver.assert_not_called()
+
+    async def test_a_quiet_morning_exits_cleanly_without_a_browser(self) -> None:
+        """Nothing due and nobody configured: a no-op, reported as success.
+
+        The distinction the job's exit code carries: this morning is not a
+        failed execution, unlike the test above, where someone was configured
+        to be watched and could not be.
+        """
+        create_driver = MagicMock()
+        with (
+            _due([]),
+            _creds(None),
+            patch.object(observer_run.settings, "observer_enabled", True),
+            patch.object(observer_run.settings, "observer_phone_number", ""),
+            patch.object(observer_run.settings, "user_phone_number", ""),
+            patch.object(observer_run.sheet, "create_driver", new=create_driver),
+        ):
+            produced = await observer_run.observe()
+
+        assert produced is True, "a quiet morning is a clean no-op, not a failure"
+        create_driver.assert_not_called()
+
+    def test_main_exits_zero_on_a_quiet_morning(self) -> None:
+        """End to end: what Cloud Run actually records for the execution."""
+        with (
+            _due([]),
+            _creds(None),
+            patch.object(observer_run.settings, "observer_enabled", True),
+            patch.object(observer_run.settings, "observer_phone_number", ""),
+            patch.object(observer_run.settings, "user_phone_number", ""),
+            patch.object(observer_run.sheet, "create_driver", new=MagicMock()),
+        ):
+            assert observer_run.main() == 0
 
 
 class TestStore:
