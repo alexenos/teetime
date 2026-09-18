@@ -3926,22 +3926,62 @@ class TestNotificationRetry:
     """A booking that reports nothing reads as one still running."""
 
     @pytest.mark.asyncio
-    async def test_a_transient_send_failure_is_retried(
+    async def test_a_raising_send_is_retried(
         self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
     ) -> None:
-        """The 9/24 booking's ConnectTimeout, which used to end the matter."""
         monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
         attempts = 0
 
-        async def flaky() -> None:
+        async def flaky() -> str | None:
             nonlocal attempts
             attempts += 1
             if attempts == 1:
                 raise TimeoutError("ConnectTimeout")
+            return "sent-2"
 
         await booking_service._notify_with_retry(flaky, sample_booking.id, "the outcome")
 
         assert attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_an_undelivered_send_is_retried_without_raising(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """The actual 2026-09-17 shape, and the one the first fix missed.
+
+        Providers catch their own transport errors and report them by
+        returning SMSResult(success=False), which sms_service narrows to
+        None - so the ConnectTimeout that dropped the 9/24 notice never
+        raised. Retrying on exceptions alone left it undetected.
+        """
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+        attempts = 0
+
+        async def undelivered_once() -> str | None:
+            nonlocal attempts
+            attempts += 1
+            return None if attempts == 1 else "sent-2"
+
+        await booking_service._notify_with_retry(undelivered_once, sample_booking.id, "the outcome")
+
+        assert attempts == 2, "a send that returned no message id was treated as delivered"
+
+    @pytest.mark.asyncio
+    async def test_a_delivered_send_is_never_repeated(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """A second message to a member is worse than a late one."""
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+        attempts = 0
+
+        async def delivers() -> str | None:
+            nonlocal attempts
+            attempts += 1
+            return "sent-1"
+
+        await booking_service._notify_with_retry(delivers, sample_booking.id, "the outcome")
+
+        assert attempts == 1
 
     @pytest.mark.asyncio
     async def test_a_persistent_failure_is_given_up_on_quietly(
@@ -3951,7 +3991,7 @@ class TestNotificationRetry:
         monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
         attempts = 0
 
-        async def always_fails() -> None:
+        async def always_fails() -> str | None:
             nonlocal attempts
             attempts += 1
             raise TimeoutError("ConnectTimeout")
@@ -3959,3 +3999,126 @@ class TestNotificationRetry:
         await booking_service._notify_with_retry(always_fails, sample_booking.id, "the outcome")
 
         assert attempts == NOTIFY_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_the_delivery_result_reaches_the_retry_decision(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """End to end through _notify_booking_result, not just the wrapper.
+
+        sms_service returns the message id or None; that value has to survive
+        _notify_booking_result for the retry above to see it at all.
+        """
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+        with patch("app.services.booking_service.sms_service") as mock_sms:
+            mock_sms.send_booking_failure = AsyncMock(side_effect=[None, "sent-2"])
+            await booking_service._try_notify_booking_result(
+                sample_booking, BookingResult(success=False, error_message="club said no")
+            )
+
+        assert mock_sms.send_booking_failure.await_count == 2
+
+
+class TestStoredErrorsStaySanitized:
+    """The trim has to hold everywhere a member can read the error back."""
+
+    @pytest.mark.asyncio
+    async def test_status_reply_trims_a_stored_stacktrace(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """The row keeps the whole exception; the status reply must not show it.
+
+        Only the immediate failure notice was trimmed, so asking the bot for
+        status afterwards still handed back the whole Selenium dump.
+        """
+        failed = TeeTimeBooking(
+            id="failed-1",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=CTDateTime.now().date() + timedelta(days=3),
+                requested_time=time(8, 0),
+                num_players=4,
+                fallback_window_minutes=30,
+            ),
+            status=BookingStatus.FAILED,
+        )
+        failed.error_message = (
+            "Message: session not created: DevToolsActivePort file doesn't exist; "
+            "For documentation on this error, please visit: https://www.selenium.dev/x\n"
+            "Stacktrace:\n#0 0x559add5339f2 <unknown>\n#1 0x559adce9f418 <unknown>"
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[failed])
+            reply = await booking_service._handle_status_intent(sample_session)
+
+        assert "Stacktrace" not in reply
+        assert "0x559add5339f2" not in reply
+        assert "selenium.dev" not in reply
+        assert "session not created: DevToolsActivePort file doesn't exist" in reply
+
+
+class TestSingleBookingNotificationsAreRetried:
+    """execute_booking reports through the same retrying wrapper as a batch."""
+
+    @pytest.mark.asyncio
+    async def test_an_undelivered_confirmation_is_retried_and_keeps_success(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """A notification that does not land must not undo a booked tee time."""
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(success=True, booked_time=time(8, 0))
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock(side_effect=[None, "sent-2"])
+                result = await booking_service.execute_booking(sample_booking.id)
+
+        assert result is True
+        assert mock_sms.send_booking_confirmation.await_count == 2
+        assert (
+            sample_booking.status == BookingStatus.SUCCESS
+        ), "a failed notification must not overwrite a persisted booking result"
+
+    @pytest.mark.asyncio
+    async def test_a_raising_confirmation_does_not_flip_the_booking_to_failed(
+        self, booking_service: BookingService, sample_booking: TeeTimeBooking, monkeypatch
+    ) -> None:
+        """Previously this landed in execute_booking's except and rewrote the row."""
+        monkeypatch.setattr("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=sample_booking)
+
+            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
+                return booking
+
+            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+
+            mock_provider = MagicMock()
+            mock_provider.book_tee_time = AsyncMock(
+                return_value=BookingResult(success=True, booked_time=time(8, 0))
+            )
+            booking_service.set_reservation_provider(mock_provider)
+
+            with patch("app.services.booking_service.sms_service") as mock_sms:
+                mock_sms.send_booking_confirmation = AsyncMock(
+                    side_effect=RuntimeError("channel is down")
+                )
+                mock_sms.send_booking_failure = AsyncMock(return_value="sent")
+                result = await booking_service.execute_booking(sample_booking.id)
+
+        assert result is True
+        assert sample_booking.status == BookingStatus.SUCCESS
