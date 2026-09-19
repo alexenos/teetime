@@ -81,21 +81,41 @@ Review finished.
 ```
 
 That means the request took. It does **not** mean findings exist yet; those
-arrive later as inline review comments (§4).
+arrive later as inline review comments ("## 4. Read the review properly").
 
 **2. Classify the reply.** Three outcomes, and they need different waits:
 
-- **Ack, as above** → triggered. Go to §3 and poll for findings.
-- **A reply naming a wait** - anything about a rate limit, a quota, or trying
-  again later. **The bot's own stated time wins over every estimate here.**
-  Parse the duration out of its text and schedule the retry for that time plus
-  a two-minute buffer.
+- **Ack, as above** → triggered. Go to "## 3. Wait" below and poll for
+  findings.
+- **A reply naming a wait** → the common case when it refuses, and the one
+  that needs no guessing. See step 3.
 - **No reply at all within ~3 minutes** → assume the trigger did not register.
   Re-post once. If the second attempt is also silent, treat it as rate-limited
-  and fall through to the estimate below.
+  and use the fallback estimate in step 4.
 
-**3. Estimating when the window reopens, when nothing states it.** Anchor on a
-timestamp that actually exists rather than on when you happened to ask:
+**3. When it is rate limited, it tells you how long. Use its number.** The bot
+states the remaining wait in the comment itself, so read the answer rather than
+estimating around it. Take the most recent `coderabbitai[bot]` issue comment
+after your trigger, pull the duration out of its text - it is written for
+people, so expect a form like minutes and seconds rather than a machine field -
+and convert it against that comment's own `created_at`, not against the clock
+when you got round to reading it:
+
+```
+next_eligible = <created_at of the rate-limit comment> + <the wait it names> + 2 minutes
+```
+
+Anchoring on `created_at` matters because the comment may have been sitting
+there for a while before this session looked; anchoring on "now" would wait out
+the same window twice. The two minutes is boundary margin, for the same reason
+step 4 uses 61 rather than 60.
+
+Capture the wording the first time you see one and paste it here, so the next
+session pattern-matches instead of re-deriving it.
+
+**4. Fallback, only when nothing states a wait.** Silence, or a refusal with no
+duration in it. Anchor on a timestamp that exists rather than on when you
+happened to ask:
 
 ```
 next_eligible = <created_at of the last successful review ack> + 61 minutes
@@ -111,21 +131,22 @@ here and the bot, a window measured from a slightly later instant than the one
 you anchored on, a retry that fires a few seconds early. Each near-miss costs a
 whole cycle to discover, so buy the margin.
 
-The hour itself is a **deliberately conservative default, not an observed
-limit.** No rate-limit event has ever been recorded on this repo, so there is
-no measured window to copy. When you do hit one, write down the bot's exact
-wording and the wait it named, here, and replace this paragraph with the real
-number.
+The hour is a **guess, not a measured limit** - a stand-in for a number the bot
+will give you directly if you let it. Claude checked #204, #211, #212 and #217
+on 2026-09-19 and found no rate-limit comment in any of them, so there is no
+captured example in this repo yet; that is four PRs out of roughly two hundred,
+not evidence the limit is rare. Step 3 is the real path. Replace this hour with
+an observed figure once one is written down.
 
-**4. Back off, and stop.** Retry at `next_eligible`. If that attempt is also
+**5. Back off, and stop.** Retry at `next_eligible`. If that attempt is also
 refused, double the wait each time - 61 → 122 → 244 minutes - and **stop after
 three refusals.** Tell the user what the bot said and that the review is not
 coming on its own. Never spam the PR: each trigger is a public comment on the
 thread, and a column of them is noise a reviewer has to scroll past.
 
-**5. Schedule the retry; do not wait for it.** The re-prompt is a scheduled
+**6. Schedule the retry; do not wait for it.** The re-prompt is a scheduled
 wake-up, not a sleep. Use the `send_later` tool
-(`mcp__Claude_Code_Remote__send_later`) with `delay_minutes` set from step 3,
+(`mcp__Claude_Code_Remote__send_later`) with `delay_minutes` set from step 3 or 4,
 and a message that carries the PR number, the head sha you want reviewed, which
 attempt this is, and what the bot last said. Then end the turn. A foreground
 `sleep` burns the session for an hour and dies with the container; a scheduled
