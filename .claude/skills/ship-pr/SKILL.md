@@ -126,7 +126,7 @@ and convert it against that comment's own `created_at`, not against the clock
 when you got round to reading it:
 
 ```
-next_eligible = <created_at of the rate-limit comment> + <the wait it names> + 2 minutes
+next_eligible = <created_at of the command reply> + <the wait it names> + 2 minutes
 ```
 
 Anchoring on `created_at` matters because the comment may have been sitting
@@ -134,8 +134,36 @@ there for a while before this session looked; anchoring on "now" would wait out
 the same window twice. The two minutes is boundary margin, for the same reason
 step 4 uses 61 rather than 60.
 
-Capture the wording the first time you see one and paste it here, so the next
-session pattern-matches instead of re-deriving it.
+**Observed wording, #217, 2026-09-19.** The refusal arrives in two places at
+once. The command reply says:
+
+```
+⚠️ Action not completed
+Review rate limited.
+```
+
+and the summary comment is edited to carry the number:
+
+```
+⚠️ Review limit reached
+Next included review available in 48 minutes.
+
+Limit details: You've used the included review currently available.
+You've used all free OSS reviews for now. Wait for the free limit to reset to
+keep reviewing this public repository.
+```
+
+**Anchor on the command reply, not the summary comment.** The wait appears in
+both, but the summary comment is a single long-lived comment that CodeRabbit
+edits in place all day - on #217 it was created at 04:53Z and carried the
+rate-limit text after an edit at 23:44:55Z, nearly nineteen hours later. Using
+its `created_at` would compute a retry time most of a day in the past. The
+command reply is created fresh for each trigger, so its `created_at` is the
+right anchor; if you can only read the summary comment, use its `updated_at`.
+
+Note also that the refusal does not mean the trigger was lost - the walkthrough
+still lists the commits it would have covered. Nothing was reviewed, so the
+findings for that commit are still owed.
 
 **4. Fallback, only when nothing states a wait.** Silence, or a refusal with no
 duration in it. Anchor on a timestamp that exists rather than on when you
@@ -344,9 +372,10 @@ Ruff over `.`, not `app tests` — that is what both CI jobs run, and scoping
 narrower locally lets a lint error in a file outside those two directories pass
 here and fail there.
 
-This gate is deliberately **stricter than CI in one respect**: CI marks mypy
-`continue-on-error: true` (pre-existing type errors), so a type regression will
-not fail the build. Keep it fatal locally so new ones do not accumulate.
+This gate matches CI. As of #217, `mypy app` is **blocking** in CI - the
+`continue-on-error: true` flag that had been left behind after #10 fixed the
+pre-existing errors is gone, so a type regression fails the build rather than
+landing green. Run it locally anyway: CI is slower than you are.
 
 Always `poetry run` — the local venv lives outside the repo, under Poetry's
 cache. (CI is configured `virtualenvs-in-project`, so there it is `.venv`; both
