@@ -51,8 +51,15 @@ def _browser_required() -> bool:
     return os.environ.get("CI", "").strip().lower() in _TRUTHY
 
 
-def _make_headless_driver():  # type: ignore[no-untyped-def]
-    from selenium import webdriver
+def _chrome_options():  # type: ignore[no-untyped-def]
+    """Headless Chrome options, pointed at ``CHROME_BINARY`` when one is named.
+
+    Without it, chromedriver resolves the browser itself and lands on
+    ``/usr/bin/google-chrome`` - the runner image's Chrome, whatever version
+    that happens to be, regardless of what the workflow installed or what is
+    first on ``PATH``. That is how CI got a driver and a browser a major
+    version apart. Naming the binary is what ties the two together.
+    """
     from selenium.webdriver.chrome.options import Options
 
     options = Options()
@@ -60,7 +67,31 @@ def _make_headless_driver():  # type: ignore[no-untyped-def]
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,900")
-    return webdriver.Chrome(options=options)
+    binary = os.environ.get("CHROME_BINARY", "").strip()
+    if binary:
+        options.binary_location = binary
+    return options
+
+
+def _chrome_service():  # type: ignore[no-untyped-def]
+    """The driver to talk to, pinned to ``CHROMEDRIVER_BINARY`` when named.
+
+    A chromedriver already on ``PATH`` is used in preference to fetching a
+    matching one, so naming the browser alone is not enough: the runner image
+    ships its own driver, and pairing it with a Chrome the workflow installed
+    separately is the same major-version mismatch from the other side. Both
+    halves come from the same install step, or neither does.
+    """
+    from selenium.webdriver.chrome.service import Service
+
+    driver = os.environ.get("CHROMEDRIVER_BINARY", "").strip()
+    return Service(executable_path=driver) if driver else Service()
+
+
+def _make_headless_driver():  # type: ignore[no-untyped-def]
+    from selenium import webdriver
+
+    return webdriver.Chrome(options=_chrome_options(), service=_chrome_service())
 
 
 @pytest.fixture(scope="module")
