@@ -17,12 +17,15 @@ artifacts landed under `..._teetime-racer-8nsnr_1` / `..._3`, and the observer's
 first snapshot is `snapshot_+-500ms.html`.
 
 **Status: diagnosed, both won.** Both bookings were granted on Reserve #1 and
-confirmed by `RESERVATION_CHECK`. Three things worth recording beyond the win:
+confirmed by `RESERVATION_CHECK`. Four things worth recording beyond the win:
 
-1. The winning Reserve on 08:38 AM came back in **2888ms**, 112ms inside the
-   3.0s `_RESERVE_TIMEOUT_S`. That is the **second** morning on record near
-   that budget (2026-08-16, 2935ms), which is the trigger §7b of the
-   `booking-postmortem` skill set for raising it.
+1. The winning Reserve on 08:38 AM came back in **2888ms** — the slowest
+   winning round trip on record at the time, alongside 08-16's 2935ms. An
+   earlier draft called this a 112ms escape from `_RESERVE_TIMEOUT_S = 3.0s`;
+   that was **wrong**, and §4 retracts it. Burst fires get
+   `_RESERVE_OPENING_TIMEOUT_S = 10.0s`, so the real headroom was ~7.1s. The
+   useful reading is the opposite of an alarm: the slow answer is the *winning*
+   one, because a grant writes a hold while a refusal only reads.
 2. **This is the first Friday on record where the requested slot itself was
    won** — but not because anything got faster. The same ask at the same offset
    (+1014ms) lost the four previous Fridays; the post-race sheets identify the
@@ -260,11 +263,34 @@ like "an unnamed party took our slot at the window". It was us, three snapshots
 later. The flip interval is an upper bound on when a slot stopped being
 *available* and says nothing about *who* took it or *when they took it*.
 
-## 4. The near-miss, and the fix it triggers
+## 4. The slowest winning round trip on record — and *not* a near-miss
 
-Task 3's winning Reserve came back in **2888ms** against a 3.0s
-`_RESERVE_TIMEOUT_S` — 112ms of margin. Round trips on record, extending §7b's
-table:
+**Retracted: the "112ms escape" this section originally claimed did not happen.**
+The first draft read task 3's 2888ms round trip against `_RESERVE_TIMEOUT_S =
+3.0s` and called it 112ms of margin. That is the wrong constant. Both winning
+Reserves were burst member #0, and burst fires get
+`_RESERVE_OPENING_TIMEOUT_S = 10.0s`:
+
+```
+walden_http_booker.py:221   _RESERVE_TIMEOUT_S = 3.0            # serial walk
+walden_http_booker.py:260   _RESERVE_OPENING_TIMEOUT_S = 10.0   # opening burst
+walden_http_booker.py:1989  send_detached(..., timeout_s=_RESERVE_OPENING_TIMEOUT_S)
+```
+
+and the constant's own comment says so outright: *"This budget is for the
+serial walk… The opening burst's is separate and much larger."* So 2888ms had
+~7.1s of headroom, not 112ms. Nothing was close to timing out, and **no change
+to `_RESERVE_TIMEOUT_S` is warranted by this morning.** Credit to the 2026-09-19
+post-mortem (#218), which caught this independently while this correction was in
+flight.
+
+The skill's §7b watch line — *"a second morning near the 3.0s
+`_RESERVE_TIMEOUT_S` is the trigger to raise it"* — predates burst mode and
+silently assumes the serial constant. It needs amending, or it will keep
+producing this false alarm; see §7.
+
+The round trips are still worth the table, as the slowest *winning* answers on
+record. Extending §7b's:
 
 | morning | kind | roundTripMs |
 |---|---|---|
@@ -279,23 +305,22 @@ table:
 | 09-15 | race | 918 / 1230 |
 | **09-18** | **race** | **2888** (+ 488–1379 on the other 20 asks) |
 
-§7b set the condition explicitly: *"a second morning near the 3.0s
-`_RESERVE_TIMEOUT_S` is the trigger to raise it."* This is that second morning,
-and unlike 08-16 it is not a lone outlier in a sample of eight — it is the same
-shape (a slow **winning** ask, while every other ask that morning returned in
-under 1.4s), which points at server-side latency on the ask that actually
-performs the hold rather than at the network.
+What survives, and is the genuinely useful reading: **the slow answer is the
+winning one.** 2888ms on the grant while every other ask that morning returned
+in 488–1379ms; 2935ms on 08-16's grant. Refusals are a read-only "already
+taken" check and come back fast; a grant writes the hold and pays for it. So
+round-trip duration correlates with *success*, not with risk — which inverts
+the instinct to treat a slow Reserve as a stalled one worth abandoning.
 
-Had it crossed 3.0s, the run would have abandoned a Reserve the club had
-already granted, and per the ladder's own rule a timeout closes the fallback
-list for the rest of the run — i.e. it would have produced the
-`success=True` / no-reservation class of §6, the one that reads like a win.
-With two bookings racing concurrently the exposure is doubled.
+That is an argument for leaving the opening budget generous, which it already
+is at 10s. The number to watch is not this one against 3.0s; it is whether
+concurrent-slot mornings push winning round trips toward the 10s opening
+budget. 2026-09-19 saw 3636ms and 3394ms with two concurrent races, so the
+trend is real but the headroom is still large.
 
-**Recommended:** raise `_RESERVE_TIMEOUT_S` from 3.0s to 4.5s. The cost of a
-longer timeout is bounded (the burst's later members cover a slow ask, and
-`_RESERVE_DEADLINE_MS` is 30s), while the cost of tripping it is a discarded
-grant.
+Where 3.0s *does* apply is the serial fallback walk (`walden_http_booker.py:1692`).
+No fallback ask on record has come close to it: the slowest is 1701ms
+(2026-09-11, attempt 11).
 
 ## 5. The 09-11 rival, identified
 
@@ -424,8 +449,15 @@ disagree about who holds what, the lost copy is the evidence.
 
 ## 7. Fixes needed
 
-- **Raise `_RESERVE_TIMEOUT_S` 3.0s → 4.5s.** Second morning inside ~115ms of
-  the budget, on the winning ask both times. §4.
+- ~~**Raise `_RESERVE_TIMEOUT_S` 3.0s → 4.5s.**~~ **Withdrawn** — the premise
+  was a misread constant. Burst fires use `_RESERVE_OPENING_TIMEOUT_S = 10.0s`,
+  so nothing was near a timeout. §4.
+- **Amend `booking-postmortem` §7b.** Its watch line ("a second morning near
+  the 3.0s `_RESERVE_TIMEOUT_S` is the trigger to raise it") predates burst
+  mode and assumes the serial constant applies to race-morning round trips. It
+  does not, and following it produced a false alarm in this very document. The
+  line should name which timeout applies to which path, and point the watch at
+  the 10s opening budget for burst fires.
 - **Scope the post-race sheet's GCS directory by `CLOUD_RUN_TASK_INDEX`,** the
   way #205 did for the race ledger. §6.
 - **Report a "first named holder" offset per slot in the observations flip
@@ -444,7 +476,7 @@ disagree about who holds what, the lost copy is the evidence.
   post-mortem reads, and it is the highest-value fix on this list: 2026-09-15's
   record carries fake 113ms and 219ms "grants" that would corrupt any latency
   analysis drawn from it.
-- **Shorten the opening burst.** Opened as #215 (twelve members → six). The
+- **Shorten the opening burst.** Merged as #215 (twelve members → six). The
   300s hold means asks after the first cannot win the target, so the tail only
   delays the serial fallback walk. §5.
 
