@@ -24,12 +24,20 @@ confirmed by `RESERVATION_CHECK`. Three things worth recording beyond the win:
    that budget (2026-08-16, 2935ms), which is the trigger §7b of the
    `booking-postmortem` skill set for raising it.
 2. **This is the first Friday on record where the requested slot itself was
-   won.** 08:38 AM is the same slot the bot was refused twelve times for on
-   2026-09-11, and the post-race sheets identify the party who held it that day
-   as the same one now sitting on 08:23 AM.
+   won** — but not because anything got faster. The same ask at the same offset
+   (+1014ms) lost the four previous Fridays; the post-race sheets identify the
+   party who held 08:38 AM on 2026-09-11 as the same one now sitting on
+   08:23 AM. Against those four, the gate bound established here favours
+   Model F: one gate at club `:01`, and on the losing Fridays the slot was
+   already claimed.
 3. The observer's `disabled` state **conflates two different realities**, and
    this morning's ledger calibrates it for the first time. This weakens the
    Model L / Model F discrimination §7f was built to provide.
+4. **The ledger records phantom grants.** Three rows this morning are logged as
+   accepted that are refusals — proven by byte-comparing the saved responses,
+   which differ only in the `<eval>`. Same bug on 2026-09-15. The primary
+   artifact every post-mortem reads is not trustworthy on verdicts after the
+   first grant. §1.
 
 ---
 
@@ -66,7 +74,7 @@ one-way 13ms, 108 probes, 5 transitions, tick pinned to ±23ms; Reserve fires
 | 9 | +2464 | refused | 1126 | :03 | [2464, 3590] |
 | 10 | +2814 | refused | 771 | :03 | [2814, 3585] |
 | 11 | +3214 | refused | 836 | :03 | [3214, 4050] |
-| 12 | +3614 | accepted (surplus hold) | 726 | :04 | [3614, 4340] |
+| 12 | +3614 | refused* | 726 | :04 | [3614, 4340] |
 
 `RACE_LEDGER: club granted 08:38 AM at +1014ms past the window; last refusal
 was +3214ms`. Burst done in 3877ms — 12 sent, 0 skipped, 10 refused, 0 errored,
@@ -91,8 +99,8 @@ Reserve fires 13ms early.
 | 6 | +1717 | refused | 1044 | :02 | [1717, 2761] |
 | 7 | +1917 | refused | 814 | :02 | [1917, 2731] |
 | 8 | +2167 | refused | 654 | :02 | [2167, 2821] |
-| 9 | +2467 | accepted (surplus hold) | 1030 | :03 | [2467, 3497] |
-| 10 | +2817 | accepted (surplus hold) | 678 | :03 | [2817, 3495] |
+| 9 | +2467 | refused* | 1030 | :03 | [2467, 3497] |
+| 10 | +2817 | refused* | 678 | :03 | [2817, 3495] |
 
 `RACE_LEDGER: club granted 09:23 AM at +1017ms past the window; last refusal
 was +2167ms`. Burst done in 2732ms — 10 sent, 2 skipped after the grant, 7
@@ -105,6 +113,40 @@ Both winning responses carried the accept `<eval>`
 (`executeHoldTimeTimer('300');;stopSheetTimers();;scrollToElement(...)`), and
 every refusal carried `PF('teeSheetValidationErrorPopupVar').show();;` — the
 club's real refusal path, as on every morning on record.
+
+### `refused*` — the rows the ledger calls accepted, and why they aren't
+
+The ledger records attempts 9 and 10 (09:23) and 12 (08:38) as **accepted**,
+and the run logs a "surplus hold" warning for each, wondering aloud "whether
+the club tolerates two". It doesn't, and there was never a second hold. Those
+rows are refusals, and the artifacts settle it outright.
+
+`attempt_09_accepted.xml` and `attempt_10_accepted.xml` are byte-identical to
+each other. Against `attempt_01_accepted.xml` — the real grant — they share
+**92,393 leading and 42 trailing characters of 92,478**. The entire difference
+is the `<eval>`:
+
+| attempt | `<eval>` | what it means |
+|---|---|---|
+| 1 (real grant) | `executeHoldTimeTimer('300');;stopSheetTimers();;scrollToElement(...)` | you hold it; here is your 300s timer |
+| 9, 10 | `PF('teeSheetValidationErrorPopupVar').show();;` | the blocked-slot popup |
+
+The same 41-byte delta appears on 08:38 (attempt 1 vs 12) and again on
+2026-09-15, where `attempt_05_accepted.xml` carries the popup eval while
+`attempt_01_accepted.xml` carries the hold timer.
+
+The mechanism: once we hold the slot, the session's current view *is* the
+booking form, so the club re-renders that form for every later ask and attaches
+the refusal eval. `classify_reserve_response` keys on the markup — booking form
+present, form slot matches — and calls it accepted. **§5 of the skill says the
+`<eval>` is the verdict; the classifier does not agree with it.**
+
+Outcome was unaffected here, because attempt 1 genuinely won both races. But it
+means: exactly **one** grant per booking, the surplus-hold warnings are
+spurious, and the ledger — the primary artifact every post-mortem reads — is
+recording phantom grants. On 2026-09-15 that put fake 113ms and 219ms "grants"
+into the record, which is fast enough to corrupt any latency analysis built on
+it. Listed as a fix in §7.
 
 ## 2. Timing table
 
@@ -158,21 +200,58 @@ Our two winning rows, and the rival's row, all trace **identically**:
 All 9 snapshots are `refreshOk: true`, `northgateRowCount: 1084`, so none of
 this is the staleness trap of §7f's last-but-one paragraph.
 
-We know from the ledger that **we did not hold 08:38 until +1014ms**. So:
+**A snapshot's offset is a request time, not an instant, and the settle lag is
+seconds wide.** This is the correction that has to come first, because it
+invalidates the obvious reading. `manifest.jsonl` records three times per
+snapshot, and they are far apart:
 
-- The `disabled` read at **+715ms** is *before* our grant. It cannot be a
-  holding — it is the row not being reservable yet.
-- The `disabled` read at **+4377ms** is *after* our grant. It is our own hold,
-  rendering without a name.
+| snapshot | requested | settled | captured |
+|---|---|---|---|
+| 0 | −500ms | **+594ms** | +715ms |
+| 1 | +715ms | **+4294ms** | +4377ms |
+| 2 | +4377ms | **+6803ms** | +6903ms |
 
-Those are two different realities behind one state string. Therefore **a
-`disabled` read can never be used to argue the gate was shut**, which is
-precisely the inference §7f promised the observer would support.
+`observations.jsonl` keys rows by the *request* time. So the row labelled
+`tMs: 715` describes the sheet somewhere in `[+715, +4294]ms` — a window that
+closes **after** our grants at +1014/+1017ms. §7f's instruction to read the
+offset as "the instant the sheet describes" does not survive a 3.6s settle lag.
 
-Second calibration: the holder's name **lags the grant by ~5.9s** (granted
-+1014ms, named +6903ms). That lag is the club's rendering, not the observer's.
-So the only unambiguous observer signal is the `reserved` + named-holder
-transition, and it arrives ~6s late.
+What the states mean, then, comes from the population rather than from any one
+row. In the `tMs: 715` snapshot, **76 of 86 Northgate rows were `empty`** while
+7 were `disabled` and 4 `blocked`. A shut gate would disable every row, not
+seven. So `disabled` is per-slot, never a gate signal:
+
+| snapshot | empty | disabled | reserved | blocked |
+|---|---|---|---|---|
+| −500ms | 80 | 3 | 0 | 4 |
+| +715ms | 76 | 7 | 0 | 4 |
+| +4377ms | 66 | 16 | 1 | 4 |
+| +6903ms | 66 | 13 | 4 | 4 |
+| +9177ms | 66 | 12 | 5 | 4 |
+| +11583ms | 66 | 9 | 8 | 4 |
+| +13979ms | 68 | 6 | 9 | 4 |
+
+Read down the last two columns: `disabled` peaks at 16 and then *drains* into
+`reserved` as `reserved` climbs 0 → 9, while their sum holds near 17. **A
+freshly taken slot renders `disabled` with no holder, then converts to
+`reserved` with a name once the club's render catches up.** `disabled` is the
+transient pre-named state of a taken slot, and the conversion takes ~10s.
+
+Two consequences:
+
+- **A `disabled` read can never be used to argue the gate was shut** — the
+  inference §7f promised the observer would support. It means "taken, not yet
+  named", and in the `tMs: 715` snapshot 76 other rows were plainly reservable.
+- **The holder's name lags the grant by seconds.** We held 08:38 from +1014ms;
+  the name appears in the snapshot settled at +7857ms. The only unambiguous
+  observer signal is the `reserved` + named-holder transition, and it arrives
+  far too late to resolve events at the 1–2s scale the gate question turns on.
+
+(An earlier draft of this section argued that the `+715ms` `disabled` read
+*preceded* our grant and therefore proved a non-holding state. That reasoning
+was wrong — it treated the request offset as the describing instant, when that
+snapshot settled at +4294ms, after both grants. The conclusion survives on the
+population argument above, which does not depend on timing at all.)
 
 **Trap this created in the first-pass report.** The flip table prints the
 holders as of the flip instant, which for our own won slots read
@@ -264,20 +343,50 @@ fits a fast human rival (grab, then fill) rather than a late gate.
   ask at the same offset* (+1014ms) that lost four Fridays running, and won it
   on the one Friday the rival ended up elsewhere. Under Model L — a gate that
   is genuinely late on Fridays — that ask should have been refused today too.
-- It **does not settle it.** Reserve 1's 2888ms round trip bounds the club's
-  receipt only to `[+1014, +3902]ms`, which straddles a late gate at `:03`. The
-  09:23 win is bounded to `[+1017, +2965]ms` and straddles it too. So the one
-  morning with the best-placed data point is also the morning whose round trip
-  destroyed its discriminating power — the same coupling §7a flagged for
-  2026-08-16.
-- **What would settle it** is a Friday where a grant lands for one slot while a
-  *different* slot is refused in the same club-second (§7d's only
-  discriminator), or a named-holder appearance in the observer earlier than
-  ~+6s. Neither is available this morning; both are free to wait for.
+- **The gate was open by club `:01`–`:02` today, and that is not bounded by the
+  slow round trip.** The 09:23 grant proves the sheet was open when the club
+  processed it. Tighter: our own attempts 2 and 3 were refused with answers
+  stamped in club `:01` — and they were refused *because we already held the
+  slot* (§1's `refused*` note: once we hold it, our own asks are blocked). So
+  our hold existed by `:01`, which puts the grant's processing, and therefore
+  the gate, inside `[+1017, +2000]ms`. A gate at `:05`–`:06` is excluded for
+  this morning outright.
+- **Against four Fridays, attempt 1 is a near-constant.** Every Friday on
+  record sent essentially the same ask at the same offset:
 
-Nothing here justifies changing the ladder or the aim. Recording the rival's
-identity is worth it because it converts "an unidentified fast party" into a
-specific, checkable pattern across Fridays.
+  | Friday | sent | RT | verdict |
+  |---|---|---|---|
+  | 2026-08-21 | +1015 | 465 | refused |
+  | 2026-08-28 | +1005 | 444 | refused |
+  | 2026-09-04 | +1026 | 474 | refused |
+  | 2026-09-11 | +1018 | 481 | refused |
+  | **2026-09-18** | **+1014** | **2888** | **granted** |
+
+  The four losses returned in 444–481ms — a 37ms spread across four weeks,
+  which is what a read-only "already taken" check costs. The win took 6× longer,
+  which is what writing a hold costs. Same request, same offset; the difference
+  is whether there was anything to acquire.
+
+Taken together this **favours Model F** — one gate at `:01` every day, and on
+the losing Fridays 08:38 was already claimed before our ask was processed.
+Model L would need the gate to swing from `:05`–`:06` to `≤:02` week to week,
+against the ~1s drift §7a established. It is not *proof*: today's gate bound is
+one Friday, and the four losing Fridays have no grant of their own to bound
+their gate with.
+
+**What would still settle it** is a Friday where a grant lands for one slot
+while a *different* slot is refused in the same club-second (§7d's only
+discriminator). That is now cheap to arrange — ask for a deliberately
+uncontested slot alongside the target at the tick — but it is **not safe until
+the shared-ViewState bug is fixed**, because a second grant under the same
+ViewState is exactly the 2026-09-04-evening failure where the club finalized
+the fallback while the chain reported the target.
+
+The practical reading: we did not win because we got faster. The same ask that
+lost four Fridays won this one, because the rival was elsewhere. Recording the
+rival's identity converts "an unidentified fast party" into a specific,
+checkable pattern across Fridays — and the 300s hold means that once they claim
+a slot, nothing inside the race can take it back.
 
 ## 6. Two smaller things
 
@@ -324,8 +433,22 @@ disagree about who holds what, the lost copy is the evidence.
   That named transition is the only unambiguous signal in the snapshots (§3),
   and it is not currently surfaced.
 - **Amend `booking-postmortem` §7f** to say that a `disabled` read carries no
-  information about the gate, and that the holder's name lags the grant by
-  ~6s. As written, §7f invites exactly the misreading §3 documents.
+  information about the gate, that a snapshot's offset is a request time with a
+  settle lag up to 3.6s rather than an instant, and that the holder's name lags
+  the grant by seconds. As written, §7f invites exactly the misreading §3
+  documents.
+- **Fix `classify_reserve_response` so the `<eval>` decides the verdict,** not
+  the presence of the booking form. Once we hold a slot the club re-renders
+  that form for every later ask, and the classifier calls each one a grant
+  (§1's `refused*` note). This writes phantom grants into the ledger every
+  post-mortem reads, and it is the highest-value fix on this list: 2026-09-15's
+  record carries fake 113ms and 219ms "grants" that would corrupt any latency
+  analysis drawn from it.
+- **Shorten the opening burst.** Opened as #215 (twelve members → six). The
+  300s hold means asks after the first cannot win the target, so the tail only
+  delays the serial fallback walk. §5.
 
-No change to the booking logic itself. Both races were clean wins on the first
-rung, and the first Friday on record to take the requested slot.
+The booking logic needed one change and it is #215. Both races were clean wins
+on the first rung, and the first Friday on record to take the requested slot —
+but the win came from the rival being elsewhere, not from anything we did
+faster, so it should not be read as the Friday problem being solved.
