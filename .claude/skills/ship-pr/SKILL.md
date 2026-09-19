@@ -98,21 +98,27 @@ arrive later as inline review comments (§4).
 timestamp that actually exists rather than on when you happened to ask:
 
 ```
-next_eligible = <created_at of the last successful review ack> + 60 minutes
+next_eligible = <created_at of the last successful review ack> + 61 minutes
 ```
 
 Both halves are readable from the API - the ack is an issue comment by
 `coderabbitai[bot]` carrying `created_at`. If no successful review exists on
 this PR yet, anchor on your own last trigger comment instead.
 
-The 60 minutes is a **deliberately conservative default, not an observed
+**61, not 60, and the extra minute is the point.** An estimate that lands
+exactly on the boundary is refused as often as it succeeds - clock skew between
+here and the bot, a window measured from a slightly later instant than the one
+you anchored on, a retry that fires a few seconds early. Each near-miss costs a
+whole cycle to discover, so buy the margin.
+
+The hour itself is a **deliberately conservative default, not an observed
 limit.** No rate-limit event has ever been recorded on this repo, so there is
 no measured window to copy. When you do hit one, write down the bot's exact
 wording and the wait it named, here, and replace this paragraph with the real
 number.
 
 **4. Back off, and stop.** Retry at `next_eligible`. If that attempt is also
-refused, double the wait each time - 60 → 120 → 240 minutes - and **stop after
+refused, double the wait each time - 61 → 122 → 244 minutes - and **stop after
 three refusals.** Tell the user what the bot said and that the review is not
 coming on its own. Never spam the PR: each trigger is a public comment on the
 thread, and a column of them is noise a reviewer has to scroll past.
