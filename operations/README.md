@@ -1,64 +1,58 @@
 # operations/
 
-How this project is run, as opposed to how it is built.
+Operating policy for this project: how work is selected, what an agent may
+decide without the maintainer, and how the result is measured.
 
-TeeTime books tee times for one retired golfer and his friends. It is also a
-nine-month experiment in whether a working application can be developed
-agentically, by someone who does not read the code. That experiment has an
-operating rhythm now, and this directory is that rhythm written down so it can
-be executed, measured and — where it has earned it — handed over.
+Not in `docs/`, which is served publicly as GitHub Pages.
 
-Not in `docs/`: that directory is served publicly as GitHub Pages. This is
-internal.
-
-## What's here
+## Contents
 
 | | |
 |---|---|
-| [`autonomy.md`](autonomy.md) | The ladder — what an agent may decide alone, per cycle, and what it takes to move up |
-| [`scoreboard.md`](scoreboard.md) | The five numbers that say whether any of this is working |
-| [`cycles/`](cycles/) | One file per operating cycle: what it does, when it fires, its prompt |
-| [`ledger/`](ledger/) | The rows cycles emit. The scoreboard is a rollup over these |
+| [`autonomy.md`](autonomy.md) | The autonomy ladder: per-cycle decision authority and the conditions for increasing it |
+| [`scoreboard.md`](scoreboard.md) | The five metrics and their sources |
+| [`cycles/`](cycles/) | One file per operating cycle: function, trigger, prompt |
+| [`ledger/`](ledger/) | The rows cycles emit; input to the scoreboard |
 
-Durable facts about the application itself live in `CLAUDE.md` at the repo
-root, which every session loads automatically. Procedures live in
+Facts about the application itself are in `CLAUDE.md` at the repository root,
+loaded automatically at the start of every session. Procedures are in
 `.claude/skills/`.
 
-## The shape of it
+## Model
 
-A **cycle** is a recurring piece of work with a trigger, a prompt, and an
-output. Each one sits on a **rung** of the autonomy ladder, from "report to the
-maintainer" up to "merge it yourself". Each one appends a **row** per run. The
-rows produce the **streak** that decides when a cycle has earned the next rung,
-and the **scoreboard** that says whether the thing being operated is any good.
+A **cycle** is recurring work with a trigger, a prompt and an output. Each
+cycle is assigned a **rung** on the autonomy ladder, from reporting to the
+maintainer up to merging its own changes. Each cycle appends a **row** per
+run. Rows produce the **streak** that determines promotion, and the
+**scoreboard** that measures the application.
 
-That is the whole machine. Everything else is detail.
+## Two constraints
 
-## Two ideas worth keeping if nothing else survives
+**A cycle cannot be promoted beyond the point at which an automated check can
+score its runs.** A high rung means the cycle acts without being read; if the
+maintainer still reads every run, the rung changed and the workload did not.
+This makes CI coverage a prerequisite for R4 rather than general test
+maintenance. See the R4 section of `autonomy.md`.
 
-**A cycle cannot be promoted past what something automated can score.** The
-point of a high rung is that the cycle acts without being read. If the
-maintainer is still reading every run, the promotion moved a label and not the
-work. This is why CI's blind spots are operating-system infrastructure rather
-than test hygiene — see the R4 section of `autonomy.md`.
-
-**Separate what is established from what is hypothesis.** Agentic systems fail
-confidently and quietly: a well-formed signal that carries no information,
-consumed as though it did. This project has three recorded instances — a
-zero-row log query read as "no booking ran", a `success=True` that did not mean
-a reservation existed, an `exit(1)` recorded as failure for intended behaviour.
-The `booking-postmortem` skill arrived at the discipline independently and it
-belongs at the top of the operating system, not buried in one procedure.
+**State separately what is established and what is hypothesis.** Three
+recorded failures in this repository originated in a well-formed signal that
+carried no information: a zero-row log query read as "no booking ran", a
+`success=True` that did not indicate a reservation, and an `exit(1)` recorded
+as a failure for intended behaviour. The `booking-postmortem` skill applies
+this distinction to diagnosis; it applies equally to operating material.
 
 ## Current state
 
 | Cycle | Rung | Status |
 |---|---|---|
-| morning post-mortem | R0 | daily since 2026-08-20, 19 documents. Has earned R1 for docs-only paths |
-| ship-pr | R2 | human-invoked; capped at R2 because `main` deploys |
+| morning post-mortem | R0 | daily since 2026-08-20; 19 documents |
+| ship-pr | R2 | maintainer-invoked; held at R2 because `main` deploys |
 | PR check-ins | R2 | scheduled re-checks on an open PR |
 
-Cycles discussed and not yet built: backlog triage, post-merge deploy
+No cycle currently emits ledger rows and no scoreboard rollup exists. The
+policy in this directory is defined; the instrumentation is not built.
+
+Cycles specified but not built: backlog triage, post-merge deploy
 verification, doctrine maintenance, member feedback intake. Intake is R1 and
-buildable now; replying to members is R5 and much later. See the end of
+buildable independently; replying to members is R5. See the final section of
 `autonomy.md`.

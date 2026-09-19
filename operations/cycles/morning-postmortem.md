@@ -2,57 +2,53 @@
 
 | | |
 |---|---|
-| **Fires** | daily, `40 11 * * *` UTC — 06:40 CT, ten minutes after the race |
-| **Runs as** | a fresh Claude Code session per firing, zero prior context |
-| **Rung** | **R0** — report only. No commits, no branches, no PRs. |
-| **Clean** | the report needed no correction before it could be acted on |
-| **Emits** | a row in `operations/ledger/runs.jsonl`; a `docs/booking-post-mortem-<date>.md` when the maintainer asks for one |
-| **Deployed as** | a Routine (scheduled trigger), named "⚡ TeeTime Morning Post-mortem" |
+| **Trigger** | daily, `40 11 * * *` UTC (06:40 CT, ten minutes after the race) |
+| **Runs as** | a new Claude Code session per firing, with no prior context |
+| **Rung** | R0 — report only. No commits, branches or PRs. |
+| **Clean** | the report required no correction before it could be acted on |
+| **Emits** | a row in the `runs` ledger; a `docs/booking-post-mortem-<date>.md` when the maintainer requests one |
+| **Deployed as** | a Routine (scheduled trigger), "⚡ TeeTime Morning Post-mortem" |
 
-**This file is the source of truth for the prompt.** The Routine holds a copy,
-and the copy is what actually executes. Change this file in a PR, then update
-the Routine to match — not the other way round. Before this file existed the
-prompt lived only in the trigger's config: unversioned, undiffable,
-unreviewable, and gone the moment it was edited.
+This file is the source of the prompt. The Routine holds the copy that
+executes. Change this file in a PR, then update the Routine to match. The
+prompt was previously stored only in the trigger configuration, which is not
+versioned and retains no history of edits.
 
-## Known issue: it will start firing an hour early on 2026-11-01
+## Scheduled defect: fires one hour early from 2026-11-01
 
-Cron is UTC. `40 11 * * *` is 06:40 CT **only during CDT**. US daylight time
-ends on **Sunday 2026-11-01**, after which 11:40 UTC is 05:40 CT — twenty
-minutes *before* the 06:00 window the job needs, and 48 minutes before the race
-it is meant to report on.
+Cron is evaluated in UTC. `40 11 * * *` is 06:40 CT during CDT only. US
+daylight time ends on Sunday 2026-11-01, after which 11:40 UTC is 05:40 CT —
+23 minutes before the booking job fires at 06:28 CT and 48 minutes before the
+window it reports on.
 
-The prompt's Gate A catches this and reports it rather than inventing a
-verdict, but it reports to a push notification that can be swiped away. The fix
-is to move the cron to `40 12 * * *` on or before that date.
+Gate A in the prompt detects this condition and reports it rather than
+producing a verdict. It reports via push notification only.
 
-Until then the cycle produces no data every morning it misfires, which is
-exactly the kind of silent stop the autonomy streak is supposed to surface.
+Correction: change the cron to `40 12 * * *` on or before that date. Until
+then the cycle produces no data on any morning it misfires.
 
-## Clean, for this cycle specifically
+## Definition of "clean" for this cycle
 
-A run is clean when the maintainer could act on the report without correcting
-it first.
+The report required no correction before the maintainer could act on it.
 
-- A correctly diagnosed **loss** is clean.
+- A correctly diagnosed loss is clean.
 - A correctly reported "no booking was scheduled" is clean.
-- A correctly reported environment failure is clean — it did not guess.
-- A confidently wrong diagnosis is **not** clean, however good the reasoning
-  looked. 2026-09-15 is the recorded case: it reported no booking on a morning
-  when two had won, because the log query was scoped to the service and missed
-  the jobs. It was caught only because the maintainer pushed back.
+- A correctly reported environment failure is clean.
+- An incorrect diagnosis is not clean. Recorded case: 2026-09-15, reported as
+  having no booking on a morning when two bookings succeeded, because the log
+  query was scoped to the Cloud Run service and excluded the jobs. Identified
+  by maintainer pushback.
 
 ## Promotion
 
-At R0 with a long history: daily since 2026-08-20, 19 documents, the
-documentation PR approved every time it was offered.
+At R0. Running daily since 2026-08-20, 19 documents produced, documentation PR
+approved on each occasion offered.
 
-**Next rung: R1, docs paths only** — open the `docs/booking-post-mortem-*.md`
-PR itself instead of asking. `docs/` cannot reach the deploy path, so the blast
-radius is a published web page, and the maintainer still reviews the PR.
+Next rung: R1, documentation paths only — open the
+`docs/booking-post-mortem-*.md` PR without asking. `docs/` has no deploy path;
+the maintainer still reviews the PR.
 
-Explicitly **not** included at R1: opening the fix PR. That touches `app/` and
-is a different rung.
+Not included at R1: opening the fix PR, which modifies `app/`.
 
 ## The prompt
 

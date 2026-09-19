@@ -1,133 +1,123 @@
 # The autonomy ladder
 
-What an agent may decide on its own, per cycle, and what it takes to move up.
+Defines what an agent may decide without the maintainer, per cycle, and the
+conditions for increasing that authority.
 
-The point of this project's operating system is moving work from "asks the
-maintainer" to "just does it." That move needs a rule rather than a mood —
-otherwise it happens too early after a good week, or never, because there is
-never an obviously right moment.
+Promotion requires a stated rule rather than a judgement call, so that it
+happens on evidence and not on recency.
 
 ## The ladder
 
-Rungs are defined once, by **blast radius** — what an action can reach — not
-per cycle. A new cycle points at a rung; it does not get its own ladder. That
-is what keeps the tenth cycle as cheap to add as the second.
+Rungs are defined once, by blast radius — what an action can reach — not per
+cycle. A new cycle is assigned a rung. It does not define its own ladder.
 
-| Rung | May | Cannot reach |
+| Rung | Permitted | Cannot reach |
 |---|---|---|
 | **R0** | Read and report. Output is text to the maintainer. | anything |
-| **R1** | Write to the repo's non-shipping surface — open a draft PR, write docs, file an issue | production, members |
-| **R2** | Act on its own work in flight — push fixes to its open PR, answer review, re-run CI | merge |
-| **R3** | Merge paths that cannot deploy — `docs/`, `operations/` | Cloud Run |
-| **R4** | Merge shipping code — `app/`, `terraform/` | — |
+| **R1** | Write to the repository's non-shipping surface: open a draft PR, write documentation, file an issue | production, members |
+| **R2** | Act on its own work in flight: push to its open PR, answer review, re-run CI | merge |
+| **R3** | Merge paths that cannot deploy: `docs/`, `operations/` | Cloud Run |
+| **R4** | Merge shipping code: `app/`, `terraform/` | — |
 | **R5** | Act on production directly, or message a member unsupervised | — |
 
 ## Registry
 
 | Cycle | Rung | Clean streak | Promotion rule |
 |---|---|---|---|
-| morning post-mortem | R0 | see ledger | 5 clean runs at R0 → R1, docs paths only |
-| ship-pr | R2 | see ledger | capped at R2 until R3's scorer exists |
-| PR check-ins | R2 | see ledger | capped at R2 |
+| morning post-mortem | R0 | computed from ledger | 5 clean runs at R0 → R1, documentation paths only |
+| ship-pr | R2 | computed from ledger | held at R2 until an R3 scorer exists |
+| PR check-ins | R2 | computed from ledger | held at R2 |
 
-Streaks are **computed, never hand-maintained** — count back through
+Streaks are computed, not stored: count back through
 `operations/ledger/runs.jsonl` for that cycle until the first `clean: false`. A
-counter maintained by hand rots the first busy week.
+stored counter can diverge from the rows it summarises.
 
-### Where the post-mortem cycle actually stands
+### Post-mortem cycle status
 
-It has run daily since 2026-08-20 and produced 19 post-mortem documents. The
-maintainer has approved the documentation PR every time. On the evidence it has
-earned R1 for docs-only paths.
+Running daily since 2026-08-20. 19 post-mortem documents produced. The
+maintainer has approved the documentation PR on each occasion it was offered.
 
-It also has a recorded reset: on 2026-09-15 it reported the morning as having
-no booking when two bookings had in fact won, and only a human pushback caught
-it. The cause was a stale log query, fixed in #206. That reset is the rule
-working — promotion should have been blocked until #206 landed, and a number
-would have said so without anyone having to remember.
+One recorded reset: on 2026-09-15 the cycle reported the morning as having no
+booking when two bookings had succeeded. The cause was a log query scoped to
+the service rather than the jobs, corrected in #206. The error was identified
+by maintainer pushback, not by the cycle. Under the promotion rule, that reset
+blocks promotion until the streak rebuilds.
 
-## What "clean" means
+## Definition of "clean"
 
-**A run is clean when its output needed no correction before it could be
-used.** Not when the news was good.
+A run is clean when its output required no correction before it could be
+acted on. This is independent of the outcome being reported.
 
-A correctly diagnosed loss is a clean run. A confidently wrong diagnosis of a
-win is not. The metric is about whether the cycle can be trusted, not about
-whether the morning went well.
+- A correctly diagnosed loss is clean.
+- A correctly reported absence of data is clean.
+- An incorrect diagnosis is not clean, regardless of the outcome reported.
 
-## Who judges
+## Scoring authority
 
-This is the constraint that actually caps the ladder, so it is worth stating
-plainly: **a cycle cannot be promoted past the point where something automated
-can score it.**
+A cycle cannot be promoted beyond the point at which an automated check can
+score its runs.
 
-At R0–R1 the maintainer judges, and that is free — they read the output anyway.
-The whole point of R3 and R4 is that the cycle acts *without* being read. If
-the maintainer is still judging every run there, the promotion bought nothing:
-the label moved and the work did not.
+At R0–R1 the maintainer scores each run at no additional cost, because the
+output is read in any case. R3 and R4 exist so that the cycle acts without
+being read. If the maintainer continues to score every run at those rungs, the
+rung has changed without the workload changing.
 
-| Rung | What scores a run | Have it? |
+| Rung | Scorer | Available |
 |---|---|---|
-| R0–R1 | the maintainer | yes, free |
-| R2 | CI green/red | **yes** — which is why `ship-pr` already works here |
-| R3 | almost nothing | acceptable anyway: nothing deploys, damage ceiling is nil |
-| R4 | CI must catch a bad deploy before members do | **partially** |
+| R0–R1 | maintainer | yes |
+| R2 | CI pass/fail | yes |
+| R3 | none in practice | accepted: no deploy path; the maximum failure is an incorrect document |
+| R4 | CI must detect a defective deploy before members do | partial |
 
-R3 is the instructive exception. A weak judge is fine there *because the blast
-radius is nil*, not because the judge is good. Do not generalise from it.
+R3 accepts a weak scorer because its blast radius is bounded, not because the
+scorer is adequate. This does not extend to R4.
 
-### The R4 scorer
+### R4 scorer status
 
-Two of the three known holes are closed as of #217:
+| Gap | State |
+|---|---|
+| mypy advisory (`continue-on-error: true`) | closed in #217 (#158) |
+| browser tests reduce silently to zero and report success | closed in #217 (#159) |
+| no `terraform validate` in CI | open |
 
-- ~~mypy advisory (`continue-on-error: true`)~~ — now blocking (#158)
-- ~~browser tests skip silently and stay green~~ — now fail under CI (#159)
-- **no `terraform validate` in CI** — still open. A bad terraform change still
-  reaches deploy unchecked.
+While the third remains open, an R4 cycle would be scored by a check that
+cannot detect infrastructure errors, and the streak would record `clean` for
+runs that were not evaluated.
 
-Until that third one is closed, R4 would be scored by something that cannot see
-infrastructure errors, and a streak counter would report "clean" on runs
-nothing checked.
-
-This is also why those issues are not ordinary test hygiene. They are
-load-bearing parts of the operating system, and should be ranked as
-infrastructure rather than by age or member impact.
+These three items are therefore prerequisites for R4, not general test
+maintenance, and should be prioritised on that basis rather than by age or
+member impact.
 
 ## Demotion
 
-The ladder goes both ways. A cycle at R3 that causes a member-visible defect
-drops to R2; it does not merely reset its streak to zero.
+A cycle at R3 or above that causes a member-visible defect drops one rung. The
+streak reset alone is insufficient.
 
-Without demotion the only correction available is switching the whole thing
-off, which is not a correction — it is a surrender.
+Without demotion, the only available correction is disabling the cycle.
 
-Note that the defect is the **worst available judge**: by the time it fires, a
-member has already been affected. It is the backstop for when the automated
-scorer misses, not the plan.
+A member-visible defect is detected only after a member has been affected. It
+is a fallback for scorer failure, not a primary control.
 
 ## Adding a cycle
 
-1. Write `operations/cycles/<name>.md` — what it does, when it fires, its
-   prompt, and what "clean" means for this one specifically.
-2. Start it at **R0**. No exceptions, including for cycles that look trivial.
-3. Add a row to the registry above with a promotion rule.
-4. Have it append a row to `operations/ledger/runs.jsonl` on every run.
+1. Write `operations/cycles/<name>.md`: function, trigger, prompt, and the
+   definition of "clean" for that cycle.
+2. Assign rung R0.
+3. Add a registry row with a promotion rule.
+4. Emit a row to `operations/ledger/runs.jsonl` on every run.
 
-Step 4 is not optional. A cycle that does not emit rows cannot have a streak,
-which means it can never be promoted — it will sit at R0 forever regardless of
-how well it performs.
+Step 4 is required. A cycle that emits no rows has no computable streak and
+therefore cannot be promoted.
 
-## Member-facing work
+## Member-facing cycles
 
-R5 is the only rung that can reach a person, and it is the one to be slowest
-about. Two notes for when it comes up:
+R5 is the only rung that reaches a person.
 
-**Intake and reply are separate cycles.** Capturing a member's bug report or
-feature request into an issue is repo-internal — that is **R1**, and buildable
-long before anything replies to anyone. If capture and reply are one cycle, the
-whole thing gates at the highest rung and the useful half never ships.
+**Intake and reply are separate cycles.** Recording a member's bug report or
+feature request as an issue is repository-internal and sits at R1. Replying to
+the member sits at R5. Combined into one cycle, the whole is gated at R5 and
+the intake half cannot ship independently.
 
-**The repo is public.** Filing a member's message verbatim as a GitHub issue
-publishes their words and habits to the open internet. Decide how identifiers
-are handled *before* intake is built — a leaked issue can be deleted but not
-un-indexed.
+**The repository is public.** Filing a member's message verbatim as an issue
+publishes its contents. Determine identifier handling before building intake;
+an issue can be deleted but not removed from external indexes.

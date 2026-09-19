@@ -1,91 +1,88 @@
 # TeeTime
 
-A golf tee time booking bot for one club, run as an experiment in agentic
-software development. Every session starts here.
+A golf tee time booking bot for one club, developed agentically.
 
-Keep this file short. It holds facts a session must know **before it does
-anything**, and pointers to where the detail lives. Procedure goes in
-`.claude/skills/`; operating policy goes in `operations/`.
+This file holds facts required before a session acts, and pointers to detail.
+Keep it short. Procedure belongs in `.claude/skills/`; operating policy belongs
+in `operations/`.
 
-## The things that bite
+## Constraints
 
 **`main` deploys.** A commit on `main` triggers Cloud Build and redeploys the
-live service. Branch first, always. Merging is the maintainer's call, never an
-agent's.
+live service. Branch before committing. Merging is the maintainer's decision.
 
-**There are three GCP resources, not one.** A log query scoped to the service
-alone returns a clean, valid, **zero-row** result on a morning when the race
-actually ran — indistinguishable from a quiet morning. This cost a
+**Three GCP resources, not one.** A Cloud Logging query scoped to the service
+alone returns a valid zero-row result on a morning when the race ran. That
+result is indistinguishable from a morning with no booking. This produced a
 misdiagnosed post-mortem on 2026-09-15.
 
 | Resource | Type | `resource.type` |
 |---|---|---|
-| `teetime` | Cloud Run **service** | `cloud_run_revision` |
-| `teetime-racer` | Cloud Run **job** | `cloud_run_job` |
-| `teetime-observer` | Cloud Run **job** | `cloud_run_job` |
+| `teetime` | Cloud Run service | `cloud_run_revision` |
+| `teetime-racer` | Cloud Run job | `cloud_run_job` |
+| `teetime-observer` | Cloud Run job | `cloud_run_job` |
 
-**One container holds one Chrome.** `cloud_run_memory` is 2Gi against a browser
-measured at ~1GiB with a loaded tee sheet, at `cloud_run_max_instances = 1`.
-Concurrent browser sessions is a real failure mode, not a theoretical one — it
-took out three bookings on 2026-09-17.
+**One container supports one Chrome.** `cloud_run_memory` is 2Gi; a browser
+with a loaded tee sheet measures ~1GiB; `cloud_run_max_instances` is 1.
+Concurrent browser sessions fail. Three bookings failed this way on
+2026-09-17.
 
-**`docs/` is a public website.** It is served as GitHub Pages at
-`alexenos.github.io/teetime`, and the repo itself is public. Anything written
-there is published. Operating material goes in `operations/`.
+**`docs/` is published.** It is served as GitHub Pages at
+`alexenos.github.io/teetime`, and the repository is public. Content placed
+there is public. Operating material belongs in `operations/`.
 
-## The race
+## Race timing
 
-The booking job fires at **06:28 CT**. The club's window nominally opens at
-06:30:00 CT but the sheet actually opens a second or so later — usually
-06:30:01, once as late as 06:30:02. Reservations open 7 days in advance.
+The booking job fires at 06:28 CT. The club's window nominally opens at
+06:30:00 CT; the sheet has been observed opening at 06:30:01, once at
+06:30:02. Reservations open 7 days in advance.
 
-A booking is confirmed by `RESERVATION_CHECK` and by nothing else.
-`phase=complete, success=True` is **not** proof that a tee time was reserved.
+A booking is confirmed by `RESERVATION_CHECK`. `phase=complete, success=True`
+does not establish that a tee time was reserved.
 
-## Before you push
+## Pre-push checks
 
 ```bash
 poetry run pytest -q && poetry run ruff check . && \
   poetry run ruff format --check . && poetry run mypy app
 ```
 
-Always `poetry run` — the local venv lives outside the repo, under Poetry's
-cache. Ruff over `.`, not `app tests`; that is what CI runs.
+Use `poetry run`: the local venv is outside the repository, under Poetry's
+cache. Run ruff over `.`, not `app tests`, which is what CI runs.
 
-As of #217 both mypy and the browser integration tests are **blocking** in CI.
-A missing or mismatched Chrome fails the build rather than silently shrinking
-the suite. `ALLOW_BROWSER_TEST_SKIP=1` is the escape hatch for an environment
-that sets `CI` but genuinely has no browser.
+As of #217, mypy and the browser integration tests are blocking in CI. A
+missing or version-mismatched Chrome fails the build rather than reducing the
+collected test count. `ALLOW_BROWSER_TEST_SKIP=1` restores skipping for an
+environment that sets `CI` but has no browser.
 
-## Operating system
+## Operations
 
-How this project decides what to work on, what an agent may do without asking,
-and whether any of it is working: **`operations/`**.
+Work selection, agent decision authority, and measurement: `operations/`.
 
-- `operations/autonomy.md` — the autonomy ladder and which rung each cycle sits on
-- `operations/scoreboard.md` — the five numbers that say whether this is working
+- `operations/autonomy.md` — the autonomy ladder and each cycle's rung
+- `operations/scoreboard.md` — the five metrics and their sources
 - `operations/cycles/` — one file per operating cycle, including its prompt
-- `operations/ledger/` — the rows those cycles emit
+- `operations/ledger/` — the rows cycles emit
 
-Current rungs, as a session needs them at a glance. `operations/autonomy.md`
-is authoritative if this table and it disagree.
+Current rungs. `operations/autonomy.md` is authoritative where it and this
+table disagree.
 
-| Cycle | Rung | May |
+| Cycle | Rung | Permitted |
 |---|---|---|
-| morning post-mortem | **R0** | report only — no commits, no PRs |
-| ship-pr | **R2** | push to its own open PR; never merge |
-| PR check-ins | **R2** | same |
+| morning post-mortem | R0 | report only; no commits, no PRs |
+| ship-pr | R2 | push to its own open PR; no merge |
+| PR check-ins | R2 | as above |
 
 ## Skills
 
-- `.claude/skills/booking-postmortem/` — diagnosing a morning, and what its
-  evidence does and does not establish
-- `.claude/skills/ship-pr/` — opening a PR, triggering CodeRabbit (it never
-  reviews this repo on its own), and working the review
+- `.claude/skills/booking-postmortem/` — morning diagnosis, and what its
+  evidence establishes
+- `.claude/skills/ship-pr/` — opening a PR, triggering CodeRabbit (which does
+  not review this repository automatically), and processing the review
 
-## House style
+## Writing conventions
 
-Distinguish what is **established** from what is **hypothesis**, in commits, PR
-bodies and docs alike. A valid-looking signal that carries no information has
-caused three separate misdiagnoses here; naming the uncertainty is how they get
-caught. Say what you could not verify and why.
+State separately what is established and what is hypothesis, in commits, PR
+bodies and documentation. Three misdiagnoses in this repository originated
+from a well-formed signal that carried no information. Record what was not
+verified, and why.

@@ -1,135 +1,131 @@
 # The scoreboard
 
-Five numbers. Three say whether the product works for the members, one says
-whether the operating system is taking work off the maintainer, one says what
-it costs.
+Five metrics. Three measure member outcomes, one measures the operating
+system, one measures cost.
 
-Every metric names the field it is computed from. A metric without a stated
-source drifts, and this project has already been burned by a metric-shaped
-answer with no provenance — a valid, zero-row log query read as "no booking
-ran" on 2026-09-15.
+Each metric names the field it is computed from. On 2026-09-15 a valid,
+zero-row log query was read as "no booking ran"; a metric without a stated
+source cannot be checked against that failure mode.
 
 ---
 
 ## 1. Outcome split
 
-Every booking request lands in exactly one of three buckets. Per **request**,
-not per morning. Rolling 4 race mornings.
+Each booking request falls into exactly one bucket. Counted per request, not
+per morning. Rolling 4 race mornings.
 
-| Bucket | Means |
+| Bucket | Definition |
 |---|---|
-| **Exact** | got the tee time the member agreed to |
-| **Fallback** | got a tee time, but not that one |
-| **Miss** | no reservation at all |
+| **Exact** | reserved the tee time the member agreed to |
+| **Fallback** | reserved a tee time other than that one |
+| **Miss** | no reservation |
 
-**Source:** `RESERVATION_CHECK`, and nothing else. `phase=complete,
-success=True` is not proof a tee time exists. This correction is in the
-post-mortem skill already and is the single easiest thing to quietly re-break.
+**Source:** `RESERVATION_CHECK`. `phase=complete, success=True` does not
+establish a reservation. This distinction is recorded in the post-mortem skill
+and is the most likely element of this definition to regress.
 
-**What makes it Exact:** the member's request must have been resolved to a
-real, bookable slot and confirmed with them *before* the race was scheduled.
-Not the nearest thing inside a ±32-minute window the bot chose on their behalf.
+**Condition for Exact:** the member's request must have been resolved to a
+bookable slot and confirmed with the member before the race was scheduled, not
+selected from a ±32-minute window at race time.
 
-That confirmation step does not exist yet — it is **#216**. Until it ships,
-Exact and Fallback cannot be honestly separated, because "8am" against a sheet
-with no 8:00 on it has no ground truth to compare against. Report the split
-with that caveat attached, or report Miss vs. not-Miss, but do not quietly
-score a fallback as exact.
+That confirmation step does not exist; it is #216. Until it ships, Exact and
+Fallback cannot be distinguished, because a request for "8am" against a sheet
+with no 08:00 slot has no reference value. Until then, report the split with
+that limitation stated, or report Miss against not-Miss.
 
-**Why per request:** 2026-09-15 was two requests, two Exact. 2026-09-17 was
-three requests, three Miss. Per-morning scoring flattens both.
+**Rationale for per-request counting:** 2026-09-15 was two requests, both
+Exact. 2026-09-17 was three requests, all Miss. Per-morning counting loses
+both figures.
 
 ## 2. Malformed response rate
 
-Share of member-facing messages that went out wrong — raw error text, wrong
-recipient, unusable content.
+Proportion of member-facing messages containing raw error text, sent to the
+wrong recipient, or otherwise unusable.
 
 ```
 malformed ÷ total member-facing messages sent, 30-day rolling
 ```
 
-**Always show the raw pair alongside the percentage** — "2 of 34 (5.9%)". At
-this volume the denominator is small enough that one bad message moves the rate
-several points, and a percentage alone hides that.
+Report the raw pair alongside the percentage: "2 of 34 (5.9%)". At current
+volume one message moves the rate by several points.
 
-**Source:** needs instrumentation. Neither the numerator nor the denominator is
-counted today.
+**Source:** not instrumented. Neither numerator nor denominator is currently
+counted.
 
-Worked example, 2026-09-17: three members asked for tee times, one received
-nineteen frames of a Selenium stack trace, one received a message meant for
-someone else.
+Reference case, 2026-09-17: of three requests, one member received a Selenium
+stack trace, and one received a message addressed to a different member.
 
-**Known gap — the silent case.** That same morning, one member was told "I'll
-message you with the result" and never heard back: the notification hit a
-Telegram `ConnectTimeout` and was dropped. That is an *absent* response, not a
-malformed one, and it will never appear in a ratio over messages actually sent.
-It is also the worst failure mode, because the member cannot tell it apart from
-a booking still in progress. Either widen this metric's definition to cover
-"should have been sent and wasn't", or add it as a sixth. Undecided.
+**Known gap — unsent messages.** On the same morning, one member was told a
+result would follow and received nothing: the notification hit a Telegram
+`ConnectTimeout` and was dropped. An unsent message does not appear in a ratio
+over messages sent. From the member's position it is indistinguishable from a
+booking still in progress. Either extend this metric to cover messages that
+should have been sent, or add a sixth metric. Not decided.
 
 ## 3. Fix latency
 
 Median of the last 5.
 
 ```
-clock starts: a post-mortem or review identifies the fix
-clock stops:  that fix is on main
+start: a post-mortem or review identifies the fix
+end:   that fix is on main
 ```
 
-**Pin the start of the clock.** Without it this drifts toward "time from bug to
-fix", which is a different and much larger number — 2026-09-17's browser
-contention reads as a few hours under one definition and months under the
-other.
+The start condition determines the value. Without it the metric measures time
+from defect introduction to fix, which is a different quantity: the 2026-09-17
+browser contention measures a few hours under the first definition and months
+under the second.
 
-**Source:** git, plus the post-mortem doc's date. Available today with no new
-instrumentation.
+**Source:** git, plus post-mortem document dates. No new instrumentation
+required.
 
 ## 4. Autonomy streak
 
-Per cycle: current rung (R0–R5) and consecutive clean runs at it.
+Per cycle: current rung (R0–R5) and consecutive clean runs at that rung.
 
-The only metric here about the operating system rather than the app. Defined in
-full in `operations/autonomy.md`, including what "clean" means and why a cycle
-cannot outrun its scorer.
+The only metric measuring the operating system rather than the application.
+Defined in `operations/autonomy.md`, including the definition of "clean" and
+the scoring-authority constraint on promotion.
 
 **Source:** `operations/ledger/runs.jsonl`, counted back to the last
 `clean: false`.
 
 ## 5. $/month
 
-Total spend, and **$/booking**.
+Total spend, and $/booking.
 
-$/booking is what makes this feel like a business rather than a hobby, and it
-is the number that either justifies or retires the ~$9.50/month Cloud SQL
-instance — a decision open since #41 and #168. Include agent/token spend, not
-just GCP.
+$/booking is the input to the Cloud SQL retention decision open since #41 and
+#168 (~$9.50/month). Include agent and token spend, not GCP alone.
 
-**Source:** needs billing export access. The post-mortem service account is
-scoped to storage and logging only, which is the same gap that left the
-memory-vs-CPU question unresolved on 2026-09-17.
+**Source:** not available. Requires billing export access; the post-mortem
+service account is scoped to storage and logging, which is the same limitation
+that left the memory-versus-CPU question unresolved on 2026-09-17.
 
 ---
 
-## Deliberately not on the board
+## Excluded
 
-**Commit count. PR count. Lines changed.**
+Commit count, PR count, lines changed.
 
-They measure activity rather than outcome, and they are the easiest thing for
-an autonomous system to game. An agent loop that opens PRs to raise its own
-number is a real failure mode once cycles are driving themselves, not a
-hypothetical one.
+These measure activity rather than outcome, and are directly gameable by a
+cycle that generates its own work.
 
-## Still undecided
+## Undecided
 
-**Human-touch rate** — the share of merged PRs where the maintainer edited code
-rather than only approving. It is the most direct read on this project's
-founding thesis ("I don't have to look at any of the code"), which is an
-argument for it. Not yet adopted.
+**Human-touch rate** — proportion of merged PRs where the maintainer edited
+code rather than only approving. Measures the project's original premise
+directly. Not adopted.
 
-## How it gets computed
+## Computation
 
-Cycles **emit rows**; the scoreboard is a rollup over them. It never parses
-nineteen markdown post-mortems — see `operations/ledger/README.md`.
+Cycles emit rows; the scoreboard is a rollup over those rows. It does not
+parse the post-mortem documents. See `operations/ledger/README.md`.
 
-The prose post-mortems stay exactly as they are. They carry the reasoning; the
-row carries the fact.
+The post-mortem documents are unchanged by this. They hold the analysis; the
+ledger holds the values used for computation.
+
+## Current implementation status
+
+No cycle currently emits rows, and no rollup exists. The ledger files are
+empty and this document is a specification. See `operations/ledger/README.md`
+for the write path, and the open work required to populate it.
