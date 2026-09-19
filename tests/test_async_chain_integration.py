@@ -8,7 +8,8 @@ none of which can happen while a script blocks the event loop. These tests
 would all fail (timeout waiting for disable-div) under the old synchronous
 spin-wait implementation.
 
-Requires Chrome; tests are skipped automatically when it isn't available.
+Requires Chrome. When it isn't available these tests skip locally and fail
+under CI - see ``_browser_required`` for why the two differ.
 """
 
 import os
@@ -29,8 +30,36 @@ FIXTURE = Path(__file__).parent / "fixtures" / "async_chain_test_page.html"
 DRIFT_TOLERANCE_MS = int(os.environ.get("CHAIN_DRIFT_TOLERANCE_MS", "150"))
 
 
-def _make_headless_driver():  # type: ignore[no-untyped-def]
-    from selenium import webdriver
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _browser_required() -> bool:
+    """Whether a missing Chrome should fail the run rather than skip it.
+
+    Skipping is right on a laptop that has no Chrome. In CI it is the hole
+    #159 describes: the seven tests below vanish, the job still reports
+    success, and the only automated coverage of the async booking chain is
+    gone with nothing to say so.
+
+    ``ALLOW_BROWSER_TEST_SKIP`` is the escape hatch for an environment that
+    sets ``CI`` but genuinely has no browser - the remote dev container, where
+    only Playwright's Chromium is installed and ``google-chrome`` is not on
+    ``PATH``, is the case this exists for.
+    """
+    if os.environ.get("ALLOW_BROWSER_TEST_SKIP", "").strip().lower() in _TRUTHY:
+        return False
+    return os.environ.get("CI", "").strip().lower() in _TRUTHY
+
+
+def _chrome_options():  # type: ignore[no-untyped-def]
+    """Headless Chrome options, pointed at ``CHROME_BINARY`` when one is named.
+
+    Without it, chromedriver resolves the browser itself and lands on
+    ``/usr/bin/google-chrome`` - the runner image's Chrome, whatever version
+    that happens to be, regardless of what the workflow installed or what is
+    first on ``PATH``. That is how CI got a driver and a browser a major
+    version apart. Naming the binary is what ties the two together.
+    """
     from selenium.webdriver.chrome.options import Options
 
     options = Options()
@@ -38,14 +67,45 @@ def _make_headless_driver():  # type: ignore[no-untyped-def]
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,900")
-    return webdriver.Chrome(options=options)
+    binary = os.environ.get("CHROME_BINARY", "").strip()
+    if binary:
+        options.binary_location = binary
+    return options
+
+
+def _chrome_service():  # type: ignore[no-untyped-def]
+    """The driver to talk to, pinned to ``CHROMEDRIVER_BINARY`` when named.
+
+    A chromedriver already on ``PATH`` is used in preference to fetching a
+    matching one, so naming the browser alone is not enough: the runner image
+    ships its own driver, and pairing it with a Chrome the workflow installed
+    separately is the same major-version mismatch from the other side. Both
+    halves come from the same install step, or neither does.
+    """
+    from selenium.webdriver.chrome.service import Service
+
+    driver = os.environ.get("CHROMEDRIVER_BINARY", "").strip()
+    return Service(executable_path=driver) if driver else Service()
+
+
+def _make_headless_driver():  # type: ignore[no-untyped-def]
+    from selenium import webdriver
+
+    return webdriver.Chrome(options=_chrome_options(), service=_chrome_service())
 
 
 @pytest.fixture(scope="module")
 def driver():  # type: ignore[no-untyped-def]
     try:
         drv = _make_headless_driver()
-    except Exception as exc:  # noqa: BLE001 - any driver startup issue -> skip
+    except Exception as exc:  # noqa: BLE001 - any driver startup issue
+        if _browser_required():
+            pytest.fail(
+                f"Chrome is required here but could not start: {exc}. "
+                "These tests are the only coverage of the async booking chain, so a "
+                "missing browser fails the run rather than shrinking the suite silently. "
+                "Set ALLOW_BROWSER_TEST_SKIP=1 to downgrade this back to a skip."
+            )
         pytest.skip(f"Chrome not available: {exc}")
     drv.set_script_timeout(30)
     yield drv
