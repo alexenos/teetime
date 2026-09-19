@@ -23,19 +23,26 @@ The second one is the surprise, and the reason this section exists: taking a PR
 ready-for-review looks like it should start a review, and does not.
 
 Both conditions are mutable, so treat them as observed rather than permanent -
-as of 2026-09-12 the repo had 0 stars, and the bot reported a plan allowing one
-included review per hour. Re-check rather than assume when the behaviour differs
-from this:
+as of 2026-09-19 the repo had 0 stars. Re-check rather than assume when the
+behaviour differs:
 
 ```bash
 gh api repos/alexenos/teetime --jq .stargazers_count   # against the threshold above
 ```
 
-and read the quota off the bot's own "Included review availability" line, which
-it prints on every review.
+The bot states its own configuration in the summary comment it posts on every
+PR, inside a "⚙️ Run configuration" block. Read it there rather than trusting
+this file - on #211, #212 and #217 it said **Plan: Advanced**, profile
+`ASSERTIVE`, configuration from the Organization UI.
+
+**An earlier version of this skill said to read the quota off an "Included
+review availability" line. No such line appears in the current summary
+comments.** Do not go looking for it; §Rate limits below is what to do instead.
 
 So the trigger is a comment, posted by you, naming the commit you want looked at
-(CodeRabbit is incremental and will not re-review commits it has already seen):
+(CodeRabbit is incremental and will not re-review commits it has already seen -
+it says so itself: *"CodeRabbit is an incremental review system and does not
+re-review already reviewed commits"*):
 
 ```bash
 gh pr comment <N> --body "@coderabbitai review - new commit $(git rev-parse --short HEAD)"
@@ -43,6 +50,110 @@ gh pr comment <N> --body "@coderabbitai review - new commit $(git rev-parse --sh
 
 Post it **when you open the PR**, and **again after every push** you want
 reviewed, including a ready-for-review transition.
+
+### No `gh`? Use the GitHub MCP tools
+
+Claude Code on the web has no `gh`, `hub`, or GitHub API access - only the
+`mcp__github__*` tools. Every `gh` command in this file has an equivalent, and
+the automation below has to work on either. The ones this skill needs:
+
+| `gh` | MCP |
+|---|---|
+| `gh pr comment <N> --body ...` | `mcp__github__add_issue_comment` |
+| `gh pr view <N> --json comments` | `mcp__github__pull_request_read` method `get_comments` |
+| `gh api .../pulls/<N>/comments` | `mcp__github__pull_request_read` method `get_review_comments` |
+| `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
+| `gh api repos/{o}/{r}` | `mcp__github__search_repositories` with `repo:alexenos/teetime` |
+
+### Rate limits, and re-prompting without sitting there
+
+Triggering is cheap but not free, and a trigger that is refused looks almost
+exactly like one that is still working. Drive it as a loop with a real clock
+rather than by feel.
+
+**1. Post the trigger, then read the bot's reply.** CodeRabbit acknowledges
+fast - on #211 the ack landed **7 seconds** after the request (`01:53:02` →
+`01:53:09`). Its ack is an issue comment from `coderabbitai[bot]` reading:
+
+```
+✅ Action performed
+Review finished.
+```
+
+That means the request took. It does **not** mean findings exist yet; those
+arrive later as inline review comments ("## 4. Read the review properly").
+
+**2. Classify the reply.** Three outcomes, and they need different waits:
+
+- **Ack, as above** → triggered. Go to "## 3. Wait" below and poll for
+  findings.
+- **A reply naming a wait** → the common case when it refuses, and the one
+  that needs no guessing. See step 3.
+- **No reply at all within ~3 minutes** → assume the trigger did not register.
+  Re-post once. If the second attempt is also silent, treat it as rate-limited
+  and use the fallback estimate in step 4.
+
+**3. When it is rate limited, it tells you how long. Use its number.** The bot
+states the remaining wait in the comment itself, so read the answer rather than
+estimating around it. Take the most recent `coderabbitai[bot]` issue comment
+after your trigger, pull the duration out of its text - it is written for
+people, so expect a form like minutes and seconds rather than a machine field -
+and convert it against that comment's own `created_at`, not against the clock
+when you got round to reading it:
+
+```
+next_eligible = <created_at of the rate-limit comment> + <the wait it names> + 2 minutes
+```
+
+Anchoring on `created_at` matters because the comment may have been sitting
+there for a while before this session looked; anchoring on "now" would wait out
+the same window twice. The two minutes is boundary margin, for the same reason
+step 4 uses 61 rather than 60.
+
+Capture the wording the first time you see one and paste it here, so the next
+session pattern-matches instead of re-deriving it.
+
+**4. Fallback, only when nothing states a wait.** Silence, or a refusal with no
+duration in it. Anchor on a timestamp that exists rather than on when you
+happened to ask:
+
+```
+next_eligible = <created_at of the last successful review ack> + 61 minutes
+```
+
+Both halves are readable from the API - the ack is an issue comment by
+`coderabbitai[bot]` carrying `created_at`. If no successful review exists on
+this PR yet, anchor on your own last trigger comment instead.
+
+**61, not 60, and the extra minute is the point.** An estimate that lands
+exactly on the boundary is refused as often as it succeeds - clock skew between
+here and the bot, a window measured from a slightly later instant than the one
+you anchored on, a retry that fires a few seconds early. Each near-miss costs a
+whole cycle to discover, so buy the margin.
+
+The hour is a **guess, not a measured limit** - a stand-in for a number the bot
+will give you directly if you let it. Claude checked #204, #211, #212 and #217
+on 2026-09-19 and found no rate-limit comment in any of them, so there is no
+captured example in this repo yet; that is four PRs out of roughly two hundred,
+not evidence the limit is rare. Step 3 is the real path. Replace this hour with
+an observed figure once one is written down.
+
+**5. Back off, and stop.** Retry at `next_eligible`. If that attempt is also
+refused, double the wait each time - 61 → 122 → 244 minutes - and **stop after
+three refusals.** Tell the user what the bot said and that the review is not
+coming on its own. Never spam the PR: each trigger is a public comment on the
+thread, and a column of them is noise a reviewer has to scroll past.
+
+**6. Schedule the retry; do not wait for it.** The re-prompt is a scheduled
+wake-up, not a sleep. Use the `send_later` tool
+(`mcp__Claude_Code_Remote__send_later`) with `delay_minutes` set from step 3 or 4,
+and a message that carries the PR number, the head sha you want reviewed, which
+attempt this is, and what the bot last said. Then end the turn. A foreground
+`sleep` burns the session for an hour and dies with the container; a scheduled
+wake-up survives both.
+
+Fold this into the PR check-in if one is already armed rather than running two
+clocks against the same PR.
 
 Its walkthrough, "Merge Risk", and pre-merge checks are each stamped with the
 commit they covered - the summary says `up to <short-sha>`. After a later push
@@ -209,7 +320,10 @@ Always `poetry run` — the local venv lives outside the repo, under Poetry's
 cache. (CI is configured `virtualenvs-in-project`, so there it is `.venv`; both
 need `poetry run` either way.)
 
-Push, then re-poll; CodeRabbit re-reviews each push.
+Push, then **trigger the review again** and re-poll. CodeRabbit does not
+re-review a push on its own here - the same two rules at the top of this file
+suppress it every time, not just on the first round. Name the new head sha in
+the trigger comment, and run the rate-limit loop again if it is refused.
 
 ## 8. Report, and stop
 

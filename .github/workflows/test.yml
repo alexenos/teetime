@@ -50,10 +50,33 @@ jobs:
 
       - name: Run type checking with mypy
         run: poetry run mypy app
-        continue-on-error: true  # Pre-existing type errors in codebase
+
+      # tests/test_async_chain_integration.py drives a real headless Chrome.
+      # Installing it here declares the version instead of inheriting whatever
+      # the runner image happens to ship, and the suite now fails rather than
+      # skips when it is missing (CI is set by Actions) - see #159.
+      #
+      # install-chromedriver gives a driver matched to the Chrome installed
+      # here. Both paths are then handed to pytest explicitly: left to their
+      # own lookups, chromedriver resolves the browser to
+      # /usr/bin/google-chrome and Selenium prefers a chromedriver already on
+      # PATH - both of which are the runner image's, not this step's, and a
+      # major version apart from it.
+      - name: Install Chrome for the browser integration tests
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-chromedriver: true
 
       - name: Run tests with pytest
         run: poetry run pytest -v --tb=short
+        env:
+          # Both come from the step above, so the pair always matches. Empty
+          # or unset falls back to the default lookups, which is what ran here
+          # before this step existed.
+          CHROME_BINARY: ${{ steps.setup-chrome.outputs.chrome-path }}
+          CHROMEDRIVER_BINARY: ${{ steps.setup-chrome.outputs.chromedriver-path }}
 
   lint:
     runs-on: ubuntu-latest
