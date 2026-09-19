@@ -383,15 +383,28 @@ class Settings(BaseSettings):
     # Instants past the aim to send the burst's members at, comma-separated ms.
     #
     # The aim is the club's tick (walden_window_opens_offset_ms), so 0 is
-    # :01.000 and 2600 is :03.600. Dense for the first half-second, because the
+    # :01.000 and 700 is :01.700. Dense for the first half-second, because the
     # probe brackets the tick to +-22ms and the first member can land a hair
-    # early; then every 200-400ms out past the latest instant at which the club
-    # has rendered its sheet closed to us on a Friday (:02.8 on 08-28). A member
-    # is one POST of ~1.8KB and one ~670KB refusal back; twelve of them over
-    # 2.6s is three or four in flight at once, which the pair had already
-    # exercised at two. Whether the club tolerates that many is the ad-hoc test
-    # this mode must pass before a race - see the module docstring.
-    walden_reserve_burst_offsets_ms: str = "0,100,220,370,520,700,900,1150,1450,1800,2200,2600"
+    # early. A member is one POST of ~1.8KB and one ~670KB refusal back.
+    #
+    # Halved from twelve members (out to 2600) on 2026-09-18. The tail existed
+    # to cover a gate that might open late - "out past the latest instant at
+    # which the club has rendered its sheet closed to us on a Friday" - and that
+    # evidence was withdrawn by docs/booking-post-mortem-2026-09-04.md: a
+    # refusal's sheet-closed marker is a re-render of *our own* staged snapshot,
+    # not a statement about the club. 2026-09-18 then bounded the gate directly:
+    # a grant, plus the self-blocked refusals it caused stamped in club :01,
+    # puts the open instant inside [+1017, +2000]ms.
+    #
+    # So the tail covered nothing. What it did do is cost time: the club's hold
+    # timer is 300s (executeHoldTimeTimer('300')), so once any member holds the
+    # target, re-asking it inside the race cannot win - and the serial fallback
+    # walk does not start until the burst drains. On 09-11 that walk began at
+    # +5305ms; on 09-04 fourteen asks out to +10.7s never reached 09:08, which
+    # was free the whole morning. Six members span +1030..+1730 in the ledger's
+    # frame, still covering the probe's error and any tick jitter, and hand the
+    # fallback walk roughly three more seconds.
+    walden_reserve_burst_offsets_ms: str = "0,100,220,370,520,700"
 
     # How many members from the front of the burst ask for the target alone.
     #
