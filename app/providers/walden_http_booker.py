@@ -274,7 +274,7 @@ _RUNG_LATE_GRACE_MS = 2000
 OPENING_MODE_LADDER = "ladder"
 OPENING_MODE_BURST = "burst"
 
-# Ceiling on burst members, and so on threads. The default plan is twelve; the
+# Ceiling on burst members, and so on threads. The default plan is six; the
 # cap exists so a misconfigured offsets string cannot turn into a hundred
 # sockets against a club that has only ever seen two in flight.
 _BURST_MAX_MEMBERS = 16
