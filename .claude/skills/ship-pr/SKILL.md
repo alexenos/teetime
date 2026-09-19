@@ -59,11 +59,20 @@ the automation below has to work on either. The ones this skill needs:
 
 | `gh` | MCP |
 |---|---|
+| `gh pr create` | `mcp__github__create_pull_request` |
 | `gh pr comment <N> --body ...` | `mcp__github__add_issue_comment` |
 | `gh pr view <N> --json comments` | `mcp__github__pull_request_read` method `get_comments` |
 | `gh api .../pulls/<N>/comments` | `mcp__github__pull_request_read` method `get_review_comments` |
+| `gh api .../pulls/<N>/comments/<ID>/replies` | `mcp__github__add_reply_to_pull_request_comment` |
 | `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
-| `gh api repos/{o}/{r}` | `mcp__github__search_repositories` with `repo:alexenos/teetime` |
+| `gh api repos/{o}/{r} --jq .stargazers_count` | `mcp__github__search_repositories`, below |
+
+The star count needs care. `mcp__github__search_repositories` returns a result
+*list*, so select the row whose `full_name` is `alexenos/teetime` rather than
+taking the first. Its field name also depends on the output mode: the default
+`minimal_output: true` names it `Stars`, and `minimal_output: false` returns the
+full GitHub object with `stargazers_count`, matching the `gh` command above.
+Pass `minimal_output: false` and read `stargazers_count`, so the two paths agree.
 
 ### Rate limits, and re-prompting without sitting there
 
@@ -72,16 +81,27 @@ exactly like one that is still working. Drive it as a loop with a real clock
 rather than by feel.
 
 **1. Post the trigger, then read the bot's reply.** CodeRabbit acknowledges
-fast - on #211 the ack landed **7 seconds** after the request (`01:53:02` →
-`01:53:09`). Its ack is an issue comment from `coderabbitai[bot]` reading:
+fast - 7 seconds on #211 (`01:53:02` → `01:53:09`), 9 seconds on #217
+(`23:32:43` → `23:32:52`). The ack is an issue comment from `coderabbitai[bot]`,
+and it comes in **two wordings that mean different things**:
 
 ```
-✅ Action performed
-Review finished.
+Action performed
+Review triggered.          ← work is starting; findings are minutes away
 ```
 
-That means the request took. It does **not** mean findings exist yet; those
-arrive later as inline review comments ("## 4. Read the review properly").
+```
+Action performed
+Review finished.           ← nothing left to do on this commit
+```
+
+Both confirm the trigger registered. Only the second means the review is over -
+it appears when every commit in range has already been reviewed, since
+CodeRabbit is incremental. Read "Review triggered" as the start of a wait, not
+the end of one; the summary comment then shows *"Currently processing new
+changes in this PR"* while it runs, and findings arrive afterwards as inline
+review comments ("## 4. Read the review properly"). On #217 that gap was about
+six minutes.
 
 **2. Classify the reply.** Three outcomes, and they need different waits:
 
@@ -89,9 +109,13 @@ arrive later as inline review comments ("## 4. Read the review properly").
   findings.
 - **A reply naming a wait** → the common case when it refuses, and the one
   that needs no guessing. See step 3.
-- **No reply at all within ~3 minutes** → assume the trigger did not register.
-  Re-post once. If the second attempt is also silent, treat it as rate-limited
-  and use the fallback estimate in step 4.
+- **No reply at all within ~3 minutes** → **re-fetch the bot's comments
+  before doing anything.** An ack can land between the check that found none and
+  the repost, and a second trigger comment for the same head sha is public noise
+  that buys nothing: CodeRabbit will not re-review a commit it has already seen,
+  so the duplicate cannot even produce a second review. Only if the re-fetch
+  still shows no ack, re-post once. If that attempt is also silent, treat it as
+  rate-limited and use the fallback estimate in step 4.
 
 **3. When it is rate limited, it tells you how long. Use its number.** The bot
 states the remaining wait in the comment itself, so read the answer rather than
@@ -146,8 +170,16 @@ thread, and a column of them is noise a reviewer has to scroll past.
 
 **6. Schedule the retry; do not wait for it.** The re-prompt is a scheduled
 wake-up, not a sleep. Use the `send_later` tool
-(`mcp__Claude_Code_Remote__send_later`) with `delay_minutes` set from step 3 or 4,
-and a message that carries the PR number, the head sha you want reviewed, which
+(`mcp__Claude_Code_Remote__send_later`).
+
+`next_eligible` from steps 3 and 4 is an **absolute timestamp**, and
+`delay_minutes` is a **duration** - passing one as the other schedules the retry
+at the wrong time. `send_later` takes an absolute time directly, so pass
+`at: <next_eligible>` in RFC3339 and skip the arithmetic entirely. Use
+`delay_minutes` only for a wait you computed as a duration to begin with, and
+then from `now`, not from the anchor timestamp.
+
+Carry in the message the PR number, the head sha you want reviewed, which
 attempt this is, and what the bot last said. Then end the turn. A foreground
 `sleep` burns the session for an hour and dies with the container; a scheduled
 wake-up survives both.
