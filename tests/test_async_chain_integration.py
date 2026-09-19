@@ -8,7 +8,8 @@ none of which can happen while a script blocks the event loop. These tests
 would all fail (timeout waiting for disable-div) under the old synchronous
 spin-wait implementation.
 
-Requires Chrome; tests are skipped automatically when it isn't available.
+Requires Chrome. When it isn't available these tests skip locally and fail
+under CI - see ``_browser_required`` for why the two differ.
 """
 
 import os
@@ -29,6 +30,27 @@ FIXTURE = Path(__file__).parent / "fixtures" / "async_chain_test_page.html"
 DRIFT_TOLERANCE_MS = int(os.environ.get("CHAIN_DRIFT_TOLERANCE_MS", "150"))
 
 
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _browser_required() -> bool:
+    """Whether a missing Chrome should fail the run rather than skip it.
+
+    Skipping is right on a laptop that has no Chrome. In CI it is the hole
+    #159 describes: the seven tests below vanish, the job still reports
+    success, and the only automated coverage of the async booking chain is
+    gone with nothing to say so.
+
+    ``ALLOW_BROWSER_TEST_SKIP`` is the escape hatch for an environment that
+    sets ``CI`` but genuinely has no browser - the remote dev container, where
+    only Playwright's Chromium is installed and ``google-chrome`` is not on
+    ``PATH``, is the case this exists for.
+    """
+    if os.environ.get("ALLOW_BROWSER_TEST_SKIP", "").strip().lower() in _TRUTHY:
+        return False
+    return os.environ.get("CI", "").strip().lower() in _TRUTHY
+
+
 def _make_headless_driver():  # type: ignore[no-untyped-def]
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -45,7 +67,14 @@ def _make_headless_driver():  # type: ignore[no-untyped-def]
 def driver():  # type: ignore[no-untyped-def]
     try:
         drv = _make_headless_driver()
-    except Exception as exc:  # noqa: BLE001 - any driver startup issue -> skip
+    except Exception as exc:  # noqa: BLE001 - any driver startup issue
+        if _browser_required():
+            pytest.fail(
+                f"Chrome is required here but could not start: {exc}. "
+                "These tests are the only coverage of the async booking chain, so a "
+                "missing browser fails the run rather than shrinking the suite silently. "
+                "Set ALLOW_BROWSER_TEST_SKIP=1 to downgrade this back to a skip."
+            )
         pytest.skip(f"Chrome not available: {exc}")
     drv.set_script_timeout(30)
     yield drv

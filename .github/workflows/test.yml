@@ -50,7 +50,16 @@ jobs:
 
       - name: Run type checking with mypy
         run: poetry run mypy app
-        continue-on-error: true  # Pre-existing type errors in codebase
+
+      # tests/test_async_chain_integration.py drives a real headless Chrome.
+      # Installing it here declares the version instead of inheriting whatever
+      # the runner image happens to ship, and the suite now fails rather than
+      # skips when it is missing (CI is set by Actions) - see #159.
+      - name: Install Chrome for the browser integration tests
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-chromedriver: true
 
       - name: Run tests with pytest
         run: poetry run pytest -v --tb=short
