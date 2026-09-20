@@ -3,7 +3,7 @@
 **Status:** Part A (phase 0) built — see "Phase 0 as built" below. Part B still
 draft, for review. No change to the booking path in phase 0 or 1.
 **Date:** 2026-09-11
-**Companion:** `docs/booking-post-mortem-2026-09-11.md`
+**Companion:** `operations/race-reports/2026-09-11.md`
 
 ---
 

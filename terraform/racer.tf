@@ -1,5 +1,5 @@
 ###############################################################################
-# The racer job (issue #184, Part B of docs/design-observer-and-fanout.md)
+# The racer job (issue #184, Part B of operations/design-observer-and-fanout.md)
 #
 # The 6:30 AM race, as a Cloud Run *job* whose tasks each race one requester's
 # bookings in their own container. It replaces the booking service's

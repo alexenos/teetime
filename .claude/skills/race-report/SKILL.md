@@ -1,18 +1,22 @@
 ---
-name: booking-postmortem
-description: Diagnose why the morning's TeeTime booking run failed. Use when the user says the bot lost the race, didn't get the tee time, "we didn't beat the humans", or asks to check the booking logs for a given morning. Pulls Cloud Run logs and the GCS debug artifacts, classifies the failure, and reports what is and isn't established.
+name: race-report
+description: Report on this morning's TeeTime booking race, win or loss. Use when the user asks to check the booking logs for a given morning, wants the morning's race report, says the bot lost the race or didn't get the tee time, or asks "did we beat the humans". Pulls Cloud Run logs and the GCS debug artifacts, classifies the outcome, and reports what is and isn't established.
 ---
 
-# Morning booking post-mortem
+# Morning race report
 
 The booking job fires at 06:28 CT. The window nominally opens at 06:30:00 CT,
 but the club's sheet actually opens a second or so later — usually 06:30:01,
 and on 2026-08-21 not until 06:30:02. That is why the run no longer aims at
 06:30:00.000, and why §7a is about a boundary that *moves* rather than a fixed
-one. The bot first won the race on 2026-08-15, so losing is no longer the
-default — but when a morning does lose, the question is the same: did we lose
-the race, or did we refuse ourselves? This skill is the repeatable path to that
-answer.
+one. The bot first won the race on 2026-08-15, and winning is now the default
+rather than the exception — this skill runs every morning regardless of
+outcome, because the round-trip and timing data in a win is exactly what
+catches the next regression before it costs a loss (see §7b). When a morning
+does lose, the question is the same as it always was: did we lose the race, or
+did we refuse ourselves? This skill is the repeatable path to that answer,
+win or lose. Reports live in `operations/race-reports/<YYYY-MM-DD>.md`, named
+for the morning that ran, not the date being raced for.
 
 ## 0. Set the session up
 
@@ -52,7 +56,7 @@ Established 2026-08-15; the setup script does exactly this.
 points `GOOGLE_APPLICATION_CREDENTIALS` at `/tmp/gcp-key.json`, but nothing
 decodes one into the other, so a test for the file's *existence* passes and
 everything downstream fails with an ADC error that names nothing. Test `-s`, not
-`-f`. See `docs/debug-artifact-access.md` for the service account and its
+`-f`. See `operations/debug-artifact-access.md` for the service account and its
 grant — read-only, one bucket and the project's logs.
 
 If for some reason the CLI is unavailable, nothing here is blocked:
@@ -532,9 +536,30 @@ deeper: the payload is re-rendered chrome around a cached row block.
 
 ## 7b. The margin 08-16 spent, and what to watch
 
+**Corrected 2026-09-20: read this section as history, not as the current
+budget.** At the time, 08-16's winning Reserve really was budgeted against
+`_RESERVE_TIMEOUT_S` (3.0s) with 65ms to spare, because `walden_http_booker.py`
+had only the one timeout. Two mornings later (09-06, 2774ms/226ms of margin)
+made the same near-miss twice, and PR #180 (2026-09-06, "give the opening its
+own timeout") split the budget in two:
+
+- **`_RESERVE_OPENING_TIMEOUT_S` = 10.0s** — governs every Reserve fired from
+  the opening burst or the opening pair, member #0 (the one that usually wins)
+  included. This is the budget a **race** row in the table below is actually
+  measured against.
+- **`_RESERVE_TIMEOUT_S` stays 3.0s** — governs only the *serial* fallback
+  walk, after the opening burst is exhausted and the ladder is asking rungs one
+  at a time. An **ad-hoc** booking (no race, no burst) also walks serially, so
+  3.0s is the live budget for those rows.
+
+So a race-morning `roundTripMs` of 2-3s — 2026-09-20 saw two such rows, both
+race-opening grants — has roughly 7-8s of margin, not none. Don't reread a
+race row's round trip against 3.0s; that mistake has now been made more than
+once. The rest of this section is kept for the history of *why* the opening
+timeout is 10.0s, not as live guidance about the 3.0s figure.
+
 The same 2935ms that blurred the boundary is a risk in its own right, and it is
-the one thing worth checking on every future race. `_RESERVE_TIMEOUT_S` is
-**3.0s**, so the winning Reserve came back with 65ms to spare. Round trips on
+the one thing worth checking on every future race. Round trips on
 record, from the ledgers:
 
 | morning | kind | roundTripMs |
@@ -571,15 +596,19 @@ its answer at 06:30:03 for a request sent at 06:30:01.022, so most of the delay
 was on the club's side rather than the return leg — consistent with race-morning
 load, and therefore likely to recur on exactly the mornings that matter.
 
-Had it crossed 3.0s the run would have abandoned a Reserve the club had already
-granted, and per the ladder's own rule a timeout closes the fallback list for the
-rest of the run. So the failure this nearly produced is the `success=True` /
-no-reservation class in §6 — the one that reads like a win.
+Had it crossed 3.0s — the budget in force at the time — the run would have
+abandoned a Reserve the club had already granted, and per the ladder's own
+rule a timeout closes the fallback list for the rest of the run. That near-miss
+is what §7b's correction above describes PR #180 fixing; a race-opening row
+today is measured against 10.0s instead, so the same numbers no longer carry
+the same risk.
 
-**So read `roundTripMs` on every race ledger, not just when the boundary is in
-question.** A second morning near 3s makes raising `_RESERVE_TIMEOUT_S` the
-cheapest fix; a single one does not, and one data point is not a trend. This
-needs no morning to test — it is a number already in the ledger.
+**Still read `roundTripMs` on every race ledger — it's free evidence about the
+club's load and the boundary (§7a), even though it no longer threatens a
+timeout on the opening burst.** If a *serial-walk* fallback row (post-burst,
+one rung at a time) ever approaches 3.0s, that budget is the live one to
+reconsider raising — check which path produced the row (§3's "opening burst"
+vs. "serial walk" log lines) before reading urgency into a number.
 
 ## 7c. Where the race budget actually goes
 
@@ -642,7 +671,7 @@ the ledger's `sentMsPastWindow`, never from the log line.**
 
 This supersedes the reading of `sheet=closed` / `disable-div` in §3, §6 and
 §7a wherever it is used as evidence about the club. The full account is
-`docs/booking-post-mortem-2026-09-04.md`; the corrections a post-mortem needs:
+`operations/race-reports/2026-09-04.md`; the corrections a post-mortem needs:
 
 **A refusal's body is a re-render of our own view as of its last refresh.**
 Not just the countdown and the rows (§5, §7a): the `disable-div` marker too.
@@ -688,7 +717,7 @@ information about our snapshot only. `_RESERVE_DEADLINE_MS` is 30s.
 
 The first Friday race on the burst. Twelve asks for 08:38, `:01`→`:05`, all
 refused; the first fallback granted on its first ask at +5305ms (club `:06`).
-Full account in `docs/booking-post-mortem-2026-09-11.md`.
+Full account in `operations/race-reports/2026-09-11.md`.
 
 **The pre-window view is a control, and it settles "pre-placed vs won in the
 race".** A refusal's body is our own pre-window snapshot (§7d) — which makes it

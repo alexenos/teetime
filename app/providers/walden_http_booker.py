@@ -249,7 +249,7 @@ _RESERVE_TIMEOUT_S = 3.0
 #   by our own in-flight ask all fit. `serverMsPastWindow` cannot separate them:
 #   the HTTP Date header is whole-second, so it only restates
 #   sent + roundTripMs bucketed to the second. Do not read a club-second as
-#   independent evidence about a gate - see docs/booking-post-mortem-2026-09-06.md.
+#   independent evidence about a gate - see operations/race-reports/2026-09-06.md.
 #
 # The sizing does not depend on which reading is right. Waiting is close to free
 # here, because burst members are each sent on their own thread - on 09-06 member
@@ -1732,7 +1732,7 @@ class DirectHttpBooker:
         # alone only restates the mystery. cpu/wall near 1.0 means the cycles
         # were genuinely burned - a slower or throttled vCPU, or more work than
         # benchmarked. Near 0.1 means this process was descheduled and something
-        # else took the CPU. See docs/booking-post-mortem-2026-08-21.md.
+        # else took the CPU. See operations/race-reports/2026-08-21.md.
         wall_start = time_module.perf_counter()
         cpu_start = time_module.process_time()
         container_cpu_start = _container_cpu_ms()

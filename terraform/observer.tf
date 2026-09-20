@@ -1,5 +1,5 @@
 ###############################################################################
-# The observer job (issue #189, phase 0 of docs/design-observer-and-fanout.md)
+# The observer job (issue #189, phase 0 of operations/design-observer-and-fanout.md)
 #
 # A separate Cloud Run *job* that logs in, parks on the target tee sheet and
 # photographs it once a second across the booking window. It never sends a

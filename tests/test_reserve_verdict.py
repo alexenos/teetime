@@ -192,7 +192,7 @@ class TestSweepLadder:
         # Reaches past the probe's bracket and any tick jitter, but no further.
         # This used to assert >= 1800, to reach "past the latest instant a
         # Friday sheet has rendered closed" (+2.8s on 08-28). That evidence was
-        # withdrawn by docs/booking-post-mortem-2026-09-04.md - a refusal's
+        # withdrawn by operations/race-reports/2026-09-04.md - a refusal's
         # sheet-closed marker re-renders our own staged snapshot, not the club -
         # and 2026-09-18 bounded the gate inside [+1017, +2000]ms from a grant
         # plus the self-blocked refusals it caused in club :01. So the tail was
@@ -204,7 +204,7 @@ class TestSweepLadder:
         # burst drains (+5305ms on 09-11; on 09-04 fourteen asks out to +10.7s
         # never reached 09:08, free all morning).
         assert len(offsets) <= 8
-        # Target-only by default (see docs/booking-post-mortem-2026-09-04-evening.md):
+        # Target-only by default (see operations/race-reports/2026-09-04-evening.md):
         # a fallback interleaved into the burst shares the target's ViewState, and
         # the 2026-09-04 evening ad-hoc test found the club can finalize the
         # fallback's grant instead of the target's. The fallback list is walked
