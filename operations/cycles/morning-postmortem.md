@@ -27,6 +27,30 @@ producing a verdict. It reports via push notification only.
 Correction: change the cron to `40 12 * * *` on or before that date. Until
 then the cycle produces no data on any morning it misfires.
 
+## Prompt defect: the step 3 watch line names the wrong timeout
+
+Step 3 instructs the session to read `roundTripMs` from every race ledger and
+treats "a second morning near the 3.0s `_RESERVE_TIMEOUT_S`" as the trigger to
+raise that constant. `_RESERVE_TIMEOUT_S = 3.0` governs the serial fallback
+walk. Race-morning Reserves are burst fires and are sent with
+`_RESERVE_OPENING_TIMEOUT_S = 10.0`
+(`app/providers/walden_http_booker.py:221, 260, 1989`). The line applies the
+serial budget to round trips that budget does not bound.
+
+Established by #219, merged 2026-09-19: the 2026-09-18 post-mortem's "112ms
+escape" was withdrawn on this basis. A 2888ms round trip had roughly 7.1s of
+headroom rather than 112ms. Following the watch line is what produced that
+report.
+
+The prompt below is not corrected here. It is a record of the text deployed in
+the Routine, and the Routine is unchanged. Correcting it is two edits made
+together: this file in a PR, and the Routine to match. Section 7b of
+`.claude/skills/booking-postmortem/SKILL.md` carries the same defect and is
+listed in #219's fix list.
+
+Not established: what the correct trigger threshold is against a 10.0s budget.
+No morning on record has approached it.
+
 ## Definition of "clean" for this cycle
 
 The report required no correction before the maintainer could act on it.
