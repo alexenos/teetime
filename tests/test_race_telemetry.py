@@ -13,7 +13,7 @@ anything read against the attempt it came from:
 * ``sheet_open``    - attempt 4, sent +4009ms, club clock 06:30:04, refused
 * ``accepted``      - attempt 5, sent +4871ms, club clock 06:30:05, granted
 
-See docs/booking-post-mortem-2026-08-21.md.
+See operations/race-reports/2026-08-21.md.
 """
 
 import gzip

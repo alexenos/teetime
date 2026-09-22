@@ -11,7 +11,7 @@ Credentials, in order of preference:
        (``gcloud auth print-access-token``). Nothing is stored; it expires in
        about an hour.
     2. Application Default Credentials - ``GOOGLE_APPLICATION_CREDENTIALS``
-       pointing at a service-account key. See docs/debug-artifact-access.md for
+       pointing at a service-account key. See operations/debug-artifact-access.md for
        the read-only service account this expects.
 
 Usage::

@@ -198,7 +198,7 @@ _database_url = _normalize_database_url(settings.database_url)
 # survive a gap that long - the Cloud SQL socket is gone by the time the next
 # request wakes the container - so the pool hands the job a dead connection and
 # its first query raises "connection is closed" before anything can retry. That
-# is the 2026-08-19 failure; see docs/booking-post-mortem-2026-08-20.md.
+# is the 2026-08-19 failure; see operations/race-reports/2026-08-20.md.
 #
 #   pre_ping  - round-trips a cheap SELECT 1 and transparently reconnects on a
 #               dead connection. This is the setting that closes the failure.

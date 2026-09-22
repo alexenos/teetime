@@ -151,7 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Telegram is enabled by `TELEGRAM_BOT_TOKEN` independently of
   `MESSAGING_CHANNEL`, so both channels can be live at once and Telegram can be
   exercised end to end before Discord is switched off. **No cost is saved until
-  that switch happens** - see `docs/telegram-setup.md`.
+  that switch happens** - see `operations/telegram-setup.md`.
 
   In a group the addressing (`@teetimebot`, or `/book@teetimebot`) is stripped
   before the text reaches the parser, mirroring the Discord gateway's
@@ -240,7 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reservation record ended up anchored to the fallback (04:58 PM) rather than
   the target the chain reported booking (05:06 PM) - the 05:06 PM slot was
   still open on the post-race sheet. See
-  `docs/booking-post-mortem-2026-09-04-evening.md`. The interleave code is
+  `operations/race-reports/2026-09-04-evening.md`. The interleave code is
   unchanged and stays reachable via an explicit
   `WALDEN_RESERVE_BURST_TARGET_ONLY`, for a future fix that makes concurrent
   grants under one ViewState safe.
@@ -307,7 +307,7 @@ a single Reserve sent at −7ms and −14ms; the change that separates them is b
 
 ### Known issues
 
-Carried from `docs/booking-post-mortem-2026-08-20.md`, neither fixed in this
+Carried from `operations/race-reports/2026-08-20.md`, neither fixed in this
 release:
 
 - **Stale pooled DB connection.** The engine sets neither `pool_pre_ping` nor

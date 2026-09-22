@@ -19,7 +19,7 @@ Lives in ``scripts/`` rather than ``app/observer/`` on purpose. BeautifulSoup
 is a dev dependency, and nothing here belongs in the job image.
 
 Two properties of the club's markup are encoded because they were load-bearing
-in the 2026-09-11 post-mortem (``docs/booking-post-mortem-2026-09-11.md`` §3):
+in the 2026-09-11 post-mortem (``operations/race-reports/2026-09-11.md`` §3):
 
 * **Named members and TBD placeholders are counted separately.** Four
   ``custom-res-name-link`` anchors is a foursome of real members; one anchor

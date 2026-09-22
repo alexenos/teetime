@@ -368,7 +368,7 @@ class Settings(BaseSettings):
     # 700-1030ms between asks - and every Friday's target was gone before the
     # second ask. Under a crowd whose retries land every second or so, or a
     # gate that opens somewhere in a two-second span, one ask per 750ms is
-    # not in the race. See docs/booking-post-mortem-2026-09-04.md.
+    # not in the race. See operations/race-reports/2026-09-04.md.
     #
     # The fallback list is *not* replaced: by default the burst asks nothing
     # but the target (see walden_burst_target_only()) and the whole list is
@@ -390,7 +390,7 @@ class Settings(BaseSettings):
     # Halved from twelve members (out to 2600) on 2026-09-18. The tail existed
     # to cover a gate that might open late - "out past the latest instant at
     # which the club has rendered its sheet closed to us on a Friday" - and that
-    # evidence was withdrawn by docs/booking-post-mortem-2026-09-04.md: a
+    # evidence was withdrawn by operations/race-reports/2026-09-04.md: a
     # refusal's sheet-closed marker is a re-render of *our own* staged snapshot,
     # not a statement about the club. 2026-09-18 then bounded the gate directly:
     # a grant, plus the self-blocked refusals it caused stamped in club :01,
@@ -412,7 +412,7 @@ class Settings(BaseSettings):
     # burst asks nothing but the target regardless of how
     # walden_reserve_burst_offsets_ms is configured - see
     # walden_burst_target_only() and
-    # docs/booking-post-mortem-2026-09-04-evening.md. A copy of the offset
+    # operations/race-reports/2026-09-04-evening.md. A copy of the offset
     # count hard-coded here instead would silently drift the moment someone
     # lengthens the offsets list past it, quietly reintroducing the fallback
     # interleave this default exists to remove.

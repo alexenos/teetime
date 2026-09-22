@@ -139,7 +139,7 @@ def is_addressed_to_bot(
     With privacy mode on, Telegram only ever delivers a group message that
     already satisfies this - it is the whole reason ``strip_bot_prefix`` could
     assume anything reaching it was addressing. With privacy mode off (see
-    docs/telegram-setup.md), Telegram hands over every message in the group,
+    operations/telegram-setup.md), Telegram hands over every message in the group,
     addressed or not, and this check is what stands in for the filter Telegram
     used to do for free. Skipped entirely for a private chat, where every
     message is already directed at the bot by construction.
@@ -440,7 +440,7 @@ class TelegramProvider(SMSProvider):
             # Status only, never the body: setWebhook echoes the secret back.
             # 401 means the bot token is wrong; 400 means the URL or the
             # secret_token was rejected (see the charset note in
-            # docs/telegram-setup.md).
+            # operations/telegram-setup.md).
             logger.error(
                 f"Failed to register Telegram webhook at {url}: " f"HTTP {exc.response.status_code}"
             )

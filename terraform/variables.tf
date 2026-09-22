@@ -182,7 +182,7 @@ variable "telegram_enabled" {
     TELEGRAM_WEBHOOK_SECRET in Secret Manager BEFORE setting this to true.
     Terraform creates those secrets empty, and a Cloud Run revision that
     references a secret with no version fails to deploy. See
-    docs/telegram-setup.md.
+    operations/telegram-setup.md.
   EOT
   type        = bool
   default     = true
@@ -744,11 +744,11 @@ variable "racer_max_requesters" {
   type        = number
   default     = 4
 
-  # Ten is the ceiling docs/design-observer-and-fanout.md sets before rate
+  # Ten is the ceiling operations/design-observer-and-fanout.md sets before rate
   # limiting and the club's terms need revisiting.
   validation {
     condition     = var.racer_max_requesters >= 1 && var.racer_max_requesters <= 10 && floor(var.racer_max_requesters) == var.racer_max_requesters
-    error_message = "racer_max_requesters must be a whole number from 1 to 10. Past 10, revisit rate limiting and the club's terms first (docs/design-observer-and-fanout.md)."
+    error_message = "racer_max_requesters must be a whole number from 1 to 10. Past 10, revisit rate limiting and the club's terms first (operations/design-observer-and-fanout.md)."
   }
 }
 
