@@ -539,7 +539,7 @@ deeper: the payload is re-rendered chrome around a cached row block.
 **Corrected 2026-09-20: read this section as history, not as the current
 budget.** At the time, 08-16's winning Reserve really was budgeted against
 `_RESERVE_TIMEOUT_S` (3.0s) with 65ms to spare, because `walden_http_booker.py`
-had only the one timeout. Two mornings later (09-06, 2774ms/226ms of margin)
+had only the one timeout. Three weeks later (09-06, 2774ms/226ms of margin)
 made the same near-miss twice, and PR #180 (2026-09-06, "give the opening its
 own timeout") split the budget in two:
 
@@ -604,11 +604,14 @@ today is measured against 10.0s instead, so the same numbers no longer carry
 the same risk.
 
 **Still read `roundTripMs` on every race ledger — it's free evidence about the
-club's load and the boundary (§7a), even though it no longer threatens a
-timeout on the opening burst.** If a *serial-walk* fallback row (post-burst,
-one rung at a time) ever approaches 3.0s, that budget is the live one to
-reconsider raising — check which path produced the row (§3's "opening burst"
-vs. "serial walk" log lines) before reading urgency into a number.
+club's load and the boundary (§7a).** An opening-burst row is only a timeout
+risk if it approaches the live 10.0s `_RESERVE_OPENING_TIMEOUT_S` — nothing
+observed so far has come remotely close (2-3s, §7b's correction above) — so
+don't reread a 2-3s race row as urgent. A *serial-walk* fallback row
+(post-burst, one rung at a time) is still budgeted at 3.0s, and one
+approaching that figure is the live thing to reconsider raising — check which
+path produced the row (§3's "opening burst" vs. "serial walk" log lines)
+before reading urgency into a number.
 
 ## 7c. Where the race budget actually goes
 
