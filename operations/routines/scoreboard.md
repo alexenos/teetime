@@ -1,77 +1,100 @@
-# Routine: scoreboard snapshot
+# Routine: scoreboard
 
-**Status: proposed. Not deployed.** No trigger exists for it. This file is the
+**Status: proposed. Not deployed.** No trigger exists. This file is the
 specification; deploying it is the steps in the last section.
 
 | | |
 |---|---|
 | **Trigger** | daily, `30 12 * * *` UTC (07:30 CT), proposed |
-| **Runs as** | a new session per firing, with no prior context |
-| **Authorization** | appends to GCS and sends a notification. **Commits nothing, opens no PR, merges nothing.** |
-| **Emits** | one row in `operations/ledger/snapshots.jsonl` |
-| **Clean** | the row was appended and its values were read from the stated sources, not inferred |
+| **Authorization** | reads every ledger, writes `docs/scoreboard.json`, appends to its own ledger. **Requires a repository write — see below.** |
+| **Emits** | `docs/scoreboard.json`, and one row in `operations/ledger/scoreboard.jsonl` |
+| **Owns** | the derived metrics; no source data of its own |
 
-## Why this is separate from the race report
+It reads the other Routines' ledgers and derives. It never writes to them.
 
-It would be cheaper to append the snapshot at the end of the race report
-Routine, which already runs daily and already has the morning's outcome in hand.
-Three things argue against it.
+## It needs a repository write, and that has a prerequisite
+
+The page is published from `docs/`, so publishing means committing there. That is
+a second standing authorization to write to `main`, and it is bounded the same way
+the race report's is: two paths (`docs/scoreboard.json` and, when regenerated,
+`docs/scoreboard.html`), a green `Tests` check, and nothing else.
+
+**`docs/` is not in the deploy filter.** The Cloud Build trigger sets
+`ignored_files = ["operations/**"]` (`terraform/main.tf`). `docs/**` is absent, so
+a commit to `docs/` fires a build and redeploys the live booking service. As
+written, this Routine would redeploy production every day it publishes.
+
+**Prerequisite: add `docs/**` to `ignored_files`.** One line of terraform, and it
+has to be applied to the live trigger before this Routine is deployed. Until then
+the Routine must not be turned on.
+
+## Why it is separate from the race report
+
+It would be cheaper to append this to the race report Routine, which already runs
+daily. Three things argue against it.
 
 **The race report's failure paths all stop early.** Wrong hour, no booking
-scheduled, environment not ready — every one is *push, then stop*. A snapshot at
-the end of that prompt is skipped on exactly the mornings something went wrong,
-which is where a gap in the history is least acceptable.
+scheduled, environment not ready — every one is *push, then stop*. A scoreboard
+update at the end of that prompt is skipped on exactly the mornings something went
+wrong, which is where a gap is least acceptable.
 
-**Cost is monthly and comes from somewhere else.** It is not a fact about this
-morning's race, and reading it does not belong in a session diagnosing one.
+**It reads every ledger, not just the morning's.** Its input is all the Routines,
+including its own history and the cost Routine's monthly rows.
 
-**The snapshot wants today's report already merged.** Reports have merged at
-06:48 and 06:51 CT, eight and eleven minutes after their run began. 07:30 CT is
-clear of that with margin, and nothing about a snapshot is time-critical — the
-morning's push notification already went out an hour earlier.
-
-## Why it commits nothing
-
-The race report's standing authorization to merge to `main` is the one
-genuinely load-bearing risk in this setup. It is bounded by a path, a check and a
-deploy filter, and those bounds are worth keeping scarce. A second standing merge
-authorization, for a metrics job, buys a committed file that a script can render
-on demand instead.
-
-A GCS append plus a notification satisfies both requirements without any new
-write access: the append is the history, and the notification is the answer to
-"did it change".
+**It needs today's report already merged.** Reports have merged at 06:48 and 06:51
+CT, eight and eleven minutes after their run began. 07:30 CT clears that with
+margin, and nothing here is time-critical — the morning's push notification went
+out an hour earlier.
 
 ## What a run does
 
-1. Read the three metrics per `operations/scoreboard.md`, each from the source
-   that document names. Record `null` with a reason for any source that does not
-   exist — do not infer a value, and do not substitute zero.
-2. Append one row to `snapshots.jsonl`, carrying the `definitions` version.
-3. Read the previous row. Compare.
-4. **Notify only if something moved.** A day where every value is unchanged
-   needs no notification; the row is the record that the check happened. A day
-   where a value changed, or where a source that previously worked has stopped
-   working, does.
-5. If the append itself fails, notify. A silent gap in the history is the one
-   failure mode this Routine exists to prevent.
+1. Read every `*.jsonl` in `operations/ledger/`.
+2. Derive the three metrics per `operations/scoreboard.md`: outcome split as
+   all-time and last-28-day totals, successful runs as a total plus the consecutive
+   count, cost from the newest `cost.jsonl` row. Record `null` with a reason for any
+   source that does not exist. Do not infer, and do not substitute zero.
+3. Compare against the newest row in `scoreboard.jsonl`.
+4. **If nothing changed:** append the row and stop. No commit, no notification. The
+   row is the record that the check happened.
+5. **If anything changed:** write `docs/scoreboard.json`, commit it on a branch,
+   open a PR, merge on green `Tests`, then append the row.
+6. **Notify only on a change, or on a failure.** A failure includes the append
+   failing and a source that previously worked having stopped — a silent gap is the
+   one failure mode this Routine exists to prevent.
+
+Step 4 is why the page is rebuilt "whenever a metric changes" rather than daily:
+most days nothing moves, and a commit that changes no value is noise.
+
+## The page
+
+| File | Role | Churn |
+|---|---|---|
+| `docs/scoreboard.html` | the page: layout, styling, the trend charts | written once, reviewed once |
+| `docs/scoreboard.json` | current values, deltas, and the trend series | overwritten on change |
+
+Written as HTML rather than markdown because markdown tops out at tables: no
+sparklines, no trend charts, no layout. A raw `.html` file with no Jekyll front
+matter is copied through `docs/` untouched, so the minima theme does not wrap it.
+
+Splitting the data from the page keeps each update to one small JSON diff instead
+of a re-rendered page, so what changed is visible in the diff.
+
+**The page is public.** Counts, rates and spend are fine; member identifiers are
+not. See `operations/scoreboard.md`.
 
 ## Shares the DST defect
 
-`30 12 * * *` UTC is 07:30 CT during CDT only. US daylight time ends
-2026-11-01, after which it fires at 06:30 CT — during the race, and before the
-report it depends on has merged. The correction is `30 13 * * *`, and it is the
-same correction the race report needs on the same date. Deploying this Routine
-adds a second cron to change, so change both together.
+`30 12 * * *` UTC is 07:30 CT during CDT only. After 2026-11-01 it fires at 06:30
+CT — during the race, and before the report it depends on has merged. The
+correction is `30 13 * * *`, on the same date the race report's `40 11` becomes
+`40 12`. Deploying this adds a second cron to change, so change them together.
 
 ## Deploying it
 
-1. Create the Routine with the prompt built from the steps above, fresh session
-   per firing.
-2. Record the trigger ID in the table at the top of this file, change **Status**
-   to deployed, and note the date.
-3. Add its row to the automation streak: the metric currently covers one
-   Routine, and `operations/scoreboard.md` says so in those words.
+1. Add `docs/**` to `ignored_files` in `terraform/main.tf` and apply it. **Not
+   optional** — without it this Routine redeploys production daily.
+2. Write `docs/scoreboard.html`.
+3. Create the Routine, record its trigger ID above, and change **Status**.
+4. Note the new cron in the 2026-11-01 DST change.
 
-Until all three are done this file describes something that does not run, and
-the scoreboard has no history.
+Until then the scoreboard has definitions and no values.

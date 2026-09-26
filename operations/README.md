@@ -11,7 +11,7 @@ Not in `docs/`, which is served publicly as GitHub Pages.
 |---|---|
 | [`scoreboard.md`](scoreboard.md) | Three metrics and their sources |
 | [`routines/`](routines/) | One file per Routine: trigger, authorization, prompt |
-| [`ledger/`](ledger/) | Event rows, and the daily snapshots that hold the scoreboard's history |
+| [`ledger/`](ledger/) | One ledger per Routine: did it run, and what did it measure |
 | [`race-reports/`](race-reports/) | One report per race morning |
 | `hypotheses/`, `*-setup.md`, `design-*.md` | Runbooks and design notes, moved here from the public site by #221 |
 
@@ -30,9 +30,10 @@ morning's report, opens a PR and merges it once `Tests` is green — the only ag
 action in this project that reaches `main` without being read first.
 `routines/race-report.md` states what bounds it.
 
-One more is specified and not deployed: the scoreboard snapshot,
-`routines/scoreboard.md`, which would append one row of metric readings a day and
-commit nothing. Without it the scoreboard has definitions and no history.
+Two more are specified and not deployed: `routines/scoreboard.md`, which derives
+the three metrics from the other ledgers and publishes a page to `docs/`, and
+`routines/cost.md`, which is additionally blocked on a Cloud Billing export that
+does not exist. Without them the scoreboard has definitions and no values.
 
 ## Two constraints
 
@@ -54,9 +55,10 @@ diagnosis; it applies equally to operating material.
 | | |
 |---|---|
 | Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
-| Scoreboard snapshot Routine | specified, not deployed |
-| Scoreboard | definitions written; no history, no rendering |
-| Ledger | schemas written; files empty, nothing writes to them |
+| Scoreboard Routine | specified, not deployed; needs `docs/**` added to the deploy filter first |
+| Cost Routine | specified, not deployed; blocked on a billing export outside this repository |
+| Scoreboard page | not written; `https://alexenos.github.io/teetime/scoreboard.html` when it is |
+| Ledgers | one per Routine; schemas written, files empty, nothing writes to them |
 
 The two known defects in the deployed race report prompt — the DST cron and the
 Step 3 timeout constant — are recorded in `routines/race-report.md`. Both require

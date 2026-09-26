@@ -70,17 +70,22 @@ environment that sets `CI` but has no browser.
 
 Measurement, and the Routines that run on a schedule: `operations/`.
 
-- `operations/scoreboard.md` — three metrics and their definitions
-- `operations/routines/` — one file per Routine, including its prompt
-  and what it is authorized to do. A file states whether it is deployed.
-- `operations/ledger/` — event rows, and the daily snapshots holding the
-  scoreboard's history. Schemas written; nothing writes to them yet.
+- `operations/scoreboard.md` — three metrics and their definitions. Published as
+  a page at `alexenos.github.io/teetime/scoreboard.html` when the Routine exists.
+- `operations/routines/` — one file per Routine, including its prompt and what it
+  is authorized to do. A file states whether it is deployed.
+- `operations/ledger/` — one ledger per Routine: did it run, and what did it
+  measure. Schemas written; nothing writes to them yet.
 - `operations/race-reports/` — one report per race morning
 
-One Routine is deployed: the race report, daily at `40 11 * * *` UTC. A second,
-the scoreboard snapshot, is specified and not deployed. `ship-pr` and the PR
-check-ins are not Routines — they are maintainer-invoked and push only to their
-own open PR.
+One Routine is deployed: the race report, daily at `40 11 * * *` UTC. Two are
+specified and not deployed — the scoreboard and the cost Routine. `ship-pr` and
+the PR check-ins are not Routines; they are maintainer-invoked and push only to
+their own open PR.
+
+**A commit to `docs/` redeploys.** `ignored_files` covers `operations/**` only, so
+publishing the scoreboard page will fire a build until `docs/**` is added to it.
+That is a prerequisite for deploying the scoreboard Routine, not a cleanup.
 
 ## Skills
 
