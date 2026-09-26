@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeeTime Scoreboard</title>
+<meta name="description" content="Booking outcomes, automation health and cost for the TeeTime booking bot.">
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --plane: #f9f9f7;
+    --ink-1: #0b0b0b;
+    --ink-2: #52514e;
+    --ink-muted: #898781;
+    --grid: #e1e0d9;
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --track: color-mix(in oklab, var(--series-1) 14%, var(--surface-1));
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19;
+      --plane: #0d0d0d;
+      --ink-1: #ffffff;
+      --ink-2: #c3c2b7;
+      --ink-muted: #898781;
+      --grid: #2c2c2a;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --plane: #0d0d0d;
+    --ink-1: #ffffff;
+    --ink-2: #c3c2b7;
+    --ink-muted: #898781;
+    --grid: #2c2c2a;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--plane);
+    color: var(--ink-1);
+    font: 400 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 16px 64px; }
+
+  header { margin-bottom: 8px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .asof { color: var(--ink-muted); font-size: 13px; margin: 0; }
+
+  .banner {
+    margin: 16px 0 0; padding: 10px 12px; border-radius: var(--radius);
+    background: color-mix(in oklab, var(--warning) 14%, var(--surface-1));
+    border: 1px solid color-mix(in oklab, var(--warning) 45%, var(--surface-1));
+    color: var(--ink-1); font-size: 13px;
+  }
+  .banner strong { font-weight: 600; }
+  .banner[hidden] { display: none; }
+
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--grid);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-top: 16px;
+  }
+  .card h2 {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-muted); margin: 0 0 14px;
+  }
+
+  /* hero: exactly one per view */
+  .hero-val { font-size: 56px; line-height: 1; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+  .hero-sub { color: var(--ink-2); font-size: 14px; margin: 8px 0 0; }
+
+  /* meter: single ratio, same-ramp track */
+  .meter { margin-top: 16px; height: 10px; border-radius: 5px; background: var(--track); overflow: hidden; }
+  .meter > i { display: block; height: 100%; background: var(--series-1); border-radius: 5px; }
+
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+  @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
+
+  .stat { font-size: 34px; line-height: 1; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
+  .stat.na { color: var(--ink-muted); font-size: 22px; font-weight: 500; }
+  .stat-sub { color: var(--ink-2); font-size: 13px; margin: 8px 0 0; }
+
+  .delta { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 500; }
+  .delta svg { flex: none; }
+
+  dl.rows { margin: 14px 0 0; display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; font-size: 13px; }
+  dl.rows dt { color: var(--ink-2); margin: 0; display: flex; align-items: center; gap: 7px; }
+  dl.rows dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-1); }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+  .window { margin-bottom: 18px; }
+  .window:last-child { margin-bottom: 0; }
+  .window-name { font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .window-name b { color: var(--ink-1); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+  th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--ink-muted); font-weight: 500; }
+  td { font-variant-numeric: tabular-nums; }
+  details { margin-top: 16px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 13px; padding: 4px 0; }
+
+  footer { margin-top: 28px; color: var(--ink-muted); font-size: 12px; }
+  footer a { color: var(--ink-2); }
+  a { color: var(--series-1); }
+  .nodata { color: var(--ink-muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>TeeTime Scoreboard</h1>
+    <p class="asof" id="asof">Loading…</p>
+  </header>
+
+  <div class="banner" id="sample-banner" hidden>
+    <strong>Sample data.</strong> No routine has published real values yet. The
+    shape is real; the numbers are illustrative.
+  </div>
+
+  <!-- 1. Outcome split. Hero = the booked rate, a single ratio, so a meter. -->
+  <section class="card" aria-labelledby="h-outcome">
+    <h2 id="h-outcome">Booking outcomes &middot; all time</h2>
+    <p class="hero-val" id="rate-hero">—</p>
+    <p class="hero-sub" id="rate-sub"></p>
+    <div class="meter" role="img" id="rate-meter-wrap" aria-label="">
+      <i id="rate-meter" style="width:0%"></i>
+    </div>
+    <div class="banner" id="exact-note" hidden></div>
+  </section>
+
+  <div class="grid">
+    <!-- windows + trend -->
+    <section class="card" aria-labelledby="h-windows">
+      <h2 id="h-windows">Last 4 weeks vs prior 4</h2>
+      <div id="windows"></div>
+    </section>
+
+    <!-- 2. Automation streak -->
+    <section class="card" aria-labelledby="h-streak">
+      <h2 id="h-streak">Automation streak</h2>
+      <p class="stat" id="streak-val">—</p>
+      <p class="stat-sub" id="streak-sub"></p>
+      <div id="streak-hist"></div>
+      <dl class="rows" id="streak-rows"></dl>
+    </section>
+  </div>
+
+  <!-- 3. Cost -->
+  <section class="card" aria-labelledby="h-cost">
+    <h2 id="h-cost">Cost</h2>
+    <p class="stat" id="cost-val">—</p>
+    <p class="stat-sub" id="cost-sub"></p>
+  </section>
+
+  <details>
+    <summary>All values as a table</summary>
+    <table id="tbl"><tbody></tbody></table>
+  </details>
+
+  <footer>
+    <p id="gen"></p>
+    <p>Definitions: <a href="https://github.com/alexenos/teetime/blob/main/operations/scoreboard.md">operations/scoreboard.md</a>
+       &middot; Routines: <a href="https://github.com/alexenos/teetime/tree/main/operations/routines">operations/routines/</a></p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var pct = function (n, d) { return d > 0 ? Math.round((n / d) * 100) : null; };
+  var fmtDate = function (iso) {
+    try {
+      return new Date(iso).toLocaleString(undefined,
+        { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return iso; }
+  };
+
+  // Arrow glyph for a delta. Direction carries the sign; the number carries the size.
+  function deltaEl(points, goodWhenUp) {
+    if (points === null || points === 0) {
+      return '<span class="delta" style="color:var(--ink-muted)">no change</span>';
+    }
+    var up = points > 0;
+    var good = up === goodWhenUp;
+    var color = good ? "var(--good)" : "var(--critical)";
+    var path = up ? "M6 2 L10 8 L2 8 Z" : "M6 10 L2 4 L10 4 Z";
+    return '<span class="delta" style="color:' + color + '">'
+      + '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">'
+      + '<path d="' + path + '" fill="currentColor"/></svg>'
+      + (up ? "+" : "−") + Math.abs(points) + " pts</span>";
+  }
+
+  function render(d) {
+    var rows = [];
+
+    $("asof").textContent = "Updated " + fmtDate(d.generated);
+    $("gen").textContent = "Generated " + fmtDate(d.generated)
+      + " · definitions " + d.definitions;
+    if (d.sample) { $("sample-banner").hidden = false; }
+
+    // ---- 1. Outcome ----
+    var o = d.outcome, at = o.all_time;
+    var total = at.booked + at.miss;
+    var rate = pct(at.booked, total);
+    $("rate-hero").textContent = rate === null ? "No data" : rate + "%";
+    $("rate-sub").textContent = total === 0
+      ? "No requests recorded yet."
+      : at.booked + " of " + total + " requests booked, across " + at.mornings + " race mornings.";
+    $("rate-meter").style.width = (rate || 0) + "%";
+    $("rate-meter-wrap").setAttribute("aria-label",
+      rate === null ? "No data" : rate + " percent of requests booked");
+    rows.push(["Requests booked, all time", at.booked + " of " + total]);
+    rows.push(["Race mornings, all time", at.mornings]);
+
+    if (!o.separable) {
+      $("exact-note").hidden = false;
+      $("exact-note").innerHTML = "<strong>Exact and fallback are not yet separable.</strong> "
+        + "Until requested times are confirmed against a real slot before the race "
+        + "(<a href=\"https://github.com/alexenos/teetime/issues/216\">#216</a>), a booking "
+        + "cannot be scored against the time the member actually wanted. This reads "
+        + "booked against missed, which is the strongest honest claim.";
+    }
+
+    // ---- windows + trend ----
+    var wins = [["Last 4 weeks", o.last_4wk], ["Prior 4 weeks", o.prior_4wk]];
+    var html = "";
+    wins.forEach(function (w) {
+      var t = w[1].booked + w[1].miss, r = pct(w[1].booked, t);
+      html += '<div class="window"><div class="window-name"><span>' + w[0] + '</span>'
+        + '<b>' + (r === null ? "—" : r + "%") + '</b></div>'
+        + '<div class="meter" role="img" aria-label="' + w[0] + ': '
+        + (r === null ? "no data" : r + " percent booked") + '">'
+        + '<i style="width:' + (r || 0) + '%"></i></div>'
+        + '<div class="nodata" style="margin-top:6px">' + w[1].booked + " booked, "
+        + w[1].miss + " missed, " + w[1].mornings + " mornings</div></div>";
+      rows.push([w[0] + " booked", w[1].booked + " of " + t]);
+    });
+    var rNow = pct(o.last_4wk.booked, o.last_4wk.booked + o.last_4wk.miss);
+    var rPrev = pct(o.prior_4wk.booked, o.prior_4wk.booked + o.prior_4wk.miss);
+    var trend = (rNow === null || rPrev === null) ? null : rNow - rPrev;
+    html += '<div style="margin-top:14px;font-size:13px;color:var(--ink-2)">Trend '
+      + deltaEl(trend, true) + "</div>";
+    $("windows").innerHTML = html;
+    rows.push(["Trend, last 4 weeks vs prior", trend === null ? "—" : (trend > 0 ? "+" : "") + trend + " pts"]);
+
+    // ---- 2. Streak ----
+    var s = d.streak;
+    $("streak-val").textContent = s.consecutive;
+    $("streak-sub").textContent = "consecutive successful runs"
+      + (s.last_failure ? " since " + s.last_failure : "")
+      + " · " + s.total_ok + " successful all time";
+    rows.push(["Automation streak", s.consecutive]);
+    rows.push(["Successful runs, all time", s.total_ok]);
+
+    // Streak history: one series, so no legend. Bars, 4px rounded data-ends.
+    var h = s.history || [];
+    if (h.length) {
+      var max = Math.max.apply(null, h.concat([s.consecutive])), bw = 26, gap = 8;
+      var series = h.concat([s.consecutive]);
+      var w = series.length * (bw + gap) - gap;
+      // xMinYMid, not the default xMidYMid: with a fixed height the default
+      // scales the content to the height and centres the result, which renders
+      // the bars as a small island in the middle of the card.
+      var sv = '<svg width="' + w + '" height="62" viewBox="0 0 ' + w + ' 62" '
+        + 'preserveAspectRatio="xMinYMid meet" style="margin-top:14px;max-width:100%" '
+        + 'role="img" aria-label="Streak lengths, oldest first: ' + series.join(", ")
+        + '. The last is the current streak.">';
+      series.forEach(function (v, i) {
+        var hgt = max > 0 ? Math.max(3, (v / max) * 46) : 3;
+        var last = i === series.length - 1;
+        sv += '<rect x="' + (i * (bw + gap)) + '" y="' + (46 - hgt) + '" width="' + bw
+          + '" height="' + hgt + '" rx="4" fill="'
+          + (last ? "var(--series-1)" : "var(--track)") + '"/>';
+        sv += '<text x="' + (i * (bw + gap) + bw / 2) + '" y="59" text-anchor="middle" '
+          + 'font-size="10" fill="var(--ink-muted)">' + v + "</text>";
+      });
+      $("streak-hist").innerHTML = sv + "</svg>"
+        + '<div class="nodata" style="margin-top:4px">Streak lengths, oldest first</div>';
+    }
+
+    var br = s.by_routine || {}, dl = "";
+    Object.keys(br).forEach(function (k) {
+      dl += "<dt>" + k + "</dt><dd>" + br[k] + "</dd>";
+      rows.push(["Streak, " + k, br[k]]);
+    });
+    $("streak-rows").innerHTML = dl;
+
+    // ---- 3. Cost ----
+    var c = d.cost;
+    if (!c.available || c.usd === null) {
+      $("cost-val").className = "stat na";
+      $("cost-val").textContent = "Not available";
+      $("cost-sub").innerHTML = c.reason
+        + ' See <a href="https://github.com/alexenos/teetime/issues/227">#227</a>'
+        + ' for what it needs. Scope when it lands: ' + c.scope + '.';
+      rows.push(["Cost", "not available"]);
+    } else {
+      $("cost-val").textContent = "$" + c.usd;
+      $("cost-sub").textContent = c.month + " · "
+        + (c.usd_per_booking === null ? "" : "$" + c.usd_per_booking + " per booking · ")
+        + "scope: " + c.scope;
+      rows.push(["Cost, " + c.month, "$" + c.usd]);
+    }
+
+    // ---- table view (required: the light-mode palette carries a contrast WARN) ----
+    $("tbl").querySelector("tbody").innerHTML = rows.map(function (r) {
+      return "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>";
+    }).join("");
+  }
+
+  fetch("scoreboard.json", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(render)
+    .catch(function (e) {
+      $("asof").textContent = "Could not load scoreboard.json (" + e.message + ").";
+    });
+})();
+</script>
+</body>
+</html>
