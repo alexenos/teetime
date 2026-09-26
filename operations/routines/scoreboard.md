@@ -68,10 +68,15 @@ most days nothing moves, and a commit that changes no value is noise.
 
 ## The page
 
-| File | Role | Churn |
-|---|---|---|
-| `docs/scoreboard.html` | the page: layout, styling, the trend charts | written once, reviewed once |
-| `docs/scoreboard.json` | current values, deltas, and the trend series | overwritten on change |
+| File | Role | Churn | State |
+|---|---|---|---|
+| `docs/scoreboard.html` | the page: layout, styling, the charts | written once, reviewed once | **written** |
+| `docs/scoreboard.json` | the values the page reads | overwritten on change | **sample data** |
+
+The page is live against sample data, flagged on the page itself with a visible
+banner keyed off `"sample": true` in the JSON. The first real run overwrites the
+file and the banner disappears. A Routine only ever writes the JSON; it does not
+regenerate the HTML.
 
 Written as HTML rather than markdown because markdown tops out at tables: no
 sparklines, no trend charts, no layout. A raw `.html` file with no Jekyll front
@@ -90,12 +95,34 @@ CT — during the race, and before the report it depends on has merged. The
 correction is `30 13 * * *`, on the same date the race report's `40 11` becomes
 `40 12`. Deploying this adds a second cron to change, so change them together.
 
+## What the page renders, and why those forms
+
+Chosen against `choosing-a-form`, and the colors were run through the palette
+validator rather than eyeballed. Two results worth recording, because both
+contradicted the obvious choice:
+
+**Booked rate is a meter, not a two-colour bar.** It is a single ratio, and the
+prescribed form for a single ratio is a meter on a same-ramp track. That also
+avoids the problem below.
+
+**Green-for-booked against red-for-missed fails.** The status pair `#0ca30c` /
+`#d03b3b` measures CVD ΔE 4.1 (deutan) in both modes, against a floor of 8 — the
+classic red/green failure. It would have shipped on instinct. The three-bucket
+view, once #216 makes exact and fallback separable, uses categorical slots 1–3
+(blue `#2a78d6`, orange `#eb6834`, aqua `#1baf7a`), which pass all-pairs in both
+modes.
+
+Light-mode aqua carries a contrast warning at 2.74:1, so the page ships direct
+labels and a table view, which is the documented relief.
+
+Exactly one hero figure, per the spec: the all-time booked rate. Everything else
+is a stat tile. The streak history is one series, so it carries no legend.
+
 ## Deploying it
 
 1. Add `docs/**` to `ignored_files` in `terraform/main.tf` and apply it. **Not
    optional** — without it this Routine redeploys production daily.
-2. Write `docs/scoreboard.html`.
-3. Create the Routine, record its trigger ID above, and change **Status**.
-4. Note the new cron in the 2026-11-01 DST change.
+2. Create the Routine, record its trigger ID above, and change **Status**.
+3. Note the new cron in the 2026-11-01 DST change.
 
-Until then the scoreboard has definitions and no values.
+Until then the page shows sample data, flagged as such.

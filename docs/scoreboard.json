@@ -1,0 +1,53 @@
+{
+  "sample": true,
+  "generated": "2026-09-26T13:30:00Z",
+  "definitions": "v1",
+  "outcome": {
+    "separable": false,
+    "all_time": {
+      "mornings": 21,
+      "booked": 38,
+      "miss": 4,
+      "exact": null,
+      "fallback": null
+    },
+    "last_4wk": {
+      "mornings": 8,
+      "booked": 14,
+      "miss": 1,
+      "exact": null,
+      "fallback": null
+    },
+    "prior_4wk": {
+      "mornings": 7,
+      "booked": 11,
+      "miss": 3,
+      "exact": null,
+      "fallback": null
+    }
+  },
+  "streak": {
+    "consecutive": 6,
+    "total_ok": 24,
+    "last_failure": "2026-09-18",
+    "by_routine": {
+      "race-report": 6,
+      "scoreboard": 0,
+      "cost": 0
+    },
+    "history": [
+      3,
+      11,
+      2,
+      6
+    ]
+  },
+  "cost": {
+    "month": "2026-09",
+    "usd": null,
+    "usd_per_booking": null,
+    "scope": "gcp_only",
+    "available": false,
+    "reason": "No billing export exists yet."
+  }
+}
