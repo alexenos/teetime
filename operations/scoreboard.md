@@ -112,12 +112,39 @@ The reports in `operations/race-reports/` are unchanged by this. They hold the
 analysis; the ledger and git hold the values used for computation. See
 `operations/ledger/README.md`.
 
+## Three levels, which are easy to conflate
+
+| | Answers | Shape | Where |
+|---|---|---|---|
+| **Events** | what happened | one row per occurrence | `ledger/mornings.jsonl`, `ledger/runs.jsonl` |
+| **Snapshots** | what the metrics read, and when | one row per day | `ledger/snapshots.jsonl` |
+| **This document** | what the metrics mean | definitions | here |
+| **The current view** | how we are doing now | rendered | nowhere yet; see below |
+
+The values are not in this document and should not be. It holds definitions,
+which are hand-written and reviewed; the values are computed, and a Routine
+editing a hand-written file invites a conflict between the two.
+
+**Snapshots are not a cache over events.** Each row records what the metrics read
+on a date, under the definitions in force on that date, and carries a
+`definitions` version saying which. Recomputing history under a later definition
+produces numbers that were never true — #216 will change what Exact means, and a
+recomputed trend would show a discontinuity that is not a change in performance.
+Some values cannot be recomputed at all: month-to-date cost is not reconstructable
+later, and agent and token spend is not queryable historically. See
+`operations/ledger/README.md`.
+
 ## How it would get updated
 
 Nothing updates it today. There is no writer, no rollup, and no rendered
 current value: a grep for `operations/ledger` or `scoreboard` across `app/`,
 `scripts/`, the workflows and terraform returns nothing. The sections above are
 a specification.
+
+The plan is one snapshot per day, from a second Routine at 07:30 CT that appends
+a row, compares it against the previous one, and notifies only when something
+moved. It commits nothing. Specified in
+`operations/routines/scoreboard.md`, which is not deployed.
 
 The three metrics are not equally far from working, and it is worth not treating
 them as one task.
@@ -165,16 +192,18 @@ Cost therefore needs new GCP setup — a billing export and an access grant —
 before any amount of code can read it. It is the only metric on this scoreboard
 that cannot be computed from data the project already has.
 
-### Where the current value would appear
+### Where the current value appears
 
-Not decided. Three options, cheapest first:
+`scripts/scoreboard.py`, not yet written: reads `snapshots.jsonl`, prints the
+newest row, the delta against the previous one, and a trend over any window
+asked for. On demand, so a reader gets the current view without a scheduled job
+rendering it into a file.
 
-- **A script run on demand** — `scripts/scoreboard.py`, printing the three
-  metrics. No new automation, no new authorization, no scheduled work.
-- **A line in the daily push notification** — the numbers arrive at 06:40
-  without being asked for. Costs nothing extra, since the notification is
-  already sent on every path.
-- **A file regenerated daily** — would require widening the Routine's standing
-  authorization to a second path, which is the one thing bounding it.
+The snapshot Routine's notification covers the daily question — did anything
+move — so the script is for looking at a trend rather than for finding out
+whether to look.
 
-The first two are compatible and neither widens what the automation may do.
+**Not a committed rendered file.** That would need the snapshot Routine to hold a
+standing authorization to write to the repository. The race report's authorization
+is the one load-bearing risk in this setup, and a metrics job is a poor reason to
+add a second.

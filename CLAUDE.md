@@ -70,14 +70,16 @@ environment that sets `CI` but has no browser.
 
 Measurement, and the Routines that run on a schedule: `operations/`.
 
-- `operations/scoreboard.md` — three metrics and their sources
+- `operations/scoreboard.md` — three metrics and their definitions
 - `operations/routines/` — one file per Routine, including its prompt
-  and what it is authorized to do
-- `operations/ledger/` — the rows a Routine run emits; specified, not yet written
+  and what it is authorized to do. A file states whether it is deployed.
+- `operations/ledger/` — event rows, and the daily snapshots holding the
+  scoreboard's history. Schemas written; nothing writes to them yet.
 - `operations/race-reports/` — one report per race morning
 
-One Routine runs on a schedule: the race report, daily at `40 11 * * *` UTC.
-`ship-pr` and the PR check-ins are maintainer-invoked and push only to their
+One Routine is deployed: the race report, daily at `40 11 * * *` UTC. A second,
+the scoreboard snapshot, is specified and not deployed. `ship-pr` and the PR
+check-ins are not Routines — they are maintainer-invoked and push only to their
 own open PR.
 
 ## Skills

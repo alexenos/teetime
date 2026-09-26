@@ -11,7 +11,7 @@ Not in `docs/`, which is served publicly as GitHub Pages.
 |---|---|
 | [`scoreboard.md`](scoreboard.md) | Three metrics and their sources |
 | [`routines/`](routines/) | One file per Routine: trigger, authorization, prompt |
-| [`ledger/`](ledger/) | The rows a Routine run emits; input to the scoreboard |
+| [`ledger/`](ledger/) | Event rows, and the daily snapshots that hold the scoreboard's history |
 | [`race-reports/`](race-reports/) | One report per race morning |
 | `hypotheses/`, `*-setup.md`, `design-*.md` | Runbooks and design notes, moved here from the public site by #221 |
 
@@ -25,10 +25,14 @@ A **Routine** is a scheduled trigger: a cron expression, a prompt, and a fresh
 session per firing. One file here per Routine. Each run appends a **row**; rows
 produce the **scoreboard**.
 
-One Routine exists: the race report, daily at 06:40 CT. It writes that morning's
-report, opens a PR and merges it once `Tests` is green — the only agent action in
-this project that reaches `main` without being read first. `operations/routines/race-report.md`
-states what bounds it.
+One Routine is deployed: the race report, daily at 06:40 CT. It writes that
+morning's report, opens a PR and merges it once `Tests` is green — the only agent
+action in this project that reaches `main` without being read first.
+`routines/race-report.md` states what bounds it.
+
+One more is specified and not deployed: the scoreboard snapshot,
+`routines/scoreboard.md`, which would append one row of metric readings a day and
+commit nothing. Without it the scoreboard has definitions and no history.
 
 ## Two constraints
 
@@ -49,9 +53,10 @@ diagnosis; it applies equally to operating material.
 
 | | |
 |---|---|
-| Race report Routine | fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
-| Scoreboard | specified; no rollup built |
-| Ledger | specified; files empty, nothing writes to them |
+| Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
+| Scoreboard snapshot Routine | specified, not deployed |
+| Scoreboard | definitions written; no history, no rendering |
+| Ledger | schemas written; files empty, nothing writes to them |
 
 The two known defects in the deployed race report prompt — the DST cron and the
 Step 3 timeout constant — are recorded in `routines/race-report.md`. Both require

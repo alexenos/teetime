@@ -1,7 +1,17 @@
 # The ledger
 
-The race report Routine appends rows here. The scoreboard is a rollup over these
-files.
+Two tiers of row, which are different kinds of thing and are easy to conflate.
+
+| Tier | File | Question it answers | One row per |
+|---|---|---|---|
+| **Events** | `mornings.jsonl`, `runs.jsonl` | what happened | thing that occurred |
+| **Snapshots** | `snapshots.jsonl` | what the metrics read, and when | day |
+
+Events are facts. A row states what happened on one morning and is never
+revisited. Snapshots are measurements: each one is a reading of the scoreboard on
+a date, under the metric definitions in force on that date. The scoreboard itself
+is neither — it is the newest snapshot rendered for a reader, recomputed on demand
+and never stored.
 
 The reports in `operations/race-reports/` hold the analysis: what was
 established, what was hypothesis, what the evidence did not settle. The ledger
@@ -9,11 +19,8 @@ holds the values used for computation. Computing a rate by re-reading
 twenty-three markdown documents is slow and non-deterministic: two sessions can
 read the same document and score it differently.
 
-One row per event, appended, never rewritten. JSON Lines, so a row can be added
-without reading or rewriting the file.
-
-Two files, one per metric that needs history. Cost is read from billing rather
-than accumulated here.
+All rows are appended, never rewritten. JSON Lines, so a row can be added without
+reading or rewriting the file.
 
 ---
 
@@ -64,6 +71,49 @@ available slot. Do not compare across that boundary without stating it.
 
 `requester` is a member identifier. This repository is public; do not write
 member names, phone numbers or Telegram handles into it.
+
+
+## `snapshots.jsonl` — one row per day
+
+The history behind the scoreboard. This is what a trend is plotted from.
+
+```json
+{"date":"2026-09-25","definitions":"v1",
+ "outcome_split":{"window_mornings":4,"exact":null,"fallback":null,"miss":0,"not_miss":6},
+ "automation_streak":{"routine":"race-report","clean_runs":7,"since":"2026-09-19"},
+ "cost":{"month":"2026-09","usd_total":null,"usd_per_booking":null,"source":"unavailable"}}
+```
+
+| Field | Definition |
+|---|---|
+| `date` | the date the snapshot was taken, CT |
+| `definitions` | which version of the metric definitions this row was computed under |
+| each metric | the value as read that day, or `null` where the source was unavailable |
+
+**Appended every day, including days nothing changed.** An identical consecutive
+row is not waste: it is the only thing that distinguishes "the metrics did not
+move" from "nothing ran". A gap in dates means a run was missed.
+
+**`null` is a value.** A metric whose source does not exist records `null` with
+the reason, not a zero and not an omitted key. Cost is `null` on every row until
+a billing export exists; an omitted key would later be indistinguishable from a
+month that cost nothing.
+
+### `definitions` is the field that makes this worth storing
+
+A snapshot could otherwise be recomputed from the events, and this file would be
+a cache. It is not, for two reasons.
+
+**Definitions change under you.** #216 will change what Exact means. Recomputing
+2026-09-15 next month under next month's definition yields a number that was
+never true, and puts a discontinuity in the trend that is not a change in
+performance. Bump `definitions` whenever a metric's meaning changes, and never
+compare rows across versions without saying so. The version is a label, not a
+date: `v1` is the definitions as of this file.
+
+**Some values cannot be recomputed at all.** Month-to-date cost is not
+reconstructable after the fact, and agent and token spend is not queryable
+historically. For those, the snapshot is the only record there will ever be.
 
 ---
 
