@@ -49,8 +49,12 @@ that did not run cannot write one.
 One row per morning the Routine fires. Day-level counts, not a rolling average —
 the rolling windows are the scoreboard's job.
 
-Real values, from the morning of 2026-09-25: two requests, one granted the target
-on the first Reserve and one that lost 08:38 and took 08:45 on the eighth.
+From the morning of 2026-09-25: two requests, one granted the target on the first
+Reserve and one that lost 08:38 and took 08:45 on the eighth.
+
+**The times and outcomes are read from that morning's report. The two `member`
+values are invented** — no salt exists yet, so no real identifier has ever been
+computed. They are shaped like the real thing and are not the real thing.
 
 ```json
 {"date":"2026-09-25","routine":"race-report","ok":true,

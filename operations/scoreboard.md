@@ -61,7 +61,7 @@ to the last failure.
 
 | Figure | |
 |---|---|
-| Headline | the combined streak: consecutive successful runs, all Routines interleaved by date |
+| Headline | the combined streak: consecutive successful runs, all Routines interleaved by date, broken by a failure **or a missing run** |
 | Breakdown | each Routine's own streak |
 | Context | total successful runs all time, which only ever rises |
 | **Trend** | the streak's own history — how long previous streaks ran before breaking |
@@ -80,15 +80,45 @@ and the breakdown for which part is not.
 A Routine's own runs count toward this, the scoreboard Routine included. It is
 measuring the automation, and it is part of the automation.
 
-**Source:** the `ok` field across every ledger in `operations/ledger/`. Sort all
-rows by date, count back from the newest to the first `ok: false`.
+**Source:** the `ok` field across every ledger in `operations/ledger/`, read from
+GCS. Sort all rows by date and count back from the newest.
+
+**Counting rows alone overstates the streak.** The streak breaks on an `ok: false`
+row *or* on a missing one. A Routine that dies before writing anything leaves no
+row at all, and a walk back through the rows that exist steps straight over that
+morning and keeps counting. `operations/ledger/README.md` already defines a missing
+date as a missed run; the streak has to apply that rule rather than trusting the
+rows to be complete.
+
+So: build the list of dates each Routine was scheduled to fire, walk back from
+today, and stop at the first date that is either `ok: false` or absent. Absence is
+the failure mode most worth catching, because it is what a crashed or never-started
+run looks like.
 
 **A run cannot always score itself.** A race report that misdiagnoses the morning
 believes it did fine — that is exactly what 2026-09-15 was. So `ok` written by the
-run being scored is provisional. Where a later commit corrected a published report,
-that is the evidence: `ok` for a race report can be derived from git, since a
-report no later commit modified was not corrected. Deterministic, needs no
-judgment, and works retroactively.
+run being scored is provisional.
+
+Git settles this in one direction only, and an earlier draft of this document got
+it wrong. A later commit correcting a published report establishes `ok: false` for
+that run: the output needed correction, and here is the correction. **The absence
+of such a commit establishes nothing.** It is consistent with a correct report, and
+equally consistent with one nobody has read closely enough to correct — which is
+the more likely reading for a report that merged itself at 06:48 and was never
+opened again.
+
+So the derivation gives:
+
+| Evidence | `ok` |
+|---|---|
+| a later commit modified the report | `false`, with the correcting commit as the note |
+| the run reported an environment failure or a wrong-hour fire | `false` |
+| nothing | **`unknown`** |
+
+`unknown` is not `true`. A streak computed over unknowns is a claim about how much
+has been checked, not about how much worked, and the page must not present it as
+the latter. This is the same rule `operations/ledger/README.md` applies to
+backfill: a missing row is detectable, an inferred row presented as read is not.
 
 ## 3. Cost
 

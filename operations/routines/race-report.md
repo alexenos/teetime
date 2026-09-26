@@ -7,7 +7,7 @@
 | **Model** | `claude-sonnet-5` |
 | **Authorization** | writes the report, commits it on its own branch, opens a non-draft PR, and squash-merges it once the `Tests` check is green — no approval. Scoped to exactly one file under `operations/race-reports/`. Everything else is ask-first. |
 | **Clean** | the report required no correction before it could be acted on |
-| **Emits** | `operations/race-reports/<YYYY-MM-DD>.md` on a morning that raced, plus a row in the `runs` ledger on every morning |
+| **Emits** | `operations/race-reports/<YYYY-MM-DD>.md` on a morning that raced. A ledger row on every morning is the intent; the deployed prompt cannot yet do it — see below. |
 | **Deployed as** | a Routine (scheduled trigger), "⚡ TeeTime Morning Race Report", `trig_018RqvzqheiZPsSMCWf6XCiH` |
 
 This file is the source of the prompt. The Routine holds the copy that
@@ -44,6 +44,32 @@ working end to end: 09-24 merged at 06:48 CT and 09-25 at 06:51 CT, eight and
 eleven minutes after the 06:40 run began. The 09-22 report is not one of them —
 it merged at 14:14 CT, 44 minutes before the Routine was edited, so a maintainer
 merged it.
+
+## Prompt defect: the early-exit paths cannot write a ledger row
+
+`operations/ledger/README.md` specifies a row per run, including the runs that
+produce no report: a morning with nothing scheduled is still a run, and a clean
+one. The deployed prompt cannot satisfy that.
+
+Every early exit ends *push, then stop*, before anything that could write a row:
+
+| Path | Stops at |
+|---|---|
+| fired at the wrong hour | Gate A |
+| no booking scheduled | Gate B |
+| environment not ready | Step 1, on `NOT READY` |
+
+So the mornings that most need a row are exactly the ones that cannot produce one,
+and the gap is indistinguishable from the Routine not having fired at all. That
+matters more than it looks, because the automation streak treats a missing date as
+a failure.
+
+Correcting it is a prompt change: each stop path appends its row before it stops,
+with `raced: false` and `ok` set to whether the exit itself was correct. A
+wrong-hour fire is a correct exit and a clean run. A `NOT READY` environment is
+not.
+
+Not correctable here. The prompt below is a record of deployed text.
 
 ## Scheduled defect: fires one hour early from 2026-11-01
 

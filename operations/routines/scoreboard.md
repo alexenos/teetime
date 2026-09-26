@@ -59,23 +59,37 @@ out an hour earlier.
 
 ## What a run does
 
-1. Read every `*.jsonl` in `operations/ledger/`.
+1. Read the ledgers **from GCS**, not from `operations/ledger/` in the checkout.
+   The repository holds the schemas; the files there are empty by design. The
+   objects are `gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<routine>.jsonl`.
 2. Derive the three metrics per `operations/scoreboard.md`: outcome split as
    all-time and last-28-day totals, the automation streak as the combined
    consecutive count plus each Routine's own, cost from the newest `cost.jsonl` row.
-   Record `null` with a reason for any
-   source that does not exist. Do not infer, and do not substitute zero.
-3. Compare against the newest row in `scoreboard.jsonl`.
-4. **If nothing changed:** append the row and stop. No commit, no notification. The
-   row is the record that the check happened.
-5. **If anything changed:** write `docs/scoreboard.json`, commit it on a branch,
-   open a PR, merge on green `Tests`, then append the row.
-6. **Notify only on a change, or on a failure.** A failure includes the append
-   failing and a source that previously worked having stopped — a silent gap is the
-   one failure mode this Routine exists to prevent.
+   Record `null` with a reason for any source that does not exist. Do not infer,
+   and do not substitute zero.
+3. Write `docs/scoreboard.json`, commit it on a branch, open a PR, merge on green
+   `Tests`.
+4. Append this run's row to `scoreboard.jsonl`.
+5. **Notify only on a change in a source metric, or on a failure.** A failure
+   includes the append failing, and a source that previously worked having stopped
+   — a silent gap is the one failure mode this Routine exists to prevent.
 
-Step 4 is why the page is rebuilt "whenever a metric changes" rather than daily:
-most days nothing moves, and a commit that changes no value is noise.
+### It publishes every run, not only when something changed
+
+An earlier draft had a "if nothing changed, append and stop without publishing"
+branch. That branch can never be taken, and the reason is worth keeping.
+
+The automation streak counts successful runs across **every** Routine, this one
+included. So each successful scoreboard run increments the streak, which is one of
+the three metrics it publishes. Something always changed. A no-change branch
+gated on "did any metric move" would therefore never fire, and a branch that
+excluded this Routine's own runs from the comparison would be comparing against a
+number it is not publishing.
+
+Publishing every run is the honest resolution, and it makes the ledger's own rule
+hold: one row per scheduled day, and a gap means a missed run. The notification
+still fires only on a change in a **source** metric, because the streak moving by
+one every day is not news.
 
 ## The page
 

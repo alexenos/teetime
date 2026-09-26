@@ -25,8 +25,10 @@ A **Routine** is a scheduled trigger: a cron expression, a prompt, and a fresh
 session per firing. One file here per Routine. Each run appends a **row**; rows
 produce the **scoreboard**.
 
-One Routine is deployed: the race report, daily at 06:40 CT. It writes that
-morning's report, opens a PR and merges it once `Tests` is green — the only agent
+One Routine is deployed: the race report, daily at `40 11 * * *` UTC — 06:40 CT
+during daylight time only, and 05:40 CT once it ends on 2026-11-01, which is
+before the race it reports on. It writes that morning's report, opens a PR and
+merges it once `Tests` is green — the only agent
 action in this project that reaches `main` without being read first.
 `routines/race-report.md` states what bounds it.
 
@@ -55,9 +57,9 @@ diagnosis; it applies equally to operating material.
 | | |
 |---|---|
 | Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
-| Scoreboard Routine | specified, not deployed; needs `docs/**` added to the deploy filter first |
+| Scoreboard Routine | specified, not deployed. `docs/**` is now declared in the deploy filter, but the apply is unverified — confirm the live trigger first |
 | Cost Routine | specified, not deployed; blocked on a billing export outside this repository |
-| Scoreboard page | not written; `https://alexenos.github.io/teetime/scoreboard.html` when it is |
+| Scoreboard page | written, at `https://alexenos.github.io/teetime/scoreboard.html`, showing **sample data** flagged on the page itself |
 | Ledgers | one per Routine; schemas written, files empty, nothing writes to them |
 
 The two known defects in the deployed race report prompt — the DST cron and the

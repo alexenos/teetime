@@ -61,10 +61,11 @@ invites $/booking comparisons against a denominator that does not match.
 
 ## Shares the DST defect
 
-A cron pinned to UTC drifts against CT twice a year. At monthly granularity the
-consequence is an hour, not a missed run, so this one is cosmetic rather than
-load-bearing — unlike the race report, where 05:40 CT lands before the race it
-reports on. Recorded so the set of crons needing the 2026-11-01 change is complete.
+A cron pinned to UTC drifts against CT twice a year: `0 14 1 * *` is 09:00 CDT and
+08:00 CST. At monthly granularity the consequence is an hour, not a missed run, so
+this one is cosmetic rather than load-bearing — unlike the race report, where 05:40
+CT lands before the race it reports on. Recorded so the set of crons needing the
+2026-11-01 review is complete, even where the answer is "leave it".
 
 ## Deploying it
 
