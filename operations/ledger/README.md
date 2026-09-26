@@ -49,10 +49,18 @@ that did not run cannot write one.
 One row per morning the Routine fires. Day-level counts, not a rolling average —
 the rolling windows are the scoreboard's job.
 
+Real values, from the morning of 2026-09-25: two requests, one granted the target
+on the first Reserve and one that lost 08:38 and took 08:45 on the eighth.
+
 ```json
 {"date":"2026-09-25","routine":"race-report","ok":true,
  "raced":true,"report":"operations/race-reports/2026-09-25.md","pr":225,
- "outcome":{"exact":2,"fallback":0,"miss":0},"confirmed_slots":false}
+ "requests":[
+   {"member":"m_7b2e04","requested":"08:38","booked":"08:45","outcome":"fallback"},
+   {"member":"m_3f9a1c","requested":"09:23","booked":"09:23","outcome":"exact"}
+ ],
+ "outcome":{"exact":1,"fallback":1,"miss":0},
+ "confirmed_slots":false}
 ```
 
 | Field | Definition |
@@ -60,8 +68,51 @@ the rolling windows are the scoreboard's job.
 | `raced` | false on a morning with no booking scheduled. A clean run with no report. |
 | `report` | path to the published report, or `null` when `raced` is false |
 | `pr` | the report's PR number, or `null` |
-| `outcome` | counts per request, by `RESERVATION_CHECK`. Omitted when `raced` is false. |
+| `requests` | one object per booking request. Omitted when `raced` is false. |
+| `outcome` | the day's totals, by `RESERVATION_CHECK`. Omitted when `raced` is false. |
 | `confirmed_slots` | whether the requested times were confirmed with the member before the race (#216) |
+
+### `requests` — one object per request
+
+| Field | Definition |
+|---|---|
+| `member` | an opaque member identifier; see below |
+| `requested` | the tee time asked for, CT |
+| `booked` | the tee time reserved, or `null` on a miss |
+| `outcome` | `exact`, `fallback` or `miss`, by `RESERVATION_CHECK` |
+
+**Both the detail and the totals are recorded**, even though the totals are a
+rollup of the detail. The totals are what the scoreboard reads, and keeping them
+explicit means a row can be checked against itself: `outcome` must equal the
+rollup of `requests`. A row where they disagree is wrong, and that is detectable
+without recomputation.
+
+Requested against booked is the pair that makes a fallback legible. `08:38 → 08:45`
+says the member was moved seven minutes; a bucket label alone does not. It is also
+what will make #216 measurable — once requests are confirmed against a real slot,
+the distance between requested and booked becomes a number worth trending rather
+than a consequence of asking for a time that never existed.
+
+### `member` is opaque, and deliberately so
+
+The requester identity in the application is a phone number
+(`app/models/database.py`, `phone_number` on `BookingRecord`, `SessionRecord` and
+`WaldenCredential`; the same field carries a Discord snowflake or Telegram user id
+for those channels). All three are personal data.
+
+`member` is therefore a stable opaque identifier — a salted hash prefix, with the
+salt held in Secret Manager — and **the mapping from it to a person is not in this
+repository.** Resolve it against the database when a question actually needs a
+name.
+
+Two reasons it is salted rather than a plain hash. A phone number has around ten
+digits of entropy, so an unsalted hash is trivially reversible by enumeration. And
+these rows feed a page served publicly from `docs/`; an identifier that is
+reversible is personal data wherever it ends up.
+
+**`member` must never reach the page.** It exists so that "is one member
+consistently getting fallbacks" is answerable from the ledger. The scoreboard
+publishes counts, and counts only.
 
 **`confirmed_slots` is what keeps a trend honest.** Until #216 ships it is `false`,
 and on such a row `exact` means only that the booked time matched the time
@@ -80,7 +131,7 @@ published. This is the history a trend is plotted from.
  "published":"docs/scoreboard.json",
  "outcome_all_time":{"exact":0,"fallback":0,"miss":0,"confirmed_slots":false},
  "outcome_4wk":{"exact":0,"fallback":0,"miss":0,"confirmed_slots":false},
- "successful_runs":{"total":0,"consecutive":0,"by_routine":{}},
+ "streak":{"consecutive":0,"by_routine":{},"total_ok":0},
  "cost":{"month":"2026-09","usd_total":null,"usd_per_booking":null,"source":"unavailable"}}
 ```
 
@@ -99,14 +150,17 @@ One row per cost run. Monthly, so most days have no row.
 
 ```json
 {"date":"2026-10-01","routine":"cost","ok":true,
- "month":"2026-09","usd_gcp":null,"usd_agent":null,"scope":"gcp_only",
+ "month":"2026-09","usd_gcp":null,"scope":"gcp_only",
  "source":"bigquery:<dataset>"}
 ```
 
-`scope` states what the figure covers, because it will not cover everything.
-Agent and token spend is not in GCP and has no programmatic source available;
-`usd_agent` is `null` unless a figure was entered by hand. A cost number whose
-scope is unstated is worse than no number.
+`scope` states what the figure covers, because it does not cover everything. GCP
+spend only, per #227. Whether Anthropic agent and token spend can be measured at
+all is open, in #228; if it becomes available, `scope` changes and a `usd_agent`
+field joins the row rather than being folded silently into the total.
+
+A cost number whose scope is unstated is worse than no number, because it invites
+$/booking comparisons against a denominator that does not match it.
 
 ---
 

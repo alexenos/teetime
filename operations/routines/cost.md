@@ -14,6 +14,10 @@ Routine owns the metrics it measures, and the scoreboard only derives. Keeping i
 separate also keeps BigQuery credentials out of the scoreboard Routine, which
 otherwise needs no access to anything but the ledgers.
 
+Scope, prerequisites and the reasoning for BigQuery are in **#227**. Whether
+Anthropic spend can be measured at all is **#228**. This file records what the
+Routine does; those issues record what has to exist first.
+
 ## What it is blocked on
 
 **Cloud Billing export to BigQuery is not enabled.** Verified: no service account
@@ -37,14 +41,9 @@ so the query needs no new tooling.
 
 ## What it cannot cover
 
-**Agent and token spend is not in GCP.** It is Anthropic spend, and no
-programmatic source for it is available to these sessions. Two honest options:
-
-1. Report GCP only, and label the figure `scope: gcp_only` on the page.
-2. Enter a monthly figure by hand, and label it `scope: gcp_plus_agent` with
-   `usd_agent` recorded as manually entered.
-
-Not decided. Until it is, option 1 is what the schema assumes.
+**Agent and token spend is not in GCP**, and whether it can be measured at all is
+not established — that is #228, not a settled absence. Scope is `gcp_only` until
+that issue resolves, labelled as such on the row and on the page.
 
 **A cost number whose scope is unstated is worse than no number**, because it
 invites $/booking comparisons against a denominator that does not match.
@@ -72,7 +71,7 @@ reports on. Recorded so the set of crons needing the 2026-11-01 change is comple
 1. Enable the billing export (outside this repository).
 2. Add the two IAM grants in `terraform/`.
 3. Create the Routine, record its trigger ID here, and change **Status**.
-4. Decide the agent-spend question above and record the decision here.
+4. Resolve #228 and record the scope decision here.
 
 Until step 1 happens, cost is `null` on every scoreboard row and the page shows it
 as unavailable rather than as zero.

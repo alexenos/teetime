@@ -50,8 +50,9 @@ out an hour earlier.
 
 1. Read every `*.jsonl` in `operations/ledger/`.
 2. Derive the three metrics per `operations/scoreboard.md`: outcome split as
-   all-time and last-28-day totals, successful runs as a total plus the consecutive
-   count, cost from the newest `cost.jsonl` row. Record `null` with a reason for any
+   all-time and last-28-day totals, the automation streak as the combined
+   consecutive count plus each Routine's own, cost from the newest `cost.jsonl` row.
+   Record `null` with a reason for any
    source that does not exist. Do not infer, and do not substitute zero.
 3. Compare against the newest row in `scoreboard.jsonl`.
 4. **If nothing changed:** append the row and stop. No commit, no notification. The

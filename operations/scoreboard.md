@@ -54,27 +54,34 @@ in definition, not in performance.
 **Per request, not per morning.** 2026-09-15 was two requests, both booked.
 2026-09-17 was three requests, all Miss. Per-morning counting loses both figures.
 
-## 2. Successful routine runs
+## 2. Automation streak
 
-The count of runs that did their job, summed across every Routine, all time.
+Consecutive successful runs across the Routines, counted back from the newest row
+to the last failure.
 
 | Figure | |
 |---|---|
-| Headline | total successful runs, all Routines, all time |
-| Breakdown | per Routine |
-| **Trend** | consecutive successful runs since the last failure |
+| Headline | the combined streak: consecutive successful runs, all Routines interleaved by date |
+| Breakdown | each Routine's own streak |
+| Context | total successful runs all time, which only ever rises |
+| **Trend** | the streak's own history — how long previous streaks ran before breaking |
 
-The headline is cumulative and only ever rises, which is why the trend is the
-consecutive count: a total cannot tell you something broke this week. The
-consecutive count drops to zero on any failure and is the number that reflects
-current health.
+The streak drops to zero on any failure, which is the point: it reflects current
+health rather than accumulated volume. The all-time total is kept alongside it as
+context, not as the headline, because a number that only rises cannot tell you
+something broke this week.
+
+**The combined streak interleaves Routines by date**, so a cost Routine failure
+resets it even though the race report kept working. That is intended for the
+headline — it answers "when did anything last break" — and it is why the per-Routine
+breakdown sits next to it. Read the headline for whether the automation is healthy
+and the breakdown for which part is not.
 
 A Routine's own runs count toward this, the scoreboard Routine included. It is
 measuring the automation, and it is part of the automation.
 
-**Source:** the `ok` field across every ledger in `operations/ledger/`. Total is
-the count of `ok: true`; consecutive is counted back from the newest row to the
-first `ok: false`.
+**Source:** the `ok` field across every ledger in `operations/ledger/`. Sort all
+rows by date, count back from the newest to the first `ok: false`.
 
 **A run cannot always score itself.** A race report that misdiagnoses the morning
 believes it did fine — that is exactly what 2026-09-15 was. So `ok` written by the
@@ -97,12 +104,14 @@ needs no new source.
 
 **Source:** `cost.jsonl`, written by the cost Routine. **Not yet available.** The
 project has no billing export and no BigQuery dataset, and no service account in
-`terraform/` holds a billing role. See `operations/routines/cost.md` for what
-enabling it requires.
+`terraform/` holds a billing role. #227 covers what enabling it requires, and why
+BigQuery is the only path to the figure.
 
-**Scope must be stated on the page.** Agent and token spend is not in GCP and has
-no programmatic source available; a figure covering GCP alone is useful but must
-say so. A cost number whose scope is unstated is worse than no number.
+**Scope is GCP only, and the page must say so.** Whether Anthropic agent and token
+spend can be measured is open in #228. For a project developed agentically against
+a ~$10/month GCP bill, the omitted half is plausibly the larger number, so a figure
+presented without its scope would understate total spend rather than approximate
+it.
 
 ---
 
