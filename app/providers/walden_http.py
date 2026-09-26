@@ -60,10 +60,12 @@ executed. Nothing about the request sequence is hardcoded, so a component id
 churning from ``j_idt1076`` to ``j_idt1082`` does not break the chain.
 """
 
+import concurrent.futures
 import datetime
 import email.utils
 import logging
 import re
+import threading
 import time as time_module
 import urllib.parse
 from dataclasses import dataclass, field
@@ -99,6 +101,27 @@ _VOID_TAGS = frozenset(
 # Request budget for a single PrimeFaces POST. The whole chain is 3-6 of these,
 # and a stalled one at 6:30 is worth abandoning to the Selenium fallback fast.
 DEFAULT_TIMEOUT_S = 10.0
+
+# Connection pool sizing, for a burst that sends every member on its own warm
+# connection (see PrimeFacesSession.prewarm).
+#
+# httpx's defaults - 20 idle connections kept, each for 5s - are what put every
+# burst member through a TCP and TLS handshake at fire time until 2026-09-25:
+# staging's last request is 66-95s before the window, so the pool was always
+# empty by then, and each ask reached the wire ~55ms after its logged send. The
+# pre-warm opens one connection per member ~2s before the burst, so the pool
+# has to keep that many idle connections that long. 64 covers the 32-member
+# burst ceiling twice over; 30s is far past the pre-warm lead and short of
+# anything a server should hold an idle client to.
+_POOL_MAX_CONNECTIONS = 100
+_POOL_MAX_KEEPALIVE = 64
+_POOL_KEEPALIVE_EXPIRY_S = 30.0
+
+# Budget for each pre-warm request, and for the whole pre-warm. A HEAD for the
+# static probe asset answers in ~26ms from Cloud Run on a warm connection, and a
+# new one adds a TCP and TLS handshake, so this is generous; it exists so that a
+# stalled pre-warm cannot eat into the burst it is warming up for.
+_PREWARM_TIMEOUT_S = 1.5
 
 # Final busy-wait before the target timestamp, mirroring the JS chain's 25 ms
 # spin. Python only needs a couple of ms since there is no DOM work left to do.
@@ -235,12 +258,99 @@ def _parse_http_date(header: str | None) -> int | None:
     return int(parsed.timestamp())
 
 
+@dataclass(frozen=True)
+class TransportTiming:
+    """When a request's bytes actually moved, as opposed to when we asked httpx.
+
+    Epoch milliseconds, from httpcore's own trace events. ``wrote_at_ms`` is the
+    instant the request body was handed to the socket - the moment a Reserve
+    leaves, and the one a burst's plan is really about. ``opened_connection``
+    says whether the request had to dial first, and ``connect_ms`` how long
+    that took (TCP plus TLS): until 2026-09-25 every burst member did, and the
+    ~55ms it cost was invisible in the ledger, whose send time is stamped before
+    the call. ``local_port`` identifies the connection a request rode, so a
+    burst can be checked for members that shared one.
+
+    Every field is None when the transport emitted no trace events at all,
+    which is what an in-memory test transport does - "not measured", rather
+    than a connection that was never opened.
+    """
+
+    wrote_at_ms: int | None = None
+    headers_at_ms: int | None = None
+    opened_connection: bool | None = None
+    connect_ms: int | None = None
+    local_port: int | None = None
+
+
+class _RequestTrace:
+    """Collects httpcore's trace events for one request.
+
+    Passed as ``extensions={"trace": ...}``; httpcore calls it with each event
+    name as it happens, on the thread doing the I/O. Only the first time of each
+    event is kept - a request has one of each - and the cost is one dict
+    insert per event, a dozen per request.
+    """
+
+    __slots__ = ("events",)
+
+    def __init__(self) -> None:
+        """Start with no events seen."""
+        self.events: dict[str, float] = {}
+
+    def __call__(self, name: str, info: dict[str, Any]) -> None:
+        """Record when ``name`` happened."""
+        self.events.setdefault(name, time_module.time())
+
+    def _first(self, suffix: str) -> float | None:
+        """The earliest event whose name ends with ``suffix`` (HTTP/1.1 or HTTP/2)."""
+        times = [at for name, at in self.events.items() if name.endswith(suffix)]
+        return min(times) if times else None
+
+    def timing(self, response: httpx.Response | None = None) -> TransportTiming:
+        """The transport facts for this request; all None if nothing was traced."""
+        if not self.events:
+            return TransportTiming()
+        wrote = self._first(".send_request_body.complete")
+        headers = self._first(".receive_response_headers.complete")
+        connect_started = self.events.get("connection.connect_tcp.started")
+        connected = self.events.get("connection.start_tls.complete") or self.events.get(
+            "connection.connect_tcp.complete"
+        )
+        local_port: int | None = None
+        if response is not None:
+            try:
+                stream = response.extensions.get("network_stream")
+                address = stream.get_extra_info("client_addr") if stream is not None else None
+                if address:
+                    local_port = int(address[1])
+            except Exception:  # noqa: BLE001 - telemetry must never fail a request
+                local_port = None
+        return TransportTiming(
+            wrote_at_ms=None if wrote is None else int(wrote * 1000),
+            headers_at_ms=None if headers is None else int(headers * 1000),
+            opened_connection=connect_started is not None,
+            connect_ms=(
+                None
+                if connect_started is None or connected is None
+                else int((connected - connect_started) * 1000)
+            ),
+            local_port=local_port,
+        )
+
+
 class DirectHttpError(RuntimeError):
     """Raised when the direct-HTTP path cannot complete a step.
 
     Always recoverable by the caller: the Selenium chain remains a valid way to
     perform the same booking, so callers catch this and fall back.
+
+    ``transport`` is set by :meth:`PrimeFacesSession.send_detached` when the
+    failure came from a request it sent, so a timed-out burst member still says
+    whether - and when - its bytes left.
     """
+
+    transport: TransportTiming | None = None
 
 
 class ViewExpiredError(DirectHttpError):
@@ -739,6 +849,9 @@ class PartialResponse:
     # The response headers worth keeping - see _LEDGER_HEADERS. Empty for a
     # response built by a parser rather than received from the club.
     headers: dict[str, str] = field(default_factory=dict)
+    # When the request's bytes really left, and on which connection. None for a
+    # response built by a parser rather than received from the club.
+    transport: TransportTiming | None = None
 
     @property
     def markup(self) -> str:
@@ -862,6 +975,9 @@ class PrimeFacesSession:
         # guessing - a wrong lead fires into a window the club has not opened.
         self.warm_up_rtt_ms: float | None = None
         self.clock_skew: ClockSkew | None = None
+        # The static asset the clock probe settled on, reused by prewarm() so
+        # the pre-warm costs no second search for one.
+        self._probe_url: str | None = None
         headers = {
             "User-Agent": user_agent,
             # PrimeFaces sets these on every AJAX request; the bridge uses
@@ -871,7 +987,15 @@ class PrimeFacesSession:
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "Accept": "application/xml, text/xml, */*; q=0.01",
         }
-        self._client = client or httpx.Client(timeout=timeout_s, follow_redirects=False)
+        self._client = client or httpx.Client(
+            timeout=timeout_s,
+            follow_redirects=False,
+            limits=httpx.Limits(
+                max_connections=_POOL_MAX_CONNECTIONS,
+                max_keepalive_connections=_POOL_MAX_KEEPALIVE,
+                keepalive_expiry=_POOL_KEEPALIVE_EXPIRY_S,
+            ),
+        )
         # Applied after construction so an injected client (tests, or a caller
         # supplying its own transport) gets the same protocol headers and cookie
         # jar as one we build - otherwise the request under test is not the
@@ -1038,6 +1162,7 @@ class PrimeFacesSession:
             distinguishes them.
         """
         probe_url = self._resolve_probe_url()
+        self._probe_url = probe_url
         samples: list[tuple[float, int]] = []
         round_trips: list[float] = []
         deadline = time_module.monotonic() + _SKEW_PROBE_BUDGET_S
@@ -1143,6 +1268,119 @@ class PrimeFacesSession:
         self.clock_skew = skew
         return skew
 
+    def prewarm(self, count: int) -> dict[str, Any]:
+        """Open ``count`` connections at once, so that many requests can each take one.
+
+        An opening burst sends its members a few milliseconds apart, each on
+        its own connection because every earlier one is still waiting for its
+        answer. Without this each member dials at its own instant, and the TCP
+        and TLS handshake - ~55ms from Cloud Run - lands between the planned
+        send and the bytes leaving (2026-09-25).
+
+        The requests are HEADs for the clock probe's static asset. The pool only
+        opens a new connection for a request that finds no idle one, so two
+        things keep the count honest: they start together from a barrier, and
+        each *holds* its connection - response still open - until every one of
+        them has a connection of its own. Without the hold, a thread scheduled a
+        little late finds an earlier request's connection already released and
+        rides it, and the pool ends up one connection short for every such
+        thread. A connection that was already open and idle is a fine one to
+        take; it just counts as reused rather than opened. The pool is sized to
+        keep them all (see ``_POOL_MAX_KEEPALIVE``).
+
+        Never raises. Returns what it managed, for the run record: how many
+        requests opened a connection, how many failed, how long it took, and
+        how many idle connections the pool holds afterwards.
+        """
+        count = max(1, count)
+        started = time_module.perf_counter()
+        try:
+            url = self._probe_url or self._resolve_probe_url()
+            self._probe_url = url
+        except Exception as exc:  # noqa: BLE001 - a pre-warm must never cost the race
+            logger.warning("DIRECT_HTTP: Pre-warm skipped - no probe target (%s)", exc)
+            return {"requested": count, "opened": 0, "failed": count, "ms": 0}
+        start_together = threading.Barrier(count)
+        hold_until_all_have_one = threading.Barrier(count)
+
+        def open_one(_index: int) -> str:
+            """Wait for the others, then ask: "opened", "reused", "untraced" or "failed"."""
+            trace = _RequestTrace()
+            try:
+                start_together.wait(timeout=_PREWARM_TIMEOUT_S)
+            except threading.BrokenBarrierError:
+                pass
+            try:
+                with self._client.stream(
+                    "HEAD", url, extensions={"trace": trace}, timeout=_PREWARM_TIMEOUT_S
+                ) as response:
+                    opened = trace.timing(response).opened_connection
+                    try:
+                        hold_until_all_have_one.wait(timeout=_PREWARM_TIMEOUT_S)
+                    except threading.BrokenBarrierError:
+                        pass
+                    # Only now read the (empty) body. Reading to the end is what
+                    # hands the connection back to the pool, so it has to wait
+                    # for the hold; and a streamed response closed *unread* is
+                    # discarded with its connection instead - the opposite of
+                    # the point.
+                    response.read()
+            except httpx.HTTPError as exc:
+                logger.debug("DIRECT_HTTP: Pre-warm request failed (%s)", exc)
+                # Release the others now: this one will never reach the hold.
+                hold_until_all_have_one.abort()
+                return "failed"
+            # An in-memory transport answers without any trace events: the
+            # request worked, and whether it dialled is simply not knowable.
+            return "untraced" if opened is None else "opened" if opened else "reused"
+
+        # Same per-URL filter the clock probe uses: without it httpx logs one
+        # INFO line per HEAD, a burst's worth of lines saying nothing.
+        httpx_logger = logging.getLogger("httpx")
+        log_filter = _SuppressProbeRequestLog(url)
+        httpx_logger.addFilter(log_filter)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=count, thread_name_prefix="prewarm"
+            ) as pool:
+                outcomes = list(pool.map(open_one, range(count)))
+        finally:
+            httpx_logger.removeFilter(log_filter)
+
+        report: dict[str, Any] = {
+            "requested": count,
+            "opened": outcomes.count("opened"),
+            "reused": outcomes.count("reused"),
+            "failed": outcomes.count("failed"),
+            "untraced": outcomes.count("untraced"),
+            "ms": int((time_module.perf_counter() - started) * 1000),
+            "idleAfter": self.idle_connections(),
+        }
+        logger.info(
+            "DIRECT_HTTP: Pre-warmed %d connection(s) in %dms - %d opened, %d already open, "
+            "%d failed; %s idle in the pool",
+            count,
+            report["ms"],
+            report["opened"],
+            report["reused"],
+            report["failed"],
+            report["idleAfter"] if report["idleAfter"] is not None else "unknown",
+        )
+        return report
+
+    def idle_connections(self) -> int | None:
+        """How many idle connections the pool holds, or None if it cannot be read.
+
+        Reads httpx's pool through private attributes, which is why every
+        failure is "unknown" rather than an error: this is a count for the log,
+        and an in-memory test transport has no pool at all.
+        """
+        try:
+            pool = self._client._transport._pool  # type: ignore[attr-defined]
+            return sum(1 for connection in pool.connections if connection.is_idle())
+        except Exception:  # noqa: BLE001 - diagnostics only
+            return None
+
     def post(
         self,
         config: AbConfig,
@@ -1186,45 +1424,64 @@ class PrimeFacesSession:
         form against a view the club has already moved past.
         """
         payload = body if body is not None else self.build_body(config)
+        # When the bytes really leave, as distinct from sent_at_ms below: see
+        # TransportTiming. Cheap enough for the critical path - a dozen dict
+        # inserts - and the only record of whether this request had to dial.
+        trace = _RequestTrace()
         sent_at_ms = int(time_module.time() * 1000)
         # httpx distinguishes "no timeout argument" (use the client's) from any
         # explicit value via a sentinel, so the two calls cannot be collapsed
         # into one with a computed keyword.
         try:
             if timeout_s is None:
-                http_response = self._client.post(self.form_state.action_url, content=payload)
+                http_response = self._client.post(
+                    self.form_state.action_url, content=payload, extensions={"trace": trace}
+                )
             else:
                 http_response = self._client.post(
-                    self.form_state.action_url, content=payload, timeout=timeout_s
+                    self.form_state.action_url,
+                    content=payload,
+                    timeout=timeout_s,
+                    extensions={"trace": trace},
                 )
         except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
             # Before the TimeoutException case: the first two are subclasses of
             # it, and this ordering is the only thing separating "never sent"
             # from "sent, outcome unknown".
-            raise DirectHttpConnectionError(
+            connection_error = DirectHttpConnectionError(
                 f"POST for {config.source} never connected: {exc}"
-            ) from exc
+            )
+            connection_error.transport = trace.timing()
+            raise connection_error from exc
         except httpx.TimeoutException as exc:
             # Read and write timeouts. Checked before the general case below -
             # TimeoutException is an HTTPError, so the order makes it reachable.
-            raise DirectHttpTimeoutError(f"POST for {config.source} timed out: {exc}") from exc
+            timeout_error = DirectHttpTimeoutError(f"POST for {config.source} timed out: {exc}")
+            timeout_error.transport = trace.timing()
+            raise timeout_error from exc
         except httpx.HTTPError as exc:
-            raise DirectHttpError(f"POST for {config.source} failed: {exc}") from exc
+            transport_error = DirectHttpError(f"POST for {config.source} failed: {exc}")
+            transport_error.transport = trace.timing()
+            raise transport_error from exc
         received_at_ms = int(time_module.time() * 1000)
+        transport = trace.timing(http_response)
 
         if http_response.status_code != 200:
-            raise DirectHttpStatusError(
+            status_error = DirectHttpStatusError(
                 f"POST for {config.source} returned HTTP {http_response.status_code}",
                 status_code=http_response.status_code,
                 headers=_ledger_headers(http_response.headers),
                 body_snippet=http_response.text[:_ERROR_BODY_SNIPPET_CHARS],
             )
+            status_error.transport = transport
+            raise status_error
 
         response = parse_partial_response(http_response.text)
         response.status_code = http_response.status_code
         response.headers = _ledger_headers(http_response.headers)
         response.sent_at_ms = sent_at_ms
         response.received_at_ms = received_at_ms
+        response.transport = transport
         # The club's clock as of this exchange, read from the endpoint that
         # actually decides the booking. The skew probe measures a static asset
         # host, which need not share a clock with the application server - and

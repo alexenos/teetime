@@ -214,7 +214,9 @@ The run has a fixed shape. Walk it and note where it diverges:
 | Pre-locate | `JS slot finder found slot` | `exact=True`, and **how many fallbacks** it kept |
 | Clock | `Clock skew measured` | probes, transitions, offset, one-way |
 | Lead | `Reserve will be sent Nms early` | Should be tens of ms, not hundreds |
-| Fire | `Firing Reserve k/N ... Nms past the window` | Attempt 1 should land on the first rung — **≈ +1030ms** since #150, not ≈ 0ms |
+| Fire | `Firing opening burst of N ... past the window (aim +1005ms)` | Since 2026-09-27 the plan is +815..+1175 around a +1005 aim (§7g); before that the first ask aimed at +1030 |
+| Burst timing | `BURST_TIMING:` / `BURST_CPU:` | Every member on a warm connection, write drift within ~2ms; CPU run-queue delay, pressure and throttling near zero (§7g) |
+| Gate | `GATE_BRACKET:` | Where each slot first said yes: `(last refusal, first grant]` by write time plus lead (§7g) |
 | Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot, and **`round trip`** against the 3.0s budget (§7b) |
 | Boundary | `RACE_LEDGER: club granted ... at +Nms` | Which rung won, and the last that lost |
 | Outcome | `Chain finished - phase=..., success=..., blocked=...` | Phase says how far it got |
@@ -389,15 +391,18 @@ a past morning can be answered there without touching GCS or a booking.
 
 ## 6. Classify
 
-- **Lost on the clock** — the opening did not land where it was aimed. The aim
-  is the club's 06:30:01 tick itself: +1000ms, margin 0 since 2026-09-04 (§7d
-  — an early ask is one free refusal, and the burst's later members cover the
-  probe's error, so the 30ms that used to sit past the tick was pure lateness
-  on a contested slot). Read `Clock skew measured` for the tick bracket, which
-  the probe pins to roughly ±22ms, and `clickDriftMs` for what the wait
-  actually hit; under the burst that drift is from its own final wait, taken
-  after the thread pool is warm, and `burstWarmupDriftMs` is the earlier wake.
-  `Clock skew unmeasurable` is the same class.
+- **Lost on the clock** — the opening did not land where it was aimed. Since
+  2026-09-27 the aim is the gate estimate plus 5ms: **+1005** (§7g). Corrected
+  2026-09-25: this line used to say "+1000ms, margin 0 since 2026-09-04", but
+  that change reached only `app/config.py`; terraform's default stayed 30 and is
+  what deploys, so every race from 09-04 to 09-25 aimed at **+1030** - read the
+  racer's own `Step 7` line for the aim, never this file. And before 09-27 each
+  ask also paid a ~55ms connection handshake after its logged send (§7g). Read
+  `Clock skew measured` for the tick bracket, which the probe pins to roughly
+  ±22ms, and `clickDriftMs` for what the wait actually hit; under the burst that
+  drift is from its own final wait, taken after the thread pool is warm, and
+  `burstWarmupDriftMs` is the earlier wake. From 09-27 `writeDriftMs` per
+  member is the better measure. `Clock skew unmeasurable` is the same class.
 - **Lost on the slot list** — few or zero fallbacks kept, or the scan dropped
   everything. Check the `dropped course=/window=` split.
 - **Refused at Reserve inside the first second** — was the standing failure
@@ -828,10 +833,67 @@ logs first (`resource.labels.job_name="teetime-observer"`), since the observer
 declines to capture at all when it cannot confirm it is parked on the target
 date.
 
+## 7g. Added 2026-09-25: the variable burst, and measuring the gate every morning
+
+Full design: `operations/design-gate-burst.md`. What a post-mortem needs:
+
+**Every send before 2026-09-27 left ~55ms after its logged time.** The HTTP
+client kept idle connections for 5s and staging ends 66-95s before the window,
+so every burst member dialled TCP + TLS 1.3 at its own instant, and
+`sentMsPastWindow` is stamped *before* the call. On 09-25 the 08:38 ask logged
++1015 left at about +1070. The one exception, 2026-09-18 (racer started late,
+probe ended <1s before the window, first asks rode that connection), is the
+only burst-era Friday that won 08:38. Do not read pre-09-27 send times as wire
+times, and do not compare them to post-09-27 write times without that offset.
+
+**The plan, the same every weekday.** Gate `walden_window_opens_offset_ms`
+(+1000) plus margin 5 = aim **+1005**. Members every 20ms from +815 to +975,
+every 5ms from +975 to +1035, every 20ms from +1055 to +1175: 28, all for the
+target, then the serial fallback walk as before. Each is sent at its instant
+minus the day's lead. Connections are opened ~2s before the first member, one
+per member; `prewarm` in run.json says how that went (`skipped` means staging
+left under 250ms).
+
+**New ledger fields, per member:** `planOffsetMs`, `plannedSendMsPastWindow`,
+`wroteMsPastWindow` (when the bytes actually left), `writeDriftMs`,
+`openedConnection` / `connectMs` / `localPort`, `responseHeadersMsPastWindow`,
+`leadMs`. **Per race, `run.json`** beside the ledger: `burstPlanMs`,
+`burstWrites`, `burstCpu`, `gateBrackets`, `prewarm`.
+
+**Reading the gate.** `GATE_BRACKET: <slot> opened in (+A, +B]` - the last
+refusal before the first grant and the grant, by write time plus lead, the
+frame the gate setting is tuned in. It can be off by one spacing (our own grant
+refuses our later asks while in flight; the club may reorder asks a few ms
+apart), so read it across mornings:
+
+```bash
+poetry run python scripts/fetch_debug_artifacts.py gate --since 20260927
+```
+
+That prints each race's bracket, the per-weekday intersection (flagged when
+brackets disagree), and each race's CPU and write record. "Granted at the first
+ask" means the gate is at or before +815 and the burst should start earlier; "no
+grant" means someone was faster than our first ask after the gate, or the gate
+was later than +1175 - check another task's bracket that morning and the
+observer's flip table before choosing. When the brackets settle, the fix is one
+number: `walden_window_opens_offset_ms` in `terraform/variables.tf`.
+
+**Whether the second vCPU helps** (`racer_cpu` = 2 since 09-27): `BURST_CPU`
+gives run-queue delay of our own threads, CPU pressure, throttled time and
+container versus process CPU for the send window. Near-zero delay and
+throttling, with every `writeDriftMs` within ~2ms in `BURST_TIMING`, means CPU
+is not what makes members late. Only a morning or two back on `racer_cpu = 1`
+with the same plan proves the second one is the reason.
+
 ## 8. Report
 
 State separately: what the run did, what is established from artifacts, what is
 hypothesis, and the single cheapest experiment that would discriminate.
+
+From 2026-09-27, include each task's `GATE_BRACKET` and a line from
+`BURST_TIMING` and `BURST_CPU` (§7g) every time, win or lose: the bracket is the
+measurement the burst exists to take, and the timing lines are how the
+connection pre-warm and the second vCPU are judged.
 
 Include the observer's flip table (§7f) every time — a line stating what it
 showed for the target slot(s), even on a clean win where it only corroborates

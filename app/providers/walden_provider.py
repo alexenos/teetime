@@ -3893,6 +3893,13 @@ class WaldenGolfProvider(ReservationProvider):
                 ),
                 burst_offsets_ms=settings.walden_burst_offsets_ms(),
                 burst_target_only=settings.walden_burst_target_only(),
+                # A timed burst only: the connections are opened ~2s before its
+                # first member, so an untimed booking has nothing to open them
+                # ahead of.
+                burst_prewarm=(
+                    settings.walden_burst_prewarm_connections
+                    and execute_at_timestamp_ms is not None
+                ),
             )
         except Exception as e:  # noqa: BLE001 - opt-in path must never break booking
             # Staging parses live markup, so a malformed page can surface as
@@ -5403,6 +5410,25 @@ class WaldenGolfProvider(ReservationProvider):
             logger.info("RACE_LEDGER: wrote %d row(s) to %s", len(rows), uri)
         except Exception as e:  # noqa: BLE001 - diagnostics must not fail a booking
             logger.warning(f"RACE_LEDGER: failed to write ledger rows: {e}")
+
+        # The run's own record beside the per-attempt rows: the burst's plan, the
+        # connection pre-warm, CPU contention and the gate bracket all live in
+        # the chain's timing, and none of it belongs to any one attempt.
+        # scripts/fetch_debug_artifacts.py reads it for the gate table.
+        try:
+            record = {
+                "targetTimestampMs": target_timestamp_ms,
+                "timing": dict(getattr(result, "timing", {}) or {}),
+            }
+            uri = self._upload_bytes_to_gcs(
+                bucket_name=bucket_name,
+                object_name=f"walden/race/{run_id}/run.json",
+                content_type="application/json; charset=utf-8",
+                data=json.dumps(record, default=str, indent=1).encode("utf-8", errors="replace"),
+            )
+            logger.info("RACE_LEDGER: wrote the run record to %s", uri)
+        except Exception as e:  # noqa: BLE001 - see above
+            logger.warning(f"RACE_LEDGER: failed to write the run record: {e}")
 
         for observation in self._ledger_payloads_worth_storing(attempts):
             if not observation.raw_xml:

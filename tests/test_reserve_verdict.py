@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import Settings
+from app.config import Settings, burst_plan_offsets_ms
 from app.providers.walden_http import parse_html, parse_partial_response
 from app.providers.walden_http_booker import (
     RESERVE_ACCEPTED,
@@ -140,20 +140,14 @@ class TestStaleMessagesLaterInTheChain:
 class TestSweepLadder:
     """The offsets the Reserve is asked at, parsed from configuration."""
 
-    def test_the_aim_is_the_tick_itself(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The sheet is believed to open at 06:30:01, and that is exactly where we aim.
+    def test_the_aim_is_five_ms_past_the_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The gate is believed to be +1000, and the aim sits 5ms after it: +1005.
 
-        Every refusal on record arrived under +1000ms (-60, -14, -7, 0, 0, 812,
-        817) and every grant over +1000ms, with the club stamping refusals inside
-        the 06:30:00 second and its grants inside 06:30:01. An aim short of the
-        tick would spend the primary shot on a question already answered no.
-
-        The margin past the tick is 0 since 2026-09-04. It was 30, to keep the
-        probe's +-22ms from landing the first send early - but an early send is
-        one free refusal, and on a contested slot the 30ms was the loss: every
-        Friday first ask went at +1005..+1026ms and was refused, while the same
-        ask at the same club-second won every other day. The burst's later
-        members are what cover the probe's error now.
+        The 5ms is only there to be after the gate. It is not what covers the
+        clock probe's error - the burst's dense part is, with a member every 5ms
+        within +-30ms of the aim. (#173 set this file's margin to 0 on
+        2026-09-04 while terraform kept 30, so the deployed aim was +1030 until
+        2026-09-25; tests/test_terraform_defaults.py keeps the two equal now.)
 
         Isolated from the environment: terraform sets these on the deployed
         service, so a shell mirroring the deployment would make this assert what
@@ -165,9 +159,9 @@ class TestSweepLadder:
 
         aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
 
-        assert config.walden_window_opens_offset_ms >= 1000
-        assert config.walden_reserve_aim_margin_ms == 0
-        assert aim_ms == config.walden_window_opens_offset_ms
+        assert config.walden_window_opens_offset_ms == 1000
+        assert config.walden_reserve_aim_margin_ms == 5
+        assert aim_ms == 1005
 
     def test_the_opening_is_a_burst_every_day(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The burst is the default, not a Friday special.
@@ -180,30 +174,33 @@ class TestSweepLadder:
             "WALDEN_RESERVE_OPENING_MODE",
             "WALDEN_RESERVE_BURST_OFFSETS_MS",
             "WALDEN_RESERVE_BURST_TARGET_ONLY",
+            "WALDEN_WINDOW_OPENS_OFFSET_MS",
+            "WALDEN_RESERVE_AIM_MARGIN_MS",
+            "WALDEN_BURST_START_BEFORE_AIM_MS",
+            "WALDEN_BURST_END_AFTER_AIM_MS",
+            "WALDEN_BURST_DENSE_HALF_WIDTH_MS",
+            "WALDEN_BURST_DENSE_SPACING_MS",
+            "WALDEN_BURST_SPARSE_SPACING_MS",
         ):
             monkeypatch.delenv(name, raising=False)
         config = Settings(_env_file=None)
 
         assert config.walden_reserve_opening_mode == "burst"
         offsets = config.walden_burst_offsets_ms()
-        # Starts on the tick and is dense through the probe's error.
-        assert offsets[0] == 0
-        assert offsets[1] <= 120
-        # Reaches past the probe's bracket and any tick jitter, but no further.
-        # This used to assert >= 1800, to reach "past the latest instant a
-        # Friday sheet has rendered closed" (+2.8s on 08-28). That evidence was
-        # withdrawn by operations/race-reports/2026-09-04.md - a refusal's
-        # sheet-closed marker re-renders our own staged snapshot, not the club -
-        # and 2026-09-18 bounded the gate inside [+1017, +2000]ms from a grant
-        # plus the self-blocked refusals it caused in club :01. So the tail was
-        # covering a late gate that the data does not show.
-        assert 500 <= offsets[-1] <= 1000
-        # And stays short. The club's hold is 300s, so once anyone holds the
-        # target, re-asking it inside the race cannot win; every extra member
-        # only delays the serial fallback walk, which does not start until the
-        # burst drains (+5305ms on 09-11; on 09-04 fourteen asks out to +10.7s
-        # never reached 09:08, free all morning).
-        assert len(offsets) <= 8
+        aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
+        plan = [aim_ms + offset for offset in offsets]
+        # The plan exactly as it was specified on 2026-09-25, in ms past
+        # 06:30:00: from +815 every 20ms to +975, every 5ms to +1035, then every
+        # 20ms again out to +1185 - whose last step lands on +1175.
+        assert plan == (
+            list(range(815, 975, 20)) + list(range(975, 1036, 5)) + list(range(1055, 1186, 20))
+        )
+        assert len(plan) == 28
+        # The dense part is +-30ms around the aim, one member every 5ms, and the
+        # aim itself is one of them.
+        dense = [offset for offset in offsets if -30 <= offset <= 30]
+        assert dense == list(range(-30, 31, 5))
+        # Every weekday the same: nothing in the plan knows what day it is.
         # Target-only by default (see operations/race-reports/2026-09-04-evening.md):
         # a fallback interleaved into the burst shares the target's ViewState, and
         # the 2026-09-04 evening ad-hoc test found the club can finalize the
@@ -211,6 +208,23 @@ class TestSweepLadder:
         # serially after the burst instead.
         assert config.walden_reserve_burst_target_only is None
         assert config.walden_burst_target_only() == len(offsets)
+        # And the connections are opened before it, so no member dials.
+        assert config.walden_burst_prewarm_connections is True
+
+    def test_the_burst_follows_the_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Moving the gate setting re-centres the whole plan; its shape does not change."""
+        monkeypatch.delenv("WALDEN_RESERVE_BURST_OFFSETS_MS", raising=False)
+        monkeypatch.setenv("WALDEN_WINDOW_OPENS_OFFSET_MS", "970")
+        monkeypatch.setenv("WALDEN_RESERVE_AIM_MARGIN_MS", "5")
+        config = Settings(_env_file=None)
+
+        aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
+        plan = [aim_ms + offset for offset in config.walden_burst_offsets_ms()]
+
+        assert aim_ms == 975
+        assert plan[0] == 785
+        assert plan[-1] == 1145
+        assert [p for p in plan if 945 <= p <= 1005] == list(range(945, 1006, 5))
 
     def test_burst_target_only_stays_coupled_to_a_longer_offset_list(
         self, monkeypatch: pytest.MonkeyPatch
@@ -246,12 +260,70 @@ class TestSweepLadder:
         assert config.walden_burst_target_only() == 4
 
     def test_burst_offsets_parse_leniently(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A malformed value degrades to one send on the aim, never to an error."""
+        """A malformed override degrades to one send on the aim, never to an error.
+
+        Negative offsets are kept, unlike the sweep's: a burst member before the
+        aim is the point of the plan, not a mistake.
+        """
         monkeypatch.setenv("WALDEN_RESERVE_BURST_OFFSETS_MS", " 100, 0,bad,-5,100,220 ")
-        assert Settings(_env_file=None).walden_burst_offsets_ms() == (0, 100, 220)
+        assert Settings(_env_file=None).walden_burst_offsets_ms() == (-5, 0, 100, 220)
 
         monkeypatch.setenv("WALDEN_RESERVE_BURST_OFFSETS_MS", "nonsense")
         assert Settings(_env_file=None).walden_burst_offsets_ms() == (0,)
+
+    def test_an_empty_override_means_the_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Only a non-blank override replaces the shape; whitespace does not."""
+        monkeypatch.setenv("WALDEN_RESERVE_BURST_OFFSETS_MS", "   ")
+        assert len(Settings(_env_file=None).walden_burst_offsets_ms()) == 28
+
+
+class TestBurstPlanShape:
+    """burst_plan_offsets_ms turns five numbers into the member list."""
+
+    def test_sparse_steps_are_laid_outward_from_the_dense_edges(self) -> None:
+        """No spacing changes abruptly at a seam, and the ends clip to the extents."""
+        plan = burst_plan_offsets_ms(
+            start_before_aim_ms=100,
+            end_after_aim_ms=95,
+            dense_half_width_ms=10,
+            dense_spacing_ms=5,
+            sparse_spacing_ms=30,
+        )
+        assert plan == (-100, -70, -40, -10, -5, 0, 5, 10, 40, 70)
+
+    def test_a_half_width_that_is_not_a_whole_number_of_steps_rounds_in(self) -> None:
+        """The dense part stays on the aim's own grid rather than stretching to the edge."""
+        plan = burst_plan_offsets_ms(
+            start_before_aim_ms=100,
+            end_after_aim_ms=100,
+            dense_half_width_ms=12,
+            dense_spacing_ms=5,
+            sparse_spacing_ms=50,
+        )
+        assert plan == (-60, -10, -5, 0, 5, 10, 60)
+
+    def test_the_extents_clip_the_dense_part_too(self) -> None:
+        """A burst told to start 10ms before the aim does not ask at -30."""
+        plan = burst_plan_offsets_ms(
+            start_before_aim_ms=10,
+            end_after_aim_ms=50,
+            dense_half_width_ms=30,
+            dense_spacing_ms=5,
+            sparse_spacing_ms=20,
+        )
+        assert plan[0] == -10
+        assert plan[-1] == 50
+
+    def test_nonsense_degrades_instead_of_raising(self) -> None:
+        """A load-time error would cost the morning; terraform validates real input."""
+        plan = burst_plan_offsets_ms(
+            start_before_aim_ms=-5,
+            end_after_aim_ms=-5,
+            dense_half_width_ms=-1,
+            dense_spacing_ms=0,
+            sparse_spacing_ms=-20,
+        )
+        assert plan == (0,)
 
     def test_the_default_ladder_is_retries_from_the_aim(
         self, monkeypatch: pytest.MonkeyPatch

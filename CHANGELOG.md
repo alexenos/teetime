@@ -28,6 +28,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The 06:30 race now opens with a 28-member burst around a measured gate, on
+  connections opened ahead of time, and records when every ask really left.**
+  The aim is the gate estimate (+1000, `walden_window_opens_offset_ms`) plus
+  5ms: +1005. Members go every 20ms from +815 to +975, every 5ms from +975 to
+  +1035, and every 20ms again to +1175 - the same plan every weekday, all for
+  the target, with the serial fallback walk after it as before. The shape is
+  five terraform settings around the aim, so moving the gate setting re-centres
+  the whole burst.
+
+  Two things in the raw data drove it. Every burst member used to open a new
+  TCP and TLS connection at its own instant - httpx drops idle connections
+  after 5s and staging ends ~90s before the window - so each ask left ~55ms
+  after its logged send; the one morning the first ask rode a still-open
+  connection (2026-09-18) is the only burst-era Friday that won 08:38. And the
+  deployed aim was +1030, not the +1000 the code and the race-report skill
+  described: #173 moved the margin to 0 in `app/config.py` and terraform kept
+  30. `tests/test_terraform_defaults.py` now holds the two defaults equal.
+
+  Now, ~2s before the burst, one connection per member is opened and held
+  until all of them exist (`PrimeFacesSession.prewarm`). Every ledger row
+  records its planned instant, when its bytes actually left (httpx's trace),
+  whether it dialled, and on which connection; each race writes `run.json`
+  beside its ledger and logs `GATE_BRACKET` (where each slot first said yes),
+  `BURST_TIMING` and `BURST_CPU`. `scripts/fetch_debug_artifacts.py gate`
+  tabulates the brackets by morning and weekday. The racer has two vCPUs, and
+  `BURST_CPU` - run-queue delay, CPU pressure, throttling, container versus
+  process CPU - is how to tell whether the second one is helping. See
+  `operations/design-gate-burst.md`.
+
 - **Every booking now runs under the requester's own Walden login; there is no
   shared account to fall back on.** A requester with no row in
   `walden_credentials` is refused - in the conversation, with "your account
