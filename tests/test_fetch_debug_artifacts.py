@@ -162,3 +162,45 @@ class TestLedgerGateBrackets:
 
         assert fetch_debug_artifacts._bracket_phrase(upper_only) == "<= +1010"
         assert fetch_debug_artifacts._bracket_phrase(nothing) == "no grant"
+
+
+class TestCpuRow:
+    """The per-race CPU line tells a lost run.json from one that never existed.
+
+    Found in review on #226: the first version printed "before 2026-09-27" for
+    any missing run.json, so a current race whose run.json upload failed - the
+    provider uploads it separately from the ledger - read as an old race.
+    """
+
+    def test_a_missing_run_json_beside_a_new_ledger_is_lost_telemetry(self) -> None:
+        rows = [{"burstIndex": 0, "wroteMsPastWindow": 990, "sentMsPastWindow": 989}]
+
+        assert "MISSING" in fetch_debug_artifacts._cpu_row(None, rows)
+
+    def test_a_missing_run_json_beside_an_old_ledger_is_history(self) -> None:
+        rows = [{"burstIndex": 0, "sentMsPastWindow": 1015}]
+
+        assert fetch_debug_artifacts._cpu_row(None, rows) == "no run.json (the race predates it)"
+
+    def test_a_run_json_without_burst_measurements_says_so(self) -> None:
+        row = fetch_debug_artifacts._cpu_row({"timing": {"openingMode": "ladder"}}, [])
+
+        assert row == "run.json has no burst measurements (the opening was not a burst)"
+
+    def test_a_full_record_reads_as_one_line(self) -> None:
+        record = {
+            "timing": {
+                "burstWrites": {"members": 28, "warm": 28, "driftMsMax": 1, "lateOver2Ms": 0},
+                "burstCpu": {
+                    "environment": {"cgroupCpuLimit": 2.0},
+                    "sendWindow": {"busyCpus": 0.4, "runQueueDelayMs": 0.2},
+                },
+            }
+        }
+
+        row = fetch_debug_artifacts._cpu_row(record, [])
+
+        assert "cpus 2.0" in row
+        assert "warm 28/28" in row
+        assert "drift max 1ms" in row
+        assert "runq 0.2ms" in row

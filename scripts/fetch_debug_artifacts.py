@@ -390,15 +390,28 @@ def _bracket_phrase(bracket: dict) -> str:
     return f"({bracket['refusedBeforeMs']:+d}, {bracket['grantedMs']:+d}]"
 
 
-def _cpu_row(record: dict | None) -> str:
-    """A run.json's CPU and write-timing record as one table row's tail."""
-    timing = (record or {}).get("timing") or {}
+def _cpu_row(record: dict | None, rows: list[dict]) -> str:
+    """A run.json's CPU and write-timing record as one table row's tail.
+
+    A missing run.json means one of two things, told apart by the ledger beside
+    it rather than by date. A ledger whose rows carry write times came from code
+    that writes run.json too - the provider uploads the two files independently -
+    so its absence is telemetry lost to a failed upload, and saying "older race"
+    would hide that. A ledger without write times predates run.json. A run.json
+    that exists but holds no burst measurements is a race whose opening was not a
+    burst.
+    """
+    if record is None:
+        if any(row.get("wroteMsPastWindow") is not None for row in rows):
+            return "run.json MISSING - this race should have written one; see RACE_LEDGER"
+        return "no run.json (the race predates it)"
+    timing = record.get("timing") or {}
     writes = timing.get("burstWrites") or {}
     cpu = timing.get("burstCpu") or {}
     environment = cpu.get("environment") or {}
     window = cpu.get("sendWindow") or {}
     if not writes and not cpu:
-        return "no run.json (before 2026-09-27)"
+        return "run.json has no burst measurements (the opening was not a burst)"
 
     def show(value: object, unit: str = "") -> str:
         return "?" if value is None else f"{value}{unit}"
@@ -448,8 +461,8 @@ def print_gate_table(mornings: dict[str, tuple[list[dict], dict | None]]) -> Non
         )
 
     print("\nCPU and write timing per race (run.json; the second-vCPU question):")
-    for run_dir, (_rows, record) in mornings.items():
-        print(f"  {run_dir:<40} {_cpu_row(record)}")
+    for run_dir, (rows, record) in mornings.items():
+        print(f"  {run_dir:<40} {_cpu_row(record, rows)}")
 
 
 def summarize_observer_run(
