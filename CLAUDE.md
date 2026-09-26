@@ -14,10 +14,16 @@ with one exception: the race report Routine merges its own report, scoped to one
 file under `operations/race-reports/` and gated on a green `Tests` check. That
 exception is defined in `operations/routines/race-report.md` and nowhere else.
 
-A commit touching only `operations/` does not redeploy: the Cloud Build trigger
-sets `ignored_files = ["operations/**"]` (`terraform/main.tf`). The filter
-applies only when every changed file matches, so a commit that also touches app
-code still deploys.
+A commit touching only `operations/` or `docs/` does not redeploy: the Cloud
+Build trigger sets `ignored_files = ["operations/**", "docs/**"]`
+(`terraform/main.tf`). The filter applies only when every changed file matches,
+so a commit that also touches app code still deploys.
+
+**That is what terraform declares, not a verified property of the live trigger.**
+Nothing in CI runs `terraform apply`, and the session service account
+(`teetime-artifact-reader`) cannot read Cloud Build, so no session can check.
+Merging a change to `ignored_files` does not change deploy behaviour; an apply
+does.
 
 **Three GCP resources, not one.** A Cloud Logging query scoped to the service
 alone returns a valid zero-row result on a morning when the race ran. That
@@ -83,9 +89,10 @@ specified and not deployed — the scoreboard and the cost Routine. `ship-pr` an
 the PR check-ins are not Routines; they are maintainer-invoked and push only to
 their own open PR.
 
-**A commit to `docs/` redeploys.** `ignored_files` covers `operations/**` only, so
-publishing the scoreboard page will fire a build until `docs/**` is added to it.
-That is a prerequisite for deploying the scoreboard Routine, not a cleanup.
+**Publishing to `docs/` needs the filter applied, not just merged.** `docs/**` is
+in `ignored_files` in terraform as of this branch. Until someone applies it, a
+scoreboard publish still fires a build. Confirm the live trigger before deploying
+the scoreboard Routine.
 
 ## Skills
 

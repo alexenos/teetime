@@ -19,14 +19,25 @@ a second standing authorization to write to `main`, and it is bounded the same w
 the race report's is: two paths (`docs/scoreboard.json` and, when regenerated,
 `docs/scoreboard.html`), a green `Tests` check, and nothing else.
 
-**`docs/` is not in the deploy filter.** The Cloud Build trigger sets
-`ignored_files = ["operations/**"]` (`terraform/main.tf`). `docs/**` is absent, so
-a commit to `docs/` fires a build and redeploys the live booking service. As
-written, this Routine would redeploy production every day it publishes.
+`docs/**` is now in `ignored_files` in `terraform/main.tf`, alongside
+`operations/**`. Without it, a commit to `docs/` fires a build and redeploys the
+live booking service, so this Routine would redeploy production every day it
+published.
 
-**Prerequisite: add `docs/**` to `ignored_files`.** One line of terraform, and it
-has to be applied to the live trigger before this Routine is deployed. Until then
-the Routine must not be turned on.
+**The edit is not the prerequisite; the apply is.** Nothing in CI runs
+`terraform apply`, so merging the change does not alter the live trigger. And no
+session can confirm it afterwards: the service account
+(`teetime-artifact-reader`) gets `PERMISSION_DENIED` on
+`gcloud builds triggers describe`.
+
+An attempt to verify it indirectly produced no signal, which is worth recording
+rather than repeating. Cloud Build posts no commit statuses to GitHub, so an
+`operations/`-only commit (1a9d4de, a race report) and a commit that changes app
+code (cabb678) both return zero statuses. The check cannot distinguish "filtered"
+from "deployed", so it says nothing about whether `operations/**` is live either.
+
+Confirm against the live trigger, by whoever can read it, before turning this
+Routine on.
 
 ## Why it is separate from the race report
 
@@ -120,8 +131,10 @@ is a stat tile. The streak history is one series, so it carries no legend.
 
 ## Deploying it
 
-1. Add `docs/**` to `ignored_files` in `terraform/main.tf` and apply it. **Not
-   optional** — without it this Routine redeploys production daily.
+1. Apply the terraform, and confirm `ignored_files` on the live trigger reads
+   `["operations/**", "docs/**"]`. **Not optional** — without it this Routine
+   redeploys production daily. The repository edit is already made; the apply is
+   not, and cannot be verified from a session.
 2. Create the Routine, record its trigger ID above, and change **Status**.
 3. Note the new cron in the 2026-11-01 DST change.
 
