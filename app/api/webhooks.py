@@ -157,7 +157,7 @@ async def handle_telegram_update(
 
     # With group privacy mode on, Telegram only ever delivers a group message
     # that already addresses this bot. Some groups need privacy mode off to
-    # get delivery working at all (see docs/telegram-setup.md), which means
+    # get delivery working at all (see operations/telegram-setup.md), which means
     # Telegram now hands over every message regardless of addressing - so an
     # unaddressed one in a non-private chat has to be dropped here instead,
     # or every group message becomes an LLM call.

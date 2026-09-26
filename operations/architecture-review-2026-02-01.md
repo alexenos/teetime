@@ -211,7 +211,7 @@ Then in CLI session:
 
 ### Prompt for CLI Session
 
-> "Continue the architecture review from docs/architecture-review-2026-02-01.md. I have Walden Golf credentials set via WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD env vars. Please:
+> "Continue the architecture review from operations/architecture-review-2026-02-01.md. I have Walden Golf credentials set via WALDEN_MEMBER_NUMBER and WALDEN_PASSWORD env vars. Please:
 > 1. Run a Selenium session to capture HTML snapshots from the tee time booking page
 > 2. Validate which DOM selectors are currently working
 > 3. Save snapshots as test fixtures

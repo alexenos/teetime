@@ -186,13 +186,25 @@ class TestSweepLadder:
 
         assert config.walden_reserve_opening_mode == "burst"
         offsets = config.walden_burst_offsets_ms()
-        # Starts on the tick, is dense through the probe's error, and reaches
-        # past the latest instant a Friday sheet has rendered closed (+2.8s
-        # past the window on 08-28, i.e. ~+1800ms past the aim).
+        # Starts on the tick and is dense through the probe's error.
         assert offsets[0] == 0
         assert offsets[1] <= 120
-        assert offsets[-1] >= 1800
-        # Target-only by default (see docs/booking-post-mortem-2026-09-04-evening.md):
+        # Reaches past the probe's bracket and any tick jitter, but no further.
+        # This used to assert >= 1800, to reach "past the latest instant a
+        # Friday sheet has rendered closed" (+2.8s on 08-28). That evidence was
+        # withdrawn by operations/race-reports/2026-09-04.md - a refusal's
+        # sheet-closed marker re-renders our own staged snapshot, not the club -
+        # and 2026-09-18 bounded the gate inside [+1017, +2000]ms from a grant
+        # plus the self-blocked refusals it caused in club :01. So the tail was
+        # covering a late gate that the data does not show.
+        assert 500 <= offsets[-1] <= 1000
+        # And stays short. The club's hold is 300s, so once anyone holds the
+        # target, re-asking it inside the race cannot win; every extra member
+        # only delays the serial fallback walk, which does not start until the
+        # burst drains (+5305ms on 09-11; on 09-04 fourteen asks out to +10.7s
+        # never reached 09:08, free all morning).
+        assert len(offsets) <= 8
+        # Target-only by default (see operations/race-reports/2026-09-04-evening.md):
         # a fallback interleaved into the burst shares the target's ViewState, and
         # the 2026-09-04 evening ad-hoc test found the club can finalize the
         # fallback's grant instead of the target's. The fallback list is walked

@@ -438,6 +438,12 @@ resource "google_cloudbuild_trigger" "deploy_main" {
     }
   }
 
+  # A commit that touches only operations/ (race reports, runbooks) has no
+  # effect on the running service and should not pay for a rebuild + Cloud
+  # Run redeploy. ignored_files only skips the trigger when every changed
+  # file matches - a commit that also touches app code still fires normally.
+  ignored_files = ["operations/**"]
+
   filename        = "cloudbuild.yaml"
   service_account = google_service_account.cloud_build.id
 

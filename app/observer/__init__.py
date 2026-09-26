@@ -1,6 +1,6 @@
 """The observer job: an independent reader of the tee sheet across the window.
 
-Phase 0 of ``docs/design-observer-and-fanout.md`` (issue #189). Four
+Phase 0 of ``operations/design-observer-and-fanout.md`` (issue #189). Four
 consecutive Fridays the requested slot was lost, and two incompatible
 explanations fit every artifact we hold - a late gate, or a faster rival. They
 cannot be separated from our own Reserve exchanges, because a refusal's body is

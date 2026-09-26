@@ -13,7 +13,7 @@
 #      zero bytes, which surfaces as an ADC error several steps into a
 #      post-mortem rather than as anything that names the cause.
 #
-#   2. The gcloud CLI. docs/debug-artifact-access.md used to say installing it
+#   2. The gcloud CLI. operations/debug-artifact-access.md used to say installing it
 #      was impossible here because the egress policy refuses dl.google.com. It
 #      refuses dl.google.com, but that host is only a CDN in front of the
 #      cloud-sdk-release bucket, and storage.googleapis.com is reachable -
@@ -28,7 +28,7 @@
 # only works if every failure is actually reported, so the exit summary below
 # reflects what is genuinely usable rather than the fact that the script ran.
 #
-# See docs/debug-artifact-access.md.
+# See operations/debug-artifact-access.md.
 
 set -uo pipefail
 

@@ -21,7 +21,7 @@ message - over Telegram, Discord, or SMS.
   independently of `MESSAGING_CHANNEL`, so it can run alongside Discord. Each
   booking records the channel it was requested on and its result is sent back
   over that same one. Telegram needs no always-on instance, so the service can
-  scale to zero - see `docs/telegram-setup.md`.
+  scale to zero - see `operations/telegram-setup.md`.
 - **LLM**: Google Gemini API with function calling
 - **Scheduling**: Cloud Run Jobs + Cloud Scheduler
 - **Database**: Cloud SQL (Postgres) / SQLite for local dev
@@ -154,7 +154,7 @@ values before flipping the variable, never after:
 echo -n "your_bot_token" | gcloud secrets versions add DISCORD_BOT_TOKEN --data-file=-
 echo -n "your_user_id"   | gcloud secrets versions add DISCORD_USER_ID --data-file=-
 
-# Telegram (telegram_enabled = true) - see docs/telegram-setup.md for how to
+# Telegram (telegram_enabled = true) - see operations/telegram-setup.md for how to
 # obtain each of these, and for the character set setWebhook accepts.
 echo -n "your_bot_token"     | gcloud secrets versions add TELEGRAM_BOT_TOKEN --data-file=-
 echo -n "your_user_id"       | gcloud secrets versions add TELEGRAM_ALLOWED_USER_IDS --data-file=-
@@ -172,7 +172,7 @@ echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENC
 # must ALSO be in TELEGRAM_ALLOWED_USER_IDS above. Requires the credential
 # store above (credential_store_enabled = true, with a versioned
 # CREDENTIAL_ENCRYPTION_KEY) - proxy booking always books under a friend's
-# stored login. See docs/telegram-setup.md.
+# stored login. See operations/telegram-setup.md.
 echo -n "your_user_id" | gcloud secrets versions add TELEGRAM_ADMIN_USER_ID --data-file=-
 ```
 
