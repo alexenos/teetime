@@ -394,15 +394,16 @@ def _cpu_row(record: dict | None, rows: list[dict]) -> str:
     """A run.json's CPU and write-timing record as one table row's tail.
 
     A missing run.json means one of two things, told apart by the ledger beside
-    it rather than by date. A ledger whose rows carry write times came from code
-    that writes run.json too - the provider uploads the two files independently -
-    so its absence is telemetry lost to a failed upload, and saying "older race"
-    would hide that. A ledger without write times predates run.json. A run.json
-    that exists but holds no burst measurements is a race whose opening was not a
-    burst.
+    it rather than by date. A ledger whose rows have a ``wroteMsPastWindow`` field
+    came from code that writes run.json too - the provider uploads the two files
+    independently - so its absence is telemetry lost to a failed upload, and
+    saying "older race" would hide that. The field's *presence* is the test, not
+    its value: on a race where no ask got its bytes out, every row carries it as
+    null. A ledger without the field predates run.json. A run.json that exists
+    but holds no burst measurements is a race whose opening was not a burst.
     """
     if record is None:
-        if any(row.get("wroteMsPastWindow") is not None for row in rows):
+        if any("wroteMsPastWindow" in row for row in rows):
             return "run.json MISSING - this race should have written one; see RACE_LEDGER"
         return "no run.json (the race predates it)"
     timing = record.get("timing") or {}

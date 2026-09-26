@@ -177,6 +177,20 @@ class TestCpuRow:
 
         assert "MISSING" in fetch_debug_artifacts._cpu_row(None, rows)
 
+    def test_a_new_ledger_whose_every_write_failed_still_reports_missing(self) -> None:
+        """No ask got its bytes out, so every write time is null - the field is still there.
+
+        Found in review on #226: testing the value rather than the field's presence
+        read this ledger as an old one, hiding a lost run.json on exactly the
+        morning it would matter most.
+        """
+        rows = [
+            {"burstIndex": 0, "wroteMsPastWindow": None, "sentMsPastWindow": 815},
+            {"burstIndex": 1, "wroteMsPastWindow": None, "sentMsPastWindow": 835},
+        ]
+
+        assert "MISSING" in fetch_debug_artifacts._cpu_row(None, rows)
+
     def test_a_missing_run_json_beside_an_old_ledger_is_history(self) -> None:
         rows = [{"burstIndex": 0, "sentMsPastWindow": 1015}]
 
