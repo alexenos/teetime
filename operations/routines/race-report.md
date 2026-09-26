@@ -1,4 +1,4 @@
-# Cycle: race report
+# Routine: race report
 
 | | |
 |---|---|
@@ -15,7 +15,7 @@ executes. Change this file in a PR, then update the Routine to match. The prompt
 was previously stored only in the trigger configuration, which is not versioned
 and retains no history of edits.
 
-## The authorization is what distinguishes this cycle
+## The authorization is what distinguishes this Routine
 
 Every other agent activity in this project ends by asking. This one does not: an
 incorrect report reaches `main` without anyone reading it first. Three things
@@ -56,7 +56,7 @@ Gate A in the prompt detects this condition and reports it rather than producing
 a verdict. It reports via push notification only.
 
 Correction: change the cron to `40 12 * * *` on or before that date. Until then
-the cycle produces no data on any morning it misfires.
+the Routine produces no data on any morning it misfires.
 
 ## Prompt defect: the Step 3 watch line names the wrong timeout
 

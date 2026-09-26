@@ -10,9 +10,9 @@ in `operations/`.
 
 **`main` deploys.** A commit on `main` triggers Cloud Build and redeploys the
 live service. Branch before committing. Merging is the maintainer's decision,
-with one exception: the race report cycle merges its own report, scoped to one
+with one exception: the race report Routine merges its own report, scoped to one
 file under `operations/race-reports/` and gated on a green `Tests` check. That
-exception is defined in `operations/cycles/race-report.md` and nowhere else.
+exception is defined in `operations/routines/race-report.md` and nowhere else.
 
 A commit touching only `operations/` does not redeploy: the Cloud Build trigger
 sets `ignored_files = ["operations/**"]` (`terraform/main.tf`). The filter
@@ -68,15 +68,15 @@ environment that sets `CI` but has no browser.
 
 ## Operations
 
-Measurement and the scheduled cycles: `operations/`.
+Measurement, and the Routines that run on a schedule: `operations/`.
 
 - `operations/scoreboard.md` — three metrics and their sources
-- `operations/cycles/` — one file per scheduled cycle, including its prompt
+- `operations/routines/` — one file per Routine, including its prompt
   and what it is authorized to do
-- `operations/ledger/` — the rows cycles emit; specified, not yet written
+- `operations/ledger/` — the rows a Routine run emits; specified, not yet written
 - `operations/race-reports/` — one report per race morning
 
-One cycle runs on a schedule: the race report, daily at `40 11 * * *` UTC.
+One Routine runs on a schedule: the race report, daily at `40 11 * * *` UTC.
 `ship-pr` and the PR check-ins are maintainer-invoked and push only to their
 own open PR.
 

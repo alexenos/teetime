@@ -1,6 +1,6 @@
 # The ledger
 
-The race report cycle appends rows here. The scoreboard is a rollup over these
+The race report Routine appends rows here. The scoreboard is a rollup over these
 files.
 
 The reports in `operations/race-reports/` hold the analysis: what was
@@ -17,20 +17,20 @@ than accumulated here.
 
 ---
 
-## `runs.jsonl` — one row per cycle run
+## `runs.jsonl` — one row per Routine run
 
 Input to the automation streak. Appended on every run, including runs that
 produced no other output — a morning with no booking scheduled is still a run,
 and a clean one.
 
 ```json
-{"cycle":"race-report","date":"2026-09-15","clean":false,
+{"routine":"race-report","date":"2026-09-15","clean":false,
  "note":"reported no booking; two had succeeded. Log query scoped to the service, fixed in #206"}
 ```
 
 | Field | Definition |
 |---|---|
-| `cycle` | matches a file in `operations/cycles/` |
+| `routine` | matches a file in `operations/routines/` |
 | `date` | run date, CT |
 | `clean` | whether the output required correction before use; independent of the outcome reported |
 | `note` | required when `clean` is false; states what was wrong |
@@ -78,21 +78,20 @@ gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<file>.jsonl
 Two reasons:
 
 1. A commit per run produces one commit per morning, on top of the report
-   commit the cycle already makes, and a merge conflict whenever two cycles run
-   concurrently.
+   commit the Routine already makes, and a merge conflict if two runs overlap.
 2. This matches existing practice. `scripts/observer_observations.py` writes
    `observations.jsonl` into the GCS run directory for the same reasons.
 
 The repository holds the schema. The bucket holds the data. A periodic snapshot
 into the repository is possible but is not implemented.
 
-Note that the cycle's standing authorization covers exactly one file under
+Note that the Routine's standing authorization covers exactly one file under
 `operations/race-reports/`. A GCS write is a data write outside that path and
 does not widen it; committing ledger rows to the repository would.
 
 ## Current state
 
-**Not implemented.** No cycle emits rows, no rollup reads them, and the files in
+**Not implemented.** Nothing emits rows, no rollup reads them, and the files in
 this directory are empty. The schemas above are the specification for that work.
 
 ## Backfill
@@ -101,7 +100,7 @@ Twenty-three reports exist in `operations/race-reports/`, covering 2026-08-13 to
 2026-09-25, and are not represented here. They are fewer than the number of runs:
 races are weekday-only, and a morning with no booking scheduled produces a run but
 no report — 2026-09-23 and 2026-09-26 are two recent examples, a Wednesday with
-nothing scheduled and a Saturday. The earliest, 2026-08-13, predates the cycle.
+nothing scheduled and a Saturday. The earliest, 2026-08-13, predates the Routine.
 
 They are not backfilled, for two reasons:
 

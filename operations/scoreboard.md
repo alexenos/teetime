@@ -39,10 +39,10 @@ both figures.
 
 ## 2. Automation streak
 
-Consecutive clean runs of the race report cycle.
+Consecutive clean runs of the race report Routine.
 
 The race report is the only automation this metric covers, because it is the
-only cycle that runs on a schedule and acts without being asked. `ship-pr` and
+only Routine that runs on a schedule and acts without being asked. `ship-pr` and
 the PR check-ins are maintainer-invoked and are not counted here.
 
 **Clean** means the run's output required no correction before it could be
@@ -50,8 +50,8 @@ acted on. It is independent of the outcome the run reported: a correctly
 diagnosed loss is clean, and so is a correctly reported "no booking was
 scheduled".
 
-The cycle now commits and merges its own report
-(`operations/cycles/race-report.md`), so an incorrect report reaches `main`.
+The Routine now commits and merges its own report
+(`operations/routines/race-report.md`), so an incorrect report reaches `main`.
 A report that merged and then required a correction commit is not clean.
 
 Two recorded cases, both predating that authorization — no auto-merged report
@@ -64,6 +64,10 @@ has yet required a correction:
 
 **Source:** `operations/ledger/runs.jsonl`, counted back from the newest row to
 the first `clean: false`. Do not store the streak.
+
+The run cannot reliably score itself — see the streak subsection under **How it
+would get updated**, which proposes deriving `clean` from git history instead and
+using a row only for the runs that produce no report.
 
 ## 3. Cost
 
@@ -81,7 +85,7 @@ that left the memory-versus-CPU question unresolved on 2026-09-17.
 ## Excluded
 
 **Commit count, PR count, lines changed.** These measure activity rather than
-outcome, and are directly gameable by a cycle that generates its own work.
+outcome, and are directly gameable by automation that generates its own work.
 
 **Malformed response rate** and **fix latency** were specified and then cut, to
 keep the scoreboard to what is worth maintaining at current volume. Neither was
@@ -99,14 +103,78 @@ hand is not recoverable from the repository later. Nothing is accumulating it.
 
 ## Computation
 
-The race report cycle emits rows; the scoreboard is a rollup over those rows.
-It does not parse the report documents. See `operations/ledger/README.md`.
+The scoreboard is a rollup over ledger rows and git metadata. It does not parse
+the prose of the reports: two sessions can read the same paragraph and score it
+differently. Reading git history *about* a report file — whether a later commit
+modified it — is deterministic and is fair game; see the streak section below.
 
 The reports in `operations/race-reports/` are unchanged by this. They hold the
-analysis; the ledger holds the values used for computation.
+analysis; the ledger and git hold the values used for computation. See
+`operations/ledger/README.md`.
 
-## Current implementation status
+## How it would get updated
 
-No cycle emits rows, and no rollup exists. The ledger files are empty and this
-document is a specification. `operations/ledger/README.md` states the write
-path and the work required to populate it.
+Nothing updates it today. There is no writer, no rollup, and no rendered
+current value: a grep for `operations/ledger` or `scoreboard` across `app/`,
+`scripts/`, the workflows and terraform returns nothing. The sections above are
+a specification.
+
+The three metrics are not equally far from working, and it is worth not treating
+them as one task.
+
+### Outcome split — needs a writer, and #216
+
+The source is already read every morning. The race report Routine reads
+`RESERVATION_CHECK` to reach its verdict, so the row is a byproduct of work that
+is happening anyway; appending it is one GCS write at the end of Step 5. That
+write is outside the Routine's authorized repository path and does not widen it.
+
+What it cannot do until #216 ships is distinguish Exact from Fallback, for the
+reason given above. Until then the row can carry `outcome` as `miss` or
+`not_miss` honestly, and no more.
+
+### Automation streak — the run cannot score itself
+
+A run that misdiagnoses the morning believes it did fine. That is precisely what
+2026-09-15 was: the session reported "no booking" and had no idea it was wrong.
+So `clean` written by the run that is being scored is not a measurement.
+
+Two ways out, and the second is better:
+
+1. Write `clean: true` provisionally and amend later, per the amendment rule in
+   `operations/ledger/README.md`. Requires someone to remember to amend.
+2. **Derive it from git instead.** A report is clean if no later commit modified
+   its file and no later PR retracted its findings. The first half is
+   mechanically computable — `git log --follow` on
+   `operations/race-reports/<date>.md` — and needs no writer and no row at all.
+   It is also retroactive, so it works on all 23 existing reports.
+
+Under (2) the streak stops needing `runs.jsonl` for reports. It still needs a row
+for the runs that produce no report, since a morning with nothing scheduled is a
+clean run with no file to inspect.
+
+### Cost — no source exists at all
+
+This one is not a code problem. The project has no billing export and no
+BigQuery dataset, and no service account in `terraform/` holds a billing role;
+the roles granted are storage, logging, run, cloudsql, secretmanager,
+artifactregistry, scheduler and serviceusage. Agent and token spend is not in
+GCP at all.
+
+Cost therefore needs new GCP setup — a billing export and an access grant —
+before any amount of code can read it. It is the only metric on this scoreboard
+that cannot be computed from data the project already has.
+
+### Where the current value would appear
+
+Not decided. Three options, cheapest first:
+
+- **A script run on demand** — `scripts/scoreboard.py`, printing the three
+  metrics. No new automation, no new authorization, no scheduled work.
+- **A line in the daily push notification** — the numbers arrive at 06:40
+  without being asked for. Costs nothing extra, since the notification is
+  already sent on every path.
+- **A file regenerated daily** — would require widening the Routine's standing
+  authorization to a second path, which is the one thing bounding it.
+
+The first two are compatible and neither widens what the automation may do.

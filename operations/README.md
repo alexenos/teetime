@@ -10,8 +10,8 @@ Not in `docs/`, which is served publicly as GitHub Pages.
 | | |
 |---|---|
 | [`scoreboard.md`](scoreboard.md) | Three metrics and their sources |
-| [`cycles/`](cycles/) | One file per scheduled cycle: trigger, authorization, prompt |
-| [`ledger/`](ledger/) | The rows cycles emit; input to the scoreboard |
+| [`routines/`](routines/) | One file per Routine: trigger, authorization, prompt |
+| [`ledger/`](ledger/) | The rows a Routine run emits; input to the scoreboard |
 | [`race-reports/`](race-reports/) | One report per race morning |
 | `hypotheses/`, `*-setup.md`, `design-*.md` | Runbooks and design notes, moved here from the public site by #221 |
 
@@ -21,20 +21,21 @@ loaded automatically at the start of every session. Procedures are in
 
 ## Model
 
-A **cycle** is recurring work with a trigger, a prompt and an output. Each cycle
-appends a **row** per run. Rows produce the **scoreboard**.
+A **Routine** is a scheduled trigger: a cron expression, a prompt, and a fresh
+session per firing. One file here per Routine. Each run appends a **row**; rows
+produce the **scoreboard**.
 
-One cycle exists: the race report, daily at 06:40 CT. It writes that morning's
+One Routine exists: the race report, daily at 06:40 CT. It writes that morning's
 report, opens a PR and merges it once `Tests` is green — the only agent action in
-this project that reaches `main` without being read first. `operations/cycles/race-report.md`
+this project that reaches `main` without being read first. `operations/routines/race-report.md`
 states what bounds it.
 
 ## Two constraints
 
 **An automated action has to be bounded by something checkable.** The race report
-cycle is bounded by a path (one file under `race-reports/`), a check (a green
+Routine is bounded by a path (one file under `race-reports/`), a check (a green
 `Tests` run) and a deploy filter (`ignored_files`, so `operations/` does not
-redeploy). Widening what a cycle may do means naming the new bound, not removing
+redeploy). Widening what a Routine may do means naming the new bound, not removing
 the old one.
 
 **State separately what is established and what is hypothesis.** Three recorded
@@ -48,10 +49,10 @@ diagnosis; it applies equally to operating material.
 
 | | |
 |---|---|
-| Race report cycle | fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
+| Race report Routine | fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
 | Scoreboard | specified; no rollup built |
 | Ledger | specified; files empty, nothing writes to them |
 
 The two known defects in the deployed race report prompt — the DST cron and the
-Step 3 timeout constant — are recorded in `cycles/race-report.md`. Both require
+Step 3 timeout constant — are recorded in `routines/race-report.md`. Both require
 editing the Routine, which this directory cannot do.
