@@ -21,13 +21,15 @@ class WaitMode(str, Enum):
     HYBRID = "hybrid"
 
 
-def _parse_offsets_ms(value: str, name: str) -> tuple[int, ...]:
+def _parse_offsets_ms(value: str, name: str, *, allow_negative: bool = False) -> tuple[int, ...]:
     """Comma-separated millisecond offsets as an ordered, deduplicated tuple.
 
     Shared by the sweep ladder and the opening burst, which want the same
-    leniency: an unparseable piece is logged and skipped, a negative one is
-    dropped, and nothing usable degrades to ``(0,)`` - one send on the aim -
-    rather than to an exception that would cost the morning.
+    leniency: an unparseable piece is logged and skipped, and nothing usable
+    degrades to ``(0,)`` - one send on the aim - rather than to an exception
+    that would cost the morning. A negative piece is dropped unless
+    ``allow_negative``: the sweep's rungs are retries after the aim, while the
+    burst deliberately starts before it.
     """
     offsets: list[int] = []
     for piece in value.split(","):
@@ -39,9 +41,48 @@ def _parse_offsets_ms(value: str, name: str) -> tuple[int, ...]:
         except ValueError:
             logger.warning("%s: ignoring unparseable offset %r", name, piece)
             continue
-        if parsed >= 0:
+        if parsed >= 0 or allow_negative:
             offsets.append(parsed)
     return tuple(sorted(dict.fromkeys(offsets))) or (0,)
+
+
+def burst_plan_offsets_ms(
+    *,
+    start_before_aim_ms: int,
+    end_after_aim_ms: int,
+    dense_half_width_ms: int,
+    dense_spacing_ms: int,
+    sparse_spacing_ms: int,
+) -> tuple[int, ...]:
+    """The opening burst's members as offsets around the aim, dense near it.
+
+    Dense members sit on multiples of ``dense_spacing_ms`` within
+    ``+-dense_half_width_ms`` of the aim, so the aim itself is always one of
+    them. Sparse members are stepped outward from the dense part's edges by
+    ``sparse_spacing_ms``: down to ``-start_before_aim_ms`` before it and up to
+    ``end_after_aim_ms`` after it. Stepping from the edges keeps the spacing
+    even at the seams; it also means an extent that is not a whole number of
+    sparse steps from the dense edge ends on the last step inside it.
+
+    Lenient on purpose. A non-positive spacing is read as 1ms and a negative
+    extent as 0, because a load-time error here would take the morning's race
+    down with it; terraform validates the values that actually deploy.
+    """
+    dense = max(1, dense_spacing_ms)
+    sparse = max(1, sparse_spacing_ms)
+    start = max(0, start_before_aim_ms)
+    end = max(0, end_after_aim_ms)
+    steps = max(0, dense_half_width_ms) // dense
+    offsets = {step * dense for step in range(-steps, steps + 1)}
+    offset = -steps * dense - sparse
+    while offset >= -start:
+        offsets.add(offset)
+        offset -= sparse
+    offset = steps * dense + sparse
+    while offset <= end:
+        offsets.add(offset)
+        offset += sparse
+    return tuple(sorted(o for o in offsets if -start <= o <= end)) or (0,)
 
 
 class Settings(BaseSettings):
@@ -220,27 +261,28 @@ class Settings(BaseSettings):
     # stated window, so tomorrow's numbers line up with the ten data points above
     # rather than starting a second, incompatible scale.
     #
+    # This is the gate the opening burst is centred on. Since 2026-09-25 every
+    # race brackets where the gate really opened (GATE_BRACKET in the log, and
+    # `scripts/fetch_debug_artifacts.py gate` across mornings), and the terraform
+    # default is where to move it once the brackets settle.
+    #
     # 0 restores the historical behaviour of treating 06:30:00 as the open.
     walden_window_opens_offset_ms: int = 1000
 
-    # Slack added to the aim, for measurement error rather than for the club.
+    # How far past the gate above to aim, so the aim is gate + margin.
     #
     # Kept separate from the offset above because the two are tuned for different
-    # reasons: that one is what we believe about the club, this one is how much we
-    # distrust our own clock probe. Folding them into one number would leave a
-    # refusal at the aim point ambiguous between "move the belief" and "widen
-    # the slack".
+    # reasons: that one is what we believe about the club, and this one only puts
+    # the aim just after it. Folding them into one number would leave a refusal
+    # at the aim point ambiguous between "move the belief" and "widen the slack".
     #
-    # 0 since 2026-09-04. It was 30, on the reasoning that the probe pins the
-    # club's tick to roughly +-22ms and arriving early lands inside the second
-    # that has never been granted. That protects against a cost that does not
-    # exist - an early ask is one free refusal - and on a contested slot the
-    # 30ms is the whole loss: every Friday first ask on record went at
-    # +1005..+1026ms, club clock :01, and was refused, while the identical ask
-    # at the identical club-second was accepted every other day. Under the
-    # opening burst (walden_reserve_opening_mode) the first send is aimed at the
-    # tick itself and the members behind it cover the probe's error.
-    walden_reserve_aim_margin_ms: int = 0
+    # 5 since 2026-09-25, making the aim +1005 against a +1000 gate. The margin
+    # is not what covers the probe's error any more: the burst's dense part
+    # (walden_burst_dense_half_width_ms) puts a member every 5ms within +-30ms
+    # of the aim. History worth keeping: #173 set this file to 0 on 2026-09-04,
+    # but terraform's default stayed 30 and terraform is what deploys, so every
+    # race from then until 2026-09-25 aimed at +1030. Keep the two defaults equal.
+    walden_reserve_aim_margin_ms: int = 5
 
     # Milliseconds past the open (above) to ask for the target slot at, before
     # any fallback tee time is tried. Comma-separated; see
@@ -359,9 +401,9 @@ class Settings(BaseSettings):
     # WALDEN_RESERVE_OPENING_MODE=ladder on the service, with no code change.
     #
     # "burst" replaces the sweep, the pair and the hold with a pipelined
-    # opening: the requests in walden_reserve_burst_offsets_ms are sent at
-    # their instants *without waiting for answers*, so a request lands on the
-    # club every hundred-odd milliseconds through the window's first seconds.
+    # opening: the members of the burst plan (see walden_burst_offsets_ms()) are
+    # sent at their instants *without waiting for answers*, so requests keep
+    # landing on the club throughout the span the gate is believed to open in.
     # The first grant wins; members not yet sent when it lands are skipped;
     # the serial fallback walk continues after the burst if nothing was
     # granted. Why: the ladder's cadence was one round trip plus a parse -
@@ -380,31 +422,52 @@ class Settings(BaseSettings):
     # every ad-hoc booking runs, or it is untested until the morning it counts.
     walden_reserve_opening_mode: str = "burst"
 
-    # Instants past the aim to send the burst's members at, comma-separated ms.
+    # The opening burst's shape, in milliseconds around the aim (the gate plus
+    # the margin above: +1005 by default). See burst_plan_offsets_ms().
     #
-    # The aim is the club's tick (walden_window_opens_offset_ms), so 0 is
-    # :01.000 and 700 is :01.700. Dense for the first half-second, because the
-    # probe brackets the tick to +-22ms and the first member can land a hair
-    # early. A member is one POST of ~1.8KB and one ~670KB refusal back.
+    # One member every walden_burst_dense_spacing_ms within
+    # +-walden_burst_dense_half_width_ms of the aim, and one every
+    # walden_burst_sparse_spacing_ms outside that, from
+    # walden_burst_start_before_aim_ms before the aim to
+    # walden_burst_end_after_aim_ms after it. With the defaults and a +1005 aim,
+    # in ms past 06:30:00:
     #
-    # Halved from twelve members (out to 2600) on 2026-09-18. The tail existed
-    # to cover a gate that might open late - "out past the latest instant at
-    # which the club has rendered its sheet closed to us on a Friday" - and that
-    # evidence was withdrawn by operations/race-reports/2026-09-04.md: a
-    # refusal's sheet-closed marker is a re-render of *our own* staged snapshot,
-    # not a statement about the club. 2026-09-18 then bounded the gate directly:
-    # a grant, plus the self-blocked refusals it caused stamped in club :01,
-    # puts the open instant inside [+1017, +2000]ms.
+    #   815, 835, ... 955       every 20ms   8 members
+    #   975, 980, ... 1035      every 5ms   13 members
+    #   1055, 1075, ... 1175    every 20ms   7 members
     #
-    # So the tail covered nothing. What it did do is cost time: the club's hold
-    # timer is 300s (executeHoldTimeTimer('300')), so once any member holds the
-    # target, re-asking it inside the race cannot win - and the serial fallback
-    # walk does not start until the burst drains. On 09-11 that walk began at
-    # +5305ms; on 09-04 fourteen asks out to +10.7s never reached 09:08, which
-    # was free the whole morning. Six members span +1030..+1730 in the ledger's
-    # frame, still covering the probe's error and any tick jitter, and hand the
-    # fallback walk roughly three more seconds.
-    walden_reserve_burst_offsets_ms: str = "0,100,220,370,520,700"
+    # 28 members. The sparse steps are laid outward from the dense part, so the
+    # last member is +1175: one more 20ms step would pass +1185.
+    #
+    # Why this shape, since 2026-09-25. Nothing had ever been written to the wire
+    # between +817 (refused, 08-12) and about +1014 (granted, 09-18), so where
+    # inside that span the gate opens had never been measured. The sparse part
+    # before the aim finds it, every weekday alike; the dense part is the race,
+    # so that wherever in +975..+1035 the gate falls, some member arrives within
+    # 5ms after it; the sparse part after the aim covers a later gate. Every
+    # member asks for the target, and the serial fallback walk runs after the
+    # burst as before. See operations/design-gate-burst.md.
+    walden_burst_start_before_aim_ms: int = 190
+    walden_burst_end_after_aim_ms: int = 180
+    walden_burst_dense_half_width_ms: int = 30
+    walden_burst_dense_spacing_ms: int = 5
+    walden_burst_sparse_spacing_ms: int = 20
+
+    # An explicit burst plan as comma-separated ms around the aim (negative is
+    # before it), overriding the shape above. Empty, the default, means "use
+    # the shape". For an experiment the shape cannot express; the terraform
+    # defaults tune the shape, not this.
+    walden_reserve_burst_offsets_ms: str = ""
+
+    # Open one connection per burst member shortly before the burst, so that no
+    # member pays a TCP and TLS handshake at its own instant.
+    #
+    # Until 2026-09-25 every member dialled at fire time. httpx drops a pooled
+    # connection after 5s idle, and staging's last request came 66-95s before
+    # the window, so each ask reached the wire ~55ms after its logged send. The
+    # one morning the first ask rode a still-open connection - 2026-09-18, when
+    # staging ran late - is the only burst-era Friday that won 08:38.
+    walden_burst_prewarm_connections: bool = True
 
     # How many members from the front of the burst ask for the target alone.
     #
@@ -661,14 +724,26 @@ class Settings(BaseSettings):
         )
 
     def walden_burst_offsets_ms(self) -> tuple[int, ...]:
-        """The opening burst's send instants, ordered and deduplicated.
+        """The opening burst's members around the aim, ordered and deduplicated.
 
-        Same leniency as the sweep: a malformed value degrades to a single send
-        on the aim rather than losing the morning. A burst of one is the
-        historical single shot, which is the safe direction to fail in.
+        The explicit WALDEN_RESERVE_BURST_OFFSETS_MS when one is set, else the
+        plan the shape settings describe. Negative offsets are before the aim
+        and are kept: unlike the sweep, the burst is meant to start before the
+        gate. Same leniency as the sweep - a malformed override degrades to a
+        single send on the aim rather than losing the morning.
         """
-        return _parse_offsets_ms(
-            self.walden_reserve_burst_offsets_ms, "WALDEN_RESERVE_BURST_OFFSETS_MS"
+        if self.walden_reserve_burst_offsets_ms.strip():
+            return _parse_offsets_ms(
+                self.walden_reserve_burst_offsets_ms,
+                "WALDEN_RESERVE_BURST_OFFSETS_MS",
+                allow_negative=True,
+            )
+        return burst_plan_offsets_ms(
+            start_before_aim_ms=self.walden_burst_start_before_aim_ms,
+            end_after_aim_ms=self.walden_burst_end_after_aim_ms,
+            dense_half_width_ms=self.walden_burst_dense_half_width_ms,
+            dense_spacing_ms=self.walden_burst_dense_spacing_ms,
+            sparse_spacing_ms=self.walden_burst_sparse_spacing_ms,
         )
 
     def walden_burst_target_only(self) -> int:

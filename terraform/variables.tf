@@ -376,6 +376,12 @@ variable "walden_window_opens_offset_ms" {
     ledger still measures from the stated window, so a morning's numbers stay
     comparable with the ten data points above.
 
+    This is the measured gate the opening burst is centred on (aim = this +
+    walden_reserve_aim_margin_ms). Since 2026-09-25 every race brackets where
+    the gate actually opened - the GATE_BRACKET log line, and
+    `scripts/fetch_debug_artifacts.py gate` across mornings and weekdays - so
+    when the brackets settle somewhere else, move this default to them.
+
     0 restores the historical behaviour of treating 06:30:00 as the open.
   EOT
   type        = number
@@ -389,22 +395,110 @@ variable "walden_window_opens_offset_ms" {
 
 variable "walden_reserve_aim_margin_ms" {
   description = <<-EOT
-    Slack added to the aim, for measurement error rather than for the club.
+    How far past the gate (walden_window_opens_offset_ms) to aim, so the aim is
+    gate + margin: +1005 with the defaults.
 
     Kept separate from walden_window_opens_offset_ms because the two are tuned
-    for different reasons: that one is what we believe about the club, this is how
-    far we distrust our own clock probe. The probe pins the club's second tick to
-    roughly +-15ms, and arriving 15ms early lands back inside the second that has
-    never once been granted. Folding them into one number would leave a refusal
-    at the aim point ambiguous between "move the belief" and "widen the slack".
+    for different reasons: that one is what we believe about the club, this one
+    only puts the aim just after it. The probe's error is covered by the burst's
+    dense part (walden_burst_dense_half_width_ms), not by this margin.
+
+    5 since 2026-09-25. It was 30 here even after app/config.py moved to 0 on
+    2026-09-04, and this default is what deploys - so every race in between aimed
+    at +1030. Keep it equal to the default in app/config.py.
   EOT
   type        = number
-  default     = 30
+  default     = 5
 
   validation {
     condition     = var.walden_reserve_aim_margin_ms == floor(var.walden_reserve_aim_margin_ms) && var.walden_reserve_aim_margin_ms >= 0 && var.walden_reserve_aim_margin_ms <= 1000
     error_message = "walden_reserve_aim_margin_ms must be a whole number of milliseconds between 0 and 1000."
   }
+}
+
+# The opening burst's shape, in milliseconds around the aim. See
+# burst_plan_offsets_ms() in app/config.py, which turns these five numbers into
+# the member list, and operations/design-gate-burst.md for why.
+#
+# With the defaults and a +1005 aim, in ms past 06:30:00:
+#
+#   815, 835, ... 955       every 20ms   8 members
+#   975, 980, ... 1035      every 5ms   13 members
+#   1055, 1075, ... 1175    every 20ms   7 members
+#
+# 28 members. Every one asks for the target; the serial fallback walk runs after
+# the burst. The whole plan moves with walden_window_opens_offset_ms, so once the
+# gate is measured, moving that default re-centres the burst on it. Keep every
+# default equal to its counterpart in app/config.py.
+
+variable "walden_burst_start_before_aim_ms" {
+  description = "How far before the aim the burst's first member is due: 190 puts it at +815 against a +1005 aim. The span below the dense part is where the gate is searched for."
+  type        = number
+  default     = 190
+
+  validation {
+    condition     = var.walden_burst_start_before_aim_ms == floor(var.walden_burst_start_before_aim_ms) && var.walden_burst_start_before_aim_ms >= 0 && var.walden_burst_start_before_aim_ms <= 1000
+    error_message = "walden_burst_start_before_aim_ms must be a whole number of milliseconds between 0 and 1000."
+  }
+}
+
+variable "walden_burst_end_after_aim_ms" {
+  description = "How far after the aim the burst may reach: 180 allows members up to +1185 against a +1005 aim (the last 20ms step lands on +1175). Covers a gate later than the dense part."
+  type        = number
+  default     = 180
+
+  validation {
+    condition     = var.walden_burst_end_after_aim_ms == floor(var.walden_burst_end_after_aim_ms) && var.walden_burst_end_after_aim_ms >= 0 && var.walden_burst_end_after_aim_ms <= 3000
+    error_message = "walden_burst_end_after_aim_ms must be a whole number of milliseconds between 0 and 3000."
+  }
+}
+
+variable "walden_burst_dense_half_width_ms" {
+  description = "Half-width of the burst's dense part around the aim: 30 puts dense members from +975 to +1035 against a +1005 aim. Wherever the gate falls inside it, some member arrives within one dense spacing after it."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.walden_burst_dense_half_width_ms == floor(var.walden_burst_dense_half_width_ms) && var.walden_burst_dense_half_width_ms >= 0 && var.walden_burst_dense_half_width_ms <= 500
+    error_message = "walden_burst_dense_half_width_ms must be a whole number of milliseconds between 0 and 500."
+  }
+}
+
+variable "walden_burst_dense_spacing_ms" {
+  description = "Spacing of the burst's dense part, and so how far after the gate its first member can land at worst."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.walden_burst_dense_spacing_ms == floor(var.walden_burst_dense_spacing_ms) && var.walden_burst_dense_spacing_ms >= 1 && var.walden_burst_dense_spacing_ms <= 100
+    error_message = "walden_burst_dense_spacing_ms must be a whole number of milliseconds between 1 and 100."
+  }
+}
+
+variable "walden_burst_sparse_spacing_ms" {
+  description = "Spacing of the burst outside its dense part, stepped outward from the dense part's edges."
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.walden_burst_sparse_spacing_ms == floor(var.walden_burst_sparse_spacing_ms) && var.walden_burst_sparse_spacing_ms >= 1 && var.walden_burst_sparse_spacing_ms <= 500
+    error_message = "walden_burst_sparse_spacing_ms must be a whole number of milliseconds between 1 and 500."
+  }
+}
+
+variable "walden_burst_prewarm_connections" {
+  description = <<-EOT
+    Open one connection per burst member ~2s before the burst, so no member pays
+    a TCP and TLS handshake at its own instant.
+
+    Until 2026-09-25 every member dialled at fire time - httpx drops a pooled
+    connection after 5s idle and staging ends 66-95s before the window - so each
+    ask reached the wire ~55ms after its logged send. The one morning the first
+    ask rode a still-open connection (2026-09-18, staging ran late) is the only
+    burst-era Friday that won 08:38. false restores dialling at fire time.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "walden_reserve_sweep_offsets_ms" {
@@ -753,9 +847,20 @@ variable "racer_max_requesters" {
 }
 
 variable "racer_cpu" {
-  description = "CPU for each racer task. Each task is one browser in its own container, so nothing else contends for it."
+  description = <<-EOT
+    CPU for each racer task. Each task is one browser in its own container, so
+    nothing else from another booking contends for it - but its own Chrome does.
+
+    2 since 2026-09-25. On about half the race mornings measured, Chrome (or
+    something else in the container) used 100-490ms of CPU during the first
+    answers, and burst members due after answers began arriving left up to 204ms
+    late on one vCPU. The BURST_CPU and BURST_TIMING log lines, and run.json's
+    burstCpu and burstWrites, say whether the second vCPU is earning its keep:
+    run-queue delay and write drift near zero with 2, against a morning or two
+    back on 1 with the same plan, is the comparison.
+  EOT
   type        = string
-  default     = "1"
+  default     = "2"
 }
 
 variable "racer_memory" {

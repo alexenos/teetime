@@ -13,7 +13,10 @@ left to do but write bytes to an already-open socket:
 
 * The Reserve request body is serialized during :meth:`DirectHttpBooker.prepare`,
   before the window opens.
-* The TLS connection is established during ``prepare`` too.
+* The TLS connection is established during ``prepare`` too - and, for a burst,
+  one connection per member is opened again ~2s before it, because the one from
+  ``prepare`` has long expired by the window (see
+  :meth:`~app.providers.walden_http.PrimeFacesSession.prewarm`).
 * :meth:`DirectHttpBooker.book` waits out the remaining time and posts.
 
 Two things sit on top of that, both from mornings this path lost.
@@ -64,12 +67,14 @@ from app.providers.walden_http import (
     Node,
     PartialResponse,
     PrimeFacesSession,
+    TransportTiming,
     ViewExpiredError,
     find_ab_for_element,
     parse_html,
     parse_partial_response,
     sleep_until,
 )
+from app.utils import cpu_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -274,10 +279,27 @@ _RUNG_LATE_GRACE_MS = 2000
 OPENING_MODE_LADDER = "ladder"
 OPENING_MODE_BURST = "burst"
 
-# Ceiling on burst members, and so on threads. The default plan is six; the
-# cap exists so a misconfigured offsets string cannot turn into a hundred
-# sockets against a club that has only ever seen two in flight.
-_BURST_MAX_MEMBERS = 16
+# Ceiling on burst members, and so on threads and pre-warmed connections. The
+# default plan is 28 since 2026-09-25 (see walden_burst_offsets_ms in
+# app/config.py); the cap exists so a misconfigured shape cannot turn into a
+# hundred sockets against the club. A plan longer than this keeps its earliest
+# members and says so in the log.
+_BURST_MAX_MEMBERS = 32
+
+# How long before the burst's first member to open its connections, and the
+# least time that must be left for it to be worth doing. A pre-warm takes one
+# handshake - ~55ms from Cloud Run - plus a HEAD, all members at once; 2s leaves
+# room for a slow morning and is far inside the pool's keep-alive. With less
+# than the minimum left (staging ran late, as on 2026-09-18) the burst goes
+# ahead on whatever connections exist rather than risk being delayed by the
+# pre-warm itself.
+_PREWARM_LEAD_MS = 2000
+_PREWARM_MIN_MS = 250
+
+# How long after the last member's planned instant the "send window" CPU
+# snapshot is taken: the span that decides whether members left on time, kept
+# apart from the parsing of answers that follows it.
+_SEND_WINDOW_PAD_MS = 20
 
 # How far ahead of the first burst member the precision wait wakes, so the
 # thread pool is spun up before the instant rather than in front of it.
@@ -437,10 +459,14 @@ class DirectHttpBooker:
         # booker built without prepare() - every test that stages the private
         # fields by hand - behaves as it always has; settings pick the burst.
         self._opening_mode: str = OPENING_MODE_LADDER
-        # The burst's send instants past the aim, and how many from the front
-        # ask for the target alone before fallbacks are interleaved.
+        # The burst's send instants around the aim (negative is before it), and
+        # how many from the front ask for the target alone before fallbacks are
+        # interleaved.
         self._burst_offsets_ms: tuple[int, ...] = (0,)
         self._burst_target_only: int = 4
+        # Open one connection per member just before the burst. Off here so a
+        # booker built without prepare() sends exactly as it always has.
+        self._burst_prewarm: bool = False
         # Fallback Reserve requests staged pre-window for the burst, best first:
         # the tee time, its handler as resolved in the staged sheet, and the
         # serialized body. Built in prepare() so that at the window every member
@@ -479,6 +505,7 @@ class DirectHttpBooker:
         opening_mode: str = OPENING_MODE_LADDER,
         burst_offsets_ms: Sequence[int] = (0,),
         burst_target_only: int = 4,
+        burst_prewarm: bool = False,
     ) -> None:
         """Resolve and pre-serialize the Reserve request, and warm the socket.
 
@@ -531,12 +558,15 @@ class DirectHttpBooker:
                 pair and the hold; ``"ladder"`` is every option above exactly as
                 it ran through 2026-09-04. Anything else is treated as the
                 ladder and logged, so a typo in a setting cannot cost a morning.
-            burst_offsets_ms: Milliseconds past the aim to send each burst
-                member at. Timed bookings only; an untimed booking has no
-                instant to burst around and sends once.
+            burst_offsets_ms: Milliseconds around the aim to send each burst
+                member at; negative is before it. Timed bookings only; an
+                untimed booking has no instant to burst around and sends once.
             burst_target_only: How many members from the front of the burst
                 ask for the target alone; after these, members alternate
                 fallback and target through ``fallback_times``.
+            burst_prewarm: Open one connection per burst member shortly before
+                the burst (see :meth:`PrimeFacesSession.prewarm`), so no member
+                pays a handshake at its own instant. Timed bursts only.
         """
         document = parse_html(page_html)
         button = document.find_by_id(reserve_button_id)
@@ -574,10 +604,19 @@ class DirectHttpBooker:
             logger.warning("DIRECT_HTTP: Unknown opening mode %r; using the ladder", opening_mode)
             opening_mode = OPENING_MODE_LADDER
         self._opening_mode = opening_mode
-        self._burst_offsets_ms = tuple(sorted(dict.fromkeys(burst_offsets_ms)))[
-            :_BURST_MAX_MEMBERS
-        ] or (0,)
+        planned = tuple(sorted(dict.fromkeys(burst_offsets_ms)))
+        if len(planned) > _BURST_MAX_MEMBERS:
+            logger.warning(
+                "DIRECT_HTTP: The burst plan has %d members; keeping the first %d "
+                "(%+dms..%+dms around the aim) and dropping the rest",
+                len(planned),
+                _BURST_MAX_MEMBERS,
+                planned[0],
+                planned[_BURST_MAX_MEMBERS - 1],
+            )
+        self._burst_offsets_ms = planned[:_BURST_MAX_MEMBERS] or (0,)
         self._burst_target_only = max(1, burst_target_only)
+        self._burst_prewarm = burst_prewarm
         self._burst_fallback_requests = []
         if self._opening_mode == OPENING_MODE_BURST:
             # Every fallback the burst may ask is resolved and serialized now,
@@ -644,13 +683,13 @@ class DirectHttpBooker:
         """The opening plan as one phrase for the staging log line."""
         if self._opening_mode == OPENING_MODE_BURST:
             plan = self._burst_plan_slots()
-            members = "+".join(
-                f"{offset}{'T' if is_target else 'F'}" for offset, _, is_target in plan
-            )
+            targets = sum(1 for _offset, _fallback, is_target in plan if is_target)
             return (
-                f"burst of {len(plan)} at +{members}ms past the aim "
-                f"({self._burst_target_only} target-only, then alternating "
-                f"{len(self._burst_fallback_requests)} staged fallback(s))"
+                f"burst of {len(plan)} around the aim: "
+                f"{describe_burst_plan(self._burst_offsets_ms)} "
+                f"({targets} ask(s) for the target, "
+                f"{len(plan) - targets} for staged fallbacks"
+                f"{', connections pre-warmed' if self._burst_prewarm else ''})"
             )
         return (
             "ladder sweep="
@@ -903,6 +942,11 @@ class DirectHttpBooker:
             wake_offset_ms = opening_offset_ms
             if self._opening_mode == OPENING_MODE_BURST:
                 wake_offset_ms -= _BURST_WARMUP_MS
+                if self._burst_prewarm:
+                    self._prewarm_burst(
+                        target_timestamp_ms + opening_offset_ms - int(round(self._lead_ms)),
+                        result,
+                    )
             drift = sleep_until(target_timestamp_ms + wake_offset_ms - int(round(self._lead_ms)))
             if self._opening_mode == OPENING_MODE_BURST:
                 result.timing["burstWarmupDriftMs"] = drift
@@ -1027,6 +1071,40 @@ class DirectHttpBooker:
         result.success = True
         result.timing["totalMs"] = elapsed_ms()
         return result
+
+    def _prewarm_burst(self, first_send_ms: int, result: DirectBookingResult) -> None:
+        """Open one connection per burst member, just before the first is due.
+
+        Sleeps to ``_PREWARM_LEAD_MS`` before ``first_send_ms`` - the first
+        member's send instant, lead included - then opens the connections all
+        at once. Skipped, and said so, when staging left less than
+        ``_PREWARM_MIN_MS``: a pre-warm that overran would delay the very burst
+        it exists to speed up. Nothing it does can reserve anything, so the
+        chain stays in a phase a browser retry may still follow.
+        """
+        sleep_until(first_send_ms - _PREWARM_LEAD_MS)
+        now_ms = int(time_module.time() * 1000)
+        left_ms = first_send_ms - now_ms
+        frame_ms = self._window_timestamp_ms
+        if left_ms < _PREWARM_MIN_MS:
+            logger.warning(
+                "DIRECT_HTTP: Only %dms left before the burst's first member; not "
+                "pre-warming, so members that find no open connection will dial at "
+                "their own instants",
+                left_ms,
+            )
+            result.timing["prewarm"] = {"skipped": True, "msLeft": left_ms}
+            return
+        try:
+            report = self.session.prewarm(len(self._burst_offsets_ms))
+        except Exception as exc:  # noqa: BLE001 - a pre-warm must never cost the race
+            logger.warning("DIRECT_HTTP: Pre-warm failed (%s); the burst goes ahead", exc)
+            result.timing["prewarm"] = {"error": str(exc)}
+            return
+        if frame_ms is not None:
+            report["startedMsPastWindow"] = now_ms - frame_ms
+        report["msLeftAfter"] = first_send_ms - int(time_module.time() * 1000)
+        result.timing["prewarm"] = report
 
     def _reserve_until_accepted(
         self,
@@ -1976,33 +2054,66 @@ class DirectHttpBooker:
         won = threading.Event()
         burst = _OpeningBurst(observations=[])
         burst_started = time_module.perf_counter()
+        # Where the aim sits in the window frame - +1005 by default - so the plan
+        # can be logged and stored in the ms-past-06:30:00 terms it is tuned in.
+        aim_past_window = target_timestamp_ms - frame_ms
+
+        def due_ms(member: _BurstMember) -> int:
+            """The epoch instant this member is due to leave, lead included."""
+            return target_timestamp_ms + member.offset_ms - lead_ms
 
         def send(member: _BurstMember) -> _BurstExchange:
             """Sleep to the member's instant, then send unless the race is won."""
+            planned_ms = due_ms(member) - frame_ms
             if member.index > 0:
-                sleep_until(target_timestamp_ms + member.offset_ms - lead_ms)
+                sleep_until(due_ms(member))
                 if won.is_set():
-                    return _BurstExchange(member, None, None, None, skipped=True)
+                    return _BurstExchange(
+                        member, None, None, None, skipped=True, planned_ms=planned_ms
+                    )
             sent_ms = int(time_module.time() * 1000) - frame_ms
             try:
                 response = self.session.send_detached(
                     member.config, body=member.body, timeout_s=_RESERVE_OPENING_TIMEOUT_S
                 )
             except DirectHttpError as exc:
-                return _BurstExchange(member, sent_ms, None, exc)
-            return _BurstExchange(member, sent_ms, response, None)
+                return _BurstExchange(member, sent_ms, None, exc, planned_ms=planned_ms)
+            return _BurstExchange(member, sent_ms, response, None, planned_ms=planned_ms)
 
+        fallback_members = sum(1 for m in members if not m.is_target)
         logger.info(
-            "DIRECT_HTTP: Firing opening burst of %d for %s - %s, lead %dms",
+            "DIRECT_HTTP: Firing opening burst of %d for %s - %s past the window "
+            "(aim %+dms), lead %dms%s",
             len(members),
             self._slot_time.strftime("%I:%M %p") if self._slot_time else "the staged slot",
-            ", ".join(
-                f"#{m.index}@+{m.offset_ms}ms "
-                f"{'T' if m.is_target else m.slot_time.strftime('%I:%M') if m.slot_time else 'F'}"
-                for m in members
-            ),
+            describe_burst_plan([m.offset_ms for m in members], base_ms=aim_past_window),
+            aim_past_window,
             lead_ms,
+            f", {fallback_members} member(s) for fallbacks" if fallback_members else "",
         )
+
+        # CPU around the burst, for the question the second vCPU was added to
+        # answer (see app/utils/cpu_telemetry.py). Three readings: now, inside
+        # the warm-up slack _run_chain woke early for; just after the last
+        # member was due, which bounds the span that decides whether members
+        # left on time; and once every answer has been absorbed. The middle one
+        # is taken on its own thread so no member waits on it.
+        cpu_before = _safe_cpu_snapshot()
+        send_window: dict[str, cpu_telemetry.CpuSnapshot] = {}
+        send_window_due_ms = due_ms(members[-1]) + _SEND_WINDOW_PAD_MS
+
+        def snapshot_send_window() -> None:
+            """Read the counters once the last member is due - without spinning."""
+            wait_s = (send_window_due_ms - time_module.time() * 1000) / 1000
+            if wait_s > 0:
+                time_module.sleep(wait_s)
+            snapshot = _safe_cpu_snapshot()
+            if snapshot is not None:
+                send_window["after"] = snapshot
+
+        window_thread = threading.Thread(target=snapshot_send_window, name="burst-cpu", daemon=True)
+        window_thread.start()
+        cpu_after: cpu_telemetry.CpuSnapshot | None = None
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, len(members) - 1), thread_name_prefix="reserve-burst"
         ) as pool:
@@ -2013,18 +2124,40 @@ class DirectHttpBooker:
             # The wait that has to be exact. sleep_until no-ops on an instant
             # already gone, so a warm-up that overran costs nothing beyond the
             # lateness it already had, and the drift says which happened.
-            result.timing["clickDriftMs"] = sleep_until(
-                target_timestamp_ms + members[0].offset_ms - lead_ms
-            )
+            result.timing["clickDriftMs"] = sleep_until(due_ms(members[0]))
             self._absorb_burst_exchange(
-                burst, send(members[0]), won=won, view_state=view_state, frame_ms=frame_ms
+                burst,
+                send(members[0]),
+                won=won,
+                view_state=view_state,
+                frame_ms=frame_ms,
+                lead_ms=lead_ms,
             )
             for future in concurrent.futures.as_completed(futures):
                 self._absorb_burst_exchange(
-                    burst, future.result(), won=won, view_state=view_state, frame_ms=frame_ms
+                    burst,
+                    future.result(),
+                    won=won,
+                    view_state=view_state,
+                    frame_ms=frame_ms,
+                    lead_ms=lead_ms,
                 )
+            # Inside the pool's scope: its worker threads are still alive, so
+            # their run-queue delay is still readable.
+            cpu_after = _safe_cpu_snapshot()
+        window_thread.join(timeout=1.0)
 
         burst.observations.sort(key=lambda o: o.attempt)
+        self._record_burst_measurements(
+            burst,
+            result,
+            members=members,
+            aim_past_window=aim_past_window,
+            lead_ms=lead_ms,
+            cpu_before=cpu_before,
+            cpu_send_window=send_window.get("after"),
+            cpu_after=cpu_after,
+        )
         if burst.accepted is None and burst.carried is None and burst.unknown is not None:
             # No grant and no refusal, but a 200 whose shape was neither. The
             # ladder treats that as progress and lets the next step say what is
@@ -2067,6 +2200,88 @@ class DirectHttpBooker:
         )
         return burst
 
+    def _record_burst_measurements(
+        self,
+        burst: "_OpeningBurst",
+        result: DirectBookingResult,
+        *,
+        members: list["_BurstMember"],
+        aim_past_window: int,
+        lead_ms: int,
+        cpu_before: cpu_telemetry.CpuSnapshot | None,
+        cpu_send_window: cpu_telemetry.CpuSnapshot | None,
+        cpu_after: cpu_telemetry.CpuSnapshot | None,
+    ) -> None:
+        """Store and log what the burst measured: its plan, its timing, CPU, the gate.
+
+        Everything lands in ``result.timing``, which the provider writes beside
+        the ledger as the run's own record (run.json), and in three greppable
+        lines: ``BURST_TIMING`` for whether members left when planned,
+        ``BURST_CPU`` for whether the CPU was the reason if not, and
+        ``GATE_BRACKET`` for where each slot first said yes. Best-effort: a
+        measurement must never cost the booking it measures.
+        """
+        try:
+            result.timing["burstAimMs"] = aim_past_window
+            result.timing["burstPlanMs"] = [aim_past_window + m.offset_ms for m in members]
+            result.timing["burstLeadMs"] = lead_ms
+
+            writes = summarize_burst_writes(burst.observations)
+            result.timing["burstWrites"] = writes
+            logger.info(
+                "BURST_TIMING: %d member(s) - %d on a warm connection, %d dialled%s; "
+                "write drift median %s, p90 %s, max %s, %d later than 2ms; "
+                "%s distinct connection(s)",
+                writes["members"],
+                writes["warm"],
+                writes["dialled"],
+                f" (worst connect {writes['connectMsMax']}ms)"
+                if writes["connectMsMax"] is not None
+                else "",
+                _signed_ms(writes["driftMsMedian"]),
+                _signed_ms(writes["driftMsP90"]),
+                _signed_ms(writes["driftMsMax"]),
+                writes["lateOver2Ms"],
+                writes["distinctConnections"]
+                if writes["distinctConnections"] is not None
+                else "unknown",
+            )
+
+            environment = cpu_telemetry.cpu_environment()
+            send_cpu = (
+                cpu_telemetry.cpu_delta(cpu_before, cpu_send_window)
+                if cpu_before is not None and cpu_send_window is not None
+                else None
+            )
+            whole_cpu = (
+                cpu_telemetry.cpu_delta(cpu_before, cpu_after)
+                if cpu_before is not None and cpu_after is not None
+                else None
+            )
+            result.timing["burstCpu"] = {
+                "environment": environment,
+                "sendWindow": send_cpu,
+                "wholeBurst": whole_cpu,
+            }
+            logger.info(
+                "BURST_CPU: %s visible, %s usable, cgroup limit %s - send window %s; "
+                "whole burst %s",
+                environment["visibleCpus"],
+                environment["usableCpus"] if environment["usableCpus"] is not None else "?",
+                environment["cgroupCpuLimit"]
+                if environment["cgroupCpuLimit"] is not None
+                else "none",
+                _cpu_phrase(send_cpu),
+                _cpu_phrase(whole_cpu),
+            )
+
+            brackets = gate_brackets(burst.observations)
+            result.timing["gateBrackets"] = brackets
+            for bracket in brackets:
+                _log_gate_bracket(bracket)
+        except Exception:  # noqa: BLE001 - telemetry must never cost a booking
+            logger.warning("DIRECT_HTTP: Could not record the burst's measurements", exc_info=True)
+
     def _absorb_burst_exchange(
         self,
         burst: "_OpeningBurst",
@@ -2075,6 +2290,7 @@ class DirectHttpBooker:
         won: threading.Event,
         view_state: str,
         frame_ms: int,
+        lead_ms: int | None = None,
     ) -> None:
         """Fold one member's answer into the burst's record, as it arrives."""
         member = exchange.member
@@ -2094,6 +2310,10 @@ class DirectHttpBooker:
                 sent_ms_past_window=exchange.sent_ms,
                 burst_index=member.index,
                 timeout_budget_s=_RESERVE_OPENING_TIMEOUT_S,
+                plan_offset_ms=member.offset_ms,
+                planned_send_ms_past_window=exchange.planned_ms,
+                lead_ms=lead_ms,
+                frame_ms=frame_ms,
             )
             burst.observations.append(observation)
             _log_reserve_observation(observation)
@@ -2127,6 +2347,9 @@ class DirectHttpBooker:
             target_timestamp_ms=frame_ms,
             defer_telemetry=True,
             burst_index=member.index,
+            plan_offset_ms=member.offset_ms,
+            planned_send_ms_past_window=exchange.planned_ms,
+            lead_ms=lead_ms,
         )
         observation.post_response_wall_ms = int((time_module.perf_counter() - wall_start) * 1000)
         observation.post_response_cpu_ms = int((time_module.process_time() - cpu_start) * 1000)
@@ -3106,12 +3329,60 @@ class ReserveObservation:
     # that took a post-mortem to notice; this makes it a field.
     body_digest: str | None = None
     identical_to_previous: bool | None = None
+    # A burst member's place in the plan: its offset around the aim, the instant
+    # it was due to leave (lead included) and the lead itself. None for a serial
+    # ask, which has no plan.
+    plan_offset_ms: int | None = None
+    planned_send_ms_past_window: int | None = None
+    lead_ms: int | None = None
+    # When the request's bytes actually left, and on what connection - see
+    # TransportTiming. sent_ms_past_window above is stamped before the HTTP call,
+    # so until 2026-09-25 it hid a ~55ms handshake on every burst member.
+    wrote_ms_past_window: int | None = None
+    response_headers_ms_past_window: int | None = None
+    opened_connection: bool | None = None
+    connect_ms: int | None = None
+    local_port: int | None = None
+
+    @property
+    def write_drift_ms(self) -> int | None:
+        """How late the request left against its plan: write time, else send time."""
+        if self.planned_send_ms_past_window is None:
+            return None
+        left = (
+            self.wrote_ms_past_window
+            if self.wrote_ms_past_window is not None
+            else self.sent_ms_past_window
+        )
+        return None if left is None else left - self.planned_send_ms_past_window
+
+    def apply_transport(self, transport: TransportTiming | None, frame_ms: int | None) -> None:
+        """Copy a request's transport timing in, in the window frame."""
+        if transport is None:
+            return
+        if frame_ms is not None:
+            if transport.wrote_at_ms is not None:
+                self.wrote_ms_past_window = transport.wrote_at_ms - frame_ms
+            if transport.headers_at_ms is not None:
+                self.response_headers_ms_past_window = transport.headers_at_ms - frame_ms
+        self.opened_connection = transport.opened_connection
+        self.connect_ms = transport.connect_ms
+        self.local_port = transport.local_port
 
     def as_row(self) -> dict[str, Any]:
         """Flatten for the JSONL ledger."""
         return {
             "attempt": self.attempt,
             "burstIndex": self.burst_index,
+            "planOffsetMs": self.plan_offset_ms,
+            "plannedSendMsPastWindow": self.planned_send_ms_past_window,
+            "leadMs": self.lead_ms,
+            "wroteMsPastWindow": self.wrote_ms_past_window,
+            "writeDriftMs": self.write_drift_ms,
+            "responseHeadersMsPastWindow": self.response_headers_ms_past_window,
+            "openedConnection": self.opened_connection,
+            "connectMs": self.connect_ms,
+            "localPort": self.local_port,
             "statusCode": self.status_code,
             "responseHeaders": self.response_headers,
             "errorBody": self.error_body,
@@ -3200,6 +3471,8 @@ class _BurstExchange:
     response: PartialResponse | None
     error: Exception | None
     skipped: bool = False
+    # When the member was due to leave, in the window frame, lead included.
+    planned_ms: int | None = None
 
 
 @dataclass
@@ -3256,6 +3529,10 @@ def _failed_observation(
     sent_ms_past_window: int | None,
     burst_index: int | None = None,
     timeout_budget_s: float = _RESERVE_TIMEOUT_S,
+    plan_offset_ms: int | None = None,
+    planned_send_ms_past_window: int | None = None,
+    lead_ms: int | None = None,
+    frame_ms: int | None = None,
 ) -> ReserveObservation:
     """The ledger row for a Reserve that raised instead of answering.
 
@@ -3268,9 +3545,13 @@ def _failed_observation(
     opening paths spend _RESERVE_OPENING_TIMEOUT_S rather than the serial walk's
     budget, and a row reporting the wrong one would misdate the boundary the
     next post-mortem reads off it.
+
+    A burst member also carries its place in the plan, and whatever transport
+    timing the error brought with it - a timed-out member still says whether,
+    and when, its bytes left.
     """
     if isinstance(exc, DirectHttpTimeoutError):
-        return ReserveObservation(
+        observation = ReserveObservation(
             attempt=attempt,
             slot_time=slot_time,
             source=source,
@@ -3281,20 +3562,25 @@ def _failed_observation(
             round_trip_ms=int(timeout_budget_s * 1000),
             burst_index=burst_index,
         )
-    observation = ReserveObservation(
-        attempt=attempt,
-        slot_time=slot_time,
-        source=source,
-        view_state=view_state,
-        verdict=RESERVE_ERRORED,
-        reason=str(exc),
-        sent_ms_past_window=sent_ms_past_window,
-        burst_index=burst_index,
-    )
-    if isinstance(exc, DirectHttpStatusError):
-        observation.status_code = exc.status_code
-        observation.response_headers = dict(exc.headers)
-        observation.error_body = _redact_tokens(exc.body_snippet)
+    else:
+        observation = ReserveObservation(
+            attempt=attempt,
+            slot_time=slot_time,
+            source=source,
+            view_state=view_state,
+            verdict=RESERVE_ERRORED,
+            reason=str(exc),
+            sent_ms_past_window=sent_ms_past_window,
+            burst_index=burst_index,
+        )
+        if isinstance(exc, DirectHttpStatusError):
+            observation.status_code = exc.status_code
+            observation.response_headers = dict(exc.headers)
+            observation.error_body = _redact_tokens(exc.body_snippet)
+    observation.plan_offset_ms = plan_offset_ms
+    observation.planned_send_ms_past_window = planned_send_ms_past_window
+    observation.lead_ms = lead_ms
+    observation.apply_transport(getattr(exc, "transport", None), frame_ms)
     return observation
 
 
@@ -3404,6 +3690,200 @@ def _log_gate_summary(observations: list[ReserveObservation], when: str) -> None
         )
 
 
+def _safe_cpu_snapshot() -> cpu_telemetry.CpuSnapshot | None:
+    """A CPU snapshot, or None: taken mid-race, so it may never raise into it."""
+    try:
+        return cpu_telemetry.take_snapshot()
+    except Exception:  # noqa: BLE001 - telemetry must never cost a booking
+        logger.debug("DIRECT_HTTP: CPU snapshot failed", exc_info=True)
+        return None
+
+
+def describe_burst_plan(offsets: Sequence[int], base_ms: int = 0) -> str:
+    """A burst plan as runs of even spacing, e.g. "+815..+975 every 20ms, ...".
+
+    ``base_ms`` shifts every member first: 0 describes the plan around the aim,
+    and the aim's offset past 06:30:00 describes it in the window frame, which
+    is the frame the plan is tuned in. Adjacent runs share their seam member,
+    the way the plan is described in words ("20ms until +975, then 5ms").
+    """
+    points = sorted(base_ms + offset for offset in offsets)
+    if not points:
+        return "no members"
+    runs: list[tuple[int, int, int | None]] = []
+    run_start, run_step, previous = points[0], None, points[0]
+    for point in points[1:]:
+        gap = point - previous
+        if run_step is None:
+            run_step = gap
+        elif gap != run_step:
+            runs.append((run_start, previous, run_step))
+            run_start, run_step = previous, gap
+        previous = point
+    runs.append((run_start, previous, run_step))
+    phrases = [
+        f"{start:+d}" if step is None else f"{start:+d}..{end:+d} every {step}ms"
+        for start, end, step in runs
+    ]
+    return f"{', '.join(phrases)} ({len(points)} member{'s' if len(points) != 1 else ''})"
+
+
+def summarize_burst_writes(observations: Sequence["ReserveObservation"]) -> dict[str, Any]:
+    """How the burst's members actually left: connections, and drift against the plan.
+
+    The outcome measure for the connection pre-warm and for the second vCPU
+    alike: with both working, every member rides a warm connection and leaves
+    within a millisecond or two of its plan.
+    """
+    rows = [o for o in observations if o.burst_index is not None]
+    drifts = sorted(o.write_drift_ms for o in rows if o.write_drift_ms is not None)
+    traced = [o for o in rows if o.opened_connection is not None]
+    ports = {o.local_port for o in rows if o.local_port is not None}
+    return {
+        "members": len(rows),
+        "writeTimed": sum(1 for o in rows if o.wrote_ms_past_window is not None),
+        "warm": sum(1 for o in traced if not o.opened_connection),
+        "dialled": sum(1 for o in traced if o.opened_connection),
+        "connectMsMax": max((o.connect_ms for o in rows if o.connect_ms is not None), default=None),
+        "distinctConnections": len(ports) if ports else None,
+        "driftMsMedian": drifts[len(drifts) // 2] if drifts else None,
+        "driftMsP90": drifts[min(len(drifts) - 1, int(len(drifts) * 0.9))] if drifts else None,
+        "driftMsMax": drifts[-1] if drifts else None,
+        "lateOver2Ms": sum(1 for drift in drifts if drift > 2),
+    }
+
+
+def gate_brackets(observations: Sequence["ReserveObservation"]) -> list[dict[str, Any]]:
+    """Where each slot the burst asked for first said yes, bracketed.
+
+    Per slot, members are ordered by when their bytes left (the send time when
+    no write time was recorded) and placed on the plan's own scale - that
+    instant plus the lead, milliseconds past 06:30:00, the frame the gate
+    setting is tuned in. The bracket is the latest refusal before the
+    earliest grant, and the grant itself.
+
+    Read one bracket as evidence, not proof. Our own grant refuses our later
+    asks while it is in flight, and the club may evaluate requests a few ms out
+    of the order they were written, so a bracket can be off by one spacing; the
+    distribution across mornings is the measurement. A slot with no grant says
+    only that someone was faster than our first ask after the gate, or that the
+    gate was later than the burst.
+    """
+
+    def written(observation: "ReserveObservation") -> int | None:
+        """When the member's bytes left, falling back to when it was sent."""
+        if observation.wrote_ms_past_window is not None:
+            return observation.wrote_ms_past_window
+        return observation.sent_ms_past_window
+
+    by_slot: dict[str, list[ReserveObservation]] = {}
+    for observation in observations:
+        if observation.burst_index is None or written(observation) is None:
+            continue
+        slot = observation.slot_time.strftime("%I:%M %p") if observation.slot_time else "?"
+        by_slot.setdefault(slot, []).append(observation)
+
+    brackets: list[dict[str, Any]] = []
+    for slot, rows in by_slot.items():
+        rows.sort(key=lambda o: written(o) or 0)
+
+        def arrival(observation: "ReserveObservation") -> int:
+            """The member's instant on the plan's scale: written plus the lead."""
+            return (written(observation) or 0) + (observation.lead_ms or 0)
+
+        entry: dict[str, Any] = {
+            "slot": slot,
+            "asks": len(rows),
+            "firstAskMs": arrival(rows[0]),
+            "lastAskMs": arrival(rows[-1]),
+            "frame": (
+                "write+lead"
+                if all(o.wrote_ms_past_window is not None for o in rows)
+                else "send+lead"
+            ),
+            "grantedMs": None,
+            "lastRefusedBeforeMs": None,
+            "refusedBefore": 0,
+            "askedAfter": 0,
+        }
+        grants = [o for o in rows if o.verdict == RESERVE_ACCEPTED]
+        if grants:
+            first = grants[0]
+            first_written = written(first) or 0
+            before = [
+                o
+                for o in rows
+                if o.verdict == RESERVE_REFUSED and (written(o) or 0) < first_written
+            ]
+            entry["grantedMs"] = arrival(first)
+            entry["lastRefusedBeforeMs"] = arrival(before[-1]) if before else None
+            entry["refusedBefore"] = len(before)
+            entry["askedAfter"] = sum(1 for o in rows if (written(o) or 0) > first_written)
+        else:
+            entry["refusedBefore"] = sum(1 for o in rows if o.verdict == RESERVE_REFUSED)
+        brackets.append(entry)
+    return brackets
+
+
+def _log_gate_bracket(bracket: dict[str, Any]) -> None:
+    """One GATE_BRACKET line for one slot, in ms past 06:30:00."""
+    frame_note = (
+        "" if bracket["frame"] == "write+lead" else " (send times - no write times recorded)"
+    )
+    if bracket["grantedMs"] is None:
+        logger.info(
+            "GATE_BRACKET: %s - nothing granted in %d ask(s) from %+dms to %+dms: someone was "
+            "faster than our first ask after the gate, or the gate is later than the burst%s",
+            bracket["slot"],
+            bracket["asks"],
+            bracket["firstAskMs"],
+            bracket["lastAskMs"],
+            frame_note,
+        )
+    elif bracket["lastRefusedBeforeMs"] is None:
+        logger.info(
+            "GATE_BRACKET: %s - the first ask, at %+dms, was granted: the gate is at or before "
+            "the burst's start, so the burst should start earlier%s",
+            bracket["slot"],
+            bracket["grantedMs"],
+            frame_note,
+        )
+    else:
+        logger.info(
+            "GATE_BRACKET: %s opened in (%+d, %+d]ms past 06:30:00 - the last refusal before the "
+            "first grant, and the grant (write time plus lead); %d refused before it, %d asked "
+            "after%s",
+            bracket["slot"],
+            bracket["lastRefusedBeforeMs"],
+            bracket["grantedMs"],
+            bracket["refusedBefore"],
+            bracket["askedAfter"],
+            frame_note,
+        )
+
+
+def _signed_ms(value: int | None) -> str:
+    """``+3ms``, or "n/a" when unmeasured."""
+    return "n/a" if value is None else f"{value:+d}ms"
+
+
+def _cpu_phrase(delta: dict[str, Any] | None) -> str:
+    """A cpu_delta() dict as one readable clause for the BURST_CPU line."""
+    if delta is None:
+        return "unmeasured"
+
+    def field(name: str, unit: str = "ms") -> str:
+        value = delta.get(name)
+        return "?" if value is None else f"{value}{unit}"
+
+    return (
+        f"{field('wallMs')}: container cpu {field('containerCpuMs')} "
+        f"({field('busyCpus', '')} busy), ours {field('processCpuMs')}, "
+        f"run-queue delay {field('runQueueDelayMs')}, cpu pressure {field('cpuPressureMs')}, "
+        f"throttled {field('throttledPeriods', '')} period(s)/{field('throttledMs')}"
+    )
+
+
 def observe_reserve_response(
     *,
     attempt: int,
@@ -3416,6 +3896,9 @@ def observe_reserve_response(
     target_timestamp_ms: int | None,
     defer_telemetry: bool = False,
     burst_index: int | None = None,
+    plan_offset_ms: int | None = None,
+    planned_send_ms_past_window: int | None = None,
+    lead_ms: int | None = None,
 ) -> ReserveObservation:
     """Build the ledger row for one Reserve exchange.
 
@@ -3426,6 +3909,10 @@ def observe_reserve_response(
     Reserve, so computing them between the club's answer and the next rung buys
     nothing and costs ~11ms of the ~54ms post-response path. The verdict, which
     *is* a decision, is never deferred.
+
+    ``target_timestamp_ms`` is the frame every offset is measured in - the
+    stated window for a timed booking. The plan arguments are a burst member's
+    and stay None for a serial ask.
     """
     verdict, reason = classify_reserve_response(document, markup)
 
@@ -3440,7 +3927,7 @@ def observe_reserve_response(
     if response.sent_at_ms is not None and response.received_at_ms is not None:
         round_trip = response.received_at_ms - response.sent_at_ms
 
-    return ReserveObservation(
+    observation = ReserveObservation(
         attempt=attempt,
         slot_time=slot_time,
         source=source,
@@ -3466,7 +3953,12 @@ def observe_reserve_response(
         response_headers=dict(response.headers),
         burst_index=burst_index,
         body_digest=_body_digest(markup),
+        plan_offset_ms=plan_offset_ms,
+        planned_send_ms_past_window=planned_send_ms_past_window,
+        lead_ms=lead_ms,
     )
+    observation.apply_transport(response.transport, target_timestamp_ms)
+    return observation
 
 
 def _find_blocked_message(response: PartialResponse) -> str | None:
@@ -3594,6 +4086,18 @@ def _log_reserve_observation(observation: ReserveObservation) -> None:
     extras = ""
     if observation.burst_index is not None:
         extras += f", burst=#{observation.burst_index}"
+    if observation.wrote_ms_past_window is not None:
+        extras += f", wrote {observation.wrote_ms_past_window}ms"
+        if observation.write_drift_ms is not None:
+            extras += f" ({observation.write_drift_ms:+d}ms vs plan)"
+    if observation.opened_connection is True:
+        extras += (
+            f", dialled {observation.connect_ms}ms"
+            if observation.connect_ms is not None
+            else ", dialled"
+        )
+    elif observation.opened_connection is False:
+        extras += ", warm connection"
     if observation.status_code is not None and observation.status_code != 200:
         extras += f", status={observation.status_code}"
         if "retry-after" in observation.response_headers:

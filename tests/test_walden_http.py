@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from app.providers import walden_http_booker
 from app.providers.walden_http import (
     AbConfig,
     DirectHttpError,
@@ -3892,3 +3893,163 @@ class _ListHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Keep the record."""
         self.records.append(record)
+
+
+class PrewarmRecorder(SourceRecorder):
+    """A SourceRecorder that also answers the pre-warm's HEADs, and times them.
+
+    The HEADs carry no form body, so the parent would read them as chain steps
+    and serve them pages meant for the booking - hence answered here, apart.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        """Record HEADs separately from the Reserve traffic."""
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.head_at_ms: list[int] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """Answer a HEAD with a dated 200; hand everything else to the parent."""
+        if request.method == "HEAD":
+            with self._lock:
+                self.head_at_ms.append(int(time_module.time() * 1000))
+            return httpx.Response(200, headers={"Date": email.utils.formatdate(usegmt=True)})
+        return super().__call__(request)
+
+
+class TestVariableBurst:
+    """The burst plan of 2026-09-25: members either side of the aim, measured.
+
+    The plan starts before the aim to find where the gate opens, is dense around
+    it so some member lands just after the gate, and records for every member
+    when it was due, when it really left and on what connection.
+    """
+
+    def test_members_before_and_after_the_aim_fire_in_plan_order(self) -> None:
+        """Negative offsets are real members, sent at their instants like the rest."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL, BLOCKED_ALL, BLOCKED_ALL, ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+        )
+        booker = burst_booker(recorder, -60, -30, 0, 30, target_only=4, fallbacks=())
+        target = window_about_to_open(in_ms=300)
+        result = booker.book(1, target_timestamp_ms=target)
+
+        assert result.success, result.error
+        burst_sends = recorder.sent_at_ms[:4]
+        assert burst_sends == sorted(burst_sends)
+        for sent, offset in zip(burst_sends, (-60, -30, 0, 30), strict=True):
+            assert target + offset - 1 <= sent <= target + offset + 50
+        # With no separate window, the frame is the target itself: the aim is 0.
+        assert result.timing["burstAimMs"] == 0
+        assert result.timing["burstPlanMs"] == [-60, -30, 0, 30]
+        rows = [o.as_row() for o in result.attempt_log if o.burst_index is not None]
+        assert [row["planOffsetMs"] for row in rows] == [-60, -30, 0, 30]
+        assert [row["plannedSendMsPastWindow"] for row in rows] == [-60, -30, 0, 30]
+        assert all(0 <= row["writeDriftMs"] <= 50 for row in rows)
+
+    def test_the_gate_is_bracketed_between_the_last_refusal_and_the_grant(self) -> None:
+        """Three refusals then a grant: the gate is after the third and by the fourth."""
+        recorder = SourceRecorder(
+            {RESERVE_ID: [BLOCKED_ALL, BLOCKED_ALL, BLOCKED_ALL, ACCEPTED_PAGE]},
+            CHAIN_AFTER_GRANT,
+        )
+        booker = burst_booker(recorder, -60, -30, 0, 30, target_only=4, fallbacks=())
+        with _CaptureLogs("app.providers.walden_http_booker") as records:
+            result = booker.book(1, target_timestamp_ms=window_about_to_open(in_ms=300))
+
+        assert result.success, result.error
+        (bracket,) = result.timing["gateBrackets"]
+        assert bracket["slot"] == RESERVE_SLOT_TIME.strftime("%I:%M %p")
+        assert bracket["refusedBefore"] == 3
+        assert bracket["askedAfter"] == 0
+        assert -2 <= bracket["lastRefusedBeforeMs"] <= 50
+        assert 28 <= bracket["grantedMs"] <= 80
+        assert bracket["grantedMs"] > bracket["lastRefusedBeforeMs"]
+        # A mocked transport records no write time, so the send time stands in
+        # and the line says so rather than passing it off as a write.
+        assert bracket["frame"] == "send+lead"
+        lines = [r.getMessage() for r in records]
+        assert any(line.startswith("GATE_BRACKET:") and "opened in (" in line for line in lines)
+        assert any(line.startswith("BURST_TIMING:") for line in lines)
+        assert any(line.startswith("BURST_CPU:") for line in lines)
+
+    def test_the_connections_are_opened_just_before_the_first_member(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One HEAD per member, all before the burst, and the race record says so."""
+        monkeypatch.setattr(walden_http_booker, "_PREWARM_LEAD_MS", 300)
+        monkeypatch.setattr(walden_http_booker, "_PREWARM_MIN_MS", 100)
+        recorder = PrewarmRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 20, 40, target_only=3, fallbacks=())
+        booker._burst_prewarm = True
+        result = booker.book(1, target_timestamp_ms=window_about_to_open(in_ms=600))
+
+        assert result.success, result.error
+        prewarm = result.timing["prewarm"]
+        assert prewarm["requested"] == 3
+        assert prewarm["failed"] == 0
+        # One HEAD to settle on a probe target (no clock probe ran here), then
+        # one per member - every one of them before the first Reserve left.
+        assert len(recorder.head_at_ms) == 4
+        assert max(recorder.head_at_ms) < recorder.sent_at_ms[0]
+        assert prewarm["msLeftAfter"] > 0
+
+    def test_a_late_staging_skips_the_prewarm_rather_than_delay_the_burst(self) -> None:
+        """With under _PREWARM_MIN_MS to go, the burst goes on what it has."""
+        recorder = PrewarmRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 20, target_only=2, fallbacks=())
+        booker._burst_prewarm = True
+        result = booker.book(1, target_timestamp_ms=window_about_to_open(in_ms=120))
+
+        assert result.success, result.error
+        assert result.timing["prewarm"]["skipped"] is True
+        assert recorder.head_at_ms == []
+
+    def test_a_plan_longer_than_the_cap_keeps_its_earliest_members(self) -> None:
+        """A misconfigured shape cannot become a hundred sockets."""
+        booker = make_booker(ChainRecorder([BLOCKED_ALL]))
+        booker.prepare(
+            RESERVE_ID,
+            TEE_SHEET,
+            opening_mode=OPENING_MODE_BURST,
+            burst_offsets_ms=range(-500, 500, 10),
+        )
+
+        assert len(booker._burst_offsets_ms) == walden_http_booker._BURST_MAX_MEMBERS
+        assert booker._burst_offsets_ms[0] == -500
+
+    def test_a_prewarm_that_raises_does_not_cost_the_burst(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Anything the pre-warm throws is logged and the burst still fires."""
+        monkeypatch.setattr(walden_http_booker, "_PREWARM_LEAD_MS", 300)
+        monkeypatch.setattr(walden_http_booker, "_PREWARM_MIN_MS", 100)
+        recorder = PrewarmRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 20, target_only=2, fallbacks=())
+        booker._burst_prewarm = True
+
+        def broken(_count: int) -> dict:
+            raise RuntimeError("pool exploded")
+
+        monkeypatch.setattr(booker.session, "prewarm", broken)
+        result = booker.book(1, target_timestamp_ms=window_about_to_open(in_ms=600))
+
+        assert result.success, result.error
+        assert "pool exploded" in result.timing["prewarm"]["error"]
+
+    def test_a_cpu_reading_that_raises_does_not_cost_a_won_burst(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The snapshots are taken mid-race; a failure there reads as unmeasured."""
+
+        def broken() -> None:
+            raise OSError("no /proc here")
+
+        monkeypatch.setattr(walden_http_booker.cpu_telemetry, "take_snapshot", broken)
+        recorder = SourceRecorder({RESERVE_ID: [ACCEPTED_PAGE]}, CHAIN_AFTER_GRANT)
+        booker = burst_booker(recorder, 0, 20, target_only=2, fallbacks=())
+        result = booker.book(1, target_timestamp_ms=window_about_to_open(in_ms=200))
+
+        assert result.success, result.error
+        assert result.timing["burstCpu"]["wholeBurst"] is None
+        assert result.timing["burstCpu"]["sendWindow"] is None

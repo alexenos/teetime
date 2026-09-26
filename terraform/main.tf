@@ -118,6 +118,12 @@ locals {
     WALDEN_MEASURE_CLOCK_SKEW            = tostring(var.walden_measure_clock_skew)
     WALDEN_WINDOW_OPENS_OFFSET_MS        = tostring(var.walden_window_opens_offset_ms)
     WALDEN_RESERVE_AIM_MARGIN_MS         = tostring(var.walden_reserve_aim_margin_ms)
+    WALDEN_BURST_START_BEFORE_AIM_MS     = tostring(var.walden_burst_start_before_aim_ms)
+    WALDEN_BURST_END_AFTER_AIM_MS        = tostring(var.walden_burst_end_after_aim_ms)
+    WALDEN_BURST_DENSE_HALF_WIDTH_MS     = tostring(var.walden_burst_dense_half_width_ms)
+    WALDEN_BURST_DENSE_SPACING_MS        = tostring(var.walden_burst_dense_spacing_ms)
+    WALDEN_BURST_SPARSE_SPACING_MS       = tostring(var.walden_burst_sparse_spacing_ms)
+    WALDEN_BURST_PREWARM_CONNECTIONS     = tostring(var.walden_burst_prewarm_connections)
     WALDEN_RESERVE_SWEEP_OFFSETS_MS      = var.walden_reserve_sweep_offsets_ms
     WALDEN_RESERVE_PIPELINE_OPENING_PAIR = tostring(var.walden_reserve_pipeline_opening_pair)
     WALDEN_CAPTURE_RACE_LEDGER           = tostring(var.walden_capture_race_ledger)

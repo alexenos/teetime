@@ -21,6 +21,14 @@ Usage::
     python scripts/fetch_debug_artifacts.py logs  --date 2026-08-13 --from 06:20 --to 08:00
     python scripts/fetch_debug_artifacts.py ledger ./artifacts/walden/race/*/ledger.jsonl
     python scripts/fetch_debug_artifacts.py observations ./artifacts/walden/observer/2026-09-25/<run id>
+    python scripts/fetch_debug_artifacts.py gate --since 20260927
+
+``gate`` answers "where does the gate open, and is it different on different
+days": it reads every 06:30 race ledger in the bucket (cached under ``--out``),
+brackets each task's slot between the last refusal before its first grant and
+that grant - by write time plus lead, the frame the gate setting is tuned in -
+and prints the brackets by morning and by weekday, with each morning's CPU and
+write-timing record from its ``run.json`` alongside.
 
 The observer's objects live under ``walden/observer/<target date>/<run id>/``,
 and the run id starts with the UTC stamp of the morning it ran, so ``--date``
@@ -153,9 +161,13 @@ def _contained_destination(root: Path, object_name: str) -> Path | None:
     return candidate
 
 
-def download(bucket: str, name: str, destination: Path) -> int:
-    """Download one object, returning bytes written."""
-    token = access_token()
+def download(bucket: str, name: str, destination: Path, token: str | None = None) -> int:
+    """Download one object, returning bytes written.
+
+    ``token`` reuses a bearer token across many downloads; without it each call
+    fetches its own, which is a credential refresh per object under ADC.
+    """
+    token = token or access_token()
     url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{quote(name, safe='')}"
     with httpx.Client(timeout=120.0) as client:
         resp = client.get(
@@ -289,6 +301,157 @@ def summarize_ledger(path: Path) -> None:
         )
 
 
+def morning_race_dirs(items: list[dict], since: str | None = None) -> dict[str, dict[str, str]]:
+    """The race directories a 06:30 CT race wrote, oldest first: ``{dir: {file: object}}``.
+
+    Picked by the UTC stamp that starts each directory name, converted to CT, so
+    the rule holds across the DST change: a race directory is stamped a few
+    seconds after 06:30 CT whichever UTC hour that is. Evening ad-hoc bookings
+    write race directories too, and say nothing about the 06:30 gate.
+    """
+    dirs: dict[str, dict[str, str]] = {}
+    for item in items:
+        parts = item["name"].split("/")
+        if len(parts) != 4 or parts[:2] != ["walden", "race"]:
+            continue
+        if parts[3] in ("ledger.jsonl", "run.json"):
+            dirs.setdefault(parts[2], {})[parts[3]] = item["name"]
+    mornings: dict[str, dict[str, str]] = {}
+    for run_dir in sorted(dirs):
+        files = dirs[run_dir]
+        if "ledger.jsonl" not in files or (since and run_dir[:8] < since):
+            continue
+        try:
+            stamp = datetime.strptime(run_dir[:15], "%Y%m%d_%H%M%S").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        local = stamp.astimezone(CLUB_TZ)
+        if local.hour == 6 and 25 <= local.minute <= 35:
+            mornings[run_dir] = files
+    return mornings
+
+
+def ledger_gate_brackets(rows: list[dict]) -> list[dict]:
+    """The racer's GATE_BRACKET, recomputed from a ledger's rows.
+
+    Per slot: the latest refusal written before the earliest-written grant, and
+    that grant. Each ask is placed at its write time plus the lead - the frame
+    the gate setting (walden_window_opens_offset_ms) is tuned in. Ledgers from
+    before 2026-09-27 carry no write time or lead, so their asks are placed at
+    the logged send time instead and the entry's ``frame`` says so: those sends
+    each paid a ~55ms TCP and TLS handshake before any byte left.
+
+    Only the opening burst counts when the ledger has one: the serial walk after
+    it asks at whatever pace the club answers, which says nothing about the gate.
+    """
+    if any(row.get("burstIndex") is not None for row in rows):
+        rows = [row for row in rows if row.get("burstIndex") is not None]
+    by_slot: dict[str, list[tuple[int, int, str, bool]]] = {}
+    for row in rows:
+        wrote = row.get("wroteMsPastWindow")
+        if wrote is not None:
+            written, arrival, timed = wrote, wrote + (row.get("leadMs") or 0), True
+        elif row.get("sentMsPastWindow") is not None:
+            written = row["sentMsPastWindow"]
+            arrival, timed = written, False
+        else:
+            continue
+        by_slot.setdefault(row.get("slot") or "?", []).append(
+            (written, arrival, str(row.get("verdict")), timed)
+        )
+    brackets: list[dict] = []
+    for slot, asks in by_slot.items():
+        asks.sort(key=lambda ask: ask[0])
+        entry: dict = {
+            "slot": slot,
+            "asks": len(asks),
+            "firstMs": asks[0][1],
+            "lastMs": asks[-1][1],
+            "frame": "write+lead" if all(ask[3] for ask in asks) else "send",
+            "grantedMs": None,
+            "refusedBeforeMs": None,
+        }
+        grants = [ask for ask in asks if ask[2] == "accepted"]
+        if grants:
+            first = grants[0]
+            before = [ask for ask in asks if ask[2] == "refused" and ask[0] < first[0]]
+            entry["grantedMs"] = first[1]
+            entry["refusedBeforeMs"] = before[-1][1] if before else None
+        brackets.append(entry)
+    return brackets
+
+
+def _bracket_phrase(bracket: dict) -> str:
+    """One bracket as text: "(+995, +1000]", "<= +815", or "no grant"."""
+    if bracket["grantedMs"] is None:
+        return "no grant"
+    if bracket["refusedBeforeMs"] is None:
+        return f"<= {bracket['grantedMs']:+d}"
+    return f"({bracket['refusedBeforeMs']:+d}, {bracket['grantedMs']:+d}]"
+
+
+def _cpu_row(record: dict | None) -> str:
+    """A run.json's CPU and write-timing record as one table row's tail."""
+    timing = (record or {}).get("timing") or {}
+    writes = timing.get("burstWrites") or {}
+    cpu = timing.get("burstCpu") or {}
+    environment = cpu.get("environment") or {}
+    window = cpu.get("sendWindow") or {}
+    if not writes and not cpu:
+        return "no run.json (before 2026-09-27)"
+
+    def show(value: object, unit: str = "") -> str:
+        return "?" if value is None else f"{value}{unit}"
+
+    return (
+        f"cpus {show(environment.get('cgroupCpuLimit') or environment.get('usableCpus'))}  "
+        f"warm {show(writes.get('warm'))}/{show(writes.get('members'))}  "
+        f"drift max {show(writes.get('driftMsMax'), 'ms')}  "
+        f"late>2ms {show(writes.get('lateOver2Ms'))}  "
+        f"busy {show(window.get('busyCpus'))}  "
+        f"runq {show(window.get('runQueueDelayMs'), 'ms')}  "
+        f"psi {show(window.get('cpuPressureMs'), 'ms')}  "
+        f"throttled {show(window.get('throttledMs'), 'ms')}"
+    )
+
+
+def print_gate_table(mornings: dict[str, tuple[list[dict], dict | None]]) -> None:
+    """Print the brackets by morning, then by weekday, then each morning's CPU record."""
+    by_weekday: dict[str, list[tuple[int | None, int]]] = {}
+    print(f"{'race dir':<40} {'day':<4} {'slot':<9} {'asks':>4}  {'span':<14} {'gate':<18} frame")
+    for run_dir, (rows, _record) in mornings.items():
+        day = datetime.strptime(run_dir[:8], "%Y%m%d").strftime("%a")
+        for bracket in ledger_gate_brackets(rows):
+            span = f"{bracket['firstMs']:+d}..{bracket['lastMs']:+d}"
+            print(
+                f"{run_dir:<40} {day:<4} {bracket['slot']:<9} {bracket['asks']:>4}  "
+                f"{span:<14} {_bracket_phrase(bracket):<18} {bracket['frame']}"
+            )
+            if bracket["grantedMs"] is not None and bracket["frame"] == "write+lead":
+                by_weekday.setdefault(day, []).append(
+                    (bracket["refusedBeforeMs"], bracket["grantedMs"])
+                )
+
+    print("\nBy weekday (write+lead brackets only; the intersection is where one gate would sit):")
+    for day in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"):
+        brackets = by_weekday.get(day, [])
+        if not brackets:
+            print(f"  {day}: no measured bracket yet")
+            continue
+        lower = max((low for low, _high in brackets if low is not None), default=None)
+        upper = min(high for _low, high in brackets)
+        consistent = lower is None or lower < upper
+        print(
+            f"  {day}: {len(brackets)} bracket(s), intersection "
+            f"{'(' + format(lower, '+d') if lower is not None else '(?'}, {upper:+d}]"
+            f"{'' if consistent else '  <- brackets disagree: the gate moved, or asks were reordered'}"
+        )
+
+    print("\nCPU and write timing per race (run.json; the second-vCPU question):")
+    for run_dir, (_rows, record) in mornings.items():
+        print(f"  {run_dir:<40} {_cpu_row(record)}")
+
+
 def summarize_observer_run(
     run_dir: Path,
     course: str | None = "Northgate",
@@ -364,6 +527,12 @@ def main() -> None:
     p_obs.add_argument("--from", dest="start", help="first tee time to show, HH:MM")
     p_obs.add_argument("--to", dest="end", help="last tee time to show, HH:MM")
 
+    p_gate = sub.add_parser(
+        "gate", help="bracket the gate on every 06:30 race, by morning and by weekday"
+    )
+    p_gate.add_argument("--since", help="first UTC date stamp to include, e.g. 20260927")
+    p_gate.add_argument("--out", default="./artifacts", type=Path, help="download cache")
+
     args = parser.parse_args()
 
     if args.command == "list":
@@ -437,6 +606,34 @@ def main() -> None:
     elif args.command == "observations":
         course = None if args.course.casefold() == "all" else args.course
         summarize_observer_run(args.run_dir, course=course, start=args.start, end=args.end)
+
+    elif args.command == "gate":
+        dirs = morning_race_dirs(list_objects(args.bucket, "walden/race/", None), args.since)
+        if not dirs:
+            print("No 06:30 race ledgers" + (f" since {args.since}" if args.since else ""))
+            return
+        root = args.out.resolve()
+        token = access_token()
+        mornings: dict[str, tuple[list[dict], dict | None]] = {}
+        for run_dir, files in dirs.items():
+            loaded: dict[str, Path] = {}
+            for filename, name in files.items():
+                destination = _contained_destination(root, name)
+                if destination is None:
+                    continue
+                # Ledgers and run records are written once and never change, so
+                # a cached copy is as good as a fresh one.
+                if not destination.exists():
+                    download(args.bucket, name, destination, token=token)
+                loaded[filename] = destination
+            ledger = loaded.get("ledger.jsonl")
+            if ledger is None:
+                continue
+            rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+            record_path = loaded.get("run.json")
+            record = json.loads(record_path.read_text()) if record_path is not None else None
+            mornings[run_dir] = (rows, record)
+        print_gate_table(mornings)
 
 
 if __name__ == "__main__":
