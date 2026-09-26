@@ -12,12 +12,31 @@ specification; deploying it is the steps in the last section.
 
 It reads the other Routines' ledgers and derives. It never writes to them.
 
-## It needs a repository write, and that has a prerequisite
+## It would need a second standing authorization, which does not exist
 
-The page is published from `docs/`, so publishing means committing there. That is
-a second standing authorization to write to `main`, and it is bounded the same way
-the race report's is: two paths (`docs/scoreboard.json` and, when regenerated,
-`docs/scoreboard.html`), a green `Tests` check, and nothing else.
+The page is published from `docs/`, so publishing means committing there — and
+merging, if it is to happen without a person. That is a **second** standing
+authorization to write to `main`.
+
+`CLAUDE.md` says the race report's exception is defined in
+`operations/routines/race-report.md` "and nowhere else". That is true today and
+this file does not change it: **this Routine is not deployed, and no second
+authorization has been granted.** What follows is what deploying it would require,
+not a grant.
+
+It is also a decision worth making deliberately rather than inheriting. An earlier
+draft of this file argued against a second authorization on the grounds that the
+race report's is the one load-bearing risk in this setup and the bounds are worth
+keeping scarce. Moving the page into `docs/` quietly created the need for one, and
+that argument was never revisited. Two options, and the maintainer picks:
+
+| | |
+|---|---|
+| **Grant it** | bounded to two paths (`docs/scoreboard.json`, `docs/scoreboard.html`), a green `Tests` check, and nothing else. `CLAUDE.md` changes from one exception to two. The scoreboard updates without a person. |
+| **Withhold it** | the Routine opens a PR and stops; the maintainer merges. One exception stands. The scoreboard is as current as the last time someone merged, which for a daily metric means it is usually a day stale. |
+
+Until that is settled, the steps below describe the granted case and must not be
+deployed.
 
 `docs/**` is now in `ignored_files` in `terraform/main.tf`, alongside
 `operations/**`. Without it, a commit to `docs/` fires a build and redeploys the
@@ -67,8 +86,9 @@ out an hour earlier.
    consecutive count plus each Routine's own, cost from the newest `cost.jsonl` row.
    Record `null` with a reason for any source that does not exist. Do not infer,
    and do not substitute zero.
-3. Write `docs/scoreboard.json`, commit it on a branch, open a PR, merge on green
-   `Tests`.
+3. Write `docs/scoreboard.json`, commit it on a branch, open a PR. Merge on green
+   `Tests` **only if the second authorization above has been granted**; otherwise
+   leave the PR open for the maintainer.
 4. Append this run's row to `scoreboard.jsonl`.
 5. **Notify only on a change in a source metric, or on a failure.** A failure
    includes the append failing, and a source that previously worked having stopped
@@ -145,11 +165,13 @@ is a stat tile. The streak history is one series, so it carries no legend.
 
 ## Deploying it
 
-1. Apply the terraform, and confirm `ignored_files` on the live trigger reads
+1. Decide the second-authorization question above, and record the decision here.
+   If granted, `CLAUDE.md` changes from one exception to two in the same commit.
+2. Apply the terraform, and confirm `ignored_files` on the live trigger reads
    `["operations/**", "docs/**"]`. **Not optional** — without it this Routine
    redeploys production daily. The repository edit is already made; the apply is
    not, and cannot be verified from a session.
-2. Create the Routine, record its trigger ID above, and change **Status**.
-3. Note the new cron in the 2026-11-01 DST change.
+3. Create the Routine, record its trigger ID above, and change **Status**.
+4. Note the new cron in the 2026-11-01 DST change.
 
 Until then the page shows sample data, flagged as such.

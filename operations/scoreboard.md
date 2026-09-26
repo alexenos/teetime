@@ -91,9 +91,15 @@ date as a missed run; the streak has to apply that rule rather than trusting the
 rows to be complete.
 
 So: build the list of dates each Routine was scheduled to fire, walk back from
-today, and stop at the first date that is either `ok: false` or absent. Absence is
-the failure mode most worth catching, because it is what a crashed or never-started
-run looks like.
+**the latest completed scheduled run**, and stop at the first date that is either
+`ok: false` or absent. Absence is the failure mode most worth catching, because it
+is what a crashed or never-started run looks like.
+
+**Not from today**, and the distinction is load-bearing. The scoreboard Routine
+derives the metrics before it appends its own row for that day, so at derivation
+time today's scoreboard row is always absent. A walk starting at today would read
+its own in-progress run as a missing one and return a streak of zero, every single
+day. An in-progress run is neither absent nor failed; it is not yet a fact.
 
 **A run cannot always score itself.** A race report that misdiagnoses the morning
 believes it did fine — that is exactly what 2026-09-15 was. So `ok` written by the

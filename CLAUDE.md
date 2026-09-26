@@ -14,6 +14,12 @@ with one exception: the race report Routine merges its own report, scoped to one
 file under `operations/race-reports/` and gated on a green `Tests` check. That
 exception is defined in `operations/routines/race-report.md` and nowhere else.
 
+A second exception is **proposed and not granted**: the scoreboard Routine would
+need one to publish `docs/scoreboard.*` without a person.
+`operations/routines/scoreboard.md` states what it would be bounded by and why it
+is a decision rather than a detail. Until it is granted there is one exception,
+and that Routine is not deployed.
+
 A commit touching only `operations/` or `docs/` does not redeploy: the Cloud
 Build trigger sets `ignored_files = ["operations/**", "docs/**"]`
 (`terraform/main.tf`). The filter applies only when every changed file matches,
