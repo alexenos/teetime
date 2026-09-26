@@ -9,12 +9,20 @@ in `operations/`.
 ## Constraints
 
 **`main` deploys.** A commit on `main` triggers Cloud Build and redeploys the
-live service. Branch before committing. Merging is the maintainer's decision.
+live service. Branch before committing. Merging is the maintainer's decision,
+with one exception: the race report cycle merges its own report, scoped to one
+file under `operations/race-reports/` and gated on a green `Tests` check. That
+exception is defined in `operations/cycles/race-report.md` and nowhere else.
+
+A commit touching only `operations/` does not redeploy: the Cloud Build trigger
+sets `ignored_files = ["operations/**"]` (`terraform/main.tf`). The filter
+applies only when every changed file matches, so a commit that also touches app
+code still deploys.
 
 **Three GCP resources, not one.** A Cloud Logging query scoped to the service
 alone returns a valid zero-row result on a morning when the race ran. That
 result is indistinguishable from a morning with no booking. This produced a
-misdiagnosed post-mortem on 2026-09-15.
+misdiagnosed race report on 2026-09-15.
 
 | Resource | Type | `resource.type` |
 |---|---|---|
@@ -29,7 +37,10 @@ Concurrent browser sessions fail. Three bookings failed this way on
 
 **`docs/` is published.** It is served as GitHub Pages at
 `alexenos.github.io/teetime`, and the repository is public. Content placed
-there is public. Operating material belongs in `operations/`.
+there is public, and now holds only the site itself — index, privacy, terms.
+Operating material belongs in `operations/`, where #221 moved it. This applies
+to member identifiers too: do not write names, phone numbers or Telegram
+handles anywhere in the repository.
 
 ## Race timing
 
@@ -57,28 +68,25 @@ environment that sets `CI` but has no browser.
 
 ## Operations
 
-Work selection, agent decision authority, and measurement: `operations/`.
+Measurement and the scheduled cycles: `operations/`.
 
-- `operations/autonomy.md` — the autonomy ladder and each cycle's rung
-- `operations/scoreboard.md` — the five metrics and their sources
-- `operations/cycles/` — one file per operating cycle, including its prompt
-- `operations/ledger/` — the rows cycles emit
+- `operations/scoreboard.md` — three metrics and their sources
+- `operations/cycles/` — one file per scheduled cycle, including its prompt
+  and what it is authorized to do
+- `operations/ledger/` — the rows cycles emit; specified, not yet written
+- `operations/race-reports/` — one report per race morning
 
-Current rungs. `operations/autonomy.md` is authoritative where it and this
-table disagree.
-
-| Cycle | Rung | Permitted |
-|---|---|---|
-| morning post-mortem | R0 | report only; no commits, no PRs |
-| ship-pr | R2 | push to its own open PR; no merge |
-| PR check-ins | R2 | as above |
+One cycle runs on a schedule: the race report, daily at `40 11 * * *` UTC.
+`ship-pr` and the PR check-ins are maintainer-invoked and push only to their
+own open PR.
 
 ## Skills
 
-- `.claude/skills/booking-postmortem/` — morning diagnosis, and what its
-  evidence establishes
+- `.claude/skills/race-report/` — morning diagnosis, and what its evidence
+  establishes
 - `.claude/skills/ship-pr/` — opening a PR, triggering CodeRabbit (which does
-  not review this repository automatically), and processing the review
+  not review this repository automatically), and processing the review.
+  `.coderabbit.yaml` excludes `operations/race-reports/**` from review (#223).
 
 ## Writing conventions
 

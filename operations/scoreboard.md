@@ -1,7 +1,7 @@
 # The scoreboard
 
-Five metrics. Three measure member outcomes, one measures the operating
-system, one measures cost.
+Three metrics. One measures member outcomes, one measures the automation, one
+measures cost.
 
 Each metric names the field it is computed from. On 2026-09-15 a valid,
 zero-row log query was read as "no booking ran"; a metric without a stated
@@ -21,8 +21,8 @@ per morning. Rolling 4 race mornings.
 | **Miss** | no reservation |
 
 **Source:** `RESERVATION_CHECK`. `phase=complete, success=True` does not
-establish a reservation. This distinction is recorded in the post-mortem skill
-and is the most likely element of this definition to regress.
+establish a reservation. This distinction is recorded in the `race-report`
+skill and is the most likely element of this definition to regress.
 
 **Condition for Exact:** the member's request must have been resolved to a
 bookable slot and confirmed with the member before the race was scheduled, not
@@ -37,67 +37,42 @@ that limitation stated, or report Miss against not-Miss.
 Exact. 2026-09-17 was three requests, all Miss. Per-morning counting loses
 both figures.
 
-## 2. Malformed response rate
+## 2. Automation streak
 
-Proportion of member-facing messages containing raw error text, sent to the
-wrong recipient, or otherwise unusable.
+Consecutive clean runs of the race report cycle.
 
-```
-malformed ÷ total member-facing messages sent, 30-day rolling
-```
+The race report is the only automation this metric covers, because it is the
+only cycle that runs on a schedule and acts without being asked. `ship-pr` and
+the PR check-ins are maintainer-invoked and are not counted here.
 
-Report the raw pair alongside the percentage: "2 of 34 (5.9%)". At current
-volume one message moves the rate by several points.
+**Clean** means the run's output required no correction before it could be
+acted on. It is independent of the outcome the run reported: a correctly
+diagnosed loss is clean, and so is a correctly reported "no booking was
+scheduled".
 
-**Source:** not instrumented. Neither numerator nor denominator is currently
-counted.
+The cycle now commits and merges its own report
+(`operations/cycles/race-report.md`), so an incorrect report reaches `main`.
+A report that merged and then required a correction commit is not clean.
 
-Reference case, 2026-09-17: of three requests, one member received a Selenium
-stack trace, and one received a message addressed to a different member.
+Two recorded cases, both predating that authorization — no auto-merged report
+has yet required a correction:
 
-**Known gap — unsent messages.** On the same morning, one member was told a
-result would follow and received nothing: the notification hit a Telegram
-`ConnectTimeout` and was dropped. An unsent message does not appear in a ratio
-over messages sent. From the member's position it is indistinguishable from a
-booking still in progress. Either extend this metric to cover messages that
-should have been sent, or add a sixth metric. Not decided.
+| Date | Why not clean |
+|---|---|
+| 2026-09-15 | Reported no booking on a morning when two bookings succeeded. The log query was scoped to the Cloud Run service and excluded the jobs. Identified by maintainer pushback; fixed in #206. |
+| 2026-09-18 | The report's headline finding, a "112ms escape" against `_RESERVE_TIMEOUT_S`, was wrong about which timeout applies to a burst fire. Retracted by #219 the following day. |
 
-## 3. Fix latency
+**Source:** `operations/ledger/runs.jsonl`, counted back from the newest row to
+the first `clean: false`. Do not store the streak.
 
-Median of the last 5.
+## 3. Cost
 
-```
-start: a post-mortem or review identifies the fix
-end:   that fix is on main
-```
-
-The start condition determines the value. Without it the metric measures time
-from defect introduction to fix, which is a different quantity: the 2026-09-17
-browser contention measures a few hours under the first definition and months
-under the second.
-
-**Source:** git, plus post-mortem document dates. No new instrumentation
-required.
-
-## 4. Autonomy streak
-
-Per cycle: current rung (R0–R5) and consecutive clean runs at that rung.
-
-The only metric measuring the operating system rather than the application.
-Defined in `operations/autonomy.md`, including the definition of "clean" and
-the scoring-authority constraint on promotion.
-
-**Source:** `operations/ledger/runs.jsonl`, counted back to the last
-`clean: false`.
-
-## 5. $/month
-
-Total spend, and $/booking.
+Total spend per month, and $/booking.
 
 $/booking is the input to the Cloud SQL retention decision open since #41 and
 #168 (~$9.50/month). Include agent and token spend, not GCP alone.
 
-**Source:** not available. Requires billing export access; the post-mortem
+**Source:** not available. Requires billing export access; the race report
 service account is scoped to storage and logging, which is the same limitation
 that left the memory-versus-CPU question unresolved on 2026-09-17.
 
@@ -105,27 +80,33 @@ that left the memory-versus-CPU question unresolved on 2026-09-17.
 
 ## Excluded
 
-Commit count, PR count, lines changed.
+**Commit count, PR count, lines changed.** These measure activity rather than
+outcome, and are directly gameable by a cycle that generates its own work.
 
-These measure activity rather than outcome, and are directly gameable by a
-cycle that generates its own work.
+**Malformed response rate** and **fix latency** were specified and then cut, to
+keep the scoreboard to what is worth maintaining at current volume. Neither was
+instrumented. The incidents that motivated the first — a member sent a Selenium
+stack trace, a member sent a message addressed to someone else, and a member
+told a result would follow who received nothing, all on 2026-09-17 — remain
+recorded in `operations/race-reports/2026-09-17.md`. They are no longer tracked
+as a rate.
 
-## Undecided
-
-**Human-touch rate** — proportion of merged PRs where the maintainer edited
-code rather than only approving. Measures the project's original premise
-directly. Not adopted.
+**Human-touch rate** — the proportion of merged PRs where the maintainer edited
+code rather than only approving — was also cut. It measured the project's
+original premise most directly, and it is the one excluded metric whose input
+cannot be reconstructed after the fact: whether a given merged PR was edited by
+hand is not recoverable from the repository later. Nothing is accumulating it.
 
 ## Computation
 
-Cycles emit rows; the scoreboard is a rollup over those rows. It does not
-parse the post-mortem documents. See `operations/ledger/README.md`.
+The race report cycle emits rows; the scoreboard is a rollup over those rows.
+It does not parse the report documents. See `operations/ledger/README.md`.
 
-The post-mortem documents are unchanged by this. They hold the analysis; the
-ledger holds the values used for computation.
+The reports in `operations/race-reports/` are unchanged by this. They hold the
+analysis; the ledger holds the values used for computation.
 
 ## Current implementation status
 
-No cycle currently emits rows, and no rollup exists. The ledger files are
-empty and this document is a specification. See `operations/ledger/README.md`
-for the write path, and the open work required to populate it.
+No cycle emits rows, and no rollup exists. The ledger files are empty and this
+document is a specification. `operations/ledger/README.md` states the write
+path and the work required to populate it.
