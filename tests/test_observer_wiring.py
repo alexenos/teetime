@@ -20,6 +20,7 @@ from app import log_safety
 from app.config import Settings
 from app.observer import run as observer_run
 from app.observer import sheet as observer_sheet
+from app.providers.walden_sheet_grid import parse_rows
 from app.services.credential_service import WaldenCredentialRequiredError
 from app.utils.timezone import CTDateTime
 
@@ -497,3 +498,223 @@ class TestCadenceSettingsValidation:
         """Every offset would collapse onto the window, recording one instant nine times."""
         with pytest.raises(ValidationError, match="observer_snapshot_interval_ms"):
             Settings(_env_file=None, observer_snapshot_interval_ms=interval)
+
+
+def _grid_html(*times: str, css: str = "Empty") -> bytes:
+    rows = "".join(
+        f'<div id="f:teeTimeCourses:0:teeTimeSlots:{i}:slotTee:0:slotTeeDIV" class="{css}">'
+        f'<div><label class="custom-time-label">{t}</label></div></div>'
+        for i, t in enumerate(times)
+    )
+    return f"<html><body>{rows}</body></html>".encode()
+
+
+class TestRecordGrids:
+    """The slot grids recorded after the window (issue #216)."""
+
+    WATCHED = date(2026, 10, 3)
+
+    @staticmethod
+    def _snapshot(html: bytes) -> observer_sheet.Snapshot:
+        return observer_sheet.Snapshot(
+            index=0,
+            planned_offset_ms=-500,
+            sent_offset_ms=-497,
+            settled_offset_ms=300,
+            captured_offset_ms=350,
+            html=html,
+            refresh_ok=True,
+        )
+
+    @staticmethod
+    def _read(when: date, *times: str, unparsed: int = 0) -> observer_sheet.HorizonRead:
+        slots, _ = parse_rows(_grid_html(*times))
+        return observer_sheet.HorizonRead(
+            sheet_date=when,
+            landed=True,
+            selected_tab_text=when.strftime("%A"),
+            html=_grid_html(*times),
+            slots=slots,
+            unparsed=unparsed,
+        )
+
+    async def _run(
+        self,
+        reads: list[observer_sheet.HorizonRead],
+        *,
+        days: int = 2,
+        save: AsyncMock | None = None,
+    ) -> tuple[AsyncMock, MagicMock, dict[str, bytes]]:
+        save = save or AsyncMock()
+        read_horizon = MagicMock(return_value=reads)
+        written: dict[str, bytes] = {}
+
+        def _upload(**kwargs: Any) -> str:
+            written[kwargs["object_name"]] = kwargs["data"]
+            return "gs://b/" + kwargs["object_name"]
+
+        with (
+            patch.object(observer_run.settings, "observer_horizon_days", days),
+            patch.object(observer_run.sheet, "read_horizon", new=read_horizon),
+            patch.object(
+                observer_run.database_service, "ensure_tee_sheet_grid_table", new=AsyncMock()
+            ),
+            patch.object(observer_run.database_service, "save_tee_sheet_grid", new=save),
+            patch.object(observer_run.artifacts, "artifacts_bucket", return_value="bkt"),
+            patch.object(observer_run.artifacts, "upload_bytes", side_effect=_upload),
+        ):
+            await observer_run._record_grids(
+                MagicMock(),
+                self.WATCHED,
+                "walden/observer/2026-10-03/run",
+                [self._snapshot(_grid_html("07:15 AM", "07:23 AM", "07:30 AM"))],
+            )
+        return save, read_horizon, written
+
+    @pytest.mark.asyncio
+    async def test_the_watched_date_and_the_days_after_it_are_recorded(self) -> None:
+        reads = [
+            self._read(date(2026, 10, 4), "07:15 AM"),
+            self._read(date(2026, 10, 5), "07:30 AM", "07:38 AM"),
+        ]
+
+        save, read_horizon, _ = await self._run(reads)
+
+        assert read_horizon.call_args.args[1] == [date(2026, 10, 4), date(2026, 10, 5)]
+        recorded = {call.args[0]: len(call.args[1]) for call in save.await_args_list}
+        assert recorded == {self.WATCHED: 3, date(2026, 10, 4): 1, date(2026, 10, 5): 2}
+        assert all(call.kwargs["source"] == "observer" for call in save.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_the_summary_says_what_each_date_rendered(self) -> None:
+        """horizon.json is where the first answer to "does D+8 render?" lives."""
+        reads = [
+            self._read(date(2026, 10, 4), "07:15 AM"),
+            observer_sheet.HorizonRead(sheet_date=date(2026, 10, 5), landed=True, html=b"<html/>"),
+            observer_sheet.HorizonRead(
+                sheet_date=date(2026, 10, 6), landed=False, note="could not be confirmed"
+            ),
+        ]
+
+        _, _, written = await self._run(reads, days=3)
+
+        summary = json.loads(written["walden/observer/2026-10-03/run/horizon.json"])
+        assert [(e["date"], e["daysPastWatched"], e["landed"]) for e in summary] == [
+            ("2026-10-04", 1, True),
+            ("2026-10-05", 2, True),
+            ("2026-10-06", 3, False),
+        ]
+        assert summary[0]["northgateRows"] == 1
+        assert summary[0]["first"] == "07:15"
+        assert summary[1]["northgateRows"] == 0
+        assert summary[2]["note"] == "could not be confirmed"
+        assert "walden/observer/2026-10-03/run/horizon/2026-10-04.html" in written
+
+    @pytest.mark.asyncio
+    async def test_empty_unconfirmed_and_holey_grids_are_not_offered(self) -> None:
+        """Each is evidence worth keeping, and none is a grid to show a member."""
+        reads = [
+            observer_sheet.HorizonRead(sheet_date=date(2026, 10, 4), landed=True, html=b"<x/>"),
+            observer_sheet.HorizonRead(sheet_date=date(2026, 10, 5), landed=False),
+            self._read(date(2026, 10, 6), "07:15 AM", unparsed=1),
+        ]
+
+        save, _, _ = await self._run(reads, days=3)
+
+        assert [call.args[0] for call in save.await_args_list] == [self.WATCHED]
+
+    @pytest.mark.asyncio
+    async def test_a_horizon_of_zero_reads_nothing_more(self) -> None:
+        save, read_horizon, written = await self._run([], days=0)
+
+        read_horizon.assert_not_called()
+        assert [call.args[0] for call in save.await_args_list] == [self.WATCHED]
+        assert written == {}
+
+    @pytest.mark.asyncio
+    async def test_a_database_failure_is_logged_not_raised(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        save = AsyncMock(side_effect=RuntimeError("connection is closed"))
+
+        with caplog.at_level(logging.ERROR):
+            await self._run([self._read(date(2026, 10, 4), "07:15 AM")], save=save)
+
+        assert "could not record the slot grids" in caplog.text
+
+
+class TestObserveReadsAheadLast:
+    """The horizon read comes after the evidence, and cannot change the verdict."""
+
+    @staticmethod
+    def _prep() -> observer_sheet.Preparation:
+        return observer_sheet.Preparation(
+            target_date=date(2026, 10, 3),
+            selected_tab_text="Saturday Sat 3 October Oct",
+            clicked_tab=True,
+            northgate_row_count=72,
+            sheet_bytes=700_000,
+            ready_at_epoch_ms=0,
+        )
+
+    async def _observe(self, record_grids: AsyncMock, events: list[str]) -> bool:
+        snapshot = TestRecordGrids._snapshot(_grid_html("09:08 AM"))
+        driver = MagicMock()
+        driver.quit.side_effect = lambda: events.append("quit")
+
+        def _store(*_args: Any) -> int:
+            events.append("store")
+            return 9
+
+        async def _record(*_args: Any) -> None:
+            events.append("record_grids")
+            await record_grids()
+
+        with (
+            patch.object(observer_run.settings, "observer_enabled", True),
+            patch.object(
+                observer_run,
+                "_resolve_target",
+                new=AsyncMock(return_value=(date(2026, 10, 3), "m", "p")),
+            ),
+            patch.object(observer_run.sheet, "create_driver", return_value=driver),
+            patch.object(observer_run.sheet, "log_in", return_value=True),
+            patch.object(observer_run.sheet, "open_tee_sheet", return_value=True),
+            patch.object(observer_run.sheet, "park_on_date", return_value=self._prep()),
+            patch.object(observer_run.sheet, "capture_across_window", return_value=[snapshot]),
+            patch.object(observer_run, "_store", side_effect=_store),
+            patch.object(observer_run, "_record_grids", side_effect=_record),
+        ):
+            return await observer_run.observe()
+
+    @pytest.mark.asyncio
+    async def test_the_window_is_stored_before_anything_reads_ahead(self) -> None:
+        events: list[str] = []
+
+        produced = await self._observe(AsyncMock(), events)
+
+        assert produced is True
+        assert events == ["store", "record_grids", "quit"]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_ahead_leaves_a_good_morning_good(self) -> None:
+        events: list[str] = []
+
+        produced = await self._observe(AsyncMock(side_effect=RuntimeError("boom")), events)
+
+        assert produced is True
+        assert events == ["store", "record_grids", "quit"]
+
+
+class TestHorizonSetting:
+    def test_defaults_to_a_week_past_the_watched_date(self) -> None:
+        assert Settings(_env_file=None).observer_horizon_days == 7
+
+    @pytest.mark.parametrize("value", [0, 30])
+    def test_accepts_the_ends_of_its_range(self, value: int) -> None:
+        assert Settings(_env_file=None, observer_horizon_days=value).observer_horizon_days == value
+
+    @pytest.mark.parametrize("value", [-1, 31])
+    def test_rejects_a_horizon_outside_it(self, value: int) -> None:
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, observer_horizon_days=value)

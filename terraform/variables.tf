@@ -750,6 +750,31 @@ variable "observer_snapshot_start_offset_ms" {
   }
 }
 
+variable "observer_horizon_days" {
+  description = <<-EOT
+    How many dates past the watched one the observer reads after the window,
+    recording each one's slot grid for the booking conversation (issue #216).
+
+    Seven reads D+8 through D+14, so every date is read on each of the seven
+    mornings before its own race. Zero turns the read off.
+
+    After the window only, and after that morning's snapshots are stored: each
+    date is a calendar round trip of about four seconds, and none of it may
+    land where the evidence is taken.
+
+    Whether the club renders rows for a date more than seven days out is
+    untested. The first morning this runs answers it - each date logs its
+    Northgate row count, and horizon.json beside the snapshots records it.
+  EOT
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.observer_horizon_days >= 0 && var.observer_horizon_days <= 30 && floor(var.observer_horizon_days) == var.observer_horizon_days
+    error_message = "observer_horizon_days must be a whole number from 0 to 30; each date costs a calendar round trip, and Settings rejects anything outside that range at container startup."
+  }
+}
+
 variable "observer_cpu" {
   description = "CPU for the observer job. Its own container, so it contends with nothing that races."
   type        = string

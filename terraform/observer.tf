@@ -99,9 +99,11 @@ resource "google_cloud_run_v2_job" "observer" {
       # worth retrying: the morning is gone.
       max_retries = 0
 
-      # 06:24 start, nine snapshots to 06:30:08, then nine uploads of ~670KB.
-      # Fifteen minutes is generous by design - the timeout exists to stop a
-      # hung browser holding an instance, not to bound the work.
+      # 06:24 start, nine snapshots to 06:30:08, then nine uploads of ~670KB,
+      # then the horizon read (issue #216): about four seconds a date, so
+      # half a minute at the default of seven. Fifteen minutes is generous by
+      # design - the timeout exists to stop a hung browser holding an
+      # instance, not to bound the work.
       timeout = "900s"
 
       containers {
@@ -176,6 +178,11 @@ resource "google_cloud_run_v2_job" "observer" {
         env {
           name  = "OBSERVER_SNAPSHOT_START_OFFSET_MS"
           value = tostring(var.observer_snapshot_start_offset_ms)
+        }
+
+        env {
+          name  = "OBSERVER_HORIZON_DAYS"
+          value = tostring(var.observer_horizon_days)
         }
 
         dynamic "env" {
