@@ -838,7 +838,9 @@ are stored it reads the next `OBSERVER_HORIZON_DAYS` dates (default 7) and
 records each one's Northgate grid for the booking conversation. Each date logs
 `OBSERVER: horizon <date> (+Nd past the watched date) - <N> rows, ...`, or
 `- NO Northgate rows`, or `- not read: <why>`; the run directory holds the
-same in `horizon.json` beside `horizon/<date>.html`. This is not race evidence
+same in `horizon.json`, and `horizon/<date>.html` is kept only for a date that
+rendered no rows or unreadable ones (a clean page would just add members' names
+to the bucket). This is not race evidence
 and needs no flip table. It does answer a question nobody had observed before
 it ran - whether the club renders a sheet more than seven days out - so say
 in the report what the first run to have it found, and after that mention it

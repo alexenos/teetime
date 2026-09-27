@@ -463,11 +463,12 @@ async def _record_grids(
     dates are read now, through the same calendar routine the racer uses.
 
     Each date's rows go to the database, where the booking conversation looks
-    them up to tell a member which tee times their date actually has. The
-    later dates' pages and a summary go to GCS beside the window's snapshots,
-    because the first run of this is also the first time anyone has looked at a
-    date more than seven days out: ``horizon.json`` says, per date, whether the
-    club rendered any rows at all.
+    them up to tell a member which tee times their date actually has. A
+    summary goes to GCS beside the window's snapshots, because the first run of
+    this is also the first time anyone has looked at a date more than seven days
+    out: ``horizon.json`` says, per date, whether the club rendered any rows at
+    all. A later date's page is kept only when its read looks wrong - see
+    ``_store_horizon``.
 
     Never raises. Everything here is a bonus on a run that has already stored
     what it exists to store.
@@ -513,8 +514,8 @@ async def _record_grids(
             f", {read.unparsed} row(s) with no readable time" if read.unparsed else "",
         )
         # A grid with rows the parser could not read is a grid with holes that
-        # would look whole to the conversation; the page is kept for a look,
-        # but the rows are not offered to anyone.
+        # would look whole to the conversation; the page is kept for a look
+        # (see _store_horizon), but the rows are not offered to anyone.
         if read.slots and not read.unparsed:
             grids.append((read.sheet_date, read.slots))
 
@@ -533,8 +534,20 @@ async def _record_grids(
         logger.exception("OBSERVER: could not record the slot grids")
 
 
+def _page_worth_keeping(read: sheet.HorizonRead) -> bool:
+    """Whether a later date's page should be stored: only when the read looks wrong."""
+    return read.html is not None and (not read.slots or read.unparsed > 0)
+
+
 def _store_horizon(prefix: str, target_date: date, reads: list[sheet.HorizonRead]) -> None:
-    """Write each later date's page and a per-date summary beside the snapshots."""
+    """Write a per-date summary beside the snapshots, and the pages worth a look.
+
+    A page is kept only for a date that rendered no Northgate rows or rows the
+    parser could not read - the two cases where someone will need to see the
+    markup. A clean read is fully described by its summary line, and the page
+    itself carries members' names in every reserved row: keeping seven of them
+    a morning would grow what the bucket holds about members for no reader.
+    """
     if not reads:
         return
     bucket = artifacts.artifacts_bucket()
@@ -561,11 +574,11 @@ def _store_horizon(prefix: str, target_date: date, reads: list[sheet.HorizonRead
                     "first": read.slots[0].start.strftime("%H:%M") if read.slots else None,
                     "last": read.slots[-1].start.strftime("%H:%M") if read.slots else None,
                     "states": dict(tally),
-                    "object": name if read.html else None,
+                    "object": name if _page_worth_keeping(read) else None,
                 }
             )
         summary.append(entry)
-        if read.html:
+        if read.html is not None and _page_worth_keeping(read):
             try:
                 artifacts.upload_bytes(
                     bucket_name=bucket,

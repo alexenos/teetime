@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the watched date's grid from its pre-window snapshot and reads the next
   `OBSERVER_HORIZON_DAYS` dates (default 7) through the racer's calendar
   routine. Each date's Northgate rows - start time, event range, state; never
-  names - go to the new `tee_sheet_grids` table, and each later date's page and
-  a `horizon.json` summary go beside the snapshots.
+  names - go to the new `tee_sheet_grids` table, and a `horizon.json` summary
+  goes beside the snapshots. A later date's page is kept only when its read
+  looks wrong, since a clean page adds nothing but members' names.
 
   The grid is not the fixed 8-minute ladder the booking path assumed. On the
   mornings of 2026-09-15 to 09-25 it ran 07:30-17:54 on an 8-minute step on

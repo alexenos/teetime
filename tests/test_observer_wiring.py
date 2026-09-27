@@ -608,6 +608,20 @@ class TestRecordGrids:
         assert summary[0]["first"] == "07:15"
         assert summary[1]["northgateRows"] == 0
         assert summary[2]["note"] == "could not be confirmed"
+        # Only the page someone will need to look at is kept. A clean read is
+        # its summary line, and its page would only add members' names to the
+        # bucket.
+        assert "walden/observer/2026-10-03/run/horizon/2026-10-04.html" not in written
+        assert summary[0]["object"] is None
+        assert "walden/observer/2026-10-03/run/horizon/2026-10-05.html" in written
+        assert summary[1]["object"] == "horizon/2026-10-05.html"
+
+    @pytest.mark.asyncio
+    async def test_a_page_with_unreadable_rows_is_kept(self) -> None:
+        _, _, written = await self._run(
+            [self._read(date(2026, 10, 4), "07:15 AM", unparsed=2)], days=1
+        )
+
         assert "walden/observer/2026-10-03/run/horizon/2026-10-04.html" in written
 
     @pytest.mark.asyncio
