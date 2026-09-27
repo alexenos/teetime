@@ -732,3 +732,25 @@ class TestHorizonSetting:
     def test_rejects_a_horizon_outside_it(self, value: int) -> None:
         with pytest.raises(ValidationError):
             Settings(_env_file=None, observer_horizon_days=value)
+
+
+def test_a_page_that_failed_to_upload_is_not_named_in_the_summary() -> None:
+    """horizon.json must not send a post-mortem looking for an object that isn't there."""
+    written: dict[str, bytes] = {}
+
+    def _upload(**kwargs: Any) -> str:
+        if kwargs["object_name"].endswith(".html"):
+            raise RuntimeError("503 from GCS")
+        written[kwargs["object_name"]] = kwargs["data"]
+        return "gs://b/" + kwargs["object_name"]
+
+    empty = observer_sheet.HorizonRead(sheet_date=date(2026, 10, 4), landed=True, html=b"<x/>")
+    with (
+        patch.object(observer_run.artifacts, "artifacts_bucket", return_value="bkt"),
+        patch.object(observer_run.artifacts, "upload_bytes", side_effect=_upload),
+    ):
+        observer_run._store_horizon("p", date(2026, 10, 3), [empty])
+
+    summary = json.loads(written["p/horizon.json"])
+    assert summary[0]["northgateRows"] == 0
+    assert summary[0]["object"] is None

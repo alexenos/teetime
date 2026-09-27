@@ -574,7 +574,9 @@ def _store_horizon(prefix: str, target_date: date, reads: list[sheet.HorizonRead
                     "first": read.slots[0].start.strftime("%H:%M") if read.slots else None,
                     "last": read.slots[-1].start.strftime("%H:%M") if read.slots else None,
                     "states": dict(tally),
-                    "object": name if _page_worth_keeping(read) else None,
+                    # Named only once the page is actually stored, so the
+                    # summary never points a post-mortem at a missing object.
+                    "object": None,
                 }
             )
         summary.append(entry)
@@ -586,6 +588,7 @@ def _store_horizon(prefix: str, target_date: date, reads: list[sheet.HorizonRead
                     content_type="text/html; charset=utf-8",
                     data=read.html,
                 )
+                entry["object"] = name
             except Exception as e:  # noqa: BLE001 - one lost page is not a lost summary
                 logger.warning("OBSERVER: failed to store %s: %s", name, e)
 
