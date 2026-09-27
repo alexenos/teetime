@@ -444,11 +444,21 @@ resource "google_cloudbuild_trigger" "deploy_main" {
     }
   }
 
-  # A commit that touches only operations/ (race reports, runbooks) has no
-  # effect on the running service and should not pay for a rebuild + Cloud
-  # Run redeploy. ignored_files only skips the trigger when every changed
-  # file matches - a commit that also touches app code still fires normally.
-  ignored_files = ["operations/**"]
+  # A commit that touches only operations/ (race reports, runbooks) or docs/
+  # (the published Pages site, including the scoreboard) has no effect on the
+  # running service and should not pay for a rebuild + Cloud Run redeploy.
+  #
+  # ignored_files only skips the trigger when EVERY changed file matches, so a
+  # commit that also touches app code still fires normally. Both entries are
+  # needed for the mixed case too: a commit touching operations/ and docs/ but
+  # no code is skipped only because both patterns are listed.
+  #
+  # docs/ matters more than it looks. The scoreboard Routine
+  # (operations/routines/scoreboard.md) publishes docs/scoreboard.json on every
+  # run where a metric moved. Without this entry each of those publishes would
+  # rebuild the image and redeploy the live booking service - daily, for a file
+  # the service never reads.
+  ignored_files = ["operations/**", "docs/**"]
 
   filename        = "cloudbuild.yaml"
   service_account = google_service_account.cloud_build.id
