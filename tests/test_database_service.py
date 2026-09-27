@@ -9,7 +9,7 @@ from datetime import date, datetime, time
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -1170,3 +1170,91 @@ class TestTeeSheetGrids:
         async with test_engine.connect() as conn:
             tables = await conn.run_sync(lambda sync: inspect(sync).get_table_names())
         assert "tee_sheet_grids" in tables
+
+
+class TestSlotAgreementPersistence:
+    """What was agreed about a booking's tee time survives the database (issue #216)."""
+
+    @pytest.mark.asyncio
+    async def test_an_agreed_slot_round_trips(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        sample_booking.request.requested_time = time(8, 2)
+        sample_booking.request.slot_confirmed = True
+        sample_booking.request.asked_time = time(8, 0)
+        sample_booking.request.fallback_ladder = [time(7, 54), time(8, 10), time(7, 46)]
+        await database_service.create_booking(sample_booking)
+
+        stored = await database_service.get_booking("test1234")
+
+        assert stored is not None
+        assert stored.request.slot_confirmed is True
+        assert stored.request.asked_time == time(8, 0)
+        assert stored.request.fallback_ladder == [time(7, 54), time(8, 10), time(7, 46)]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_ladder_is_not_a_missing_one(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Nothing to fall back to is a fact about the sheet; NULL is "never worked out"."""
+        sample_booking.request.slot_confirmed = True
+        sample_booking.request.fallback_ladder = []
+        await database_service.create_booking(sample_booking)
+
+        stored = await database_service.get_booking("test1234")
+
+        assert stored is not None
+        assert stored.request.fallback_ladder == []
+
+    @pytest.mark.asyncio
+    async def test_a_booking_from_before_reads_back_unchecked(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        await database_service.create_booking(sample_booking)
+
+        stored = await database_service.get_booking("test1234")
+
+        assert stored is not None
+        assert stored.request.slot_confirmed is None
+        assert stored.request.asked_time is None
+        assert stored.request.fallback_ladder is None
+
+    @pytest.mark.asyncio
+    async def test_the_offered_times_survive_between_turns(
+        self, database_service: DatabaseService, sample_session: UserSession
+    ) -> None:
+        """ "Which one?" and the answer arrive as two messages, maybe on two instances."""
+        await database_service.create_session(sample_session)
+        sample_session.state = ConversationState.AWAITING_SLOT_CHOICE
+        sample_session.pending_request = TeeTimeRequest(
+            requested_date=date(2026, 10, 13),
+            requested_time=time(8, 0),
+            slot_options=[time(7, 54), time(8, 2), time(8, 10)],
+        )
+        await database_service.update_session(sample_session)
+
+        stored = await database_service.get_session(sample_session.phone_number)
+
+        assert stored is not None
+        assert stored.state == ConversationState.AWAITING_SLOT_CHOICE
+        assert stored.pending_request is not None
+        assert stored.pending_request.slot_options == [time(7, 54), time(8, 2), time(8, 10)]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_ladder_never_stops_a_booking_loading(
+    database_service: DatabaseService, sample_booking: TeeTimeBooking, test_session_local
+) -> None:
+    """The racer's claim reads every due booking; a bad description must not sink one."""
+    await database_service.create_booking(sample_booking)
+    async with test_session_local() as db:
+        record = (
+            await db.execute(select(BookingRecord).where(BookingRecord.booking_id == "test1234"))
+        ).scalar_one()
+        record.fallback_ladder = '["8 oclock"]'
+        await db.commit()
+
+    stored = await database_service.get_booking("test1234")
+
+    assert stored is not None
+    assert stored.request.fallback_ladder is None

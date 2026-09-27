@@ -39,11 +39,14 @@ counts, written by the race report Routine from `RESERVATION_CHECK`.
 recorded in the `race-report` skill and the most likely element of this definition
 to regress.
 
-**Exact and Fallback are not yet distinguishable.** Separating them requires the
-member's request to have been resolved to a bookable slot and confirmed before the
-race, rather than selected from a ±32-minute window at race time. That step does
-not exist; it is #216. A request for "8am" against a sheet with no 08:00 slot has
-no reference value, so until #216 ships the honest report is Miss against not-Miss,
+**Exact and Fallback are distinguishable only for agreed requests.** Separating
+them requires the member's request to have been resolved to a bookable slot and
+confirmed before the race, rather than selected from a ±32-minute window at race
+time. #216 adds that step where the club's sheet for the date has been read: the
+member is offered the real tee times nearest their request, picks one, and the
+race logs `agreed=sheet` for it. A request for "8am" against a sheet with no 08:00
+slot has no reference value, so a request logged `agreed=unchecked` (no sheet on
+file) or `agreed=none` (booked before #216) is still only Miss against not-Miss,
 and the page must say so rather than showing an Exact count that means something
 weaker than it reads.
 

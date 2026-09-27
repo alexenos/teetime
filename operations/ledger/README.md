@@ -120,8 +120,12 @@ publishes counts, and counts only.
 
 **`confirmed_slots` is what keeps a trend honest.** Until #216 ships it is `false`,
 and on such a row `exact` means only that the booked time matched the time
-requested — which may not have corresponded to an available slot. When #216 lands
-the field flips to `true` and `exact` starts meaning something stricter. A trend
+requested — which may not have corresponded to an available slot. With #216 each
+booking's race log states what was agreed (`SLOT_AGREEMENT: ... agreed=sheet`,
+`agreed=unchecked` or `agreed=none`), and the field is `true` only on a morning
+where every request was `agreed=sheet`; on such a row `exact` means something
+stricter. It does not flip once and stay flipped: a request for a date whose sheet
+had not been read is `agreed=unchecked`, and its morning stays `false`. A trend
 drawn across that boundary shows a step that is not a change in performance. The
 scoreboard must not compare across it without saying so.
 
