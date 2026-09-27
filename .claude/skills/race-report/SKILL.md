@@ -833,6 +833,17 @@ logs first (`resource.labels.job_name="teetime-observer"`), since the observer
 declines to capture at all when it cannot confirm it is parked on the target
 date.
 
+**After the window the observer also reads ahead (#216).** Once its snapshots
+are stored it reads the next `OBSERVER_HORIZON_DAYS` dates (default 7) and
+records each one's Northgate grid for the booking conversation. Each date logs
+`OBSERVER: horizon <date> (+Nd past the watched date) - <N> rows, ...`, or
+`- NO Northgate rows`, or `- not read: <why>`; the run directory holds the
+same in `horizon.json` beside `horizon/<date>.html`. This is not race evidence
+and needs no flip table. It does answer a question nobody had observed before
+it ran - whether the club renders a sheet more than seven days out - so say
+in the report what the first run to have it found, and after that mention it
+only when a date rendered no rows or was not read.
+
 ## 7g. Added 2026-09-25: the variable burst, and measuring the gate every morning
 
 Full design: `operations/design-gate-burst.md`. What a post-mortem needs:
