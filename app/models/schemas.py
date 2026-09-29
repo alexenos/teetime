@@ -64,6 +64,43 @@ class TeeTimeRequest(BaseModel):
             "must be multiples of 8 minutes from the requested time (e.g., 8, 16, 24, 32)."
         ),
     )
+    slot_confirmed: bool | None = Field(
+        default=None,
+        description=(
+            "Whether requested_time was checked against the club's sheet for "
+            "requested_date before the booking was made (issue #216). True: it is "
+            "a tee time that sheet offered, agreed with the member. False: there "
+            "was no usable reading of the sheet, so the time stands as the member "
+            "typed it and was told so. None: never checked - a booking made before "
+            "this existed, through the REST API, or a request still in conversation."
+        ),
+    )
+    asked_time: time | None = Field(
+        default=None,
+        description=(
+            "The time the member first asked for, when the sheet had no open tee "
+            "time there and they picked another. requested_time is then their pick. "
+            "None when what they asked for is what is being raced for."
+        ),
+    )
+    fallback_ladder: list[time] | None = Field(
+        default=None,
+        description=(
+            "The open tee times the racer would fall back to if requested_time is "
+            "gone, in the order it would try them, as the sheet read when the "
+            "member agreed to the booking. Set only when slot_confirmed is True. A "
+            "description of the race, not an instruction to it: the racer still "
+            "builds its own list from the live sheet at 06:28."
+        ),
+    )
+    slot_options: list[time] | None = Field(
+        default=None,
+        description=(
+            "Conversation state only: the tee times just offered for this request "
+            "because requested_time was not an open slot, awaiting the member's "
+            "pick. Never stored on a booking."
+        ),
+    )
 
 
 class TeeTimeBooking(BaseModel):
@@ -140,6 +177,10 @@ class ConversationState(str, Enum):
         AWAITING_PROXY_TARGET: The proxy admin asked to book without naming who
             for, and we asked "for which user?". Waiting for them to name the
             friend. Only ever reached by the single admin ID (issue #185).
+        AWAITING_SLOT_CHOICE: A requested time is not an open tee time on its
+            date's sheet, and we offered the nearest ones and asked which.
+            Waiting for the member to pick (issue #216). The request being
+            asked about is the pending one carrying slot_options.
     """
 
     IDLE = "idle"
@@ -149,6 +190,7 @@ class ConversationState(str, Enum):
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     AWAITING_CANCELLATION_SELECTION = "awaiting_cancellation_selection"
     AWAITING_PROXY_TARGET = "awaiting_proxy_target"
+    AWAITING_SLOT_CHOICE = "awaiting_slot_choice"
 
 
 class UserSession(BaseModel):

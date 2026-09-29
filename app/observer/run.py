@@ -1,4 +1,4 @@
-"""The observer run: pick a date, get warm early, photograph, then upload.
+"""The observer run: pick a date, get warm early, photograph, upload, then read ahead.
 
 Ordering is a safety property, not a preference. Cloud Scheduler starts this
 job at 06:24 and the racer at 06:28, so the observer's login is always the
@@ -21,11 +21,15 @@ import logging
 import os
 import sys
 import uuid
-from datetime import date, datetime, timedelta
+from collections import Counter
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from app.config import settings
 from app.log_safety import silence_wire_loggers
 from app.observer import artifacts, sheet
+from app.providers import walden_sheet_grid
+from app.providers.walden_sheet_grid import GridSlot
 from app.services.credential_service import (
     WaldenCredentialRequiredError,
     credential_service,
@@ -401,23 +405,202 @@ async def observe() -> bool:
             interval_ms=settings.observer_snapshot_interval_ms,
             start_offset_ms=settings.observer_snapshot_start_offset_ms,
         )
+
+        if not snapshots:
+            logger.error("OBSERVER: no snapshots were captured")
+            return False
+
+        prefix = _object_prefix(target_date, run_id)
+        stored = await asyncio.to_thread(_store, prefix, prep, snapshots, window_epoch_ms)
+
+        # Only now, with the window's evidence already stored: the browser is
+        # still logged in and on the sheet, which is everything reading the
+        # dates after this one needs (issue #216). Nothing that happens here can
+        # cost the snapshots, and nothing here decides the exit code.
+        try:
+            await _record_grids(driver, target_date, prefix, snapshots)
+        except Exception:  # noqa: BLE001 - the run's product is already stored
+            logger.exception("OBSERVER: recording the slot grids failed")
     finally:
         try:
             driver.quit()
         except Exception as e:  # noqa: BLE001 - the run is over; a stuck browser is not news
             logger.warning("OBSERVER: browser did not shut down cleanly: %s", e)
 
-    if not snapshots:
-        logger.error("OBSERVER: no snapshots were captured")
-        return False
-
-    stored = await asyncio.to_thread(
-        _store, _object_prefix(target_date, run_id), prep, snapshots, window_epoch_ms
-    )
     # Partial storage still separates the two models, so a morning that lost one
     # upload stays green. Losing every one of them is a failed run: the bytes
     # were the only thing this job was for.
     return stored > 0
+
+
+def _horizon_dates(target_date: date, days: int) -> list[date]:
+    """The dates read after the window: the ``days`` that follow the watched one."""
+    return [target_date + timedelta(days=offset) for offset in range(1, days + 1)]
+
+
+def _describe_grid(slots: list[GridSlot]) -> str:
+    """ "87 rows, 07:15 AM-06:00 PM (empty 80, disabled 3, ...)" for the log."""
+    if not slots:
+        return "NO Northgate rows"
+    tally = Counter(slot.state for slot in slots)
+    states = ", ".join(f"{state} {count}" for state, count in tally.most_common())
+    return (
+        f"{len(slots)} rows, {slots[0].start.strftime('%I:%M %p')}-"
+        f"{slots[-1].start.strftime('%I:%M %p')} ({states})"
+    )
+
+
+async def _record_grids(
+    driver: Any,
+    target_date: date,
+    prefix: str,
+    snapshots: list[sheet.Snapshot],
+) -> None:
+    """Record the slot grid of the watched date and the dates after it (#216).
+
+    The watched date's grid comes from the first snapshot, already in memory -
+    taken before the window, when nothing on it has been booked yet. The later
+    dates are read now, through the same calendar routine the racer uses.
+
+    Each date's rows go to the database, where the booking conversation looks
+    them up to tell a member which tee times their date actually has. A
+    summary goes to GCS beside the window's snapshots, because the first run of
+    this is also the first time anyone has looked at a date more than seven days
+    out: ``horizon.json`` says, per date, whether the club rendered any rows at
+    all. A later date's page is kept only when its read looks wrong - see
+    ``_store_horizon``.
+
+    Never raises. Everything here is a bonus on a run that has already stored
+    what it exists to store.
+    """
+    captured_at = datetime.now(UTC).replace(tzinfo=None)
+    grids: list[tuple[date, list[GridSlot]]] = []
+
+    watched, unparsed = walden_sheet_grid.parse_rows(snapshots[0].html)
+    logger.info(
+        "OBSERVER: grid %s (watched) - %s%s",
+        target_date,
+        _describe_grid(watched),
+        f", {unparsed} row(s) with no readable time" if unparsed else "",
+    )
+    if watched and not unparsed:
+        grids.append((target_date, watched))
+
+    reads: list[sheet.HorizonRead] = []
+    days = settings.observer_horizon_days
+    if days > 0:
+        try:
+            reads = await asyncio.to_thread(
+                sheet.read_horizon, driver, _horizon_dates(target_date, days)
+            )
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.exception("OBSERVER: the horizon read failed outright")
+
+    for read in reads:
+        offset = (read.sheet_date - target_date).days
+        if not read.landed:
+            logger.warning(
+                "OBSERVER: horizon %s (+%dd past the watched date) - not read: %s",
+                read.sheet_date,
+                offset,
+                read.note,
+            )
+            continue
+        logger.info(
+            "OBSERVER: horizon %s (+%dd past the watched date) - %s%s",
+            read.sheet_date,
+            offset,
+            _describe_grid(read.slots),
+            f", {read.unparsed} row(s) with no readable time" if read.unparsed else "",
+        )
+        # A grid with rows the parser could not read is a grid with holes that
+        # would look whole to the conversation; the page is kept for a look
+        # (see _store_horizon), but the rows are not offered to anyone.
+        if read.slots and not read.unparsed:
+            grids.append((read.sheet_date, read.slots))
+
+    await asyncio.to_thread(_store_horizon, prefix, target_date, reads)
+
+    if not grids:
+        return
+    try:
+        await database_service.ensure_tee_sheet_grid_table()
+        for sheet_date, slots in grids:
+            await database_service.save_tee_sheet_grid(
+                sheet_date, slots, captured_at=captured_at, source="observer"
+            )
+        logger.info("OBSERVER: recorded the slot grid for %d date(s)", len(grids))
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.exception("OBSERVER: could not record the slot grids")
+
+
+def _page_worth_keeping(read: sheet.HorizonRead) -> bool:
+    """Whether a later date's page should be stored: only when the read looks wrong."""
+    return read.html is not None and (not read.slots or read.unparsed > 0)
+
+
+def _store_horizon(prefix: str, target_date: date, reads: list[sheet.HorizonRead]) -> None:
+    """Write a per-date summary beside the snapshots, and the pages worth a look.
+
+    A page is kept only for a date that rendered no Northgate rows or rows the
+    parser could not read - the two cases where someone will need to see the
+    markup. A clean read is fully described by its summary line, and the page
+    itself carries members' names in every reserved row: keeping seven of them
+    a morning would grow what the bucket holds about members for no reader.
+    """
+    if not reads:
+        return
+    bucket = artifacts.artifacts_bucket()
+    if not bucket:
+        logger.warning("OBSERVER: DEBUG_ARTIFACTS_BUCKET is unset - the horizon pages are not kept")
+        return
+
+    summary = []
+    for read in reads:
+        name = f"horizon/{read.sheet_date.isoformat()}.html"
+        entry: dict[str, Any] = {
+            "date": read.sheet_date.isoformat(),
+            "daysPastWatched": (read.sheet_date - target_date).days,
+            "landed": read.landed,
+            "note": read.note,
+        }
+        if read.landed:
+            tally = Counter(slot.state for slot in read.slots)
+            entry.update(
+                {
+                    "selectedTabText": read.selected_tab_text,
+                    "northgateRows": len(read.slots),
+                    "unparsedRows": read.unparsed,
+                    "first": read.slots[0].start.strftime("%H:%M") if read.slots else None,
+                    "last": read.slots[-1].start.strftime("%H:%M") if read.slots else None,
+                    "states": dict(tally),
+                    # Named only once the page is actually stored, so the
+                    # summary never points a post-mortem at a missing object.
+                    "object": None,
+                }
+            )
+        summary.append(entry)
+        if read.html is not None and _page_worth_keeping(read):
+            try:
+                artifacts.upload_bytes(
+                    bucket_name=bucket,
+                    object_name=f"{prefix}/{name}",
+                    content_type="text/html; charset=utf-8",
+                    data=read.html,
+                )
+                entry["object"] = name
+            except Exception as e:  # noqa: BLE001 - one lost page is not a lost summary
+                logger.warning("OBSERVER: failed to store %s: %s", name, e)
+
+    try:
+        artifacts.upload_bytes(
+            bucket_name=bucket,
+            object_name=f"{prefix}/horizon.json",
+            content_type="application/json; charset=utf-8",
+            data=json.dumps(summary, indent=2).encode("utf-8"),
+        )
+    except Exception as e:  # noqa: BLE001 - the log lines above carry the same facts
+        logger.warning("OBSERVER: failed to store horizon.json: %s", e)
 
 
 def main() -> int:

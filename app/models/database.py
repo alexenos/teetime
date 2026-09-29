@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column, Date, DateTime, Enum, Integer, String, Text, Time, text
+from sqlalchemy import Boolean, Column, Date, DateTime, Enum, Integer, String, Text, Time, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -62,6 +62,18 @@ class BookingRecord(Base):
             booking (e.g. "@dax "), so the result notification days later says
             who got the spot. NULL for a private conversation or a channel
             with no addressing concept.
+        slot_confirmed: Whether requested_time was agreed against the club's
+            sheet before booking (issue #216): true when it is a tee time the
+            sheet offered, false when no reading of the sheet was available,
+            NULL for rows from before the check existed or from the REST API.
+            With it the race report can call a morning Exact (reserved
+            requested_time), Fallback (reserved something else) or Miss
+            without guessing what "requested" meant.
+        asked_time: What the member first asked for, when that was not an
+            open slot and they picked requested_time instead. NULL otherwise.
+        fallback_ladder: JSON list of "HH:MM" - the open tee times the racer
+            would fall back through, in its order, as the sheet read when the
+            booking was agreed. Only set when slot_confirmed is true.
         created_at: When this record was created.
         updated_at: When this record was last modified.
     """
@@ -83,6 +95,9 @@ class BookingRecord(Base):
     origin_channel_id = Column(String(32), nullable=True)
     channel = Column(String(16), nullable=True)
     requester_handle = Column(String(64), nullable=True)
+    slot_confirmed = Column(Boolean, nullable=True)
+    asked_time = Column(Time, nullable=True)
+    fallback_ladder = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -180,6 +195,42 @@ class WaldenCredentialRecord(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class TeeSheetGridRecord(Base):
+    """
+    Database model for one reading of a date's Northgate slot grid (issue #216).
+
+    Written by the observer job, which is already logged in and on the sheet
+    every morning: after the window it reads the date it watched and the dates
+    after it, and records which tee times each one has. Read by the booking
+    conversation, so a request for a time the club does not offer can be met
+    with the times it does - without a browser, a login and ~25 seconds inside
+    a chat reply.
+
+    Appended, never updated. The latest reading of a date is the one used; the
+    earlier ones stay, so a post-mortem can see whether the grid changed between
+    the request and the race.
+
+    Columns:
+        id: Auto-incrementing primary key.
+        sheet_date: The date the sheet shows.
+        captured_at: When it was read, naive UTC.
+        slots_json: The rows, as walden_sheet_grid.slots_to_json writes them -
+            start time, end time for a merged event row, and state. Times and
+            states only; the markup's member names are never read.
+        slot_count: Number of rows, so a reading can be judged without parsing.
+        source: What read it - "observer" today.
+    """
+
+    __tablename__ = "tee_sheet_grids"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sheet_date = Column(Date, nullable=False, index=True)
+    captured_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    slots_json = Column(Text, nullable=False)
+    slot_count = Column(Integer, nullable=False)
+    source = Column(String(32), nullable=True)
+
+
 def _normalize_database_url(url: str) -> str:
     """Point a bare sqlite:// URL at the async driver, leaving others alone."""
     # Count of 1: only the scheme is being rewritten. A database path may itself
@@ -246,6 +297,9 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "pending_proxy_target", "VARCHAR(64)"),
     ("walden_credentials", "name", "VARCHAR(100)"),
     ("walden_credentials", "telegram_username", "VARCHAR(64)"),
+    ("bookings", "slot_confirmed", "BOOLEAN"),
+    ("bookings", "asked_time", "TIME"),
+    ("bookings", "fallback_ladder", "TEXT"),
 ]
 
 
@@ -292,6 +346,7 @@ async def _run_column_migrations(conn: Any) -> None:
 _ADDED_CONVERSATION_STATES: list[str] = [
     "AWAITING_CANCELLATION_SELECTION",
     "AWAITING_PROXY_TARGET",
+    "AWAITING_SLOT_CHOICE",
 ]
 
 

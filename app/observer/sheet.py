@@ -22,11 +22,13 @@ Two things this module does *not* do, both deliberate:
   provider would be duplicated for no gain. ``northgate_row_count`` is recorded
   during preparation instead, so a run that somehow renders no Northgate rows
   says so in its own manifest rather than being discovered a Friday later.
-* **No parsing.** Nothing here builds a DOM tree or extracts slot state; each
-  snapshot is the page's bytes, stored as-is. A 670KB sheet costs ~37ms to
-  parse and that cost must not land inside the window (issue #189, trap 5). The
-  two substring counts below run during preparation and after the last
-  snapshot, never between them.
+* **No parsing inside the window.** Nothing between the first and last snapshot
+  builds a DOM tree or extracts slot state; each snapshot is the page's bytes,
+  stored as-is. A 670KB sheet costs ~37ms to parse and that cost must not land
+  inside the window (issue #189, trap 5). The substring count below runs during
+  preparation, and ``read_horizon`` - which does parse, to record each later
+  date's slot grid for issue #216 - runs only once the window's snapshots are
+  stored.
 """
 
 import logging
@@ -47,9 +49,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions
 from selenium.webdriver.support.ui import WebDriverWait
 
-from app.providers import walden_date_selection
+from app.providers import walden_date_selection, walden_sheet_grid
 from app.providers.wait_helper import WaitStrategy
 from app.providers.walden_dom_schema import DOM
+from app.providers.walden_sheet_grid import GridSlot
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,26 @@ class Snapshot:
     captured_offset_ms: int
     html: bytes
     refresh_ok: bool
+    note: str | None = None
+
+
+@dataclass
+class HorizonRead:
+    """One date past the watched one, read after the window (issue #216).
+
+    ``landed`` is False when the view could not be confirmed to be on
+    ``sheet_date``; nothing else is filled in then, because rows read off an
+    unconfirmed date would be stored as that date's grid. ``slots`` holds
+    Northgate's rows and ``unparsed`` the Northgate rows whose time could not
+    be read.
+    """
+
+    sheet_date: date
+    landed: bool
+    selected_tab_text: str = ""
+    html: bytes | None = None
+    slots: list[GridSlot] = field(default_factory=list)
+    unparsed: int = 0
     note: str | None = None
 
 
@@ -183,6 +206,61 @@ def open_tee_sheet(driver: webdriver.Chrome) -> bool:
         return False
 
 
+def land_on_date(
+    driver: webdriver.Chrome, target_date: date, notes: list[str]
+) -> tuple[str, bool] | None:
+    """Put this session's view on ``target_date`` and confirm the club agrees.
+
+    Returns ``(selected_tab_text, clicked)``, or None when the view could not be
+    confirmed to be on ``target_date``. Anything worth recording about the trip
+    is appended to ``notes``.
+
+    The shared routine reports that it clicked something, never where the sheet
+    landed, so the check is made here: nothing is read until the day tab the
+    club now calls current names the date being asked for.
+    """
+    selected = walden_date_selection.selected_tab(driver)
+    selected_text = selected.text if selected is not None else ""
+
+    if selected is not None and walden_date_selection.tab_matches(selected_text, target_date):
+        logger.info(
+            "OBSERVER: sheet already parked on %s (tab=%r)",
+            target_date,
+            " ".join(selected_text.split()),
+        )
+        return " ".join(selected_text.split()), False
+
+    notes.append(f"selected tab was {' '.join(selected_text.split())!r}, wanted {target_date}")
+    logger.info(
+        "OBSERVER: sheet is on %r, selecting %s",
+        " ".join(selected_text.split()),
+        target_date,
+    )
+    if not walden_date_selection.select_date(
+        driver,
+        target_date,
+        wait_strategy=WaitStrategy(),
+        log_prefix="OBSERVER",
+    ):
+        logger.error(
+            "OBSERVER: could not put the sheet on %s - reading nothing rather than "
+            "reading the wrong date",
+            target_date,
+        )
+        return None
+
+    selected = walden_date_selection.selected_tab(driver)
+    selected_text = selected.text if selected is not None else ""
+    if not walden_date_selection.tab_matches(selected_text, target_date):
+        logger.error(
+            "OBSERVER: after selecting, the sheet reports %r rather than %s",
+            " ".join(selected_text.split()),
+            target_date,
+        )
+        return None
+    return " ".join(selected_text.split()), True
+
+
 def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | None:
     """Point this session's view at ``target_date`` and confirm it landed there.
 
@@ -197,50 +275,10 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
     """
     notes: list[str] = []
 
-    selected = walden_date_selection.selected_tab(driver)
-    selected_text = selected.text if selected is not None else ""
-    clicked = False
-
-    if selected is not None and walden_date_selection.tab_matches(selected_text, target_date):
-        logger.info(
-            "OBSERVER: sheet already parked on %s (tab=%r)",
-            target_date,
-            " ".join(selected_text.split()),
-        )
-    else:
-        notes.append(f"selected tab was {' '.join(selected_text.split())!r}, wanted {target_date}")
-        logger.info(
-            "OBSERVER: sheet is on %r, selecting %s",
-            " ".join(selected_text.split()),
-            target_date,
-        )
-        if not walden_date_selection.select_date(
-            driver,
-            target_date,
-            wait_strategy=WaitStrategy(),
-            log_prefix="OBSERVER",
-        ):
-            logger.error(
-                "OBSERVER: could not put the sheet on %s - capturing nothing rather than "
-                "photographing the wrong date",
-                target_date,
-            )
-            return None
-        clicked = True
-
-        # The shared routine reports that it clicked something, never where the
-        # sheet landed - so the observer's own contract is enforced here, as it
-        # was before the routine was shared. Nothing is stored until the day tab
-        # the club now calls current names the date this run is filed under.
-        selected = walden_date_selection.selected_tab(driver)
-        selected_text = selected.text if selected is not None else ""
-        if not walden_date_selection.tab_matches(selected_text, target_date):
-            logger.error(
-                "OBSERVER: after selecting, the sheet reports %r rather than %s",
-                " ".join(selected_text.split()),
-                target_date,
-            )
-            return None
+    landed = land_on_date(driver, target_date, notes)
+    if landed is None:
+        return None
+    selected_text, clicked = landed
 
     # Pre-window, so the parse-cost rule does not apply yet. A substring count
     # rather than a parse even so - it answers the only question being asked.
@@ -272,6 +310,60 @@ def park_on_date(driver: webdriver.Chrome, target_date: date) -> Preparation | N
         ready_at_epoch_ms=int(time_module.time() * 1000),
         notes=notes,
     )
+
+
+def read_horizon(driver: webdriver.Chrome, dates: list[date]) -> list[HorizonRead]:
+    """Read each date's sheet in turn, after the window has been photographed.
+
+    Reaching each date is ``land_on_date`` - the racer's calendar routine plus
+    the observer's own check of where the sheet landed - so a read is only
+    ever filed under a date the club confirmed it was showing.
+
+    Never raises for one date's sake. A read that fails is recorded as not
+    landed with the reason, and the next date is still tried: these reads are
+    a bonus on a run whose evidence is already stored, and one stale day tab
+    must not cost the other six.
+    """
+    reads: list[HorizonRead] = []
+    for sheet_date in dates:
+        notes: list[str] = []
+        try:
+            landed = land_on_date(driver, sheet_date, notes)
+            if landed is None:
+                reads.append(
+                    HorizonRead(
+                        sheet_date=sheet_date,
+                        landed=False,
+                        note="the sheet could not be confirmed to be on this date",
+                    )
+                )
+                continue
+            html = driver.page_source.encode("utf-8", errors="replace")
+        except WebDriverException as e:
+            logger.warning(
+                "OBSERVER: horizon %s - reading raised %s: %s", sheet_date, type(e).__name__, e
+            )
+            reads.append(
+                HorizonRead(
+                    sheet_date=sheet_date,
+                    landed=False,
+                    note=f"reading raised {type(e).__name__}",
+                )
+            )
+            continue
+
+        slots, unparsed = walden_sheet_grid.parse_rows(html)
+        reads.append(
+            HorizonRead(
+                sheet_date=sheet_date,
+                landed=True,
+                selected_tab_text=landed[0],
+                html=html,
+                slots=slots,
+                unparsed=unparsed,
+            )
+        )
+    return reads
 
 
 def wait_until_epoch_ms(target_epoch_ms: int) -> None:

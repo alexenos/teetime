@@ -9,11 +9,12 @@ from datetime import date, datetime, time
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models.database import Base, BookingRecord, SessionRecord
+from app.models.database import Base, BookingRecord, SessionRecord, TeeSheetGridRecord
 from app.models.schemas import (
     BookingStatus,
     ConversationState,
@@ -21,6 +22,7 @@ from app.models.schemas import (
     TeeTimeRequest,
     UserSession,
 )
+from app.providers.walden_sheet_grid import GridSlot
 from app.services.database_service import DatabaseService
 
 
@@ -1087,3 +1089,172 @@ class TestOriginChannelPersistence:
 
         assert retrieved is not None
         assert retrieved.origin_channel_id == "778899001122334455"
+
+
+class TestTeeSheetGrids:
+    """One date's slot grid, as the observer read it (issue #216)."""
+
+    @staticmethod
+    def _slots(*starts: time) -> list[GridSlot]:
+        return [GridSlot(start=start, state="empty") for start in starts]
+
+    @pytest.mark.asyncio
+    async def test_a_date_never_read_has_no_grid(self, database_service: DatabaseService) -> None:
+        assert await database_service.get_tee_sheet_grid(date(2026, 10, 3)) is None
+
+    @pytest.mark.asyncio
+    async def test_a_stored_grid_reads_back_whole(self, database_service: DatabaseService) -> None:
+        slots = [
+            GridSlot(time(7, 15), "empty"),
+            GridSlot(time(8, 26), "event", end=time(10, 42)),
+            GridSlot(time(10, 50), "reserved"),
+        ]
+        captured = datetime(2026, 9, 26, 11, 30, 40)
+
+        await database_service.save_tee_sheet_grid(
+            date(2026, 10, 3), slots, captured_at=captured, source="observer"
+        )
+        grid = await database_service.get_tee_sheet_grid(date(2026, 10, 3))
+
+        assert grid is not None
+        assert grid.sheet_date == date(2026, 10, 3)
+        assert list(grid.slots) == slots
+        assert grid.captured_at == captured
+
+    @pytest.mark.asyncio
+    async def test_the_latest_reading_wins(self, database_service: DatabaseService) -> None:
+        """Readings are appended, so a date read on seven mornings keeps all seven."""
+        sheet_date = date(2026, 10, 3)
+        await database_service.save_tee_sheet_grid(
+            sheet_date, self._slots(time(8, 0)), datetime(2026, 9, 25, 11, 31), "observer"
+        )
+        await database_service.save_tee_sheet_grid(
+            sheet_date, self._slots(time(8, 8)), datetime(2026, 9, 26, 11, 31), "observer"
+        )
+        # Written last but read earlier - order of insertion must not decide.
+        await database_service.save_tee_sheet_grid(
+            sheet_date, self._slots(time(7, 53)), datetime(2026, 9, 24, 11, 31), "observer"
+        )
+
+        grid = await database_service.get_tee_sheet_grid(sheet_date)
+
+        assert grid is not None
+        assert [slot.start for slot in grid.slots] == [time(8, 8)]
+
+    @pytest.mark.asyncio
+    async def test_another_dates_grid_is_not_returned(
+        self, database_service: DatabaseService
+    ) -> None:
+        await database_service.save_tee_sheet_grid(
+            date(2026, 10, 4), self._slots(time(8, 0)), datetime(2026, 9, 26, 11, 31), "observer"
+        )
+        assert await database_service.get_tee_sheet_grid(date(2026, 10, 3)) is None
+
+    @pytest.mark.asyncio
+    async def test_the_table_can_be_created_by_the_observer(
+        self, test_engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The observer may be the first thing to touch the table on a new revision.
+
+        Created on a database that has everything else but not this table, and
+        a second call is a no-op rather than an error.
+        """
+        async with test_engine.begin() as conn:
+            await conn.run_sync(TeeSheetGridRecord.__table__.drop)
+        monkeypatch.setattr("app.services.database_service.engine", test_engine)
+        service = DatabaseService()
+
+        await service.ensure_tee_sheet_grid_table()
+        await service.ensure_tee_sheet_grid_table()
+
+        async with test_engine.connect() as conn:
+            tables = await conn.run_sync(lambda sync: inspect(sync).get_table_names())
+        assert "tee_sheet_grids" in tables
+
+
+class TestSlotAgreementPersistence:
+    """What was agreed about a booking's tee time survives the database (issue #216)."""
+
+    @pytest.mark.asyncio
+    async def test_an_agreed_slot_round_trips(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        sample_booking.request.requested_time = time(8, 2)
+        sample_booking.request.slot_confirmed = True
+        sample_booking.request.asked_time = time(8, 0)
+        sample_booking.request.fallback_ladder = [time(7, 54), time(8, 10), time(7, 46)]
+        await database_service.create_booking(sample_booking)
+
+        stored = await database_service.get_booking("test1234")
+
+        assert stored is not None
+        assert stored.request.slot_confirmed is True
+        assert stored.request.asked_time == time(8, 0)
+        assert stored.request.fallback_ladder == [time(7, 54), time(8, 10), time(7, 46)]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_ladder_is_not_a_missing_one(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        """Nothing to fall back to is a fact about the sheet; NULL is "never worked out"."""
+        sample_booking.request.slot_confirmed = True
+        sample_booking.request.fallback_ladder = []
+        await database_service.create_booking(sample_booking)
+
+        stored = await database_service.get_booking("test1234")
+
+        assert stored is not None
+        assert stored.request.fallback_ladder == []
+
+    @pytest.mark.asyncio
+    async def test_a_booking_from_before_reads_back_unchecked(
+        self, database_service: DatabaseService, sample_booking: TeeTimeBooking
+    ) -> None:
+        await database_service.create_booking(sample_booking)
+
+        stored = await database_service.get_booking("test1234")
+
+        assert stored is not None
+        assert stored.request.slot_confirmed is None
+        assert stored.request.asked_time is None
+        assert stored.request.fallback_ladder is None
+
+    @pytest.mark.asyncio
+    async def test_the_offered_times_survive_between_turns(
+        self, database_service: DatabaseService, sample_session: UserSession
+    ) -> None:
+        """ "Which one?" and the answer arrive as two messages, maybe on two instances."""
+        await database_service.create_session(sample_session)
+        sample_session.state = ConversationState.AWAITING_SLOT_CHOICE
+        sample_session.pending_request = TeeTimeRequest(
+            requested_date=date(2026, 10, 13),
+            requested_time=time(8, 0),
+            slot_options=[time(7, 54), time(8, 2), time(8, 10)],
+        )
+        await database_service.update_session(sample_session)
+
+        stored = await database_service.get_session(sample_session.phone_number)
+
+        assert stored is not None
+        assert stored.state == ConversationState.AWAITING_SLOT_CHOICE
+        assert stored.pending_request is not None
+        assert stored.pending_request.slot_options == [time(7, 54), time(8, 2), time(8, 10)]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_ladder_never_stops_a_booking_loading(
+    database_service: DatabaseService, sample_booking: TeeTimeBooking, test_session_local
+) -> None:
+    """The racer's claim reads every due booking; a bad description must not sink one."""
+    await database_service.create_booking(sample_booking)
+    async with test_session_local() as db:
+        record = (
+            await db.execute(select(BookingRecord).where(BookingRecord.booking_id == "test1234"))
+        ).scalar_one()
+        record.fallback_ladder = '["8 oclock"]'
+        await db.commit()
+
+    stored = await database_service.get_booking("test1234")
+
+    assert stored is not None
+    assert stored.request.fallback_ladder is None

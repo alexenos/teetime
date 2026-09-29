@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as dtime
 
 from app.config import settings
 from app.models.schemas import (
@@ -25,11 +26,14 @@ from app.models.schemas import (
     UserSession,
 )
 from app.providers.base import BatchBookingRequest, BookingResult, ReservationProvider
+from app.providers.walden_sheet_grid import SheetGrid
+from app.services import slot_agreement
 from app.services.credential_service import credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.help_text import help_message
 from app.services.proxy_booking import is_proxy_admin, split_proxy_target, strip_leading_for
+from app.services.slot_agreement import SLOT_CHOICE_ABORTS, SlotCheck
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
 
@@ -53,6 +57,39 @@ _DOCS_LINK_RE = re.compile(r"\s*;?\s*For documentation on this error.*", re.DOTA
 # so a transient send failure is retried before it is given up on.
 NOTIFY_MAX_ATTEMPTS = 3
 NOTIFY_RETRY_DELAY_S = 2
+
+
+def describe_slot_agreement(booking: TeeTimeBooking) -> str:
+    """What was agreed about a booking's tee time, as the race log states it.
+
+    Logged once per booking as the race starts, so a race report reads what a
+    morning was aiming at from the same place it reads the outcome - the
+    Cloud Logging the report already queries - rather than from a database it
+    has no access to. The three answers are the three meanings "requested" can
+    have (issue #216):
+
+    * ``agreed=sheet`` - the time is a tee time the club's sheet offered, and
+      the member agreed to it. Reserving it is Exact; reserving anything else
+      is Fallback.
+    * ``agreed=unchecked`` - no reading of the sheet was available, the member
+      was told so, and the time is as typed.
+    * ``agreed=none`` - booked before the check existed, or through the API.
+    """
+    request = booking.request
+    head = f"booking {booking.id} races for {request.requested_time.strftime('%H:%M')}"
+    if request.slot_confirmed is True:
+        asked = f" asked={request.asked_time.strftime('%H:%M')}" if request.asked_time else ""
+        if request.fallback_ladder is None:
+            ladder = "unrecorded"
+        else:
+            ladder = ",".join(t.strftime("%H:%M") for t in request.fallback_ladder) or "empty"
+        return f"{head} - agreed=sheet{asked} ladder={ladder}"
+    if request.slot_confirmed is False:
+        return (
+            f"{head} - agreed=unchecked (no reading of the sheet when it was booked; the "
+            f"racer's own +/-{request.fallback_window_minutes} min fallbacks apply)"
+        )
+    return f"{head} - agreed=none (booked before slot agreement existed, or through the API)"
 
 
 def _member_safe_error(error: str | None) -> str:
@@ -420,6 +457,15 @@ class BookingService:
                 await self.update_session(session)
                 return early_response
 
+        # "2" or "8:08" in answer to "which one?" needs no language model to
+        # read, for the same reason a bare "yes" doesn't. Anything that is not
+        # plainly a pick falls through to the parser below.
+        if session.state == ConversationState.AWAITING_SLOT_CHOICE:
+            picked = await self._slot_choice_shortcut(session, message)
+            if picked is not None:
+                await self.update_session(session)
+                return picked
+
         affirmative = self._confirmation_shortcut(session, message)
         if affirmative is not None:
             response = await self._handle_confirmation_shortcut(session, affirmative)
@@ -675,6 +721,12 @@ class BookingService:
         if session.state == ConversationState.AWAITING_CANCELLATION_SELECTION:
             return await self._handle_cancellation_selection(session, parsed)
 
+        # Likewise a reply to "which of these tee times?" that the shortcut
+        # could not read on its own: "the earlier one" may come back from the
+        # parser as a booking at 07:53, which is an answer, not a new request.
+        if session.state == ConversationState.AWAITING_SLOT_CHOICE:
+            return await self._handle_slot_choice_reply(session, parsed)
+
         if parsed.intent == "book":
             return await self._handle_book_intent(session, parsed)
         elif parsed.intent == "confirm":
@@ -707,22 +759,7 @@ class BookingService:
             if ask_target is not None:
                 return ask_target
 
-            session.state = ConversationState.AWAITING_CONFIRMATION
-
-            booking_summaries = []
-            for i, request in enumerate(parsed.tee_time_requests, 1):
-                date_str = request.requested_date.strftime("%A, %B %d")
-                time_str = request.requested_time.strftime("%I:%M %p")
-                booking_summaries.append(
-                    f"{i}. {date_str} at {time_str} for {request.num_players} players"
-                )
-
-            attribution = await self._attribution_for(session)
-            return (
-                f"I'll book {len(parsed.tee_time_requests)} tee times{attribution.suffix()}:\n"
-                + "\n".join(booking_summaries)
-                + "\n\nReply 'yes' to confirm all bookings."
-            )
+            return await self._continue_slot_agreement(session)
 
         if not parsed.tee_time_request:
             if parsed.clarification_needed:
@@ -736,17 +773,324 @@ class BookingService:
         if ask_target is not None:
             return ask_target
 
-        session.state = ConversationState.AWAITING_CONFIRMATION
+        return await self._continue_slot_agreement(session)
 
-        request = parsed.tee_time_request
+    @staticmethod
+    def _pending(session: UserSession) -> list[TeeTimeRequest]:
+        """The requests this conversation is building, one or several alike."""
+        if session.pending_requests:
+            return session.pending_requests
+        if session.pending_request:
+            return [session.pending_request]
+        return []
+
+    async def _sheet_grid_for(self, sheet_date: date) -> SheetGrid | None:
+        """The last reading of ``sheet_date``'s tee sheet, or None if there is none.
+
+        A lookup that fails is logged and treated as no reading. The member is
+        then told their time could not be checked, which is true, instead of
+        having a booking refused over a table they never asked about.
+        """
+        try:
+            return await database_service.get_tee_sheet_grid(sheet_date)
+        except Exception:
+            logger.exception(
+                "SLOT_AGREEMENT: could not read the %s tee sheet grid; treating it as unread",
+                sheet_date,
+            )
+            return None
+
+    def _agree(self, request: TeeTimeRequest, tee_time: dtime, grid: SheetGrid | None) -> None:
+        """Make ``tee_time`` the request's agreed target, with its fallback ladder."""
+        if tee_time != request.requested_time:
+            request.asked_time = request.asked_time or request.requested_time
+            request.requested_time = tee_time
+        request.slot_confirmed = True
+        request.slot_options = None
+        # The grid is the one the options came from. If it cannot be re-read
+        # now, the pick was still a real tee time when it was offered, so the
+        # agreement stands; only the ladder goes unrecorded.
+        request.fallback_ladder = (
+            slot_agreement.fallback_ladder(
+                tee_time, grid.open_times(), request.fallback_window_minutes
+            )
+            if grid is not None
+            else None
+        )
+
+    async def _check_slot(self, request: TeeTimeRequest) -> SlotCheck:
+        """Check a request's time against its date's sheet and record the verdict."""
+        grid = await self._sheet_grid_for(request.requested_date)
+        check = slot_agreement.check_requested_time(request.requested_time, grid)
+        if check.kind == "exact":
+            self._agree(request, request.requested_time, grid)
+        elif check.kind == "unknown":
+            request.slot_confirmed = False
+            request.slot_options = None
+            request.fallback_ladder = None
+        else:
+            request.slot_options = list(check.options)
+
+        detail = f" ({check.reason})" if check.reason else ""
+        if check.kind == "choose":
+            offered = ", ".join(t.strftime("%H:%M") for t in check.options)
+            detail = f" ({check.reason}; offered {offered})"
+        logger.info(
+            "SLOT_AGREEMENT: %s %s checked against the sheet read %s - %s%s",
+            request.requested_date,
+            request.requested_time.strftime("%H:%M"),
+            grid.captured_at if grid is not None else "never",
+            check.kind,
+            detail,
+        )
+        return check
+
+    async def _continue_slot_agreement(self, session: UserSession) -> str:
+        """Agree each pending request's tee time, then ask for the usual yes.
+
+        Walks the pending requests in order. The first whose time is not an
+        open tee time on its date's sheet stops the walk with "which of
+        these?" (AWAITING_SLOT_CHOICE); a request already agreed, or already
+        found uncheckable, is not checked twice. Once none is left waiting, the
+        confirmation is the one this conversation always ended in, now saying
+        what happens if the tee time is gone (issue #216).
+        """
+        requests = self._pending(session)
+        for position, request in enumerate(requests, 1):
+            check: SlotCheck | None = None
+            if request.slot_confirmed is None and request.slot_options is None:
+                check = await self._check_slot(request)
+            if request.slot_options:
+                session.state = ConversationState.AWAITING_SLOT_CHOICE
+                return self._slot_question(request, position, len(requests), check)
+
+        session.state = ConversationState.AWAITING_CONFIRMATION
+        return await self._confirmation_prompt(session)
+
+    def _slot_question(
+        self,
+        request: TeeTimeRequest,
+        position: int,
+        total: int,
+        check: SlotCheck | None = None,
+    ) -> str:
+        """Ask which offered tee time a request should be booked at.
+
+        ``check`` carries why the requested time was not offered, and is passed
+        only the first time the question is asked; a repeat says it more
+        briefly rather than re-deriving the reason from a sheet that may have
+        been read again since.
+        """
+        first_ask = check is not None
+        if check is None:
+            check = SlotCheck(
+                kind="choose",
+                requested=request.requested_time,
+                options=tuple(request.slot_options or ()),
+            )
+        date_str = request.requested_date.strftime("%A, %B %d")
+        question = slot_agreement.choice_question(check, date_str, first_ask=first_ask)
+        return f"Booking {position} of {total}: {question}" if total > 1 else question
+
+    @staticmethod
+    def _request_awaiting_pick(
+        session: UserSession,
+    ) -> tuple[int, int, TeeTimeRequest] | None:
+        """The pending request the member is being asked about, with its position."""
+        requests = BookingService._pending(session)
+        for position, request in enumerate(requests, 1):
+            if request.slot_options:
+                return position, len(requests), request
+        return None
+
+    def _abandon_pending_booking(self, session: UserSession) -> str:
+        session.pending_request = None
+        session.pending_requests = None
+        self._clear_pending_proxy_target(session)
+        session.state = ConversationState.IDLE
+        return "Okay, I won't book that. Let me know if you'd like a different date or time."
+
+    async def _slot_choice_shortcut(self, session: UserSession, message: str) -> str | None:
+        """Settle "which one?" from the reply alone, when the reply is plainly a pick.
+
+        Returns the next message, or None when the reply needs the parser -
+        which is anything that is not an option number, a clock time, or one of
+        SLOT_CHOICE_ABORTS.
+        """
+        waiting = self._request_awaiting_pick(session)
+        if waiting is None:
+            # Parked in the state with nothing being asked - an interrupted
+            # conversation. Nothing to answer, so let the reply be read afresh.
+            session.state = ConversationState.IDLE
+            return None
+        position, total, request = waiting
+
+        if _normalize_reply(message) in SLOT_CHOICE_ABORTS:
+            return self._abandon_pending_booking(session)
+
+        pick = slot_agreement.parse_pick(message, request.slot_options or [])
+        if pick is None:
+            return None
+        return await self._apply_pick(session, request, position, total, pick)
+
+    async def _apply_pick(
+        self,
+        session: UserSession,
+        request: TeeTimeRequest,
+        position: int,
+        total: int,
+        pick: int | dtime,
+    ) -> str:
+        """Take an option number or a named time as the answer to "which one?".
+
+        An offered option is agreed as it stands. A time that was not offered
+        is agreed too if the sheet has it open - the member may know the sheet
+        better than three suggestions do - and otherwise gets the same question
+        about the times nearest it.
+        """
+        options = request.slot_options or []
+        grid = await self._sheet_grid_for(request.requested_date)
+
+        if isinstance(pick, int):
+            chosen = options[pick]
+        elif pick in options or (grid is not None and pick in grid.open_times()):
+            chosen = pick
+        else:
+            check = slot_agreement.check_requested_time(pick, grid)
+            if check.kind != "choose":
+                return "That isn't one of the times I offered. " + self._slot_question(
+                    request, position, total
+                )
+            request.slot_options = list(check.options)
+            return self._slot_question(request, position, total, check)
+
+        self._agree(request, chosen, grid)
+        logger.info(
+            "SLOT_AGREEMENT: %s agreed at %s (asked for %s)",
+            request.requested_date,
+            chosen.strftime("%H:%M"),
+            request.asked_time.strftime("%H:%M") if request.asked_time else "the same",
+        )
+        return await self._continue_slot_agreement(session)
+
+    async def _handle_slot_choice_reply(self, session: UserSession, parsed: ParsedIntent) -> str:
+        """A reply to "which one?" that needed the parser to read."""
+        waiting = self._request_awaiting_pick(session)
+        if waiting is None:
+            session.state = ConversationState.IDLE
+            return await self._process_intent(session, parsed)
+        position, total, request = waiting
+
+        if parsed.intent == "book":
+            named = parsed.tee_time_requests or (
+                [parsed.tee_time_request] if parsed.tee_time_request else []
+            )
+            if (
+                len(named) == 1
+                and named[0].requested_date == request.requested_date
+                and named[0].num_players == request.num_players
+            ):
+                # A time on the date being asked about - an answer to the
+                # question. A different party size is a different request, and
+                # taking it as a pick would drop the change without a word.
+                return await self._apply_pick(
+                    session, request, position, total, named[0].requested_time
+                )
+            if named:
+                # Something else entirely replaces the request being asked about.
+                return await self._handle_book_intent(session, parsed)
+        elif parsed.intent == "cancel":
+            return self._abandon_pending_booking(session)
+        elif parsed.intent == "help":
+            return self._get_help_message()
+        elif parsed.intent == "status":
+            return await self._handle_status_intent(session)
+
+        # Including a bare "yes": there is no booking to confirm until a tee
+        # time has been picked.
+        return "Sorry, I didn't catch which one. " + self._slot_question(request, position, total)
+
+    async def _confirmation_prompt(self, session: UserSession) -> str:
+        """The "reply yes" message for the requests this conversation agreed."""
+        attribution = await self._attribution_for(session)
+        requests = self._pending(session)
+
+        if len(requests) > 1:
+            booking_summaries = []
+            for i, request in enumerate(requests, 1):
+                date_str = request.requested_date.strftime("%A, %B %d")
+                time_str = request.requested_time.strftime("%I:%M %p")
+                booking_summaries.append(
+                    f"{i}. {date_str} at {time_str} for {request.num_players} players"
+                    + self._slot_summary(request, await self._unchecked_reason(request))
+                )
+            return (
+                f"I'll book {len(requests)} tee times{attribution.suffix()}:\n"
+                + "\n".join(booking_summaries)
+                + "\n\nReply 'yes' to confirm all bookings."
+            )
+
+        request = requests[0]
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
-
-        attribution = await self._attribution_for(session)
+        note = self._slot_note(request, await self._unchecked_reason(request))
         return (
             f"I'll book a tee time{attribution.suffix()} for {date_str} at {time_str} "
-            f"for {request.num_players} players. Reply 'yes' to confirm."
+            f"for {request.num_players} players. {note + ' ' if note else ''}"
+            "Reply 'yes' to confirm."
         )
+
+    async def _unchecked_reason(self, request: TeeTimeRequest) -> str | None:
+        """Why a request's time could not be checked: no sheet, or nothing open on it.
+
+        Read again rather than carried on the request, which would need another
+        field only this message uses. None for a request that was checked.
+        """
+        if request.slot_confirmed is not False:
+            return None
+        grid = await self._sheet_grid_for(request.requested_date)
+        check = slot_agreement.check_requested_time(request.requested_time, grid)
+        return check.reason if check.kind == "unknown" else "no_sheet"
+
+    @staticmethod
+    def _slot_note(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
+        """One or two sentences on what the sheet said about a single request."""
+        date_str = request.requested_date.strftime("%A, %B %d")
+        if request.slot_confirmed is True:
+            if request.fallback_ladder is None:
+                return f"{slot_agreement.clock(request.requested_time)} is on the club's sheet."
+            return slot_agreement.ladder_note(
+                request.requested_time, request.fallback_ladder, request.fallback_window_minutes
+            )
+        if request.slot_confirmed is False:
+            check = SlotCheck(
+                kind="unknown", requested=request.requested_time, reason=unchecked_reason
+            )
+            return slot_agreement.unchecked_note(check, date_str, request.fallback_window_minutes)
+        return ""
+
+    @staticmethod
+    def _slot_summary(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
+        """The same, short enough for one line of a multi-booking list."""
+        if request.slot_confirmed is True:
+            if not request.fallback_ladder:
+                return " (on the club's sheet)"
+            shown = ", ".join(
+                slot_agreement.clock(t)
+                for t in request.fallback_ladder[: slot_agreement.LADDER_PREVIEW]
+            )
+            return f" (on the club's sheet; if it's gone: {shown})"
+        if request.slot_confirmed is False:
+            seen = (
+                "the sheet showed nothing open"
+                if unchecked_reason == "nothing_open"
+                else "sheet not seen yet"
+            )
+            return (
+                f" ({seen}; the closest within {request.fallback_window_minutes} "
+                "minutes if it isn't open)"
+            )
+        return ""
 
     def _ask_for_proxy_target(self, session: UserSession) -> str | None:
         """Ask the admin who a booking is for, when they didn't say.
@@ -2195,6 +2539,7 @@ class BookingService:
             for booking in group_bookings:
                 booking.status = BookingStatus.IN_PROGRESS
                 await database_service.update_booking(booking)
+                logger.info("SLOT_AGREEMENT: %s", describe_slot_agreement(booking))
 
             batch_requests = [
                 BatchBookingRequest(

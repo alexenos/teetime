@@ -303,3 +303,78 @@ class TestStaleTabRetry:
 
         assert driver.execute_script.call_count == 1
         assert "WebDriverException" in (snaps[0].note or "")
+
+
+def _grid_page(*times: str) -> str:
+    """A sheet whose Northgate rows start at ``times``, all open."""
+    rows = "".join(
+        f'<div id="f:teeTimeCourses:0:teeTimeSlots:{i}:slotTee:0:slotTeeDIV" class="Empty">'
+        f'<div><label class="custom-time-label">{t}</label></div></div>'
+        for i, t in enumerate(times)
+    )
+    return f"<html><body>{rows}</body></html>"
+
+
+class TestReadHorizon:
+    """Reading the dates after the watched one (issue #216)."""
+
+    def test_each_date_is_landed_on_then_read(self) -> None:
+        driver = MagicMock()
+        pages = [_grid_page("07:15 AM", "07:23 AM"), _grid_page("07:30 AM")]
+        type(driver).page_source = property(lambda self: pages.pop(0))
+        wanted = [date(2026, 10, 3), date(2026, 10, 4)]
+
+        with patch.object(
+            observer_sheet,
+            "land_on_date",
+            side_effect=[("Saturday Sat 3 October Oct", True), ("Sunday Sun 4 October Oct", True)],
+        ) as land:
+            reads = observer_sheet.read_horizon(driver, wanted)
+
+        assert [call.args[1] for call in land.call_args_list] == wanted
+        assert [r.landed for r in reads] == [True, True]
+        assert [len(r.slots) for r in reads] == [2, 1]
+        assert reads[0].selected_tab_text == "Saturday Sat 3 October Oct"
+        assert reads[0].html is not None
+
+    def test_a_date_that_cannot_be_confirmed_is_not_read(self) -> None:
+        """Rows read off an unconfirmed date would be stored as that date's grid."""
+        driver = MagicMock()
+        type(driver).page_source = property(lambda self: _grid_page("07:15 AM"))
+
+        with patch.object(observer_sheet, "land_on_date", return_value=None):
+            reads = observer_sheet.read_horizon(driver, [date(2026, 10, 3)])
+
+        assert reads[0].landed is False
+        assert reads[0].slots == []
+        assert reads[0].html is None
+        assert "could not be confirmed" in (reads[0].note or "")
+
+    def test_one_failed_date_does_not_cost_the_rest(self) -> None:
+        driver = MagicMock()
+        pages: list[object] = [WebDriverException("tab went away"), _grid_page("07:15 AM")]
+
+        def _page(_self: object) -> str:
+            page = pages.pop(0)
+            if isinstance(page, Exception):
+                raise page
+            return str(page)
+
+        type(driver).page_source = property(_page)
+        with patch.object(observer_sheet, "land_on_date", return_value=("tab", True)):
+            reads = observer_sheet.read_horizon(driver, [date(2026, 10, 3), date(2026, 10, 4)])
+
+        assert [r.landed for r in reads] == [False, True]
+        assert "WebDriverException" in (reads[0].note or "")
+        assert len(reads[1].slots) == 1
+
+    def test_a_date_with_no_rows_is_still_a_landed_read(self) -> None:
+        """ "The club rendered nothing" is the answer the first run exists to get."""
+        driver = MagicMock()
+        type(driver).page_source = property(lambda self: "<html><body>No tee times</body></html>")
+
+        with patch.object(observer_sheet, "land_on_date", return_value=("tab", True)):
+            reads = observer_sheet.read_horizon(driver, [date(2026, 10, 10)])
+
+        assert reads[0].landed is True
+        assert reads[0].slots == []

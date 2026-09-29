@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A booking request is checked against the date's real tee sheet before it
+  is scheduled (#216).** A member could ask for 8:00 on a day whose sheet has
+  no 8:00 - Tuesdays run 07:54, 08:02, 08:10 - be told the booking was
+  scheduled, and learn a week later that the bot had raced for the nearest time
+  in a ±32-minute window it chose without saying so.
+
+  Now, where the observer has read the date's sheet, an open tee time is
+  confirmed together with the fallbacks the racer would walk ("If it's gone,
+  I'll try 08:00 AM, then 08:15 AM, then 07:53 AM"). A time that is not open
+  gets "There's no 08:00 AM tee time on Tuesday, October 13. The closest open
+  tee times are: 1. 07:54 AM 2. 08:02 AM 3. 08:10 AM. Which one?", answered by
+  number or by time, and the pick is what gets raced for. A date whose sheet
+  has not been read is booked as typed, and the member is told so and what
+  happens instead.
+
+  Each booking stores whether its time was agreed, what was first asked, and
+  the ladder, and the race logs `SLOT_AGREEMENT: ... agreed=sheet|unchecked|none`
+  as it claims each one, so a race report can call a request Exact, Fallback or
+  Miss without guessing (`.claude/skills/race-report/SKILL.md` §6). The race
+  itself is unchanged: the ladder describes it, and
+  `tests/test_slot_agreement.py` runs the racer's own slot-ranking JavaScript to
+  hold the two equal.
+
+- **The observer records each date's real slot grid, reading a week past the
+  date it watched (#216).** Once the window's snapshots are stored, it parses
+  the watched date's grid from its pre-window snapshot and reads the next
+  `OBSERVER_HORIZON_DAYS` dates (default 7) through the racer's calendar
+  routine. Each date's Northgate rows - start time, event range, state; never
+  names - go to the new `tee_sheet_grids` table, and a `horizon.json` summary
+  goes beside the snapshots. A later date's page is kept only when its read
+  looks wrong, since a clean page adds nothing but members' names.
+
+  The grid is not the fixed 8-minute ladder the booking path assumed. On the
+  mornings of 2026-09-15 to 09-25 it ran 07:30-17:54 on an 8-minute step on
+  Tuesdays, 07:15-18:00 alternating 7 and 8 minutes on most other days, and
+  started at 09:08 on a Saturday. Whether the club renders any rows for a date
+  more than seven days out had never been looked at; each date now logs
+  `OBSERVER: horizon <date> ... - <N> rows` or `NO Northgate rows`. None of it
+  runs before the window, and none of it can cost the snapshots or change the
+  run's exit code.
+
 - **A message that only addresses the bot now gets usage help instead of
   silence.** Tagging the bot and sending the request as a separate message —
   `@NorthgateTeetimebot`, then `Book 9/20 at 12p` — used to produce no reply at

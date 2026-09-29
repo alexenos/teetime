@@ -419,6 +419,22 @@ a past morning can be answered there without touching GCS or a booking.
 - **Chain completed, no reservation** — `success=True` but `RESERVATION_CHECK`
   found nothing. The most dangerous class: it looks like a win in the summary.
 
+**Exact, Fallback or Miss is per request, and needs what was agreed (#216).**
+Every booking logs `SLOT_AGREEMENT: booking <id> races for HH:MM - agreed=...`
+as the race claims it. Read that line before calling any request exact:
+
+| `agreed=` | Meaning | Exact | Fallback | Miss |
+|---|---|---|---|---|
+| `sheet` | the time is a tee time the club's sheet offered, and the member agreed to it | `RESERVATION_CHECK` on that time | on any other time | nothing reserved |
+| `unchecked` | no reading of the sheet was on file when it was booked; the time is as typed | only in the old sense — matched what was typed | | |
+| `none` | booked before slot agreement existed, or through the API | only in the old sense | | |
+
+The ledger row's `confirmed_slots` is `true` only when every request that
+morning is `agreed=sheet`. `asked=` is what the member first typed when it was
+not a slot; `ladder=` is the order they were told the racer would fall back
+through, as the sheet read then. A fallback booked off that ladder means the
+sheet changed between the booking and the race, and is worth a sentence.
+
 ## 7. What is already ruled out
 
 Don't re-litigate these; each was established from artifacts, not reasoning:
@@ -832,6 +848,19 @@ An empty or missing prefix is not evidence about the club: read the job's own
 logs first (`resource.labels.job_name="teetime-observer"`), since the observer
 declines to capture at all when it cannot confirm it is parked on the target
 date.
+
+**After the window the observer also reads ahead (#216).** Once its snapshots
+are stored it reads the next `OBSERVER_HORIZON_DAYS` dates (default 7) and
+records each one's Northgate grid for the booking conversation. Each date logs
+`OBSERVER: horizon <date> (+Nd past the watched date) - <N> rows, ...`, or
+`- NO Northgate rows`, or `- not read: <why>`; the run directory holds the
+same in `horizon.json`, and `horizon/<date>.html` is kept only for a date that
+rendered no rows or unreadable ones (a clean page would just add members' names
+to the bucket). This is not race evidence
+and needs no flip table. It does answer a question nobody had observed before
+it ran - whether the club renders a sheet more than seven days out - so say
+in the report what the first run to have it found, and after that mention it
+only when a date rendered no rows or was not read.
 
 ## 7g. Added 2026-09-25: the variable burst, and measuring the gate every morning
 

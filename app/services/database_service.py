@@ -5,23 +5,67 @@ This module provides async CRUD operations for BookingRecord and SessionRecord,
 handling conversion between Pydantic schemas and SQLAlchemy models.
 """
 
-from datetime import UTC, datetime
+import json
+import logging
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, time
 
 from sqlalchemy import select, update
 
-from app.models.database import AsyncSessionLocal, BookingRecord, SessionRecord
+from app.models.database import (
+    AsyncSessionLocal,
+    BookingRecord,
+    SessionRecord,
+    TeeSheetGridRecord,
+    engine,
+)
 from app.models.schemas import (
     BookingStatus,
     TeeTimeBooking,
     TeeTimeRequest,
     UserSession,
 )
+from app.providers.walden_sheet_grid import (
+    GridSlot,
+    SheetGrid,
+    slots_from_json,
+    slots_to_json,
+)
+
+logger = logging.getLogger(__name__)
 
 # How many times claim_next_due_group re-reads after losing a group to another
 # task. Each loss removes that group from the due set, so a handful of racer
 # tasks never needs more than a few; this bound only turns a bug into an error
 # instead of a loop.
 _MAX_CLAIM_ATTEMPTS = 20
+
+
+def _ladder_to_json(ladder: list[time] | None) -> str | None:
+    """A fallback ladder as stored: JSON "HH:MM" strings, in order.
+
+    An empty list is kept as "[]", not NULL: an agreed slot with nothing open
+    near it has a ladder, and it is empty. NULL means no ladder was worked out.
+    """
+    if ladder is None:
+        return None
+    return json.dumps([t.strftime("%H:%M") for t in ladder])
+
+
+def _ladder_from_json(text: str | None) -> list[time] | None:
+    """The stored ladder, or None when there is none - or none that can be read.
+
+    Tolerant on purpose. Every read of a booking passes through here, including
+    the racer's claim at 06:28, and the ladder only describes the race: a value
+    that fails to parse must cost the description, never the booking.
+    """
+    if text is None:
+        return None
+    try:
+        return [datetime.strptime(value, "%H:%M").time() for value in json.loads(text)]
+    except (TypeError, ValueError) as e:
+        logger.warning("Ignoring an unreadable fallback_ladder %r: %s", text[:80], e)
+        return None
 
 
 class DatabaseService:
@@ -49,6 +93,9 @@ class DatabaseService:
             origin_channel_id=booking.origin_channel_id,
             channel=booking.channel,
             requester_handle=booking.requester_handle,
+            slot_confirmed=booking.request.slot_confirmed,
+            asked_time=booking.request.asked_time,
+            fallback_ladder=_ladder_to_json(booking.request.fallback_ladder),
             created_at=booking.created_at,
             updated_at=booking.updated_at,
         )
@@ -60,6 +107,9 @@ class DatabaseService:
             requested_time=record.requested_time,  # type: ignore[arg-type]
             num_players=record.num_players,  # type: ignore[arg-type]
             fallback_window_minutes=record.fallback_window_minutes,  # type: ignore[arg-type]
+            slot_confirmed=record.slot_confirmed,  # type: ignore[arg-type]
+            asked_time=record.asked_time,  # type: ignore[arg-type]
+            fallback_ladder=_ladder_from_json(record.fallback_ladder),  # type: ignore[arg-type]
         )
         return TeeTimeBooking(
             id=record.booking_id,  # type: ignore[arg-type]
@@ -347,6 +397,57 @@ class DatabaseService:
             f"Could not claim a due booking group after {_MAX_CLAIM_ATTEMPTS} attempts "
             "while bookings were still due"
         )
+
+    async def ensure_tee_sheet_grid_table(self) -> None:
+        """Create the grid table if this database does not have it yet.
+
+        The service creates every table at startup (init_db), but the observer
+        is a separate job that can run before the service has ever started on a
+        new revision - with scale-to-zero, nothing guarantees the order. Only
+        this one table is touched: init_db's column migrations take locks on
+        the bookings table, and the observer writes while the racer may still be
+        reporting on it.
+        """
+        async with engine.begin() as conn:
+            await conn.run_sync(TeeSheetGridRecord.__table__.create, checkfirst=True)  # type: ignore[attr-defined]
+
+    async def save_tee_sheet_grid(
+        self,
+        sheet_date: date,
+        slots: Sequence[GridSlot],
+        captured_at: datetime,
+        source: str,
+    ) -> None:
+        """Append one reading of a date's grid (issue #216)."""
+        async with AsyncSessionLocal() as db:
+            db.add(
+                TeeSheetGridRecord(
+                    sheet_date=sheet_date,
+                    captured_at=captured_at,
+                    slots_json=slots_to_json(slots),
+                    slot_count=len(slots),
+                    source=source,
+                )
+            )
+            await db.commit()
+
+    async def get_tee_sheet_grid(self, sheet_date: date) -> SheetGrid | None:
+        """The latest reading of a date's grid, or None if it was never read."""
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(TeeSheetGridRecord)
+                .where(TeeSheetGridRecord.sheet_date == sheet_date)
+                .order_by(TeeSheetGridRecord.captured_at.desc(), TeeSheetGridRecord.id.desc())
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return SheetGrid(
+                sheet_date=record.sheet_date,  # type: ignore[arg-type]
+                slots=slots_from_json(record.slots_json),  # type: ignore[arg-type]
+                captured_at=record.captured_at,  # type: ignore[arg-type]
+            )
 
 
 database_service = DatabaseService()
