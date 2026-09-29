@@ -28,6 +28,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import Settings, settings
 from app.models.database import Base
 from app.models.schemas import ConversationState, ParsedIntent, TeeTimeRequest, UserSession
+from app.providers.walden_sheet_grid import GridSlot, SheetGrid
 from app.services import proxy_booking
 from app.services.booking_service import BookingService
 from app.services.credential_service import (
@@ -334,6 +335,17 @@ def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_tee_sheet_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No date's sheet has been read, so no booking here stops to ask for a slot.
+
+    Slot agreement (issue #216) is covered in test_booking_service.py; these
+    tests are about who a booking is for, and stub the lookup at the service's
+    seam because _FakeSessions below stands in for database_service.
+    """
+    monkeypatch.setattr(BookingService, "_sheet_grid_for", AsyncMock(return_value=None))
+
+
 class _FakeSessions:
     """A stand-in for database_service's session storage, keyed by identity."""
 
@@ -429,6 +441,60 @@ class TestProxyBookingFlow:
         assert create.await_args.kwargs["requester_handle"] == "@alexenos "
         # And forgotten, so the admin's next booking isn't silently Alex's too.
         assert admin.pending_proxy_target is None
+
+    @pytest.mark.asyncio
+    async def test_the_slot_question_comes_after_the_friend_is_settled(
+        self, service: BookingService, admin_configured: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Details, then who it's for, then which tee time, then yes (issue #216).
+
+        The pick must not lose the friend: the booking that comes out of it is
+        still Alex's, reported into Alex's conversation.
+        """
+        tuesday = date(2026, 10, 13)
+        grid = SheetGrid(
+            sheet_date=tuesday,
+            slots=tuple(GridSlot(time(7, 30 + 8 * i), "empty") for i in range(4))
+            + (GridSlot(time(8, 2), "empty"), GridSlot(time(8, 10), "empty")),
+        )
+        monkeypatch.setattr(BookingService, "_sheet_grid_for", AsyncMock(return_value=grid))
+        admin = UserSession(phone_number=ADMIN_ID, channel="telegram", origin_channel_id="-100")
+        alex = UserSession(phone_number=ALEX_ID, channel="telegram", origin_channel_id="-555")
+        sessions = _FakeSessions(admin, alex)
+        db_patch, cred_patch = self._patched(sessions, [self._owner()])
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=tuesday, requested_time=time(8, 0), num_players=4
+            ),
+        )
+
+        with db_patch, cred_patch:
+            with patch("app.services.booking_service.gemini_service") as gemini:
+                gemini.parse_message = AsyncMock(return_value=parsed)
+                question = await service.handle_incoming_message(
+                    ADMIN_ID, "for @alex book 10/13 at 8a", channel="telegram"
+                )
+                assert question.startswith("There's no 08:00 AM tee time on Tuesday, October 13.")
+                assert admin.pending_proxy_target == ALEX_ID
+
+                echo = await service.handle_incoming_message(ADMIN_ID, "2", channel="telegram")
+                assert "for Alex for Tuesday, October 13 at 08:02 AM" in echo
+
+            with patch.object(service, "create_booking", AsyncMock()) as create:
+                create.return_value = AsyncMock(
+                    id="abc123",
+                    status="scheduled",
+                    request=admin.pending_request,
+                    actual_booked_time=None,
+                    scheduled_execution_time=None,
+                )
+                await service.handle_incoming_message(ADMIN_ID, "yes", channel="telegram")
+
+        assert create.await_args.args[0] == ALEX_ID
+        assert create.await_args.args[1].requested_time == time(8, 2)
+        assert create.await_args.args[1].slot_confirmed is True
+        assert create.await_args.args[2] == "-555"
 
     @pytest.mark.asyncio
     async def test_failed_target_drops_an_unconfirmed_request(

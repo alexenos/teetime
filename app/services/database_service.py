@@ -5,8 +5,10 @@ This module provides async CRUD operations for BookingRecord and SessionRecord,
 handling conversion between Pydantic schemas and SQLAlchemy models.
 """
 
+import json
+import logging
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 
 from sqlalchemy import select, update
 
@@ -30,11 +32,40 @@ from app.providers.walden_sheet_grid import (
     slots_to_json,
 )
 
+logger = logging.getLogger(__name__)
+
 # How many times claim_next_due_group re-reads after losing a group to another
 # task. Each loss removes that group from the due set, so a handful of racer
 # tasks never needs more than a few; this bound only turns a bug into an error
 # instead of a loop.
 _MAX_CLAIM_ATTEMPTS = 20
+
+
+def _ladder_to_json(ladder: list[time] | None) -> str | None:
+    """A fallback ladder as stored: JSON "HH:MM" strings, in order.
+
+    An empty list is kept as "[]", not NULL: an agreed slot with nothing open
+    near it has a ladder, and it is empty. NULL means no ladder was worked out.
+    """
+    if ladder is None:
+        return None
+    return json.dumps([t.strftime("%H:%M") for t in ladder])
+
+
+def _ladder_from_json(text: str | None) -> list[time] | None:
+    """The stored ladder, or None when there is none - or none that can be read.
+
+    Tolerant on purpose. Every read of a booking passes through here, including
+    the racer's claim at 06:28, and the ladder only describes the race: a value
+    that fails to parse must cost the description, never the booking.
+    """
+    if text is None:
+        return None
+    try:
+        return [datetime.strptime(value, "%H:%M").time() for value in json.loads(text)]
+    except (TypeError, ValueError) as e:
+        logger.warning("Ignoring an unreadable fallback_ladder %r: %s", text[:80], e)
+        return None
 
 
 class DatabaseService:
@@ -62,6 +93,9 @@ class DatabaseService:
             origin_channel_id=booking.origin_channel_id,
             channel=booking.channel,
             requester_handle=booking.requester_handle,
+            slot_confirmed=booking.request.slot_confirmed,
+            asked_time=booking.request.asked_time,
+            fallback_ladder=_ladder_to_json(booking.request.fallback_ladder),
             created_at=booking.created_at,
             updated_at=booking.updated_at,
         )
@@ -73,6 +107,9 @@ class DatabaseService:
             requested_time=record.requested_time,  # type: ignore[arg-type]
             num_players=record.num_players,  # type: ignore[arg-type]
             fallback_window_minutes=record.fallback_window_minutes,  # type: ignore[arg-type]
+            slot_confirmed=record.slot_confirmed,  # type: ignore[arg-type]
+            asked_time=record.asked_time,  # type: ignore[arg-type]
+            fallback_ladder=_ladder_from_json(record.fallback_ladder),  # type: ignore[arg-type]
         )
         return TeeTimeBooking(
             id=record.booking_id,  # type: ignore[arg-type]

@@ -6,6 +6,7 @@ and SMS conversations.
 """
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,11 +23,13 @@ from app.models.schemas import (
     UserSession,
 )
 from app.providers.base import BookingResult
+from app.providers.walden_sheet_grid import GridSlot, SheetGrid
 from app.services.booking_service import (
     MEMBER_ERROR_MAX_LEN,
     NOTIFY_MAX_ATTEMPTS,
     BookingService,
     _member_safe_error,
+    describe_slot_agreement,
 )
 from app.services.credential_service import (
     WaldenCredentialRequiredError,
@@ -58,6 +61,26 @@ def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
         "app.services.booking_service.credential_service.get_dedicated_credentials",
         _credential,
     )
+
+
+# Captured before any fixture replaces it, for the one test that needs the real
+# lookup underneath the stub below.
+_REAL_SHEET_GRID_FOR = BookingService._sheet_grid_for
+
+
+@pytest.fixture(autouse=True)
+def no_tee_sheet_on_file(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Every date's sheet is unread unless a test says otherwise (issue #216).
+
+    Stubbed at the service's own seam rather than on database_service, because
+    most tests here replace database_service wholesale with a MagicMock, whose
+    attributes cannot be awaited. With no grid, a booking's time is reported
+    as unchecked and the conversation runs exactly as it did before slot
+    agreement existed. TestSlotAgreement sets a grid.
+    """
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr(BookingService, "_sheet_grid_for", lookup)
+    return lookup
 
 
 @pytest.fixture
@@ -4122,3 +4145,508 @@ class TestSingleBookingNotificationsAreRetried:
 
         assert result is True
         assert sample_booking.status == BookingStatus.SUCCESS
+
+
+def _grid_for(sheet_date: date, times: list[time], **states: str) -> SheetGrid:
+    """A sheet whose rows are open unless named in ``states`` ("tHHMM" -> state)."""
+    return SheetGrid(
+        sheet_date=sheet_date,
+        slots=tuple(GridSlot(t, states.get(t.strftime("t%H%M"), "empty")) for t in times),
+        captured_at=datetime(2026, 9, 26, 11, 31),
+    )
+
+
+def _steps(start: time, steps: list[int], until: time) -> list[time]:
+    times, minutes, i = [start], start.hour * 60 + start.minute, 0
+    while True:
+        minutes += steps[i % len(steps)]
+        i += 1
+        if minutes > until.hour * 60 + until.minute:
+            return times
+        times.append(time(minutes // 60, minutes % 60))
+
+
+# The two grids the observer photographed in September 2026 (see
+# tests/test_slot_agreement.py): an 8-minute step from 07:30 on Tuesdays, and
+# 7/8 alternating from 07:15 on most other days.
+EIGHT_MINUTE = _steps(time(7, 30), [8], time(17, 54))
+ALTERNATING = _steps(time(7, 15), [8, 7], time(18, 0))
+
+SAT = date(2026, 10, 10)
+TUE = date(2026, 10, 13)
+
+
+class TestSlotAgreement:
+    """A requested time agreed against the club's sheet before booking (issue #216)."""
+
+    @staticmethod
+    def _parsed(when: date, at: time) -> ParsedIntent:
+        return ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(requested_date=when, requested_time=at, num_players=4),
+        )
+
+    @staticmethod
+    async def _say(
+        service: BookingService, session: UserSession, message: str, parsed: ParsedIntent | None
+    ) -> tuple[str, AsyncMock]:
+        """Send one message through the whole inbound path, with a stubbed parser."""
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_or_create_session = AsyncMock(return_value=session)
+            mock_db.update_session = AsyncMock(return_value=session)
+            with patch("app.services.booking_service.gemini_service") as mock_gemini:
+                mock_gemini.parse_message = AsyncMock(return_value=parsed)
+                reply = await service.handle_incoming_message(session.phone_number, message)
+        return reply, mock_gemini.parse_message
+
+    @pytest.mark.asyncio
+    async def test_an_open_slot_is_confirmed_with_what_happens_if_it_goes(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(SAT, ALTERNATING)
+
+        reply = await booking_service._handle_book_intent(
+            sample_session, self._parsed(SAT, time(8, 8))
+        )
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert request.slot_confirmed is True
+        assert request.asked_time is None
+        assert request.fallback_ladder == [
+            time(8, 0),
+            time(8, 15),
+            time(7, 53),
+            time(8, 23),
+            time(8, 30),
+            time(7, 45),
+            time(7, 38),
+            time(8, 38),
+        ]
+        assert reply == (
+            "I'll book a tee time for Saturday, October 10 at 08:08 AM for 4 players. "
+            "08:08 AM is on the club's sheet. If it's gone, I'll try 08:00 AM, then "
+            "08:15 AM, then 07:53 AM (and 5 more within 32 minutes). Reply 'yes' to confirm."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_time_the_sheet_does_not_have_asks_which(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        """The issue's example, on a real Tuesday grid: there is no 08:00."""
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+
+        reply = await booking_service._handle_book_intent(
+            sample_session, self._parsed(TUE, time(8, 0))
+        )
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert sample_session.state == ConversationState.AWAITING_SLOT_CHOICE
+        assert request.slot_options == [time(7, 54), time(8, 2), time(8, 10)]
+        assert request.slot_confirmed is None
+        assert request.requested_time == time(8, 0)
+        assert reply == (
+            "There's no 08:00 AM tee time on Tuesday, October 13. The closest open tee "
+            "times are:\n1. 07:54 AM\n2. 08:02 AM\n3. 08:10 AM\n"
+            "Which one? Reply with the number or the time."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_number_picks_without_the_language_model(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        reply, parser = await self._say(booking_service, sample_session, "2", None)
+
+        request = sample_session.pending_request
+        assert request is not None
+        parser.assert_not_called()
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert request.requested_time == time(8, 2)
+        assert request.asked_time == time(8, 0)
+        assert request.slot_confirmed is True
+        assert request.slot_options is None
+        assert request.fallback_ladder is not None
+        # Every neighbour on an 8-minute grid is aligned, so ties go to the earlier.
+        assert request.fallback_ladder[:3] == [time(7, 54), time(8, 10), time(7, 46)]
+        assert "for Tuesday, October 13 at 08:02 AM" in reply
+        assert "If it's gone, I'll try 07:54 AM, then 08:10 AM, then 07:46 AM" in reply
+        assert reply.endswith("Reply 'yes' to confirm.")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("message", "agreed"), [("8:10am", time(8, 10)), ("7:54", time(7, 54))]
+    )
+    async def test_a_time_picks_too(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+        message: str,
+        agreed: time,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        await self._say(booking_service, sample_session, message, None)
+
+        assert sample_session.pending_request is not None
+        assert sample_session.pending_request.requested_time == agreed
+
+    @pytest.mark.asyncio
+    async def test_an_open_time_that_was_not_offered_is_taken(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        """Three suggestions are a shortcut, not the only tee times on the sheet."""
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        await self._say(booking_service, sample_session, "7:30", None)
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert request.requested_time == time(7, 30)
+        assert request.slot_confirmed is True
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+
+    @pytest.mark.asyncio
+    async def test_a_time_that_is_not_open_either_gets_its_own_nearest(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        reply, _ = await self._say(booking_service, sample_session, "8:20", None)
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert sample_session.state == ConversationState.AWAITING_SLOT_CHOICE
+        assert request.slot_options == [time(8, 10), time(8, 18), time(8, 26)]
+        assert reply.startswith("There's no 08:20 AM tee time on Tuesday, October 13.")
+
+    @pytest.mark.asyncio
+    async def test_never_mind_drops_the_request(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        reply, parser = await self._say(booking_service, sample_session, "Never mind", None)
+
+        parser.assert_not_called()
+        assert "won't book that" in reply
+        assert sample_session.pending_request is None
+        assert sample_session.state == ConversationState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_yes_is_not_a_pick(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        """Nothing is booked until a tee time has been chosen."""
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        with patch.object(booking_service, "create_booking", AsyncMock()) as create:
+            reply, _ = await self._say(
+                booking_service, sample_session, "yes", ParsedIntent(intent="confirm")
+            )
+
+        create.assert_not_called()
+        assert reply.startswith(
+            "Sorry, I didn't catch which one. The open tee times on offer for Tuesday, October 13"
+        )
+        assert sample_session.state == ConversationState.AWAITING_SLOT_CHOICE
+
+    @pytest.mark.asyncio
+    async def test_a_parsed_time_on_the_same_date_is_an_answer(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        """ "The earlier one" comes back from the parser as a booking at 07:54."""
+        no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        await self._say(
+            booking_service, sample_session, "the earlier one", self._parsed(TUE, time(7, 54))
+        )
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert request.requested_time == time(7, 54)
+        assert request.asked_time == time(8, 0)
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+
+    @pytest.mark.asyncio
+    async def test_a_different_date_replaces_the_request(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.side_effect = lambda d: (
+            _grid_for(d, EIGHT_MINUTE if d == TUE else ALTERNATING)
+        )
+        await booking_service._handle_book_intent(sample_session, self._parsed(TUE, time(8, 0)))
+
+        reply, _ = await self._say(
+            booking_service, sample_session, "make it saturday at 8", self._parsed(SAT, time(8, 0))
+        )
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert (request.requested_date, request.requested_time) == (SAT, time(8, 0))
+        assert request.slot_confirmed is True
+        assert "Saturday, October 10 at 08:00 AM" in reply
+
+    @pytest.mark.asyncio
+    async def test_an_unread_sheet_is_said_plainly(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """No reading of the date: book as typed, and say what that means."""
+        reply = await booking_service._handle_book_intent(
+            sample_session, self._parsed(SAT, time(8, 0))
+        )
+
+        request = sample_session.pending_request
+        assert request is not None
+        assert request.slot_confirmed is False
+        assert request.fallback_ladder is None
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert reply == (
+            "I'll book a tee time for Saturday, October 10 at 08:00 AM for 4 players. "
+            "I haven't seen Saturday, October 10's tee sheet yet, so I can't check that "
+            "08:00 AM is a real tee time. If it isn't, or it's gone, I'll take the closest "
+            "one within 32 minutes. Reply 'yes' to confirm."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_sheet_with_nothing_open_is_not_called_unseen(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(
+            SAT, [time(8, 0), time(8, 8)], t0800="blocked", t0808="blocked"
+        )
+
+        reply = await booking_service._handle_book_intent(
+            sample_session, self._parsed(SAT, time(8, 0))
+        )
+
+        assert "showed nothing open when I last read it" in reply
+
+    @pytest.mark.asyncio
+    async def test_a_lookup_failure_is_an_unread_sheet_not_a_refusal(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The real seam this time, under the autouse stub.
+        monkeypatch.setattr(BookingService, "_sheet_grid_for", _REAL_SHEET_GRID_FOR)
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_tee_sheet_grid = AsyncMock(side_effect=RuntimeError("connection is closed"))
+            reply = await booking_service._handle_book_intent(
+                sample_session, self._parsed(SAT, time(8, 0))
+            )
+
+        assert sample_session.pending_request is not None
+        assert sample_session.pending_request.slot_confirmed is False
+        assert reply.endswith("Reply 'yes' to confirm.")
+
+    @pytest.mark.asyncio
+    async def test_several_requests_are_asked_about_in_turn(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.side_effect = lambda d: (
+            _grid_for(d, EIGHT_MINUTE if d == TUE else ALTERNATING)
+        )
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_requests=[
+                TeeTimeRequest(requested_date=SAT, requested_time=time(8, 8), num_players=4),
+                TeeTimeRequest(requested_date=TUE, requested_time=time(8, 0), num_players=2),
+            ],
+        )
+
+        question = await booking_service._handle_book_intent(sample_session, parsed)
+        assert question.startswith("Booking 2 of 2: There's no 08:00 AM tee time on Tuesday")
+        assert sample_session.state == ConversationState.AWAITING_SLOT_CHOICE
+
+        summary, _ = await self._say(booking_service, sample_session, "3", None)
+
+        assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+        assert sample_session.pending_requests is not None
+        assert [r.requested_time for r in sample_session.pending_requests] == [
+            time(8, 8),
+            time(8, 10),
+        ]
+        assert summary == (
+            "I'll book 2 tee times:\n"
+            "1. Saturday, October 10 at 08:08 AM for 4 players (on the club's sheet; if "
+            "it's gone: 08:00 AM, 08:15 AM, 07:53 AM)\n"
+            "2. Tuesday, October 13 at 08:10 AM for 2 players (on the club's sheet; if "
+            "it's gone: 08:02 AM, 08:18 AM, 07:54 AM)\n\n"
+            "Reply 'yes' to confirm all bookings."
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_agreement_is_stored_on_the_booking(
+        self, booking_service: BookingService
+    ) -> None:
+        import pytz
+
+        request = TeeTimeRequest(
+            requested_date=TUE,
+            requested_time=time(8, 2),
+            num_players=4,
+            slot_confirmed=True,
+            asked_time=time(8, 0),
+            fallback_ladder=[time(8, 10), time(7, 54)],
+        )
+        session = UserSession(
+            phone_number="+15551234567",
+            state=ConversationState.AWAITING_CONFIRMATION,
+            pending_request=request,
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.create_booking = AsyncMock(side_effect=lambda booking: booking)
+            with patch.object(CTDateTime, "now") as mock_now:
+                mock_now.return_value = pytz.timezone("America/Chicago").localize(
+                    datetime(2026, 9, 26, 10, 0)
+                )
+                await booking_service._handle_confirm_intent(session)
+
+        stored = mock_db.create_booking.await_args.args[0].request
+        assert stored.requested_time == time(8, 2)
+        assert stored.slot_confirmed is True
+        assert stored.asked_time == time(8, 0)
+        assert stored.fallback_ladder == [time(8, 10), time(7, 54)]
+
+
+class TestDescribeSlotAgreement:
+    """The race log's statement of what a booking is aiming at."""
+
+    @staticmethod
+    def _booking(**fields: object) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id="abc12345",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=TUE, requested_time=time(8, 2), num_players=4, **fields
+            ),
+        )
+
+    def test_an_agreed_slot(self) -> None:
+        booking = self._booking(
+            slot_confirmed=True, asked_time=time(8, 0), fallback_ladder=[time(8, 10), time(7, 54)]
+        )
+        assert describe_slot_agreement(booking) == (
+            "booking abc12345 races for 08:02 - agreed=sheet asked=08:00 ladder=08:10,07:54"
+        )
+
+    def test_an_agreed_slot_with_nothing_to_fall_back_to(self) -> None:
+        booking = self._booking(slot_confirmed=True, fallback_ladder=[])
+        assert describe_slot_agreement(booking).endswith("agreed=sheet ladder=empty")
+
+    def test_an_unchecked_time(self) -> None:
+        text = describe_slot_agreement(self._booking(slot_confirmed=False))
+        assert text.startswith("booking abc12345 races for 08:02 - agreed=unchecked")
+
+    def test_a_booking_from_before(self) -> None:
+        assert "agreed=none" in describe_slot_agreement(self._booking())
+
+    @pytest.mark.asyncio
+    async def test_the_race_logs_it_for_every_booking(
+        self, booking_service: BookingService, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult
+
+        booking = self._booking(slot_confirmed=True, fallback_ladder=[time(8, 10)])
+        booking.status = BookingStatus.SCHEDULED
+
+        async def book_multiple(target_date, requests, execute_at=None) -> BatchBookingResult:  # type: ignore[no-untyped-def]
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=item.booking_id,
+                        result=BookingResult(success=True, booked_time=item.target_time),
+                    )
+                    for item in requests
+                ]
+            )
+
+        provider = MagicMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
+        booking_service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.credential_service") as mock_creds:
+            mock_creds.require_credentials = AsyncMock(
+                return_value=WaldenCredentials(member_number="m", password="p")
+            )
+            with patch("app.services.booking_service.database_service") as mock_db:
+                mock_db.update_booking = AsyncMock()
+                with caplog.at_level(logging.INFO, logger="app.services.booking_service"):
+                    await booking_service.execute_bookings_batch([booking])
+
+        assert (
+            "SLOT_AGREEMENT: booking abc12345 races for 08:02 - agreed=sheet ladder=08:10"
+            in caplog.text
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_changed_party_size_is_a_new_request_not_a_pick(
+    booking_service: BookingService, sample_session: UserSession, no_tee_sheet_on_file: AsyncMock
+) -> None:
+    """ "Make it 2 of us at 7:54" must not quietly book four."""
+    no_tee_sheet_on_file.return_value = _grid_for(TUE, EIGHT_MINUTE)
+    await booking_service._handle_book_intent(
+        sample_session, TestSlotAgreement._parsed(TUE, time(8, 0))
+    )
+    two = ParsedIntent(
+        intent="book",
+        tee_time_request=TeeTimeRequest(
+            requested_date=TUE, requested_time=time(7, 54), num_players=2
+        ),
+    )
+
+    await TestSlotAgreement._say(booking_service, sample_session, "make it 2 of us at 7:54", two)
+
+    request = sample_session.pending_request
+    assert request is not None
+    assert (request.requested_time, request.num_players) == (time(7, 54), 2)
+    assert request.asked_time is None
+    assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
