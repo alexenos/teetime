@@ -79,8 +79,10 @@ out an hour earlier.
 ## What a run does
 
 1. Read the ledgers **from GCS**, not from `operations/ledger/` in the checkout.
-   The repository holds the schemas; the files there are empty by design. The
-   objects are `gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<routine>.jsonl`.
+   The repository holds the schemas; the files there are empty by design. Each
+   Routine writes one object per run under its own prefix, so this is a list and
+   then a read of everything found:
+   `gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<routine>/<YYYY-MM-DD>.json`.
 2. Derive the three metrics per `operations/scoreboard.md`: outcome split as
    all-time and last-28-day totals, the automation streak as the combined
    consecutive count plus each Routine's own, cost from the newest `cost.jsonl` row.

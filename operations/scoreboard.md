@@ -80,8 +80,8 @@ and the breakdown for which part is not.
 A Routine's own runs count toward this, the scoreboard Routine included. It is
 measuring the automation, and it is part of the automation.
 
-**Source:** the `ok` field across every ledger in `operations/ledger/`, read from
-GCS. Sort all rows by date and count back from the newest.
+**Source:** the `ok` field across every Routine's ledger prefix in GCS, one object
+per run. Sort all rows by date and count back from the newest.
 
 **Counting rows alone overstates the streak.** The streak breaks on an `ok: false`
 row *or* on a missing one. A Routine that dies before writing anything leaves no
