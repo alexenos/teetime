@@ -5,16 +5,29 @@ This module provides async CRUD operations for BookingRecord and SessionRecord,
 handling conversion between Pydantic schemas and SQLAlchemy models.
 """
 
-from datetime import UTC, datetime
+from collections.abc import Sequence
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select, update
 
-from app.models.database import AsyncSessionLocal, BookingRecord, SessionRecord
+from app.models.database import (
+    AsyncSessionLocal,
+    BookingRecord,
+    SessionRecord,
+    TeeSheetGridRecord,
+    engine,
+)
 from app.models.schemas import (
     BookingStatus,
     TeeTimeBooking,
     TeeTimeRequest,
     UserSession,
+)
+from app.providers.walden_sheet_grid import (
+    GridSlot,
+    SheetGrid,
+    slots_from_json,
+    slots_to_json,
 )
 
 # How many times claim_next_due_group re-reads after losing a group to another
@@ -347,6 +360,57 @@ class DatabaseService:
             f"Could not claim a due booking group after {_MAX_CLAIM_ATTEMPTS} attempts "
             "while bookings were still due"
         )
+
+    async def ensure_tee_sheet_grid_table(self) -> None:
+        """Create the grid table if this database does not have it yet.
+
+        The service creates every table at startup (init_db), but the observer
+        is a separate job that can run before the service has ever started on a
+        new revision - with scale-to-zero, nothing guarantees the order. Only
+        this one table is touched: init_db's column migrations take locks on
+        the bookings table, and the observer writes while the racer may still be
+        reporting on it.
+        """
+        async with engine.begin() as conn:
+            await conn.run_sync(TeeSheetGridRecord.__table__.create, checkfirst=True)  # type: ignore[attr-defined]
+
+    async def save_tee_sheet_grid(
+        self,
+        sheet_date: date,
+        slots: Sequence[GridSlot],
+        captured_at: datetime,
+        source: str,
+    ) -> None:
+        """Append one reading of a date's grid (issue #216)."""
+        async with AsyncSessionLocal() as db:
+            db.add(
+                TeeSheetGridRecord(
+                    sheet_date=sheet_date,
+                    captured_at=captured_at,
+                    slots_json=slots_to_json(slots),
+                    slot_count=len(slots),
+                    source=source,
+                )
+            )
+            await db.commit()
+
+    async def get_tee_sheet_grid(self, sheet_date: date) -> SheetGrid | None:
+        """The latest reading of a date's grid, or None if it was never read."""
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(TeeSheetGridRecord)
+                .where(TeeSheetGridRecord.sheet_date == sheet_date)
+                .order_by(TeeSheetGridRecord.captured_at.desc(), TeeSheetGridRecord.id.desc())
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return None
+            return SheetGrid(
+                sheet_date=record.sheet_date,  # type: ignore[arg-type]
+                slots=slots_from_json(record.slots_json),  # type: ignore[arg-type]
+                captured_at=record.captured_at,  # type: ignore[arg-type]
+            )
 
 
 database_service = DatabaseService()

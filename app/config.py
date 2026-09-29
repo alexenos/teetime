@@ -598,6 +598,38 @@ class Settings(BaseSettings):
     observer_snapshot_interval_ms: int = 1000
     observer_snapshot_start_offset_ms: int = -500
 
+    # How many dates past the watched one the observer reads after the window,
+    # recording each one's slot grid for the booking conversation (issue #216).
+    # Seven reads D+8 through D+14, so a date is read on each of the seven
+    # mornings before its own race as well as on the morning of it. Zero turns
+    # the read off.
+    #
+    # Only ever after the window, and only after that morning's snapshots are
+    # stored: the reads cost about four seconds a date through the racer's own
+    # calendar routine, and none of that may land where the evidence is taken.
+    #
+    # Whether the club renders any rows for a date that far out is untested -
+    # the day strip offers those dates and the date picker allows a year ahead,
+    # but nobody has looked. The first morning this runs answers it: each date
+    # logs how many Northgate rows it rendered.
+    observer_horizon_days: int = 7
+
+    @field_validator("observer_horizon_days")
+    @classmethod
+    def _validate_observer_horizon(cls, v: int) -> int:
+        """Reject a horizon that is negative or would outrun the job's timeout.
+
+        Each date is a calendar round trip of about four seconds, and the
+        observer's Cloud Run timeout is fifteen minutes; thirty dates is two
+        minutes of reading and leaves the rest of that for everything else.
+        """
+        if not 0 <= v <= 30:
+            raise ValueError(
+                f"observer_horizon_days must be between 0 and 30, got {v}. "
+                "Zero turns the read off; each date costs a calendar round trip."
+            )
+        return v
+
     @field_validator("observer_snapshot_count", "observer_snapshot_interval_ms")
     @classmethod
     def _validate_observer_cadence(cls, v: int, info: ValidationInfo) -> int:

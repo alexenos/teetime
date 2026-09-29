@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The observer records each date's real slot grid, reading a week past the
+  date it watched (#216).** Once the window's snapshots are stored, it parses
+  the watched date's grid from its pre-window snapshot and reads the next
+  `OBSERVER_HORIZON_DAYS` dates (default 7) through the racer's calendar
+  routine. Each date's Northgate rows - start time, event range, state; never
+  names - go to the new `tee_sheet_grids` table, and a `horizon.json` summary
+  goes beside the snapshots. A later date's page is kept only when its read
+  looks wrong, since a clean page adds nothing but members' names.
+
+  The grid is not the fixed 8-minute ladder the booking path assumed. On the
+  mornings of 2026-09-15 to 09-25 it ran 07:30-17:54 on an 8-minute step on
+  Tuesdays, 07:15-18:00 alternating 7 and 8 minutes on most other days, and
+  started at 09:08 on a Saturday. Whether the club renders any rows for a date
+  more than seven days out had never been looked at; each date now logs
+  `OBSERVER: horizon <date> ... - <N> rows` or `NO Northgate rows`. None of it
+  runs before the window, and none of it can cost the snapshots or change the
+  run's exit code.
+
 - **A message that only addresses the bot now gets usage help instead of
   silence.** Tagging the bot and sending the request as a separate message —
   `@NorthgateTeetimebot`, then `Book 9/20 at 12p` — used to produce no reply at

@@ -180,6 +180,42 @@ class WaldenCredentialRecord(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class TeeSheetGridRecord(Base):
+    """
+    Database model for one reading of a date's Northgate slot grid (issue #216).
+
+    Written by the observer job, which is already logged in and on the sheet
+    every morning: after the window it reads the date it watched and the dates
+    after it, and records which tee times each one has. Read by the booking
+    conversation, so a request for a time the club does not offer can be met
+    with the times it does - without a browser, a login and ~25 seconds inside
+    a chat reply.
+
+    Appended, never updated. The latest reading of a date is the one used; the
+    earlier ones stay, so a post-mortem can see whether the grid changed between
+    the request and the race.
+
+    Columns:
+        id: Auto-incrementing primary key.
+        sheet_date: The date the sheet shows.
+        captured_at: When it was read, naive UTC.
+        slots_json: The rows, as walden_sheet_grid.slots_to_json writes them -
+            start time, end time for a merged event row, and state. Times and
+            states only; the markup's member names are never read.
+        slot_count: Number of rows, so a reading can be judged without parsing.
+        source: What read it - "observer" today.
+    """
+
+    __tablename__ = "tee_sheet_grids"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    sheet_date = Column(Date, nullable=False, index=True)
+    captured_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    slots_json = Column(Text, nullable=False)
+    slot_count = Column(Integer, nullable=False)
+    source = Column(String(32), nullable=True)
+
+
 def _normalize_database_url(url: str) -> str:
     """Point a bare sqlite:// URL at the async driver, leaving others alone."""
     # Count of 1: only the scheme is being rewritten. A database path may itself

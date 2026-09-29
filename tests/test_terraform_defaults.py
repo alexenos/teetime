@@ -159,3 +159,24 @@ def test_the_parser_skips_heredoc_prose(tmp_path: Path) -> None:
     )
 
     assert terraform_defaults(tf) == {"x": "5"}
+
+
+def test_the_observer_horizon_agrees_with_the_app(
+    defaults: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """How far ahead the observer reads is deployed at terraform's default (#216)."""
+    monkeypatch.delenv("OBSERVER_HORIZON_DAYS", raising=False)
+
+    assert _as_python(defaults["observer_horizon_days"]) == (
+        Settings(_env_file=None).observer_horizon_days
+    )
+
+
+def test_the_observer_horizon_reaches_the_observer() -> None:
+    """The observer job's env is its own, not booking_env, so it is checked there."""
+    observer_tf = (_TERRAFORM / "observer.tf").read_text(encoding="utf-8")
+
+    assert re.search(
+        r'name\s*=\s*"OBSERVER_HORIZON_DAYS"\s*\n\s*value\s*=\s*tostring\(var\.observer_horizon_days\)',
+        observer_tf,
+    ), "OBSERVER_HORIZON_DAYS is not set from var.observer_horizon_days in terraform/observer.tf"
