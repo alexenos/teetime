@@ -59,8 +59,8 @@ diagnosis; it applies equally to operating material.
 | Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
 | Scoreboard Routine | specified, not deployed. `docs/**` is now declared in the deploy filter, but the apply is unverified — confirm the live trigger first |
 | Cost Routine | specified, not deployed; blocked on a billing export outside this repository |
-| Scoreboard page | written, at `https://alexenos.github.io/teetime/scoreboard.html`, showing **sample data** flagged on the page itself |
-| Ledgers | one per Routine; schemas written, files empty, nothing writes to them |
+| Scoreboard page | written, at `https://alexenos.github.io/teetime/scoreboard.html`, showing the outcome split **backfilled** from the race reports, flagged on the page itself; streak and cost unavailable |
+| Ledgers | one per Routine; schemas written. 23 race-report rows backfilled from the reports (`ledger/backfill/`); no Routine writes rows yet |
 
 The two known defects in the deployed race report prompt — the DST cron and the
 Step 3 timeout constant — are recorded in `routines/race-report.md`. Both require

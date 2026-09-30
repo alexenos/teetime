@@ -94,7 +94,10 @@ out an hour earlier.
    all-time and last-28-day totals, the automation streak as the combined
    consecutive count plus each Routine's own, cost from the newest `cost.jsonl` row.
    Record `null` with a reason for any source that does not exist. Do not infer,
-   and do not substitute zero.
+   and do not substitute zero. Rows with a `backfill` object count toward the
+   outcome split and are skipped by the streak (`operations/scoreboard.md` §2).
+   `operations/ledger/derive_scoreboard.py` already derives and validates the
+   outcome split; the streak walk is the part this Routine adds.
 3. Write `docs/scoreboard.json`, commit it on a branch, open a PR, merge on green
    `Tests`. That is the standing authorization above, and it covers those two
    paths and nothing else.
@@ -125,11 +128,12 @@ one every day is not news.
 | File | Role | Churn | State |
 |---|---|---|---|
 | `docs/scoreboard.html` | the page: layout, styling, the charts | written once, reviewed once | **written** |
-| `docs/scoreboard.json` | the values the page reads | overwritten on change | **sample data** |
+| `docs/scoreboard.json` | the values the page reads | overwritten on change | **backfilled** (2026-09-30) |
 
-The page is live against sample data, flagged on the page itself with a visible
-banner keyed off `"sample": true` in the JSON. The first real run overwrites the
-file and the banner disappears. A Routine only ever writes the JSON; it does not
+The page is live against 23 mornings backfilled from the race reports, flagged
+by a banner keyed off the `backfill` object in the JSON (`"sample": true` still
+drives the sample banner, now unused). The banner stays while any published row is
+a backfill row, which is correct: those outcomes were transcribed, not read. A Routine only ever writes the JSON; it does not
 regenerate the HTML.
 
 Written as HTML rather than markdown because markdown tops out at tables: no

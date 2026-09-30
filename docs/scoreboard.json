@@ -1,46 +1,46 @@
 {
-  "sample": true,
-  "generated": "2026-09-26T13:30:00Z",
+  "sample": false,
+  "generated": "2026-09-30T14:25:13Z",
   "definitions": "v1",
+  "backfill": {
+    "rows": 23,
+    "first": "2026-08-13",
+    "last": "2026-09-27",
+    "routine_rows": 0,
+    "source": "operations/ledger/backfill/race-report.jsonl"
+  },
   "outcome": {
     "separable": false,
     "all_time": {
-      "mornings": 21,
-      "booked": 38,
-      "miss": 4,
+      "mornings": 23,
+      "booked": 26,
+      "miss": 6,
       "exact": null,
       "fallback": null
     },
     "last_4wk": {
-      "mornings": 8,
-      "booked": 14,
-      "miss": 1,
+      "mornings": 15,
+      "booked": 19,
+      "miss": 5,
       "exact": null,
       "fallback": null
     },
     "prior_4wk": {
-      "mornings": 7,
-      "booked": 11,
-      "miss": 3,
+      "mornings": 8,
+      "booked": 7,
+      "miss": 1,
       "exact": null,
       "fallback": null
     }
   },
   "streak": {
-    "consecutive": 6,
-    "total_ok": 24,
-    "last_failure": "2026-09-18",
-    "by_routine": {
-      "race-report": 6,
-      "scoreboard": 0,
-      "cost": 0
-    },
-    "history": [
-      3,
-      11,
-      2,
-      6
-    ]
+    "available": false,
+    "reason": "No Routine has written a ledger row yet. Backfilled rows record outcomes, not runs, so they neither extend nor break the streak.",
+    "consecutive": null,
+    "total_ok": null,
+    "last_failure": null,
+    "by_routine": {},
+    "history": []
   },
   "cost": {
     "month": "2026-09",

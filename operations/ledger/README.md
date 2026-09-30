@@ -10,7 +10,8 @@ did that run succeed, and what did it measure.
 | `operations/cost/` | cost | the month's spend |
 
 The `.jsonl` files in this directory are empty and exist to make the set visible
-in the repository. The data is in GCS, one object per run.
+in the repository. The data is in GCS, one object per run. `backfill/` is the
+exception; see Backfill below.
 
 A Routine writes only its own ledger. The scoreboard Routine is the only one that
 *reads* the others, and it reads them to derive; it never writes to them.
@@ -51,7 +52,7 @@ what makes "did the automation run" answerable without reading anything else.
 |---|---|
 | `date` | run date, CT |
 | `routine` | matches a file in `operations/routines/` |
-| `ok` | whether the run did its job |
+| `ok` | whether the run did its job. `null` only on a backfill row, which records no run |
 | `note` | required when `ok` is false; states what went wrong |
 
 `ok` is about the run, not the outcome it reported. A race report that correctly
@@ -215,22 +216,82 @@ does not widen it; committing rows would.
 
 ## Current state
 
-**Not implemented.** Nothing emits rows, nothing reads them, and the files here
-are empty. The schemas above are the specification for that work.
+**Backfilled; no Routine writes rows yet.** The 23 rows in
+`backfill/race-report.jsonl` are the only race-report rows, and
+`derive_scoreboard.py` is the only reader. The race report Routine starts writing
+once its rewritten prompt is pasted into the trigger (#234).
 
 ## Backfill
 
-Twenty-three reports exist in `operations/race-reports/`, covering 2026-08-13 to
-2026-09-25, and are not represented here. They are fewer than the number of runs:
-races are weekday-only, and a morning with no booking produces a run but no
-report — 2026-09-23 and 2026-09-26 are recent examples. The earliest, 2026-08-13,
-predates the Routine.
+`backfill/race-report.jsonl` holds one row per race-morning report in
+`operations/race-reports/`, 2026-08-13 to 2026-09-27: 23 rows, 32 requests. It was
+written on 2026-09-30 so the scoreboard has a history before the Routines have
+produced one. It is committed rather than only uploaded because it was
+transcribed by hand from prose, so it needs review like any other derived claim.
+Once uploaded, the objects in GCS are the ledger and this file is their reviewed
+source.
 
-`outcome` is backfillable from each report, since the verdict and the slot count
-are stated in it. `ok` is not: it is an assessment of whether the output needed
-correction, which the documents do not record. 2026-09-15 and 2026-09-18 are
-determinable because the corrections are written down; most are not.
+**A backfill row carries a `backfill` object, and that is how every reader tells
+it apart.** Its fields are what a Routine row would have, plus:
 
-Backfill individually where there is a reason to, marking any field that was
-inferred rather than read. A missing row is detectable; an inferred row presented
-as read is not.
+| Field | Definition |
+|---|---|
+| `backfill.written` | the date the row was transcribed, not the date it describes |
+| `backfill.basis` | what the outcome rests on: `reservation_check` (the report quotes one), `report_no_reserve` (the report establishes no Reserve reached the club), or `member_failure_notice` (only the failure message the member received) |
+
+Every value on the row was **read from the report, not from logs.** No row was
+re-derived from `RESERVATION_CHECK` in the artifacts. Where the report quotes a
+`RESERVATION_CHECK` line the basis says so. 2026-08-13 is the one exception:
+that report is still marked open and its artifacts were never read. The miss is
+scored on the member-facing failure and the attempt-1 refusal in the 2026-09-11
+report, and its `note` says so.
+
+**`ok` is `null` on every backfill row.** `ok` assesses a Routine run. A backfill
+row does not record a run: the reports up to 2026-09-19 were written in
+maintainer sessions, and a Routine run that produced a report left no record of
+its own. So `null` means "not a run", not "failed". The streak must skip these
+rows. Counting them as failures would break it, and counting them as successes
+would claim correctness nobody checked. 2026-09-18 was corrected after merge
+(#219), and 2026-09-15's first pass misreported the morning before the published
+report fixed it. Neither correction changed the outcome, and both are in `note`.
+
+Scoring follows the schema mechanically: `exact` when the booked time equals the
+requested one, `fallback` otherwise, `miss` when nothing was reserved.
+`confirmed_slots` is `false` on every row, since all of them predate #216.
+
+**Folded and omitted.** The 2026-09-04 evening run was ad-hoc, not a race. It is
+the second request on the 2026-09-04 row, because the ledger holds one object per
+date. 2026-09-17 had no race but three ad-hoc requests inside the window, all
+Miss, and it is included because `operations/scoreboard.md` counts it. Mornings
+that raced with no report of their own are **absent, not scored**: 08-14, 08-15,
+08-16 and 08-22 have attempt-1 ledger entries quoted in later reports but no
+outcome, and 08-18 (lost to a login timeout, per the 2026-08-20 report) has no
+requested time on record. The race report Routine has fired daily since
+2026-08-20, so a missing date before 2026-09-30 is a gap in the backfill, not a
+missed run.
+
+### Writing it to GCS
+
+The upload is one object per row, never overwriting:
+
+```bash
+python -c "import json,pathlib;d=pathlib.Path('rr');d.mkdir(exist_ok=True);[(d/(r['date']+'.json')).write_text(json.dumps(r)+'
+') for r in map(json.loads,open('operations/ledger/backfill/race-report.jsonl'))]"
+gcloud storage cp --no-clobber rr/*.json gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/race-report/
+```
+
+The dates are all before the Routine's first write, so none collides with an
+object the Routine will create.
+
+### Deriving the scoreboard
+
+```bash
+python operations/ledger/derive_scoreboard.py operations/ledger/backfill/race-report.jsonl --out docs/scoreboard.json
+```
+
+It validates every row (the rollup against `requests`, `booked` against
+`outcome`, `member` null, one row per date) before deriving anything. It derives
+the outcome split only. The streak is published as unavailable while every row is
+a backfill row. The first Routine-written row makes the script exit rather than
+publish a streak it has no walk for; that walk belongs to the scoreboard Routine
+(#234).
