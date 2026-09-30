@@ -14,22 +14,38 @@ with one exception: the race report Routine merges its own report, scoped to one
 file under `operations/race-reports/` and gated on a green `Tests` check. That
 exception is defined in `operations/routines/race-report.md` and nowhere else.
 
-A second exception is **proposed and not granted**: the scoreboard Routine would
-need one to publish `docs/scoreboard.*` without a person.
-`operations/routines/scoreboard.md` states what it would be bounded by and why it
-is a decision rather than a detail. Until it is granted there is one exception,
-and that Routine is not deployed.
+A second exception was **granted on 2026-09-29**: the scoreboard Routine may
+merge `docs/scoreboard.json` and `docs/scoreboard.html`, on the same terms — those
+two paths, a green `Tests` check, nothing else. It is defined in
+`operations/routines/scoreboard.md`. That Routine is not yet deployed, because it
+has no ledger rows to read until the race report writes them.
 
 A commit touching only `operations/` or `docs/` does not redeploy: the Cloud
 Build trigger sets `ignored_files = ["operations/**", "docs/**"]`
 (`terraform/main.tf`). The filter applies only when every changed file matches,
 so a commit that also touches app code still deploys.
 
-**That is what terraform declares, not a verified property of the live trigger.**
-Nothing in CI runs `terraform apply`, and the session service account
-(`teetime-artifact-reader`) cannot read Cloud Build, so no session can check.
-Merging a change to `ignored_files` does not change deploy behaviour; an apply
-does.
+**A merge to `main` applies terraform.** `cloudbuild.yaml` runs
+`terraform apply -auto-approve` as its last step, so the Cloud Build trigger both
+deploys the image and reconciles infrastructure. An infrastructure change is live
+once it merges and the build succeeds — there is no separate manual apply.
+
+The exception is a commit the filter above suppresses: a change touching only
+`operations/` or `docs/` fires no build, so it also applies no terraform. A
+terraform change always touches `terraform/`, so it always builds.
+
+**Verify an apply by reading the build log, not by describing the resource.**
+`gcloud builds triggers describe` is denied to the session service account, but
+Cloud Build writes to Cloud Logging and that account holds `roles/logging.viewer`:
+
+```bash
+gcloud logging read 'resource.type="build" AND textPayload:"Apply complete"' \
+  --limit=5 --format="value(timestamp,textPayload)" --freshness=7d
+```
+
+A routine build reports `0 added, 3 changed, 0 destroyed`; a build that also
+changed infrastructure reports more. #220 merged at 2026-09-27T02:06Z and the
+apply at 02:11Z shows `+ "docs/**"` with `4 changed`.
 
 **Three GCP resources, not one.** A Cloud Logging query scoped to the service
 alone returns a valid zero-row result on a morning when the race ran. That
@@ -95,10 +111,8 @@ specified and not deployed — the scoreboard and the cost Routine. `ship-pr` an
 the PR check-ins are not Routines; they are maintainer-invoked and push only to
 their own open PR.
 
-**Publishing to `docs/` needs the filter applied, not just merged.** `docs/**` is
-in `ignored_files` in terraform as of this branch. Until someone applies it, a
-scoreboard publish still fires a build. Confirm the live trigger before deploying
-the scoreboard Routine.
+`docs/**` has been live in `ignored_files` since #220's apply on 2026-09-27, so a
+scoreboard publish does not rebuild the service.
 
 ## Skills
 

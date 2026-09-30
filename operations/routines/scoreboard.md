@@ -12,51 +12,58 @@ specification; deploying it is the steps in the last section.
 
 It reads the other Routines' ledgers and derives. It never writes to them.
 
-## It would need a second standing authorization, which does not exist
+## The second standing authorization, granted
 
 The page is published from `docs/`, so publishing means committing there — and
 merging, if it is to happen without a person. That is a **second** standing
-authorization to write to `main`.
+authorization to write to `main`, and the maintainer granted it on 2026-09-29.
 
-`CLAUDE.md` says the race report's exception is defined in
-`operations/routines/race-report.md` "and nowhere else". That is true today and
-this file does not change it: **this Routine is not deployed, and no second
-authorization has been granted.** What follows is what deploying it would require,
-not a grant.
+It is bounded the same way the race report's is, and no wider:
 
-It is also a decision worth making deliberately rather than inheriting. An earlier
-draft of this file argued against a second authorization on the grounds that the
-race report's is the one load-bearing risk in this setup and the bounds are worth
-keeping scarce. Moving the page into `docs/` quietly created the need for one, and
-that argument was never revisited. Two options, and the maintainer picks:
-
-| | |
+| Bound | |
 |---|---|
-| **Grant it** | bounded to two paths (`docs/scoreboard.json`, `docs/scoreboard.html`), a green `Tests` check, and nothing else. `CLAUDE.md` changes from one exception to two. The scoreboard updates without a person. |
-| **Withhold it** | the Routine opens a PR and stops; the maintainer merges. One exception stands. The scoreboard is as current as the last time someone merged, which for a daily metric means it is usually a day stale. |
+| Path | `docs/scoreboard.json`, and `docs/scoreboard.html` when regenerated. Nothing else, ever. |
+| Check | a green `Tests` run on the PR head. Red CI leaves the PR open and is reported. |
+| Deploy | `docs/**` is in `ignored_files`, so the merge does not rebuild the service. |
 
-Until that is settled, the steps below describe the granted case and must not be
-deployed.
+Everything outside those two paths stays ask-first, on the same terms as the race
+report: never app code, never terraform, never another Routine's file, and never a
+merge by any route other than a PR with a green check.
 
-`docs/**` is now in `ignored_files` in `terraform/main.tf`, alongside
-`operations/**`. Without it, a commit to `docs/` fires a build and redeploys the
-live booking service, so this Routine would redeploy production every day it
-published.
+The decision was made deliberately rather than inherited, which matters because an
+earlier draft of this file argued the other way — that the race report's
+authorization was the one load-bearing risk and the bounds were worth keeping
+scarce. What changed the answer: the blast radius here is two files the running
+service never reads, behind a deploy filter, and the race report's far riskier
+authorization has run without a bad merge since 2026-09-22.
 
-**The edit is not the prerequisite; the apply is.** Nothing in CI runs
-`terraform apply`, so merging the change does not alter the live trigger. And no
-session can confirm it afterwards: the service account
-(`teetime-artifact-reader`) gets `PERMISSION_DENIED` on
-`gcloud builds triggers describe`.
+The withheld alternative was a Routine that opens a PR and stops. It was rejected
+because a daily metric nobody merges is a daily metric that is usually a day stale,
+which defeats the point of publishing it.
 
-An attempt to verify it indirectly produced no signal, which is worth recording
-rather than repeating. Cloud Build posts no commit statuses to GitHub, so an
-`operations/`-only commit (1a9d4de, a race report) and a commit that changes app
-code (cabb678) both return zero statuses. The check cannot distinguish "filtered"
-from "deployed", so it says nothing about whether `operations/**` is live either.
+## The deploy filter is live
 
-Confirm against the live trigger, by whoever can read it, before turning this
-Routine on.
+`docs/**` has been in `ignored_files` since #220's apply on 2026-09-27, alongside
+`operations/**`. Without it, a commit to `docs/` would fire a build and redeploy
+the live booking service, and this Routine would do that every day it published.
+
+**A merge to `main` applies terraform.** `cloudbuild.yaml` runs
+`terraform apply -auto-approve` as its last build step, so an infrastructure change
+is live once it merges and the build succeeds. There is no separate manual apply,
+and an earlier version of this file said there was.
+
+It is checkable, and was checked. `gcloud builds triggers describe` is denied to
+the session service account, but Cloud Build writes to Cloud Logging and that
+account holds `roles/logging.viewer`:
+
+```
+2026-09-27T02:11:17  Step #3: ~ ignored_files = [
+2026-09-27T02:11:17  Step #3:     + "docs/**",
+2026-09-27T02:11:59  Step #3: Apply complete! Resources: 0 added, 4 changed, 0 destroyed.
+```
+
+#220 merged at 02:06Z; that is the apply five minutes later. A routine build
+reports `3 changed`; the fourth was this filter.
 
 ## Why it is separate from the race report
 
@@ -79,16 +86,18 @@ out an hour earlier.
 ## What a run does
 
 1. Read the ledgers **from GCS**, not from `operations/ledger/` in the checkout.
-   The repository holds the schemas; the files there are empty by design. The
-   objects are `gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<routine>.jsonl`.
+   The repository holds the schemas; the files there are empty by design. Each
+   Routine writes one object per run under its own prefix, so this is a list and
+   then a read of everything found:
+   `gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<routine>/<YYYY-MM-DD>.json`.
 2. Derive the three metrics per `operations/scoreboard.md`: outcome split as
    all-time and last-28-day totals, the automation streak as the combined
    consecutive count plus each Routine's own, cost from the newest `cost.jsonl` row.
    Record `null` with a reason for any source that does not exist. Do not infer,
    and do not substitute zero.
-3. Write `docs/scoreboard.json`, commit it on a branch, open a PR. Merge on green
-   `Tests` **only if the second authorization above has been granted**; otherwise
-   leave the PR open for the maintainer.
+3. Write `docs/scoreboard.json`, commit it on a branch, open a PR, merge on green
+   `Tests`. That is the standing authorization above, and it covers those two
+   paths and nothing else.
 4. Append this run's row to `scoreboard.jsonl`.
 5. **Notify only on a change in a source metric, or on a failure.** A failure
    includes the append failing, and a source that previously worked having stopped
@@ -165,13 +174,17 @@ is a stat tile. The streak history is one series, so it carries no legend.
 
 ## Deploying it
 
-1. Decide the second-authorization question above, and record the decision here.
-   If granted, `CLAUDE.md` changes from one exception to two in the same commit.
-2. Apply the terraform, and confirm `ignored_files` on the live trigger reads
-   `["operations/**", "docs/**"]`. **Not optional** — without it this Routine
-   redeploys production daily. The repository edit is already made; the apply is
-   not, and cannot be verified from a session.
-3. Create the Routine, record its trigger ID above, and change **Status**.
-4. Note the new cron in the 2026-11-01 DST change.
+Two prerequisites are already met: the authorization is granted, and `docs/**` is
+live in the deploy filter. What remains:
 
-Until then the page shows sample data, flagged as such.
+1. **The race report Routine must be writing its ledger first.** This Routine
+   derives from those rows and has nothing to read until they exist. That is the
+   prompt in `race-report.md`, pending a paste into its trigger.
+2. Create the Routine, record its trigger ID in the table above, and change
+   **Status** to deployed.
+3. Note its cron in the 2026-11-01 DST change, which then covers two Routines
+   rather than one.
+
+Until step 1 produces rows, this Routine would publish a page of zeros and nulls,
+which is worse than the sample data now showing — the sample is labelled, and
+zeros would not be.

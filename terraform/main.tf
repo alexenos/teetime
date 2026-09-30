@@ -351,6 +351,37 @@ resource "google_storage_bucket_iam_member" "cloud_run_debug_artifacts_writer" {
   member = "serviceAccount:${google_service_account.cloud_run.email}"
 }
 
+# The Routine sessions run as teetime-artifact-reader, which holds
+# roles/storage.objectViewer on this bucket and roles/logging.viewer on the
+# project. Both were granted by hand - see operations/debug-artifact-access.md -
+# so that account is deliberately not managed here; only this binding is.
+#
+# Read alone is not enough once a Routine has to record what it did. Without
+# this, a session gets:
+#
+#   teetime-artifact-reader@... does not have storage.objects.create access
+#   Permission 'storage.objects.create' denied on ... /objects/operations/...
+#
+# objectCreator, not objectAdmin, for the same reason observer.tf uses it: the
+# grant lets a session add an object and gives it no way to overwrite or delete
+# one. That is what keeps the race artifacts stored beside these ledgers safe
+# from a session that goes wrong, and it is why the ledgers are one object per
+# run rather than one appended file - see operations/ledger/README.md.
+#
+# The condition confines it to the operations/ prefix. Conditions on a bucket
+# binding need uniform bucket-level access, which this bucket enables above.
+resource "google_storage_bucket_iam_member" "routine_ledger_writer" {
+  bucket = google_storage_bucket.debug_artifacts.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:teetime-artifact-reader@${var.project_id}.iam.gserviceaccount.com"
+
+  condition {
+    title       = "operations_ledger_prefix_only"
+    description = "Routine ledger rows only; no access to walden/ race artifacts."
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${var.debug_artifacts_bucket}/objects/operations/\")"
+  }
+}
+
 resource "google_cloud_run_v2_service_iam_member" "public_access" {
   name     = google_cloud_run_v2_service.teetime.name
   location = var.region

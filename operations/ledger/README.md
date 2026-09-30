@@ -3,17 +3,36 @@
 **One ledger per Routine, named for the Routine.** Every row answers two things:
 did that run succeed, and what did it measure.
 
-| File | Routine | Owns |
+| Prefix | Routine | Owns |
 |---|---|---|
-| `race-report.jsonl` | race report | the day's outcome split |
-| `scoreboard.jsonl` | scoreboard | the derived metrics, as published |
-| `cost.jsonl` | cost | the month's spend |
+| `operations/race-report/` | race report | the day's outcome split |
+| `operations/scoreboard/` | scoreboard | the derived metrics, as published |
+| `operations/cost/` | cost | the month's spend |
+
+The `.jsonl` files in this directory are empty and exist to make the set visible
+in the repository. The data is in GCS, one object per run.
 
 A Routine writes only its own ledger. The scoreboard Routine is the only one that
 *reads* the others, and it reads them to derive; it never writes to them.
 
-Rows are appended, never rewritten. JSON Lines, so a row can be added without
-reading or rewriting the file.
+**One object per run, not one appended file.** A run writes
+`operations/<routine>/<YYYY-MM-DD>.json` and never touches anything already
+there.
+
+That is forced by the grant, and the grant is the right one. The Routine service
+account holds `roles/storage.objectCreator` on the `operations/` prefix
+(`terraform/main.tf`), which permits creating an object and gives no way to
+overwrite or delete one. Appending to a single `.jsonl` is a read-modify-write:
+it replaces the object, which needs delete permission, which would also let a
+session destroy the race artifacts stored beside these ledgers.
+
+So the layout is a consequence of least privilege, and it buys two things beyond
+that. Append-only becomes **enforced rather than conventional** — no run can
+rewrite an earlier run's record, including its own. And two runs that overlap
+cannot clobber each other, because they are writing different objects.
+
+Reading is unaffected: the same account holds `objectViewer` bucket-wide, so a
+reader lists the prefix and reads every object under it.
 
 The reports in `operations/race-reports/` hold the analysis: what was established,
 what was hypothesis, what the evidence did not settle. The ledgers hold the values
@@ -83,7 +102,7 @@ computed. They are shaped like the real thing and are not the real thing.
 | `member` | an opaque member identifier; see below |
 | `requested` | the tee time asked for, CT |
 | `booked` | the tee time reserved, or `null` on a miss |
-| `outcome` | `exact`, `fallback` or `miss`, by `RESERVATION_CHECK` |
+| `outcome` | `exact`, `fallback` or `miss`, by `RESERVATION_CHECK`. Exactly one, always present; there is no fourth value and no unscored request. |
 
 **Both the detail and the totals are recorded**, even though the totals are a
 rollup of the detail. The totals are what the scoreboard reads, and keeping them
@@ -177,12 +196,16 @@ $/booking comparisons against a denominator that does not match it.
 Rows are written to GCS, not committed to the repository:
 
 ```
-gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<file>.jsonl
+gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/<routine>/<YYYY-MM-DD>.json
 ```
 
-Two reasons: a commit per run adds one commit per morning on top of the report
-commit the race report already makes, and `scripts/observer_observations.py`
-already writes its ledger to GCS for the same reason.
+A monthly Routine uses the month in place of the date; the rule is one object per
+run, named so that listing the prefix sorts chronologically.
+
+Two reasons it is GCS rather than the repository: a commit per run adds one
+commit per morning on top of the report commit the race report already makes, and
+`scripts/observer_observations.py` already writes its ledger to GCS for the same
+reason.
 
 The repository holds the schema. The bucket holds the data. The files in this
 directory are empty and exist to make the set visible.

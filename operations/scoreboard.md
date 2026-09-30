@@ -50,6 +50,13 @@ file) or `agreed=none` (booked before #216) is still only Miss against not-Miss,
 and the page must say so rather than showing an Exact count that means something
 weaker than it reads.
 
+**Miss against not-Miss is a presentation bucket, not a ledger value.** The row's
+`outcome` is always one of `exact`, `fallback` or `miss`, scored mechanically from
+booked against requested, so the totals always roll up and a booked request is
+always counted as booked. Collapsing Exact and Fallback into not-Miss is something
+the page does when `confirmed_slots` is false. A ledger that omitted the
+distinction instead would lose the booking, not just the label.
+
 Every row carries `confirmed_slots` for this reason. The page must not draw a
 trend across a change in that field without marking it: the step would be a change
 in definition, not in performance.
@@ -83,8 +90,8 @@ and the breakdown for which part is not.
 A Routine's own runs count toward this, the scoreboard Routine included. It is
 measuring the automation, and it is part of the automation.
 
-**Source:** the `ok` field across every ledger in `operations/ledger/`, read from
-GCS. Sort all rows by date and count back from the newest.
+**Source:** the `ok` field across every Routine's ledger prefix in GCS, one object
+per run. Sort all rows by date and count back from the newest.
 
 **Counting rows alone overstates the streak.** The streak breaks on an `ok: false`
 row *or* on a missing one. A Routine that dies before writing anything leaves no
