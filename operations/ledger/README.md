@@ -102,7 +102,7 @@ computed. They are shaped like the real thing and are not the real thing.
 | `member` | an opaque member identifier; see below |
 | `requested` | the tee time asked for, CT |
 | `booked` | the tee time reserved, or `null` on a miss |
-| `outcome` | `exact`, `fallback` or `miss`, by `RESERVATION_CHECK` |
+| `outcome` | `exact`, `fallback` or `miss`, by `RESERVATION_CHECK`. Exactly one, always present; there is no fourth value and no unscored request. |
 
 **Both the detail and the totals are recorded**, even though the totals are a
 rollup of the detail. The totals are what the scoreboard reads, and keeping them
