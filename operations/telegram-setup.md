@@ -178,8 +178,8 @@ row in `walden_credentials`. There is no shared account: a requester with no row
 is told "your account isn't set up for booking yet" rather than quietly booking
 under someone else's membership.
 
-For a proxy booking that person is the friend, not the admin. `for @alex`
-requires Alex to have a row and requires nothing of the admin's own account —
+For a proxy booking that person is the friend, not the admin. `for @friend`
+requires the friend to have a row and requires nothing of the admin's own account —
 which has no Walden login at all, by design, and is refused one if anything
 tries to look it up.
 
@@ -192,11 +192,11 @@ nothing decrypts until the attempt runs. Terraform enforces this with a
 precondition rather than letting it deploy.
 
 ```
-dax.garner:
-@northgateteetimebot for @alex book 9/12 at 8a
+admin:
+@northgateteetimebot for @friend book 9/12 at 8a
 
 NorthgateTeetimebot:
-@dax.garner I'll book a tee time for Alex for Saturday, September 12 at
+@admin I'll book a tee time for Friend for Saturday, September 12 at
 08:00 AM for 4 players. Reply 'yes' to confirm.
 ```
 
@@ -204,24 +204,24 @@ Leave the target out and the bot asks for it, holding the request across the
 turn:
 
 ```
-dax.garner:
+admin:
 @northgateteetimebot book 9/12 at 8a
 
 NorthgateTeetimebot:
-@dax.garner For which user? This account has no Walden login of its own, so
+@admin For which user? This account has no Walden login of its own, so
 every booking has to be made under a friend's. Reply with their name or
 Telegram handle.
 
-dax.garner:
-@alex
+admin:
+@friend
 ```
 
-What "@alex" matches is the `--name` and `--telegram-username` fields on that
+What "@friend" matches is the `--name` and `--telegram-username` fields on that
 friend's credential row:
 
 ```bash
 poetry run python scripts/add_walden_credential.py set <telegram user id> \
-    --name "Alex" --telegram-username alexenos
+    --name "Friend" --telegram-username <friend-username>
 ```
 
 Matching is case-insensitive. The leading `@` is **required** in the `for @X`
@@ -229,7 +229,7 @@ clause — it is what separates a target from ordinary English, so that
 `for 4 players, book 9/12` is read as a booking rather than as a friend named
 "4". It is only a marker, not a claim that the word is a Telegram handle: a
 stored `--name` matches through it fine. Omitting it costs a turn rather than
-the request (`for alex book 9/12` is parsed as a booking, then the bot asks who
+the request (`for friend book 9/12` is parsed as a booking, then the bot asks who
 it is for), and answering that question takes a bare name either way.
 
 `--label` is *not* matched — it stayed a free-text admin note. `list` shows

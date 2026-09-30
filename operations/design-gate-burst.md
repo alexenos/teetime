@@ -13,7 +13,7 @@ ledger and the terraform settings use.
 ## Why
 
 The Friday 08:38 slot is decided by tens of milliseconds between us and one other
-automated client (Letbetter's foursome: 08:38 on three of the four Friday postrace
+automated client (another member's foursome: 08:38 on three of the four Friday postrace
 sheets, and their fallback 08:23 on the fourth - the morning we won 08:38). Of
 the three burst-era Fridays we won 08:38 once, on 09-18.
 
