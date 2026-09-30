@@ -1,6 +1,6 @@
 {
   "sample": false,
-  "generated": "2026-09-30T14:25:13Z",
+  "generated": "2026-09-30T16:47:28Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
@@ -13,14 +13,14 @@
     "separable": false,
     "all_time": {
       "mornings": 23,
-      "booked": 26,
+      "booked": 25,
       "miss": 6,
       "exact": null,
       "fallback": null
     },
     "last_4wk": {
       "mornings": 15,
-      "booked": 19,
+      "booked": 18,
       "miss": 5,
       "exact": null,
       "fallback": null

@@ -224,7 +224,7 @@ once its rewritten prompt is pasted into the trigger (#234).
 ## Backfill
 
 `backfill/race-report.jsonl` holds one row per race-morning report in
-`operations/race-reports/`, 2026-08-13 to 2026-09-27: 23 rows, 32 requests. It was
+`operations/race-reports/`, 2026-08-13 to 2026-09-27: 23 rows, 31 requests. It was
 written on 2026-09-30 so the scoreboard has a history before the Routines have
 produced one. It is committed rather than only uploaded because it was
 transcribed by hand from prose, so it needs review like any other derived claim.
@@ -259,9 +259,9 @@ Scoring follows the schema mechanically: `exact` when the booked time equals the
 requested one, `fallback` otherwise, `miss` when nothing was reserved.
 `confirmed_slots` is `false` on every row, since all of them predate #216.
 
-**Folded and omitted.** The 2026-09-04 evening run was ad-hoc, not a race. It is
-the second request on the 2026-09-04 row, because the ledger holds one object per
-date. 2026-09-17 had no race but three ad-hoc requests inside the window, all
+**Folded and omitted.** The 2026-09-04 evening run
+(`2026-09-04-evening.md`) was an ad-hoc pre-race test, not a race, and is left
+out: the 2026-09-04 row is the morning race alone. 2026-09-17 had no race but three ad-hoc requests inside the window, all
 Miss, and it is included because `operations/scoreboard.md` counts it. Mornings
 that raced with no report of their own are **absent, not scored**: 08-14, 08-15,
 08-16 and 08-22 have attempt-1 ledger entries quoted in later reports but no
