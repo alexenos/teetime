@@ -93,6 +93,12 @@ measuring the automation, and it is part of the automation.
 **Source:** the `ok` field across every Routine's ledger prefix in GCS, one object
 per run. Sort all rows by date and count back from the newest.
 
+**A backfill row is not a run.** Rows carrying a `backfill` object were
+transcribed from past reports (`operations/ledger/README.md`, Backfill) and hold
+`ok: null`. They count toward the outcome split and are skipped by the streak
+entirely. They neither extend it nor break it, and a scheduled date covered only
+by a backfill row is outside the walk, not a gap in it.
+
 **Counting rows alone overstates the streak.** The streak breaks on an `ok: false`
 row *or* on a missing one. A Routine that dies before writing anything leaves no
 row at all, and a walk back through the rows that exist steps straight over that
@@ -201,6 +207,8 @@ Specified in `operations/routines/scoreboard.md` and
 
 ## Current state
 
-**No metric has a value.** Nothing writes any ledger, the page does not exist, and
-cost has no source at all. This document and the two Routine specifications are
-the work remaining.
+**The outcome split has a value, backfilled.** The page shows 23 mornings
+transcribed from the race reports (2026-08-13 to 2026-09-27), derived by
+`operations/ledger/derive_scoreboard.py` and flagged as backfilled on the page.
+The streak has no value, because no Routine has written a row. Cost has no source
+at all.

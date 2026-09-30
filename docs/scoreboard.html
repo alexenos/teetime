@@ -138,6 +138,7 @@
     <strong>Sample data.</strong> No routine has published real values yet. The
     shape is real; the numbers are illustrative.
   </div>
+  <div class="banner" id="backfill-banner" hidden></div>
 
   <!-- 1. Outcome split. Hero = the booked rate, a single ratio, so a meter. -->
   <section class="card" aria-labelledby="h-outcome">
@@ -219,6 +220,16 @@
     $("gen").textContent = "Generated " + fmtDate(d.generated)
       + " · definitions " + d.definitions;
     if (d.sample) { $("sample-banner").hidden = false; }
+    var bf = d.backfill;
+    if (bf && bf.rows > 0) {
+      $("backfill-banner").hidden = false;
+      $("backfill-banner").innerHTML = "<strong>Backfilled.</strong> The outcomes of "
+        + bf.rows + " mornings, " + bf.first + " to " + bf.last + ", were transcribed "
+        + "from the published <a href=\"https://github.com/alexenos/teetime/tree/main/operations/race-reports\">race reports</a>, "
+        + "not read from the logs by a Routine. Source: <a href=\"https://github.com/alexenos/teetime/blob/main/"
+        + bf.source + "\">" + bf.source + "</a>.";
+      rows.push(["Backfilled rows", bf.rows + " (" + bf.first + " to " + bf.last + ")"]);
+    }
 
     // ---- 1. Outcome ----
     var o = d.outcome, at = o.all_time;
@@ -267,45 +278,52 @@
 
     // ---- 2. Streak ----
     var s = d.streak;
-    $("streak-val").textContent = s.consecutive;
-    $("streak-sub").textContent = "consecutive successful runs"
-      + (s.last_failure ? " since " + s.last_failure : "")
-      + " · " + s.total_ok + " successful all time";
-    rows.push(["Automation streak", s.consecutive]);
-    rows.push(["Successful runs, all time", s.total_ok]);
+    if (s.available === false) {
+      $("streak-val").className = "stat na";
+      $("streak-val").textContent = "Not available";
+      $("streak-sub").textContent = s.reason;
+      rows.push(["Automation streak", "not available"]);
+    } else {
+      $("streak-val").textContent = s.consecutive;
+      $("streak-sub").textContent = "consecutive successful runs"
+        + (s.last_failure ? " since " + s.last_failure : "")
+        + " · " + s.total_ok + " successful all time";
+      rows.push(["Automation streak", s.consecutive]);
+      rows.push(["Successful runs, all time", s.total_ok]);
 
-    // Streak history: one series, so no legend. Bars, 4px rounded data-ends.
-    var h = s.history || [];
-    if (h.length) {
-      var max = Math.max.apply(null, h.concat([s.consecutive])), bw = 26, gap = 8;
-      var series = h.concat([s.consecutive]);
-      var w = series.length * (bw + gap) - gap;
-      // xMinYMid, not the default xMidYMid: with a fixed height the default
-      // scales the content to the height and centres the result, which renders
-      // the bars as a small island in the middle of the card.
-      var sv = '<svg width="' + w + '" height="62" viewBox="0 0 ' + w + ' 62" '
-        + 'preserveAspectRatio="xMinYMid meet" style="margin-top:14px;max-width:100%" '
-        + 'role="img" aria-label="Streak lengths, oldest first: ' + series.join(", ")
-        + '. The last is the current streak.">';
-      series.forEach(function (v, i) {
-        var hgt = max > 0 ? Math.max(3, (v / max) * 46) : 3;
-        var last = i === series.length - 1;
-        sv += '<rect x="' + (i * (bw + gap)) + '" y="' + (46 - hgt) + '" width="' + bw
-          + '" height="' + hgt + '" rx="4" fill="'
-          + (last ? "var(--series-1)" : "var(--track)") + '"/>';
-        sv += '<text x="' + (i * (bw + gap) + bw / 2) + '" y="59" text-anchor="middle" '
-          + 'font-size="10" fill="var(--ink-muted)">' + v + "</text>";
+      // Streak history: one series, so no legend. Bars, 4px rounded data-ends.
+      var h = s.history || [];
+      if (h.length) {
+        var max = Math.max.apply(null, h.concat([s.consecutive])), bw = 26, gap = 8;
+        var series = h.concat([s.consecutive]);
+        var w = series.length * (bw + gap) - gap;
+        // xMinYMid, not the default xMidYMid: with a fixed height the default
+        // scales the content to the height and centres the result, which renders
+        // the bars as a small island in the middle of the card.
+        var sv = '<svg width="' + w + '" height="62" viewBox="0 0 ' + w + ' 62" '
+          + 'preserveAspectRatio="xMinYMid meet" style="margin-top:14px;max-width:100%" '
+          + 'role="img" aria-label="Streak lengths, oldest first: ' + series.join(", ")
+          + '. The last is the current streak.">';
+        series.forEach(function (v, i) {
+          var hgt = max > 0 ? Math.max(3, (v / max) * 46) : 3;
+          var last = i === series.length - 1;
+          sv += '<rect x="' + (i * (bw + gap)) + '" y="' + (46 - hgt) + '" width="' + bw
+            + '" height="' + hgt + '" rx="4" fill="'
+            + (last ? "var(--series-1)" : "var(--track)") + '"/>';
+          sv += '<text x="' + (i * (bw + gap) + bw / 2) + '" y="59" text-anchor="middle" '
+            + 'font-size="10" fill="var(--ink-muted)">' + v + "</text>";
+        });
+        $("streak-hist").innerHTML = sv + "</svg>"
+          + '<div class="nodata" style="margin-top:4px">Streak lengths, oldest first</div>';
+      }
+
+      var br = s.by_routine || {}, dl = "";
+      Object.keys(br).forEach(function (k) {
+        dl += "<dt>" + k + "</dt><dd>" + br[k] + "</dd>";
+        rows.push(["Streak, " + k, br[k]]);
       });
-      $("streak-hist").innerHTML = sv + "</svg>"
-        + '<div class="nodata" style="margin-top:4px">Streak lengths, oldest first</div>';
+      $("streak-rows").innerHTML = dl;
     }
-
-    var br = s.by_routine || {}, dl = "";
-    Object.keys(br).forEach(function (k) {
-      dl += "<dt>" + k + "</dt><dd>" + br[k] + "</dd>";
-      rows.push(["Streak, " + k, br[k]]);
-    });
-    $("streak-rows").innerHTML = dl;
 
     // ---- 3. Cost ----
     var c = d.cost;
