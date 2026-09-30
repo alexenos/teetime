@@ -275,8 +275,7 @@ missed run.
 The upload is one object per row, never overwriting:
 
 ```bash
-python -c "import json,pathlib;d=pathlib.Path('rr');d.mkdir(exist_ok=True);[(d/(r['date']+'.json')).write_text(json.dumps(r)+'
-') for r in map(json.loads,open('operations/ledger/backfill/race-report.jsonl'))]"
+python -c "import json,pathlib;d=pathlib.Path('rr');d.mkdir(exist_ok=True);[(d/(r['date']+'.json')).write_text(json.dumps(r)+'\n') for r in map(json.loads,open('operations/ledger/backfill/race-report.jsonl'))]"
 gcloud storage cp --no-clobber rr/*.json gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/race-report/
 ```
 
