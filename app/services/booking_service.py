@@ -503,7 +503,7 @@ class BookingService:
             # We asked "for which user?" last turn, so the whole message is
             # normally the answer - not a new request. But nothing stops the
             # admin from retyping the entire command instead of just a name
-            # (naturally, after a typo: "for @rongarner book 9/15 at 12:02p").
+            # (naturally, after a typo: "for @friend book 9/15 at 12:02p").
             # split_proxy_target only matches that shape (it requires a
             # leading "for @"), so trying it first and falling back to the
             # raw message keeps a bare name working exactly as before, while
@@ -604,7 +604,7 @@ class BookingService:
         """
         matches = await credential_service.find_by_name_or_telegram_username(target)
 
-        # Verbatim first, the stripped form only as a fallback. "For Ronald" is
+        # Verbatim first, the stripped form only as a fallback. "For Friend" is
         # the natural answer to "reply with their name" and the preposition is
         # not part of the name - but a friend stored as "For Real" has to keep
         # working too, and the order is what makes both true.

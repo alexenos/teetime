@@ -4541,7 +4541,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             if not bookers:
                 slot_text = slot_item.text
-                # Match names like "O'Donnell, Deborah", "mcghee, mike", "Garrett, Steve"
+                # Match names like "O'Hara, Pat", "doe, jane", "Member, Test"
                 # Handles apostrophes, lowercase names, and multi-part first names
                 name_pattern = r"([A-Za-z][A-Za-z']+,\s*[A-Za-z][A-Za-z' ]*)"
                 matches = re.findall(name_pattern, slot_text)
@@ -4555,7 +4555,7 @@ class WaldenGolfProvider(ReservationProvider):
                 for span in spans:
                     span_text = span.text.strip()
                     if span_text and "Available" not in span_text and "Reserve" not in span_text:
-                        # Match names with apostrophes and lowercase (e.g., "O'Donnell,", "mcghee,")
+                        # Match names with apostrophes and lowercase (e.g., "O'Hara,", "doe,")
                         if re.match(r"^[A-Za-z][A-Za-z']+,", span_text):
                             bookers.append(span_text)
 
