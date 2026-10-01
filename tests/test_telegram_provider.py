@@ -97,7 +97,7 @@ class TestVerifyWebhookSecretEncoding:
 class TestSettingsValidation:
     def test_username_rejected_as_allowlist(self) -> None:
         with pytest.raises(ValidationError, match="numeric Telegram user IDs"):
-            Settings(telegram_allowed_user_ids="@alexenos")
+            Settings(telegram_allowed_user_ids="@alex_test")
 
     def test_numeric_list_accepted(self) -> None:
         assert Settings(telegram_allowed_user_ids="1, 2 ,3").telegram_allowed_ids() == {
