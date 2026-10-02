@@ -92,3 +92,37 @@ class TestMain:
     def test_nothing_to_check_against_is_not_a_pass(self, tmp_path: Path) -> None:
         report = _report(tmp_path, "anything\n")
         assert check_report_names.main([str(report)]) == 2
+
+
+class TestReviewFindings:
+    """Each case let a name through before #238's review round."""
+
+    def test_name_wrapped_across_lines(self) -> None:
+        assert check_report_names.find("held by Jane\nDoe at 08:38", {"Jane Doe"}) == [(1, "J~8")]
+
+    def test_bare_name_straight_after_at(self) -> None:
+        assert check_report_names.find("asked for @Bob", {"Bob"}) == [(1, "B~3")]
+
+    def test_unreadable_labels_file_is_not_a_pass(self, tmp_path: Path, artifacts: Path) -> None:
+        labels = tmp_path / "labels.json"
+        labels.write_text("{not json", encoding="utf-8")
+        report = _report(tmp_path, "08:38 was held by Rival 1's foursome.\n")
+        args = [str(report), "--artifacts", str(artifacts), "--labels", str(labels)]
+        assert check_report_names.main(args) == 2
+
+    def test_missing_artifacts_directory_is_not_a_pass(self, tmp_path: Path) -> None:
+        labels = tmp_path / "labels.json"
+        labels.write_text(json.dumps({"people": [{"forms": ["Bob"]}]}), encoding="utf-8")
+        report = _report(tmp_path, "clean\n")
+        args = [str(report), "--artifacts", str(tmp_path / "absent"), "--labels", str(labels)]
+        assert check_report_names.main(args) == 2
+
+    def test_unparseable_sheet_is_not_skipped(
+        self, artifacts: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(_: bytes) -> list[object]:
+            raise ValueError("unparseable")
+
+        monkeypatch.setattr(check_report_names.observer_observations, "parse_sheet", boom)
+        with pytest.raises(check_report_names.SourceError):
+            check_report_names.sheet_names(artifacts)

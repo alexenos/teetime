@@ -24,11 +24,12 @@ letter and length), so this script's own output is safe to paste anywhere.
 
 Usage::
 
-    gcloud secrets versions access latest --secret=MEMBER_PSEUDONYM_LABELS > /tmp/labels.json
+    gcloud secrets versions access latest --secret=MEMBER_PSEUDONYM_LABELS > ~/.teetime/labels.json
     python scripts/check_report_names.py operations/race-reports/2026-10-02.md \\
-        --artifacts ./artifacts --labels /tmp/labels.json
+        --artifacts ./artifacts --labels ~/.teetime/labels.json
 
-Exit status: 0 clean, 1 a forbidden form was found, 2 nothing to check against.
+Exit status: 0 clean, 1 a forbidden form was found, 2 cannot check - a source
+that was asked for could not be read, or there was nothing to check against.
 """
 
 from __future__ import annotations
@@ -64,14 +65,23 @@ def _variants(name: str) -> set[str]:
     return forms
 
 
+class SourceError(Exception):
+    """A source the caller asked for could not be read, so a clean result would be a lie."""
+
+
 def sheet_names(artifacts: Path) -> set[str]:
-    """Every holder and TBD name on every ``*.html`` sheet under ``artifacts``."""
+    """Every holder and TBD name on every ``*.html`` sheet under ``artifacts``.
+
+    A page that is not a tee sheet parses to no slots and adds nothing. A page
+    that cannot be read or parsed at all raises :class:`SourceError` - it may be
+    the morning's sheet, and skipping it would pass every name on it.
+    """
     names: set[str] = set()
     for page in artifacts.rglob("*.html"):
         try:
             slots = observer_observations.parse_sheet(page.read_bytes())
-        except Exception:  # a page that is not a tee sheet has nothing to add
-            continue
+        except Exception as exc:
+            raise SourceError(f"{page}: {exc.__class__.__name__}") from exc
         for slot in slots:
             for name in (*slot.holders, *slot.tbd):
                 names |= _variants(name)
@@ -88,8 +98,11 @@ def label_forms(labels: dict) -> set[str]:
 
 
 def _pattern(form: str) -> re.Pattern[str]:
-    # \b fails before "@", so a handle anchors on "not a word character" instead.
-    return re.compile(rf"(?<![\w@]){re.escape(form)}(?!\w)", re.IGNORECASE)
+    # \b fails before "@", so a handle anchors on "not a word character" instead;
+    # a bare name still matches straight after "@". Any run of whitespace stands
+    # for a space, because Markdown wraps a "First Last" across two lines.
+    body = r"\s+".join(re.escape(word) for word in form.split())
+    return re.compile(rf"(?<!\w){body}(?!\w)", re.IGNORECASE)
 
 
 def _mask(text: str) -> str:
@@ -97,14 +110,17 @@ def _mask(text: str) -> str:
 
 
 def find(text: str, forms: set[str]) -> list[tuple[int, str]]:
-    """``(line number, mask)`` for every occurrence of every form."""
+    """``(line number, mask)`` for every occurrence of every form.
+
+    Searched over the whole text, so a name wrapped across lines is still found;
+    the line is the one the match starts on.
+    """
     hits: list[tuple[int, str]] = []
-    patterns = [_pattern(form) for form in sorted(forms, key=len, reverse=True)]
-    for number, line in enumerate(text.splitlines(), start=1):
-        for pattern in patterns:
-            for match in pattern.finditer(line):
-                hits.append((number, _mask(match.group(0))))
-    return hits
+    for form in sorted(forms, key=len, reverse=True):
+        for match in _pattern(form).finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            hits.append((line, _mask(" ".join(match.group(0).split()))))
+    return sorted(hits)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,19 +130,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--labels", type=Path, help="MEMBER_PSEUDONYM_LABELS JSON")
     args = parser.parse_args(argv)
 
+    # A source that was asked for and could not be read is exit 2, never a
+    # partial check: the forms only it held would pass.
     forms: set[str] = set()
-    if args.artifacts and args.artifacts.is_dir():
-        found = sheet_names(args.artifacts)
-        print(f"{len(found)} name forms from tee sheets under {args.artifacts}")
-        forms |= found
-    if args.labels:
-        try:
-            found = label_forms(json.loads(args.labels.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as exc:
-            print(f"labels file unreadable ({exc.__class__.__name__}); continuing without it")
-        else:
+    try:
+        if args.artifacts:
+            if not args.artifacts.is_dir():
+                raise SourceError(f"{args.artifacts}: not a directory")
+            found = sheet_names(args.artifacts)
+            print(f"{len(found)} name forms from tee sheets under {args.artifacts}")
+            forms |= found
+        if args.labels:
+            try:
+                found = label_forms(json.loads(args.labels.read_text(encoding="utf-8")))
+            except (OSError, ValueError, AttributeError) as exc:
+                raise SourceError(f"{args.labels}: {exc.__class__.__name__}") from exc
             print(f"{len(found)} name forms from {args.labels}")
             forms |= found
+    except SourceError as exc:
+        print(f"cannot check: {exc}")
+        return 2
     if not forms:
         print("nothing to check against: no tee sheets and no labels file")
         return 2

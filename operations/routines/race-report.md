@@ -256,7 +256,7 @@ Write the full report into operations/race-reports/<YYYY-MM-DD>.md, named for th
 
 Then, under the standing authorization at the top of this prompt:
 
-Before committing, run the name check from the skill's §8a: poetry run python scripts/check_report_names.py operations/race-reports/<YYYY-MM-DD>.md --artifacts ./artifacts --labels /tmp/labels.json. Exit 0 is the only pass. On exit 1, replace the named lines with labels and run it again. On exit 2 (nothing to check against), do not commit: write the ledger row with ok:false and a note, and say so in the push notification.
+Before committing, run the name check from the skill's §8a: poetry run python scripts/check_report_names.py operations/race-reports/<YYYY-MM-DD>.md --artifacts ./artifacts --labels ~/.teetime/labels.json. Exit 0 is the only pass. On exit 1, replace the named lines with labels and run it again. On exit 2 (it could not check), do not commit: write the ledger row with ok:false and a note, and say so in the push notification.
 git checkout -b docs/race-report-<YYYY-MM-DD>, add only that one file, commit.
 git push -u origin docs/race-report-<YYYY-MM-DD>.
 Open a normal (non-draft) PR into main, titled to match the morning's outcome - use the existing operations/race-reports/ PRs as a style model. Subscribe to its activity.
