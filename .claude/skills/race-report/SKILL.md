@@ -937,3 +937,56 @@ and what it would settle. But *reading* a response no longer does: anything abou
 how a response is classified is answerable against
 `tests/fixtures/reserve_responses/` in seconds. Check whether the question is
 really about the club's behaviour before spending a morning on it.
+
+## 8a. Naming people: the report is public
+
+The repository is public, and the report is merged with nobody reading it
+first. The logs and tee sheets you read name everyone: the members this bot
+books for, and the club members it races against, who never agreed to appear
+anywhere. Write labels, never names.
+
+**What counts as identifying:** a name in any order (`Last, First` as the sheet
+renders it, `First Last`, a bare first name or surname), a Telegram handle, an
+email, a phone number or chat id, a Walden member number. This applies to the
+report file, the PR title and body, and the commit message. The push
+notification goes only to the maintainer, but use labels there too.
+
+**Where labels come from.** `MEMBER_PSEUDONYM_LABELS` in Secret Manager maps each
+known person's name forms to a label. Read it once per session:
+
+```bash
+gcloud secrets versions access latest --secret=MEMBER_PSEUDONYM_LABELS \
+  --project=gen-lang-client-0822973627 > /tmp/labels.json
+```
+
+- **Members this bot books for** are `member A`, `member B`, … — the same label
+  in every report.
+- **Rivals** are one label per person: `Rival 1`, `Rival 2`, …. A foursome is
+  written as its people ("Rival 1's foursome", "Rivals 1–3"), since groups change
+  week to week and people do not.
+- **Inside a quoted log line or sheet cell**, replace only the name, with the
+  label in angle brackets, and leave the rest verbatim:
+  `` `Member: <member B> is restricted for 1 round(s) on Northgate per Day` ``.
+
+**Someone not in the labels file:** write "an unregistered member" and give the
+sheet's object path and `teeTimeSlots` index, so the maintainer can resolve and
+register them. Do not invent a new `Rival N`: numbers are assigned in the
+private registry (`MEMBER_PSEUDONYM_REGISTRY`, owners only), never in a report.
+If the labels file cannot be read, every person is "an unregistered member"
+with their slot reference. Say so in the report, and carry on.
+
+**Check before you commit**, every time. Run it against the artifacts you
+downloaded in §4, which include the morning's tee sheets:
+
+```bash
+poetry run python scripts/check_report_names.py operations/race-reports/<YYYY-MM-DD>.md \
+  --artifacts ./artifacts --labels /tmp/labels.json
+```
+
+It forbids every holder and TBD name on every sheet under `./artifacts`, so it
+catches a rival nobody has registered, plus every form in the labels file. It
+prints line numbers and a mask, never the match. Exit 1 means fix the named
+lines and run it again. Exit 2 means there was nothing to check against (no
+sheets and no labels file). That is not a pass: do not commit, and report it.
+The check knows only the names it was given. A name read from a log and not
+from a sheet or the labels file passes it, so the rule above still applies.
