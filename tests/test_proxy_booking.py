@@ -137,23 +137,23 @@ class TestNormalizeTarget:
 
 
 class TestStripLeadingFor:
-    """Answering "for which user?" with "For Ronald" names Ronald, not "For Ronald"."""
+    """Answering "for which user?" with "For Friend" names Friend, not "For Friend"."""
 
     @pytest.mark.parametrize(
         ("reply", "expected"),
         [
-            ("For Ronald", "Ronald"),
-            ("for ronald", "ronald"),
-            ("FOR @ronald", "@ronald"),
-            ("  for   Ronald  ", "Ronald"),
-            ("for Ron Garner", "Ron Garner"),
+            ("For Friend", "Friend"),
+            ("for friend", "friend"),
+            ("FOR @friend", "@friend"),
+            ("  for   Friend  ", "Friend"),
+            ("for Test Member", "Test Member"),
         ],
     )
     def test_a_restated_preposition_is_dropped(self, reply: str, expected: str) -> None:
         """Case, spacing and a leading "@" all survive; only the "for" goes."""
         assert proxy_booking.strip_leading_for(reply) == expected
 
-    @pytest.mark.parametrize("reply", ["Ronald", "@ronald", "Ron Garner"])
+    @pytest.mark.parametrize("reply", ["Friend", "@friend", "Test Member"])
     def test_a_bare_name_is_untouched(self, reply: str) -> None:
         """A reply that never restated the preposition comes back unchanged."""
         assert proxy_booking.strip_leading_for(reply) == reply
@@ -218,13 +218,13 @@ class TestCredentialLookupByName:
 
     @pytest.mark.asyncio
     async def test_matches_telegram_username(self, credential_service: CredentialService) -> None:
-        await credential_service.set_credentials(ALEX_ID, "m", "pw", telegram_username="@alexenos")
+        await credential_service.set_credentials(ALEX_ID, "m", "pw", telegram_username="@alex_test")
 
-        matches = await credential_service.find_by_name_or_telegram_username("alexenos")
+        matches = await credential_service.find_by_name_or_telegram_username("alex_test")
 
         assert [owner.phone_number for owner in matches] == [ALEX_ID]
         # Stored without the "@" however the admin typed it going in.
-        assert matches[0].telegram_username == "alexenos"
+        assert matches[0].telegram_username == "alex_test"
 
     @pytest.mark.asyncio
     async def test_unknown_target_matches_nothing(
@@ -269,18 +269,18 @@ class TestCredentialLookupByName:
         self, credential_service: CredentialService
     ) -> None:
         await credential_service.set_credentials(
-            ALEX_ID, "m", "pw", name="Alex", telegram_username="alexenos"
+            ALEX_ID, "m", "pw", name="Alex", telegram_username="alex_test"
         )
 
         owner = await credential_service.get_owner(ALEX_ID)
 
         assert owner == CredentialOwner(
-            phone_number=ALEX_ID, name="Alex", telegram_username="alexenos"
+            phone_number=ALEX_ID, name="Alex", telegram_username="alex_test"
         )
         assert owner.display_name == "Alex"
 
     def test_display_name_falls_back_to_handle_then_id(self) -> None:
-        assert CredentialOwner(ALEX_ID, None, "alexenos").display_name == "@alexenos"
+        assert CredentialOwner(ALEX_ID, None, "alex_test").display_name == "@alex_test"
         assert CredentialOwner(ALEX_ID, None, None).display_name == ALEX_ID
 
 
@@ -384,7 +384,7 @@ class TestProxyBookingFlow:
 
     @staticmethod
     def _owner() -> CredentialOwner:
-        return CredentialOwner(phone_number=ALEX_ID, name="Alex", telegram_username="alexenos")
+        return CredentialOwner(phone_number=ALEX_ID, name="Alex", telegram_username="alex_test")
 
     def _patched(self, sessions: _FakeSessions, matches: list[CredentialOwner]):  # type: ignore[no-untyped-def]
         """Patch the three collaborators the proxy flow reaches for."""
@@ -406,7 +406,7 @@ class TestProxyBookingFlow:
             phone_number=ALEX_ID,
             channel="telegram",
             origin_channel_id="-555",
-            requester_handle="@alexenos ",
+            requester_handle="@alex_test ",
         )
         sessions = _FakeSessions(admin, alex)
         db_patch, cred_patch = self._patched(sessions, [self._owner()])
@@ -438,7 +438,7 @@ class TestProxyBookingFlow:
         # Attributed to Alex, and reported back into Alex's own conversation.
         assert create.await_args.args[0] == ALEX_ID
         assert create.await_args.args[2] == "-555"
-        assert create.await_args.kwargs["requester_handle"] == "@alexenos "
+        assert create.await_args.kwargs["requester_handle"] == "@alex_test "
         # And forgotten, so the admin's next booking isn't silently Alex's too.
         assert admin.pending_proxy_target is None
 
@@ -550,7 +550,7 @@ class TestProxyBookingFlow:
     async def test_retyping_the_full_command_while_awaiting_a_target_still_resolves(
         self, service: BookingService, admin_configured: None
     ) -> None:
-        """Regression: seen live on 2026-09-12 with a real "for @rongarner" typo.
+        """Regression: seen live on 2026-09-12 with a real "for @<handle>" typo.
 
         After a failed target the admin is expected to reply with just a name
         - but the natural thing to do after a typo is retype the *whole*
@@ -786,11 +786,11 @@ class TestProxyBookingFlow:
     async def test_answering_with_for_still_names_the_friend(
         self, service: BookingService, admin_configured: None
     ) -> None:
-        """The reported case: "for which user?" answered "For Ronald".
+        """The reported case: "for which user?" answered "For Friend".
 
         The prompt asks for a name, so restating the preposition is the
-        natural reply. Looked up verbatim it folded to "for ronald", matched
-        nobody, and came back as `I don't know who "For Ronald" is` - which
+        natural reply. Looked up verbatim it folded to "for friend", matched
+        nobody, and came back as `I don't know who "For Friend" is` - which
         reads as the friend being unconfigured rather than the word "For"
         being taken as part of his name.
         """
@@ -1050,4 +1050,4 @@ class TestProxyBookingFlow:
         # Not the admin's chat: with no session of Alex's to copy, the result
         # falls back to his private chat rather than the group Dax typed in.
         assert create.await_args.args[2] is None
-        assert create.await_args.kwargs["requester_handle"] == "@alexenos "
+        assert create.await_args.kwargs["requester_handle"] == "@alex_test "

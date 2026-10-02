@@ -92,9 +92,9 @@ def normalize_target(target: str) -> str:
 
 
 # A reply to "for which user?" that restates the preposition the question was
-# asked with. "For Ronald" is the natural answer to "Reply with their name or
+# asked with. "For Friend" is the natural answer to "Reply with their name or
 # Telegram handle", and before this it was looked up verbatim - folding to
-# "for ronald", matching nobody, and reporting `I don't know who "For Ronald"
+# "for friend", matching nobody, and reporting `I don't know who "For Friend"
 # is`, which reads as the friend not being configured rather than the word
 # "For" being part of the name.
 #

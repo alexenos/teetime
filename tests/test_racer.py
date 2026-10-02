@@ -68,31 +68,31 @@ class TestClaimNextDueGroup:
     async def test_claims_one_requesters_group_and_nobody_elses(
         self, database_service: DatabaseService
     ) -> None:
-        await database_service.create_booking(_booking("ron", "8501282320", at=time(12, 8)))
-        await database_service.create_booking(_booking("melissa", "8537795292"))
+        await database_service.create_booking(_booking("bob", "1000000001", at=time(12, 8)))
+        await database_service.create_booking(_booking("alice", "1000000002"))
 
         claimed = await database_service.claim_next_due_group(DUE_BEFORE)
 
-        assert [b.id for b in claimed] == ["ron"]
+        assert [b.id for b in claimed] == ["bob"]
         assert claimed[0].status == BookingStatus.IN_PROGRESS
         assert await _statuses(database_service) == {
-            "ron": BookingStatus.IN_PROGRESS,
-            "melissa": BookingStatus.SCHEDULED,
+            "bob": BookingStatus.IN_PROGRESS,
+            "alice": BookingStatus.SCHEDULED,
         }
 
     @pytest.mark.asyncio
     async def test_each_claim_takes_the_next_group_until_none_are_left(
         self, database_service: DatabaseService
     ) -> None:
-        await database_service.create_booking(_booking("ron", "8501282320"))
-        await database_service.create_booking(_booking("melissa", "8537795292"))
+        await database_service.create_booking(_booking("bob", "1000000001"))
+        await database_service.create_booking(_booking("alice", "1000000002"))
 
         first = await database_service.claim_next_due_group(DUE_BEFORE)
         second = await database_service.claim_next_due_group(DUE_BEFORE)
         third = await database_service.claim_next_due_group(DUE_BEFORE)
 
-        assert [b.id for b in first] == ["ron"]
-        assert [b.id for b in second] == ["melissa"]
+        assert [b.id for b in first] == ["bob"]
+        assert [b.id for b in second] == ["alice"]
         assert third == []
 
     @pytest.mark.asyncio
@@ -100,8 +100,8 @@ class TestClaimNextDueGroup:
         self, database_service: DatabaseService
     ) -> None:
         """One login's work stays in one container - the same grouping as the batch."""
-        await database_service.create_booking(_booking("late", "8501282320", at=time(12, 8)))
-        await database_service.create_booking(_booking("early", "8501282320", at=time(12, 0)))
+        await database_service.create_booking(_booking("late", "1000000001", at=time(12, 8)))
+        await database_service.create_booking(_booking("early", "1000000001", at=time(12, 0)))
 
         claimed = await database_service.claim_next_due_group(DUE_BEFORE)
 
@@ -111,8 +111,8 @@ class TestClaimNextDueGroup:
     async def test_one_requester_on_two_dates_is_two_groups(
         self, database_service: DatabaseService
     ) -> None:
-        await database_service.create_booking(_booking("sat", "8501282320", when=date(2026, 9, 19)))
-        await database_service.create_booking(_booking("sun", "8501282320", when=date(2026, 9, 20)))
+        await database_service.create_booking(_booking("sat", "1000000001", when=date(2026, 9, 19)))
+        await database_service.create_booking(_booking("sun", "1000000001", when=date(2026, 9, 20)))
 
         first = await database_service.claim_next_due_group(DUE_BEFORE)
         second = await database_service.claim_next_due_group(DUE_BEFORE)
@@ -125,10 +125,10 @@ class TestClaimNextDueGroup:
         self, database_service: DatabaseService
     ) -> None:
         await database_service.create_booking(
-            _booking("racing", "8501282320", status=BookingStatus.IN_PROGRESS)
+            _booking("racing", "1000000001", status=BookingStatus.IN_PROGRESS)
         )
         await database_service.create_booking(
-            _booking("cancelled", "8537795292", status=BookingStatus.CANCELLED)
+            _booking("cancelled", "1000000002", status=BookingStatus.CANCELLED)
         )
 
         assert await database_service.claim_next_due_group(DUE_BEFORE) == []
@@ -139,21 +139,21 @@ class TestClaimNextDueGroup:
     ) -> None:
         """The read said the group was free; the update is what actually decides.
 
-        Another task claims Ron's group between this task's read and its
+        Another task claims Bob's group between this task's read and its
         update. The update must move nothing, and the task must go on to the
-        next group rather than racing Ron's booking a second time.
+        next group rather than racing Bob's booking a second time.
         """
-        await database_service.create_booking(_booking("ron", "8501282320"))
-        await database_service.create_booking(_booking("melissa", "8537795292"))
+        await database_service.create_booking(_booking("bob", "1000000001"))
+        await database_service.create_booking(_booking("alice", "1000000002"))
         stale_read = await database_service.get_due_bookings(DUE_BEFORE)
-        assert [b.id for b in await database_service.claim_next_due_group(DUE_BEFORE)] == ["ron"]
+        assert [b.id for b in await database_service.claim_next_due_group(DUE_BEFORE)] == ["bob"]
 
         real_read = database_service.get_due_bookings
         reads = AsyncMock(side_effect=[stale_read, await real_read(DUE_BEFORE)])
         with patch.object(database_service, "get_due_bookings", new=reads):
             claimed = await database_service.claim_next_due_group(DUE_BEFORE)
 
-        assert [b.id for b in claimed] == ["melissa"]
+        assert [b.id for b in claimed] == ["alice"]
         assert reads.await_count == 2
 
     @pytest.mark.asyncio
@@ -163,9 +163,9 @@ class TestClaimNextDueGroup:
         """A booking for the same requester and date, committed between the claim's
         read and its update, must not be left SCHEDULED for a second task to race
         concurrently under the same login."""
-        await database_service.create_booking(_booking("first", "8501282320"))
+        await database_service.create_booking(_booking("first", "1000000001"))
         read_before_insert = await database_service.get_due_bookings(DUE_BEFORE)
-        await database_service.create_booking(_booking("second", "8501282320", at=time(12, 8)))
+        await database_service.create_booking(_booking("second", "1000000001", at=time(12, 8)))
 
         with patch.object(
             database_service,
@@ -182,15 +182,15 @@ class TestClaimNextDueGroup:
     async def test_concurrent_claims_never_share_a_group(
         self, database_service: DatabaseService
     ) -> None:
-        await database_service.create_booking(_booking("ron", "8501282320"))
-        await database_service.create_booking(_booking("melissa", "8537795292"))
+        await database_service.create_booking(_booking("bob", "1000000001"))
+        await database_service.create_booking(_booking("alice", "1000000002"))
 
         results = await asyncio.gather(
             *(database_service.claim_next_due_group(DUE_BEFORE) for _ in range(3))
         )
 
         claimed_ids = sorted(b.id or "" for group in results for b in group)
-        assert claimed_ids == ["melissa", "ron"]
+        assert claimed_ids == ["alice", "bob"]
         assert sum(1 for group in results if not group) == 1
 
     @pytest.mark.asyncio
@@ -199,9 +199,9 @@ class TestClaimNextDueGroup:
     ) -> None:
         """An empty answer would mean "nothing to race" while a booking is still due."""
         await database_service.create_booking(
-            _booking("gone", "8501282320", status=BookingStatus.CANCELLED)
+            _booking("gone", "1000000001", status=BookingStatus.CANCELLED)
         )
-        phantom = [_booking("gone", "8501282320")]
+        phantom = [_booking("gone", "1000000001")]
         with (
             patch.object(database_service, "get_due_bookings", new=AsyncMock(return_value=phantom)),
             pytest.raises(RuntimeError, match="Could not claim"),
@@ -276,12 +276,12 @@ class _RaceHarness:
             p.stop()
 
 
-def _ron() -> TeeTimeBooking:
-    return _booking("ron", "8501282320", status=BookingStatus.IN_PROGRESS)
+def _bob() -> TeeTimeBooking:
+    return _booking("bob", "1000000001", status=BookingStatus.IN_PROGRESS)
 
 
-def _melissa() -> TeeTimeBooking:
-    return _booking("melissa", "8537795292", status=BookingStatus.IN_PROGRESS)
+def _alice() -> TeeTimeBooking:
+    return _booking("alice", "1000000002", status=BookingStatus.IN_PROGRESS)
 
 
 class TestRace:
@@ -296,7 +296,7 @@ class TestRace:
 
     @pytest.mark.asyncio
     async def test_races_the_claimed_group_at_the_window_after_holding_to_0628(self) -> None:
-        claimed = [_ron()]
+        claimed = [_bob()]
         with _RaceHarness(claims=[claimed], now=_at(6, 27)) as h:
             assert await racer_run.race() is True
 
@@ -310,7 +310,7 @@ class TestRace:
     async def test_a_late_start_races_at_once_and_says_so(self, caplog: Any) -> None:
         with (
             caplog.at_level(logging.ERROR, logger="app.racer.run"),
-            _RaceHarness(claims=[[_ron()]], now=_at(6, 28, 30)) as h,
+            _RaceHarness(claims=[[_bob()]], now=_at(6, 28, 30)) as h,
         ):
             assert await racer_run.race() is True
 
@@ -321,14 +321,14 @@ class TestRace:
     @pytest.mark.asyncio
     async def test_a_refused_booking_is_not_a_failed_task(self) -> None:
         """The member has been told; a red task per lost slot would bury real breakage."""
-        with _RaceHarness(claims=[[_melissa()]], now=_at(6, 27)) as h:
+        with _RaceHarness(claims=[[_alice()]], now=_at(6, 27)) as h:
             h.run.return_value = _result(succeeded=0, failed=1)
             assert await racer_run.race() is True
 
     @pytest.mark.asyncio
     async def test_a_failure_around_the_race_still_tells_the_members(self) -> None:
         """Claimed rows belong to this task alone - if it goes quiet, nobody reports them."""
-        claimed = [_ron()]
+        claimed = [_bob()]
         with _RaceHarness(claims=[claimed], now=_at(6, 27)) as h:
             h.install.side_effect = RuntimeError("no provider")
             assert await racer_run.race() is False
@@ -345,7 +345,7 @@ class TestTaskBudget:
         """Five bookings would be 1500s at 300s each - past Cloud Run's task timeout,
         which would kill the container before the timeout branch messages anyone."""
         group = [
-            _booking(f"b{i}", "8501282320", status=BookingStatus.IN_PROGRESS) for i in range(5)
+            _booking(f"b{i}", "1000000001", status=BookingStatus.IN_PROGRESS) for i in range(5)
         ]
         with _RaceHarness(claims=[group], now=_at(6, 27)) as h:
             h.clock.side_effect = [0.0, 150.0]
@@ -355,7 +355,7 @@ class TestTaskBudget:
 
     @pytest.mark.asyncio
     async def test_a_small_groups_timeout_is_the_usual_per_booking_allowance(self) -> None:
-        with _RaceHarness(claims=[[_ron()]], now=_at(6, 27)) as h:
+        with _RaceHarness(claims=[[_bob()]], now=_at(6, 27)) as h:
             await racer_run.race()
 
         assert h.run.await_args.kwargs["timeout_s"] == 300
@@ -375,7 +375,7 @@ class TestLeftoverGroups:
     async def test_a_group_nobody_claimed_is_raced_late_after_this_tasks_own(
         self, caplog: Any
     ) -> None:
-        own, leftover = [_ron()], [_melissa()]
+        own, leftover = [_bob()], [_alice()]
         with (
             caplog.at_level(logging.ERROR, logger="app.racer.run"),
             _RaceHarness(claims=[own, leftover], now=_at(6, 27)) as h,
@@ -389,7 +389,7 @@ class TestLeftoverGroups:
 
     @pytest.mark.asyncio
     async def test_a_leftover_there_is_no_time_to_race_is_reported_not_stranded(self) -> None:
-        own, leftover = [_ron()], [_melissa()]
+        own, leftover = [_bob()], [_alice()]
         with _RaceHarness(claims=[own, leftover], now=_at(6, 27)) as h:
             # started, first race, then the leftover check with 1000s gone
             h.clock.side_effect = [0.0, 0.0, 1000.0]
@@ -400,7 +400,7 @@ class TestLeftoverGroups:
 
     @pytest.mark.asyncio
     async def test_a_failure_in_a_late_race_is_reported_and_fails_the_task(self) -> None:
-        own, leftover = [_ron()], [_melissa()]
+        own, leftover = [_bob()], [_alice()]
         with _RaceHarness(claims=[own, leftover], now=_at(6, 27)) as h:
             h.run.side_effect = [_result(), RuntimeError("browser died")]
             assert await racer_run.race() is False
