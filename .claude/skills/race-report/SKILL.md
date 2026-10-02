@@ -963,7 +963,7 @@ install -d -m 700 ~/.teetime && (umask 077; gcloud secrets versions access lates
 
 Delete it once the check below has passed: `rm -f ~/.teetime/labels.json`.
 
-- **Members this bot books for** are `member A`, `member B`, … — the same label
+- **Members this bot books for** are `Member A`, `Member B`, … — the same label
   in every report.
 - **Rivals** are one label per person: `Rival 1`, `Rival 2`, …. A foursome is
   written as its people ("Rival 1's foursome", "Rivals 1–3"), since groups change
@@ -971,7 +971,7 @@ Delete it once the check below has passed: `rm -f ~/.teetime/labels.json`.
 - **Inside a quoted log line or sheet cell**, replace the name with the label in
   angle brackets, redact every other identifier above the same way (`<handle>`,
   `<member number>`), and leave the rest verbatim:
-  `` `Member: <member B> is restricted for 1 round(s) on Northgate per Day` ``.
+  `` `Member: <Member B> is restricted for 1 round(s) on Northgate per Day` ``.
 
 **Someone not in the labels file:** write "an unregistered member" and give the
 sheet's object path and `teeTimeSlots` index, so the maintainer can resolve and
