@@ -164,6 +164,79 @@ commands, each one shown with the tag. In a private chat, where there is no
 addressing to get wrong, the same reply shows the examples untagged. The Discord
 gateway answers a bare `@mention` the same way.
 
+## Members group (who may use the bot)
+
+Anyone in the members' Telegram group may use the bot, as well as anyone in
+`TELEGRAM_ALLOWED_USER_IDS` (issue #239). Letting a member in means approving
+their request to join the group. There is no secret version to add and nothing
+to redeploy, and you never need their numeric ID.
+
+Leaving the group, or being removed from it, is offboarding. The bot cancels
+the person's pending bookings, deletes their stored Walden login, and tells
+both them and the admin. A tee time already reserved at the club is left
+alone. Someone who is also on the allowlist keeps access after leaving, so
+nothing of theirs is deleted; the admin is told instead.
+
+Membership is checked with `getChatMember` and cached for up to five minutes.
+A failed check refuses the message and is not cached.
+
+### One-time setup
+
+Do the Telegram steps first and **read the chat ID last**. Turning on join
+requests can convert the group to a supergroup, and the conversion gives it a
+new ID.
+
+1. **Create the group** in Telegram, and add the bot to it.
+2. **Make the bot an admin** of the group. Telegram sends `chat_member` updates
+   (joins and leaves) only to admins, and offboarding depends on them. The bot
+   needs no admin rights beyond the role itself.
+3. **Stop members from adding people.** Under the group's permissions, turn
+   off "Add members" for regular members. Otherwise anyone in the group can
+   let anyone else in.
+4. **Create an invite link** with "Request admin approval" on. That link is
+   what you send a new member. Approving the request is the step that gives
+   them access.
+5. **Read the chat ID.** From an allowlisted account, tag the bot in the group
+   with any request, then read the ID out of the service's log line:
+
+   ```bash
+   gcloud logging read 'resource.type="cloud_run_revision" AND textPayload:"Telegram message received"' \
+     --limit=5 --format="value(timestamp,textPayload)" --freshness=1h
+   ```
+
+   The line reads `Telegram message received from <user> in chat <id>`. The
+   group's ID is the negative number, for a supergroup usually starting with
+   `-100`.
+6. **Add the secret version:**
+
+   ```bash
+   printf '%s' "<chat id>" | gcloud secrets versions add TELEGRAM_MEMBERS_CHAT_ID --data-file=- --project=$PROJECT_ID
+   ```
+
+   Terraform creates the secret empty the first time it applies this change,
+   so this step comes after that merge.
+7. **Turn it on.** Change the default of `telegram_group_access_enabled` to
+   `true` in `terraform/variables.tf`, and merge. With the group configured,
+   webhook registration asks Telegram for `chat_member` updates as well as
+   messages.
+
+### Checking it works
+
+Have a second account request to join, then approve it. The bot should
+welcome that account in the group with a link to a private chat, and the
+account should then be able to message the bot.
+
+Remove the account again. Both the account and the admin should get an
+offboarding message.
+
+**If no welcome appears, the bot is not receiving `chat_member` updates.**
+Check that it is an admin. Without those updates, a newly approved member is
+still authorized within a minute, because the membership check asks Telegram
+directly. A removed member, though, keeps access for up to five minutes, and
+**their scheduled bookings and stored login are not cleaned up**. Until that is
+fixed, offboard by hand: cancel their bookings and run
+`scripts/add_walden_credential.py remove <telegram user id>`.
+
 ## Booking for someone else (admin proxy)
 
 One designated Telegram account can book under a *specific friend's* Walden

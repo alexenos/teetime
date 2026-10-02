@@ -159,6 +159,10 @@ echo -n "your_user_id"   | gcloud secrets versions add DISCORD_USER_ID --data-fi
 echo -n "your_bot_token"     | gcloud secrets versions add TELEGRAM_BOT_TOKEN --data-file=-
 echo -n "your_user_id"       | gcloud secrets versions add TELEGRAM_ALLOWED_USER_IDS --data-file=-
 echo -n "your_webhook_secret"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECRET --data-file=-
+# Optional: anyone in this Telegram group may also use the bot
+# (telegram_group_access_enabled = true, issue #239). See "Members group" in
+# operations/telegram-setup.md for the group's setup and how to read its ID.
+echo -n "your_group_chat_id" | gcloud secrets versions add TELEGRAM_MEMBERS_CHAT_ID --data-file=-
 
 # Per-friend Walden credential store (credential_store_enabled = true, issue #179).
 # Encrypts friends' own Walden logins at rest in the DB; the single global
