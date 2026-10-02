@@ -119,6 +119,7 @@ on record has approached it.
 | 2026-08-20 | Created. Report-only: no commits, no branches, no PRs. Ended by asking which PR to open. |
 | 2026-09-22 | Renamed to "Morning Race Report", and given standing authorization to commit, open and merge the report PR. The repository-side rename landed the same day in #221 (06:40 CT); the Routine was edited at 14:58 CT to match. The two are separate edits — nothing links them but the date. |
 | 2026-09-29 | Prompt rewritten here to write a ledger row on every path and to drop the `_RESERVE_TIMEOUT_S` escalation line. **Pending application to the trigger.** |
+| 2026-10-02 | Naming rule and pre-commit name check added (skill §8a). **Pending application to the trigger**, together with the 09-29 changes. |
 
 ## The prompt
 
@@ -146,6 +147,14 @@ and stating that no threshold worth acting on is established.
 exists in Secret Manager, so there is nothing to compute. The prompt says so, and
 says not to substitute anything identifying — this repository and the scoreboard
 page built from these rows are both public.
+
+**A naming rule, and a check before the commit (2026-10-02).** The report is
+public and merges unread, and it is written from logs and tee sheets that name
+everyone. Five reports already carried member names, handles, a member number
+and three rivals' names (#236). The prompt now requires labels (`member A`,
+`Rival 1`), read from `MEMBER_PSEUDONYM_LABELS`, and requires
+`scripts/check_report_names.py` to pass before Step 5 commits. The rule lives in
+the skill's §8a; the prompt points at it and makes the check a gate.
 
 **The cron is unchanged**, deliberately. `40 11 * * *` is correct until
 2026-11-01; changing it now would make the Routine fire at 07:40 CT, an hour
@@ -198,6 +207,9 @@ This matters most on the paths that stop early. A morning with no row is indisti
 
 If the ledger write fails, say so in the push notification and carry on to send it. One retry, then report the failure rather than losing the notification.
 
+Rule that applies to every path through this prompt: no names
+The report, the PR title and body, and the commit message are public. Never write a person's name (in any order, or a bare first name or surname), a Telegram handle, an email, a phone number or chat id, or a member number. Use the labels from MEMBER_PSEUDONYM_LABELS in Secret Manager: member A, member B for the people this bot books for, and Rival 1, Rival 2 for anyone else. Write "an unregistered member" plus the sheet path and slot index for anyone not in it, and never invent a new number. The skill's §8a has the details and the command that reads the labels. Use labels in the push notification too.
+
 Step 1 - name the session, then set it up
 Before anything else can fail, establish today's date in Central Time:
 
@@ -244,6 +256,7 @@ Write the full report into operations/race-reports/<YYYY-MM-DD>.md, named for th
 
 Then, under the standing authorization at the top of this prompt:
 
+Before committing, run the name check from the skill's §8a: poetry run python scripts/check_report_names.py operations/race-reports/<YYYY-MM-DD>.md --artifacts ./artifacts --labels ~/.teetime/labels.json. Exit 0 is the only pass. On exit 1, replace the named lines with labels and run it again. On exit 2 (it could not check), do not commit: write the ledger row with ok:false and a note, and say so in the push notification.
 git checkout -b docs/race-report-<YYYY-MM-DD>, add only that one file, commit.
 git push -u origin docs/race-report-<YYYY-MM-DD>.
 Open a normal (non-draft) PR into main, titled to match the morning's outcome - use the existing operations/race-reports/ PRs as a style model. Subscribe to its activity.
