@@ -365,6 +365,23 @@ class TestLeave:
             "no Walden login was stored."
         )
 
+    async def test_cancel_loses_to_a_racer_that_already_claimed(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """A row the racer moved to IN_PROGRESS after it was read stays IN_PROGRESS."""
+        _sent(monkeypatch)
+        await database_service.create_booking(_booking("schd0001", BookingStatus.SCHEDULED))
+        stale = await database_service.get_booking("schd0001")
+        assert stale is not None and stale.status == BookingStatus.SCHEDULED
+
+        # The racer's claim commits between offboard's read and its cancel.
+        claimed = stale.model_copy(update={"status": BookingStatus.IN_PROGRESS})
+        await database_service.update_booking(claimed)
+
+        assert await database_service.cancel_pending_booking("schd0001") is None
+        current = await database_service.get_booking("schd0001")
+        assert current is not None and current.status == BookingStatus.IN_PROGRESS
+
     async def test_allowlisted_leaver_keeps_everything(
         self, monkeypatch: pytest.MonkeyPatch, test_db: None
     ) -> None:
@@ -463,23 +480,27 @@ class TestWebhookRoute:
         assert resp.json() == {"status": "ok"}
         assert len(sent) == 1
 
-    def test_chat_member_failure_still_answers_200(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    def test_chat_member_failure_answers_500_so_telegram_retries(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-2xx would have Telegram redeliver it; a retry fixes no bug."""
+        """An acknowledged failure would leave a departed member's bookings live."""
+        from fastapi import FastAPI
+
         from app.api import webhooks
 
         async def boom(update):  # type: ignore[no-untyped-def]
             raise RuntimeError("database down")
 
+        monkeypatch.setattr(settings, "telegram_webhook_secret", "s3cret")
         monkeypatch.setattr(webhooks, "handle_chat_member_update", boom)
-        resp = client.post(
+        app = FastAPI()
+        app.include_router(webhooks.router)
+        resp = TestClient(app, raise_server_exceptions=False).post(
             "/webhooks/telegram",
             json={"update_id": 3, "chat_member": _chat_member_update("member", "left")},
             headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"},
         )
-        assert resp.status_code == 200
-        assert resp.json() == {"status": "error"}
+        assert resp.status_code == 500
 
     def test_chat_member_update_needs_the_secret(self, client: TestClient) -> None:
         resp = client.post(

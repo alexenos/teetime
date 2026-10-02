@@ -132,16 +132,18 @@ async def handle_telegram_update(
 
     # Someone joined or left the members group (issue #239). Only requested
     # when that group is configured, and only delivered because the bot is an
-    # admin there. Answered 200 even on failure: Telegram would otherwise
-    # redeliver it, and an exception here is a bug to read in the logs, not a
-    # transient condition a retry would fix.
+    # admin there. A failure answers 500 so Telegram redelivers it: offboarding
+    # is safe to repeat, and an acknowledged failure would leave a departed
+    # member's bookings scheduled and their login stored.
     chat_member = update.get("chat_member")
     if isinstance(chat_member, dict):
         try:
             return {"status": await handle_chat_member_update(chat_member)}
-        except Exception:
+        except Exception as exc:
             logger.exception("Error handling Telegram chat_member update")
-            return {"status": "error"}
+            raise HTTPException(
+                status_code=500, detail="Telegram chat_member update failed"
+            ) from exc
 
     message = update.get("message") or {}
     sender = message.get("from") or {}
