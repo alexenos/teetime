@@ -139,47 +139,56 @@ async def handle_chat_member_update(update: dict[str, object]) -> str:
 
     was_member = is_member_status(old)
     is_member = is_member_status(new)
+    if was_member == is_member:
+        # A promotion, a restriction, a title change. Nothing to act on, and
+        # nothing cached either: a late one could otherwise re-authorize
+        # someone whose leave was already processed.
+        return "ignored"
 
-    if not was_member and is_member:
-        record_membership(user_id, True)
+    # Updates can arrive late and out of order: a failed one is redelivered
+    # (the webhook answers 500 so offboarding is retried), and by then the
+    # person may have left or rejoined. So each one is checked against what
+    # Telegram says right now before it is acted on or cached.
+    current = await _current_membership(members_chat, user_id)
+
+    if is_member:
+        if current is False:
+            logger.info(
+                f"Ignoring a stale join update for Telegram user {user_id}: not in the group now"
+            )
+            record_membership(user_id, False)
+            return "ignored"
+        if current is True:
+            record_membership(user_id, True)
+        # Unknown: welcome them, but cache nothing. The next message asks
+        # Telegram again rather than trusting an unconfirmed join.
         await _welcome(members_chat, user)
         return "ok"
-    if was_member and not is_member:
-        if await _rejoined_since(members_chat, user_id):
-            return "ignored"
-        record_membership(user_id, False)
-        await offboard(user)
-        return "ok"
-    record_membership(user_id, is_member)
-    return "ignored"
+
+    if current is True:
+        logger.info(
+            f"Ignoring a stale leave update for Telegram user {user_id}: in the group again"
+        )
+        record_membership(user_id, True)
+        return "ignored"
+    # False or unknown: offboard. The update says they left, and keeping a
+    # departed member's login is the worse mistake.
+    record_membership(user_id, False)
+    await offboard(user)
+    return "ok"
 
 
-async def _rejoined_since(chat_id: str, user_id: str) -> bool:
-    """Whether Telegram says this user is in the group right now.
+async def _current_membership(chat_id: str, user_id: str) -> bool | None:
+    """What Telegram says about this user's membership right now, bypassing the cache.
 
-    A leave update can arrive late: a failed one is redelivered (the webhook
-    answers 500 so that offboarding is retried), and by then the member may
-    have rejoined. Offboarding them on the strength of the stale update would
-    delete the login of someone who is back. So ask Telegram directly, without
-    the cache, before deleting anything.
-
-    Only a definite "is a member" stops offboarding. A lookup that fails lets
-    it proceed: the update itself says they left, and keeping the login of a
-    departed member is the worse mistake.
+    None when Telegram could not be asked.
     """
     try:
         member = await TelegramProvider().get_chat_member(chat_id, user_id)
     except ChatMemberLookupError as exc:
-        logger.warning(f"Could not re-check {user_id} before offboarding ({exc}); proceeding")
-        return False
-    if member is not None and is_member_status(member):
-        logger.info(
-            f"Ignoring a stale leave update for Telegram user {user_id}: "
-            "they are in the members group again"
-        )
-        record_membership(user_id, True)
-        return True
-    return False
+        logger.warning(f"Could not re-check members-group membership for {user_id}: {exc}")
+        return None
+    return member is not None and is_member_status(member)
 
 
 async def _welcome(chat_id: str, user: dict[str, object]) -> None:

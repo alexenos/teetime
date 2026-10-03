@@ -211,6 +211,11 @@ def _chat_member_update(old: str, new: str, chat_id: str = GROUP, user_id: int =
 
 
 class TestJoin:
+    @pytest.fixture(autouse=True)
+    def _telegram_says_they_joined(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A join is re-checked live; by default Telegram agrees they are in."""
+        _patch_lookup(monkeypatch, {"status": "member"})
+
     async def test_welcomes_in_the_group_with_a_deep_link(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -234,10 +239,59 @@ class TestJoin:
         _patch_lookup(monkeypatch, {"status": "left"})
         assert await telegram_members.is_authorized(MEMBER, is_bot=False) is False
 
+        _patch_lookup(monkeypatch, {"status": "member"})
         await telegram_members.handle_chat_member_update(_chat_member_update("left", "member"))
 
-        calls = _patch_lookup(monkeypatch, AssertionError("should answer from the update"))
+        calls = _patch_lookup(monkeypatch, AssertionError("should answer from the cache"))
         assert await telegram_members.is_authorized(MEMBER, is_bot=False) is True
+        assert calls == []
+
+    async def test_stale_join_after_leaving_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A late join must not re-authorize someone whose leave was processed."""
+        sent = _sent(monkeypatch)
+        _patch_lookup(monkeypatch, {"status": "left"})
+
+        status = await telegram_members.handle_chat_member_update(
+            _chat_member_update("left", "member")
+        )
+
+        assert status == "ignored"
+        assert sent == []
+        calls = _patch_lookup(monkeypatch, AssertionError("should answer from the cache"))
+        assert await telegram_members.is_authorized(MEMBER, is_bot=False) is False
+        assert calls == []
+
+    async def test_unconfirmed_join_is_welcomed_but_not_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent = _sent(monkeypatch)
+        _patch_lookup(monkeypatch, ChatMemberLookupError("HTTP 502"))
+
+        status = await telegram_members.handle_chat_member_update(
+            _chat_member_update("left", "member")
+        )
+
+        assert status == "ok"
+        assert len(sent) == 1
+        calls = _patch_lookup(monkeypatch, {"status": "member"})
+        assert await telegram_members.is_authorized(MEMBER, is_bot=False) is True
+        assert len(calls) == 1
+
+    async def test_late_promotion_does_not_reauthorize(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """member -> administrator says nothing about now; it must not be cached."""
+        _sent(monkeypatch)
+        telegram_members.record_membership(MEMBER, False)
+
+        await telegram_members.handle_chat_member_update(
+            _chat_member_update("member", "administrator")
+        )
+
+        calls = _patch_lookup(monkeypatch, AssertionError("should answer from the cache"))
+        assert await telegram_members.is_authorized(MEMBER, is_bot=False) is False
         assert calls == []
 
     async def test_other_chat_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -510,6 +564,7 @@ class TestWebhookRoute:
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sent = _sent(monkeypatch)
+        _patch_lookup(monkeypatch, {"status": "member"})
         resp = client.post(
             "/webhooks/telegram",
             json={"update_id": 3, "chat_member": _chat_member_update("left", "member")},
