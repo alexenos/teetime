@@ -181,20 +181,56 @@ def addressee_prefix(sender: dict[str, object]) -> str:
 
 
 def is_authorized_user(user_id: str, is_bot: bool) -> bool:
-    """Decide whether an incoming Telegram update should be processed.
+    """Decide whether this user is on the static allowlist.
 
     Mirrors the Discord allowlist: only the configured user IDs are handled,
     wherever the bot can see them, and an empty allowlist authorizes no one.
     The webhook is a public URL whose only other protection is the shared
     secret, so this must fail closed.
+
+    This is half of the inbound check. The other half is membership of the
+    members group (issue #239), which needs a Telegram API call and so lives in
+    app/services/telegram_members.is_authorized - the function the webhook
+    actually calls.
     """
     if is_bot:
         return False
     allowed = settings.telegram_allowed_ids()
     if not allowed:
-        logger.warning("TELEGRAM_ALLOWED_USER_IDS not configured; ignoring update from %s", user_id)
+        # An empty allowlist is the expected steady state once the members
+        # group is the way in, so it is only worth a warning without one.
+        if not settings.telegram_members_chat():
+            logger.warning(
+                "TELEGRAM_ALLOWED_USER_IDS not configured; ignoring update from %s", user_id
+            )
         return False
     return user_id in allowed
+
+
+class ChatMemberLookupError(RuntimeError):
+    """getChatMember gave no definitive answer: a network error, a timeout, or
+    a response other than "here is the member" or "no such member".
+
+    Kept distinct from a "not a member" answer so the caller can fail closed
+    without caching the refusal - an outage must not lock a real member out
+    for longer than it lasts.
+    """
+
+
+def is_member_status(member: dict[str, object]) -> bool:
+    """Whether a Bot API ChatMember object describes someone currently in the chat.
+
+    "restricted" covers both a muted member who is still in the group and a
+    restriction left behind on someone who has gone - Telegram says which with
+    is_member. "left" and "kicked" are out; anything unrecognised is treated as
+    out too, since this decides who may book.
+    """
+    status = member.get("status")
+    if status in ("creator", "administrator", "member"):
+        return True
+    if status == "restricted":
+        return member.get("is_member") is True
+    return False
 
 
 def verify_webhook_secret(header_value: str | None) -> bool:
@@ -363,6 +399,41 @@ class TelegramProvider(SMSProvider):
         )
         return False
 
+    async def get_chat_member(self, chat_id: str, user_id: str) -> dict[str, object] | None:
+        """This user's ChatMember object in chat_id, or None if Telegram has none.
+
+        None means Telegram answered and the user is not someone it knows in
+        that chat - a 400 such as "user not found" or "PARTICIPANT_ID_INVALID",
+        which getChatMember returns for a user who was never in the group.
+        Every other failure raises ChatMemberLookupError, because "could not
+        tell" must not be confused with "not a member" (see that class).
+        """
+        if not settings.telegram_bot_token:
+            raise ChatMemberLookupError("TELEGRAM_BOT_TOKEN is not configured")
+        try:
+            numeric_user_id = int(user_id)
+        except ValueError:
+            return None
+        try:
+            async with self._client() as client:
+                resp = await client.post(
+                    "/getChatMember", json={"chat_id": chat_id, "user_id": numeric_user_id}
+                )
+                if resp.status_code == 400:
+                    return None
+                resp.raise_for_status()
+                result = resp.json()["result"]
+        except httpx.HTTPStatusError as exc:
+            # Status only: the request URL carries the bot token.
+            raise ChatMemberLookupError(
+                f"getChatMember failed: HTTP {exc.response.status_code}"
+            ) from None
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            raise ChatMemberLookupError(f"getChatMember failed: {type(exc).__name__}") from None
+        if not isinstance(result, dict):
+            raise ChatMemberLookupError("getChatMember returned an unexpected shape")
+        return result
+
     async def get_bot_username(self) -> str | None:
         """This bot's @username, from getMe, cached for the process.
 
@@ -396,9 +467,10 @@ class TelegramProvider(SMSProvider):
 
         Idempotent, and re-run on every startup so a changed service URL heals
         itself rather than leaving the bot silently pointed at a dead endpoint.
-        Only "message" updates are requested; the bot has no use for the edits,
-        reactions and membership changes Telegram would otherwise deliver, and
-        each one would be an unnecessary wake-up for a scale-to-zero service.
+        Only "message" updates are requested, plus "chat_member" when a members
+        group is configured; the bot has no use for the edits and reactions
+        Telegram would otherwise deliver, and each one would be an unnecessary
+        wake-up for a scale-to-zero service.
 
         Returns True when the webhook is registered, False when it is not -
         including when it is deliberately not attempted, since a missing base
@@ -420,6 +492,14 @@ class TelegramProvider(SMSProvider):
             return False
 
         url = f"{settings.telegram_webhook_base_url.rstrip('/')}{WEBHOOK_PATH}"
+        # chat_member updates are how the bot learns someone joined or left the
+        # members group (issue #239). Requested only when that group is
+        # configured: Telegram delivers them only for chats where the bot is an
+        # admin, and joins and leaves are rare, so they add no meaningful
+        # wake-ups - but with group access off there is nothing to do with them.
+        allowed_updates = ["message"]
+        if settings.telegram_members_chat():
+            allowed_updates.append("chat_member")
         try:
             async with self._client() as client:
                 resp = await client.post(
@@ -427,7 +507,7 @@ class TelegramProvider(SMSProvider):
                     json={
                         "url": url,
                         "secret_token": settings.telegram_webhook_secret,
-                        "allowed_updates": ["message"],
+                        "allowed_updates": allowed_updates,
                     },
                 )
                 resp.raise_for_status()

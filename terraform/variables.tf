@@ -209,6 +209,31 @@ variable "credential_store_enabled" {
   default     = true
 }
 
+variable "telegram_group_access_enabled" {
+  description = <<-EOT
+    Expose TELEGRAM_MEMBERS_CHAT_ID to the running service, so that anyone in
+    the members' Telegram group may use the bot (issue #239), in addition to
+    TELEGRAM_ALLOWED_USER_IDS.
+
+    On: letting a member in is approving their request to join the group - no
+    allowlist version, no redeploy. Leaving the group, or being removed, cancels
+    their pending bookings and deletes their stored Walden login.
+
+    REQUIRES telegram_enabled = true (enforced by a precondition on the Cloud
+    Run service).
+
+    Ordering matters for the same mechanical reason as credential_store_enabled
+    and admin_proxy_enabled: Terraform creates the secret empty, and a Cloud Run
+    revision referencing a secret with no version fails to deploy. Set up the
+    group and add the TELEGRAM_MEMBERS_CHAT_ID version BEFORE setting this to
+    true - see "Members group" in operations/telegram-setup.md.
+
+    Off, the allowlist is the only way in, exactly as before.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "admin_proxy_enabled" {
   description = <<-EOT
     Expose TELEGRAM_ADMIN_USER_ID to the running service, letting one

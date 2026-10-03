@@ -268,12 +268,13 @@ class TestBookingServiceBookings:
         """Test cancelling a scheduled booking."""
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_booking = AsyncMock(return_value=sample_booking)
-
-            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
-                return booking
-
-            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+            cancelled = sample_booking.model_copy(update={"status": BookingStatus.CANCELLED})
+            # The status change is a conditional UPDATE now, not update_booking
+            # on the row that was read - see cancel_pending_booking.
+            mock_db.cancel_pending_booking = AsyncMock(return_value=cancelled)
             result = await booking_service.cancel_booking(sample_booking.id)
+            mock_db.cancel_pending_booking.assert_awaited_once_with(sample_booking.id)
+            mock_db.update_booking.assert_not_called()
             assert result is not None
             assert result.status == BookingStatus.CANCELLED
 

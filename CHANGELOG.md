@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Anyone in the members' Telegram group can use the bot (#239).** Before
+  this, adding a member took a new version of the `TELEGRAM_ALLOWED_USER_IDS`
+  secret and a redeploy. Now the bot also accepts anyone currently in the group
+  named by `TELEGRAM_MEMBERS_CHAT_ID`, so letting someone in is approving their
+  request to join. The allowlist still works alongside it.
+
+  A new member is welcomed in the group with a link to a private chat with the
+  bot. When someone leaves, or is removed, their pending bookings are cancelled
+  and their stored Walden login is deleted, and both they and the admin are
+  told. Tee times already reserved at the club are left alone, and an
+  allowlisted person keeps everything.
+
+  Off by default (`telegram_group_access_enabled`). To turn it on, follow
+  "Members group" in `operations/telegram-setup.md`: the group has to exist,
+  with the bot as an admin, and the secret needs a version first. Not yet
+  verified against a real group: that Telegram delivers the join and leave
+  updates offboarding depends on. The setup doc says how to check, and what
+  to do by hand if they don't arrive.
+
 - **A booking request is checked against the date's real tee sheet before it
   is scheduled (#216).** A member could ask for 8:00 on a day whose sheet has
   no 8:00 - Tuesdays run 07:54, 08:02, 08:10 - be told the booking was

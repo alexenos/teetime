@@ -516,11 +516,13 @@ class TestBookingsEndpointsIntegration:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_booking = AsyncMock(return_value=created_booking)
-
-            async def update_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
-                return booking
-
-            mock_db.update_booking = AsyncMock(side_effect=update_booking_side_effect)
+            assert created_booking is not None
+            # Cancelling is a conditional UPDATE (cancel_pending_booking), not
+            # update_booking on the row that was read.
+            cancelled_booking = created_booking.model_copy(
+                update={"status": BookingStatus.CANCELLED}
+            )
+            mock_db.cancel_pending_booking = AsyncMock(return_value=cancelled_booking)
 
             cancel_response = test_client.delete(
                 f"/bookings/{booking_id}?phone_number=%2B15558888888"
@@ -529,7 +531,7 @@ class TestBookingsEndpointsIntegration:
             assert cancel_response.json()["status"] == "cancelled"
 
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_booking = AsyncMock(return_value=created_booking)
+            mock_db.get_booking = AsyncMock(return_value=cancelled_booking)
 
             get_response = test_client.get(f"/bookings/{booking_id}")
             assert get_response.status_code == 200

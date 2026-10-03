@@ -2253,8 +2253,9 @@ class BookingService:
                 return None
             return await database_service.get_booking(booking_id)
 
-        booking.status = BookingStatus.CANCELLED
-        return await database_service.update_booking(booking)
+        # Conditional, not read-then-write: the racer may claim this row between
+        # the status check above and here (see cancel_pending_booking).
+        return await database_service.cancel_pending_booking(booking_id)
 
     def _calculate_execution_time(self, target_date: date) -> datetime:
         """

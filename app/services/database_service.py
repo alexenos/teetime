@@ -234,6 +234,40 @@ class DatabaseService:
             await db.refresh(record)
             return self._record_to_booking(record)
 
+    async def cancel_pending_booking(self, booking_id: str) -> TeeTimeBooking | None:
+        """Mark a booking CANCELLED only if it has not started, in one statement.
+
+        A read-then-write cancel races the racer's claim: if
+        claim_next_due_group moves the row to IN_PROGRESS between the read and
+        the write, the write overwrites a race already under way with
+        CANCELLED. This UPDATE re-checks the status in the database, the same
+        way the claim does, so whichever commits first wins and the other
+        changes nothing.
+
+        Returns the cancelled booking, or None when it no longer exists or has
+        already moved past PENDING/SCHEDULED.
+        """
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                update(BookingRecord)
+                .where(
+                    BookingRecord.booking_id == booking_id,
+                    BookingRecord.status.in_([BookingStatus.PENDING, BookingStatus.SCHEDULED]),
+                )
+                .values(
+                    status=BookingStatus.CANCELLED,
+                    updated_at=datetime.now(UTC).replace(tzinfo=None),
+                )
+                .returning(BookingRecord.booking_id)
+                .execution_options(synchronize_session=False)
+            )
+            cancelled = result.scalar_one_or_none()
+            await db.commit()
+
+        if cancelled is None:
+            return None
+        return await self.get_booking(booking_id)
+
     async def get_session(self, phone_number: str) -> UserSession | None:
         """Get a session by phone number."""
         async with AsyncSessionLocal() as db:

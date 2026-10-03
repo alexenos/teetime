@@ -1,4 +1,5 @@
 import logging
+import re
 from enum import Enum
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -112,6 +113,14 @@ class Settings(BaseSettings):
     # Comma-separated Telegram user IDs allowed to talk to the bot. Empty means
     # nobody, matching the Discord allowlist - fail closed.
     telegram_allowed_user_ids: str = ""
+    # The members' Telegram group (issue #239). Anyone currently in it may talk
+    # to the bot, in addition to the allowlist above, so letting a member in is
+    # approving their request to join the group - not a new secret version and
+    # a redeploy. Leaving or being removed revokes it, and offboards them: their
+    # pending bookings are cancelled and their stored Walden login deleted (see
+    # app/services/telegram_members.py). A negative chat ID; empty turns group
+    # access off and leaves the allowlist as the only way in.
+    telegram_members_chat_id: str = ""
     # The single Telegram user ID allowed to book on another friend's behalf
     # (issue #185): "for @alex book 9/12 at 8a". Not a role any allowed user
     # can hold - exactly one ID, and it must also appear in
@@ -691,6 +700,26 @@ class Settings(BaseSettings):
                 )
         return v
 
+    @field_validator("telegram_members_chat_id")
+    @classmethod
+    def _validate_telegram_members_chat_id(cls, v: str) -> str:
+        """Reject a TELEGRAM_MEMBERS_CHAT_ID that is not a group chat ID.
+
+        Group and supergroup IDs are always negative; a positive number is a
+        user's ID, and an @name or invite link is not an ID at all. Any of
+        those would silently match no group, so nobody outside the allowlist
+        could reach the bot and nothing would say why.
+        """
+        v = v.strip()
+        if v and not re.fullmatch(r"-\d+", v):
+            raise ValueError(
+                "TELEGRAM_MEMBERS_CHAT_ID must be the members group's numeric chat ID, "
+                f"which is negative (e.g. -1001234567890); got {v!r}. See "
+                "operations/telegram-setup.md for how to read it from the logs. Leave it "
+                "unset to turn group access off."
+            )
+        return v
+
     @field_validator("telegram_admin_user_id")
     @classmethod
     def _validate_telegram_admin_user_id(cls, v: str) -> str:
@@ -724,7 +753,9 @@ class Settings(BaseSettings):
         6:30 booking run down over a feature it does not use.
         """
         admin = self.telegram_admin_user_id.strip()
-        if admin and admin not in self.telegram_allowed_ids():
+        # With a members group configured the admin may reach the bot through
+        # it instead, which cannot be checked without calling Telegram.
+        if admin and admin not in self.telegram_allowed_ids() and not self.telegram_members_chat():
             logger.warning(
                 "TELEGRAM_ADMIN_USER_ID (%s) is not in TELEGRAM_ALLOWED_USER_IDS; the admin "
                 "cannot talk to the bot at all, so proxy booking is effectively off. "
@@ -738,6 +769,10 @@ class Settings(BaseSettings):
         return frozenset(
             piece.strip() for piece in self.telegram_allowed_user_ids.split(",") if piece.strip()
         )
+
+    def telegram_members_chat(self) -> str | None:
+        """The members group's chat ID, or None when group access is off."""
+        return self.telegram_members_chat_id.strip() or None
 
     def telegram_admin_id(self) -> str | None:
         """The single proxy-booking admin's Telegram ID, or None when unset."""

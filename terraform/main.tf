@@ -61,6 +61,15 @@ locals {
     "TELEGRAM_ADMIN_USER_ID",
   ]
 
+  # The members group's chat ID (issue #239): anyone in that Telegram group may
+  # use the bot, so letting a member in is approving their join request rather
+  # than a new allowlist version and a redeploy. A secret rather than a
+  # variables.tf default because the repository is public. Gated like the two
+  # above, for the same reason: unversioned until the group exists.
+  group_access_secrets = [
+    "TELEGRAM_MEMBERS_CHAT_ID",
+  ]
+
   # Every secret this project stores. Deliberately NOT scoped by
   # messaging_channel: dropping a secret from this list would have Terraform
   # delete it (and its versions) from Secret Manager, so flipping the channel
@@ -76,7 +85,7 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
-  ], local.discord_secrets, local.telegram_secrets, local.credential_secrets, local.admin_proxy_secrets)
+  ], local.discord_secrets, local.telegram_secrets, local.credential_secrets, local.admin_proxy_secrets, local.group_access_secrets)
 
   # Credentials for a channel (or optional feature) that is switched off.
   # Each is withheld independently of the others.
@@ -85,6 +94,7 @@ locals {
     var.telegram_enabled ? [] : local.telegram_secrets,
     var.credential_store_enabled ? [] : local.credential_secrets,
     var.admin_proxy_enabled ? [] : local.admin_proxy_secrets,
+    var.telegram_group_access_enabled ? [] : local.group_access_secrets,
   )
 
   # Secrets the running container may read. A channel's credentials are only
@@ -228,6 +238,16 @@ resource "google_cloud_run_v2_service" "teetime" {
         "tries to decrypt one - and it fails at 06:30, days after the booking",
         "was accepted, because nothing decrypts until the attempt runs.",
         "There is deliberately no shared-account fallback on this path.",
+      ])
+    }
+
+    precondition {
+      condition     = !var.telegram_group_access_enabled || var.telegram_enabled
+      error_message = join(" ", [
+        "telegram_group_access_enabled=true requires telegram_enabled=true.",
+        "Group membership is read from Telegram with the bot's token, and",
+        "joins and leaves arrive on its webhook; neither exists with the",
+        "Telegram channel off.",
       ])
     }
   }

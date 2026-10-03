@@ -9,7 +9,6 @@ from app.providers.telegram_provider import (
     TelegramProvider,
     addressee_prefix,
     is_addressed_to_bot,
-    is_authorized_user,
     strip_bot_prefix,
     verify_webhook_secret,
 )
@@ -17,6 +16,7 @@ from app.providers.twilio_provider import TwilioSMSProvider
 from app.services.booking_service import booking_service
 from app.services.help_text import addressing_help_message
 from app.services.sms_service import sms_service
+from app.services.telegram_members import handle_chat_member_update, is_authorized
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,8 @@ async def handle_telegram_update(
     from Telegram is the secret registered with setWebhook and echoed back in
     X-Telegram-Bot-Api-Secret-Token, so a bad or missing one is rejected before
     the body is read. Beyond that, only the users in TELEGRAM_ALLOWED_USER_IDS
-    are answered.
+    or in the members group (TELEGRAM_MEMBERS_CHAT_ID, issue #239) are
+    answered.
 
     Always returns 200 for an update that is merely uninteresting - a message
     from someone else, an empty body, an update type we did not ask for.
@@ -129,6 +130,21 @@ async def handle_telegram_update(
         logger.warning("Telegram update was not an object; ignoring")
         return {"status": "ignored"}
 
+    # Someone joined or left the members group (issue #239). Only requested
+    # when that group is configured, and only delivered because the bot is an
+    # admin there. A failure answers 500 so Telegram redelivers it: offboarding
+    # is safe to repeat, and an acknowledged failure would leave a departed
+    # member's bookings scheduled and their login stored.
+    chat_member = update.get("chat_member")
+    if isinstance(chat_member, dict):
+        try:
+            return {"status": await handle_chat_member_update(chat_member)}
+        except Exception as exc:
+            logger.exception("Error handling Telegram chat_member update")
+            raise HTTPException(
+                status_code=500, detail="Telegram chat_member update failed"
+            ) from exc
+
     message = update.get("message") or {}
     sender = message.get("from") or {}
     chat = message.get("chat") or {}
@@ -144,7 +160,7 @@ async def handle_telegram_update(
         logger.info("Telegram update carried no message to handle; ignoring")
         return {"status": "ignored"}
 
-    if not is_authorized_user(user_id, bool(sender.get("is_bot"))):
+    if not await is_authorized(user_id, bool(sender.get("is_bot"))):
         logger.info(f"Ignoring Telegram message from unauthorized user {user_id}")
         return {"status": "ignored"}
 
