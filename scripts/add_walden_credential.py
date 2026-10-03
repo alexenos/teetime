@@ -1,94 +1,34 @@
 """
-Admin tool for the per-friend Walden Golf credential store (issue #179).
+Admin tool for the member Walden login store (issues #179, #242).
 
-Members now connect their own login through the bot's setup form (#240,
-app/services/member_setup.py), so the admin never sees it. This script is the
-admin's fallback for listing and removing rows, and for adding one by hand -
-which means seeing that member's password, the thing the form exists to avoid.
-#242 retires `set` once logins are encrypted with a key the admin does not
-hold. Values are
-encrypted at rest with CREDENTIAL_ENCRYPTION_KEY (see
-app/services/credential_crypto.py) - set that in .env or the environment
-before running this. Generate one with:
+Members connect their own login through the bot (send it /start in a private
+chat - issue #240), so the admin never sees it. This script can no longer add
+or change one: `set` is retired (#242), because typing a member's password here
+was exactly the exposure the setup form exists to remove.
 
-    python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-
-Usage:
-
-    poetry run python scripts/add_walden_credential.py set <phone_number> \
-        --name "Alex" --telegram-username alexenos
-    (prompts for the member number and password rather than taking them as
-    arguments, so neither lands in shell history; --member-number is still
-    accepted for scripted use)
+What remains needs no key and shows no secret:
 
     poetry run python scripts/add_walden_credential.py list
-    poetry run python scripts/add_walden_credential.py remove <phone_number>
+    poetry run python scripts/add_walden_credential.py remove <requester id>
 
-<phone_number> is whatever identity the requester's bookings already use -
-the same phone number, Discord snowflake, or Telegram user ID recorded on
-their SessionRecord/BookingRecord rows.
+`list` shows which encryption each row uses. Before CREDENTIAL_ENCRYPTION_KEY
+is deleted, every row must say `kms` - a `fernet` row is a member who has not
+re-entered their login since logins moved to Cloud KMS, and deleting the key
+would make it unreadable.
 
---name and --telegram-username are what the admin's "for @X" matches against
-when booking on a friend's behalf (issue #185). A row with neither cannot be
-proxy-booked for at all - the lookup fails loudly rather than falling back to
-the shared account - so set at least one on every friend. --label is unrelated:
-a free-text note that resolves nothing.
+<requester id> is whatever identity the member's bookings use - for Telegram,
+their numeric user ID.
 """
 
 import argparse
 import asyncio
-import getpass
 import sys
 
 from sqlalchemy import select
 
 from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, init_db
+from app.services.credential_crypto import scheme_of
 from app.services.credential_service import credential_service
-
-
-async def _set(
-    phone_number: str,
-    member_number: str | None,
-    label: str | None,
-    name: str | None,
-    telegram_username: str | None,
-) -> None:
-    """Prompt for whatever wasn't passed on the command line, then save.
-
-    The member number is part of the Walden login, same as the password, so
-    it's optional on the command line for the same reason: an argument lands
-    in shell history and is visible to anyone who can list processes on this
-    machine. Prompted with getpass, not input(), so it isn't echoed to the
-    terminal either. Passing it explicitly still works, for scripted use.
-    """
-    if not member_number:
-        member_number = getpass.getpass("Walden member number: ").strip()
-    if not member_number:
-        raise SystemExit("Member number cannot be empty.")
-
-    password = getpass.getpass("Walden password: ")
-    if not password:
-        raise SystemExit("Password cannot be empty.")
-
-    await credential_service.set_credentials(
-        phone_number,
-        member_number,
-        password,
-        label=label,
-        name=name,
-        telegram_username=telegram_username,
-    )
-    who = name or label
-    print(f"Saved Walden credentials for {phone_number}" + (f" ({who})" if who else ""))
-
-    owner = await credential_service.get_owner(phone_number)
-    if owner is not None and not owner.name and not owner.telegram_username:
-        # Said now rather than discovered later as "I don't know who Alex is"
-        # in the middle of a booking conversation.
-        print(
-            "Warning: this row has neither --name nor --telegram-username, so the admin "
-            "cannot proxy-book for them. Re-run `set` with one to make them addressable."
-        )
 
 
 async def _remove(phone_number: str) -> None:
@@ -124,42 +64,41 @@ async def _list() -> None:
             if part
         )
         suffix = f" ({identity})" if identity else " (no name or handle - not proxy-bookable)"
+        # Read from the stored values' prefixes; nothing is decrypted.
+        schemes = {
+            scheme_of(str(record.member_number_encrypted)),
+            scheme_of(str(record.password_encrypted)),
+        }
+        encryption = schemes.pop() if len(schemes) == 1 else "mixed"
         print(
-            f"{record.phone_number}{suffix} - added {record.created_at}, "
-            f"updated {record.updated_at}"
+            f"{record.phone_number}{suffix} - encryption={encryption}, "
+            f"added {record.created_at}, updated {record.updated_at}"
         )
+
+    remaining = sum(
+        1
+        for r in records
+        if "fernet"
+        in {scheme_of(str(r.member_number_encrypted)), scheme_of(str(r.password_encrypted))}
+    )
+    print()
+    if remaining:
+        print(
+            f"{remaining} row(s) still depend on CREDENTIAL_ENCRYPTION_KEY. Do not delete it "
+            "until each of those members has re-entered their login (/start, then /login)."
+        )
+    else:
+        print("No row depends on CREDENTIAL_ENCRYPTION_KEY.")
 
 
 async def _main() -> None:
-    """Parse the subcommand and dispatch to set/remove/list."""
+    """Parse the subcommand and dispatch to remove/list."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    set_parser = subparsers.add_parser("set", help="Add or update a friend's Walden login")
-    set_parser.add_argument("phone_number", help="Requester identity used on their bookings")
-    set_parser.add_argument(
-        "--member-number",
-        default=None,
-        help="Walden member number (prompted for if omitted, to avoid shell history)",
-    )
-    set_parser.add_argument(
-        "--name",
-        default=None,
-        help="Friend's display name, matched against the admin's \"for @X\" (issue #185)",
-    )
-    set_parser.add_argument(
-        "--telegram-username",
-        default=None,
-        help="Friend's Telegram @handle, matched the same way as --name",
-    )
-    set_parser.add_argument(
-        "--label",
-        default=None,
-        help="Optional free-text note; never used to resolve a target (see --name)",
-    )
-
+    subparsers.add_parser("set", help="Retired (#242): members connect their own login with /start")
     remove_parser = subparsers.add_parser("remove", help="Delete a stored credential")
     remove_parser.add_argument("phone_number")
 
@@ -169,17 +108,16 @@ async def _main() -> None:
 
     args = parser.parse_args()
 
+    if args.command == "set":
+        raise SystemExit(
+            "`set` is retired (#242). Members connect their own Walden login: they send /start "
+            "to the bot in a private chat. Typing a member's password here is what that "
+            "replaced."
+        )
+
     await init_db()
 
-    if args.command == "set":
-        await _set(
-            args.phone_number,
-            args.member_number,
-            args.label,
-            args.name,
-            args.telegram_username,
-        )
-    elif args.command == "remove":
+    if args.command == "remove":
         await _remove(args.phone_number)
     elif args.command == "list":
         await _list()

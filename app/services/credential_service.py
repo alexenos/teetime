@@ -126,8 +126,12 @@ class CredentialService:
             return None
 
         return WaldenCredentials(
-            member_number=credential_crypto.decrypt(str(record.member_number_encrypted)),
-            password=credential_crypto.decrypt(str(record.password_encrypted)),
+            member_number=await credential_crypto.decrypt(
+                str(record.member_number_encrypted), context=f"{phone_number}:member_number"
+            ),
+            password=await credential_crypto.decrypt(
+                str(record.password_encrypted), context=f"{phone_number}:password"
+            ),
         )
 
     async def require_credentials(self, phone_number: str) -> WaldenCredentials:
@@ -238,8 +242,14 @@ class CredentialService:
         so updating a friend's password does not silently erase the name that
         makes them addressable.
         """
-        member_number_encrypted = credential_crypto.encrypt(member_number)
-        password_encrypted = credential_crypto.encrypt(password)
+        # The context binds each KMS ciphertext to this row and field, so it
+        # cannot be copied onto another member's row and still decrypt.
+        member_number_encrypted = await credential_crypto.encrypt(
+            member_number, context=f"{phone_number}:member_number"
+        )
+        password_encrypted = await credential_crypto.encrypt(
+            password, context=f"{phone_number}:password"
+        )
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
