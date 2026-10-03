@@ -511,7 +511,8 @@ resource "google_cloudbuild_trigger" "deploy_main" {
   # running service and should not pay for a rebuild + Cloud Run redeploy. The
   # same holds for .claude/ (session skills and launch.json), which neither the
   # image nor the build reads. CLAUDE.md sits at the root, not under .claude/,
-  # so an edit to it still builds.
+  # so it is listed by name: it is session instructions, and the image carries
+  # it only because the Dockerfile copies the whole tree. Nothing reads it.
   #
   # ignored_files only skips the trigger when EVERY changed file matches, so a
   # commit that also touches app code still fires normally. Every entry is
@@ -523,7 +524,7 @@ resource "google_cloudbuild_trigger" "deploy_main" {
   # run where a metric moved. Without this entry each of those publishes would
   # rebuild the image and redeploy the live booking service - daily, for a file
   # the service never reads.
-  ignored_files = ["operations/**", "docs/**", ".claude/**"]
+  ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md"]
 
   filename        = "cloudbuild.yaml"
   service_account = google_service_account.cloud_build.id
