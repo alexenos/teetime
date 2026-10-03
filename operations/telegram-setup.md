@@ -337,19 +337,16 @@ admin:
 @friend
 ```
 
-What "@friend" matches is the `--name` and `--telegram-username` fields on that
-friend's credential row:
-
-```bash
-poetry run python scripts/add_walden_credential.py set <telegram user id> \
-    --name "Friend" --telegram-username <friend-username>
-```
+What "@friend" matches is the `name` and `telegram_username` fields on that
+friend's credential row. Both are filled in from the friend's Telegram profile
+(first name and @username) when they connect their own login with `/start`
+(#240). `scripts/add_walden_credential.py list` shows them.
 
 Matching is case-insensitive. The leading `@` is **required** in the `for @X`
 clause — it is what separates a target from ordinary English, so that
 `for 4 players, book 9/12` is read as a booking rather than as a friend named
 "4". It is only a marker, not a claim that the word is a Telegram handle: a
-stored `--name` matches through it fine. Omitting it costs a turn rather than
+stored name matches through it fine. Omitting it costs a turn rather than
 the request (`for friend book 9/12` is parsed as a booking, then the bot asks who
 it is for), and answering that question takes a bare name either way.
 

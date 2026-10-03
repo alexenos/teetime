@@ -171,6 +171,14 @@ class Settings(BaseSettings):
     # so that count can grow without the admin doing anything.
     racer_max_requesters: int = 4
 
+    # Full resource name of the Cloud KMS key member logins are written with
+    # (issue #242): projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>. Set
+    # by terraform when credential_kms_enabled. When set, new logins are
+    # encrypted with KMS and every decrypt is audit-logged; logins written with
+    # credential_encryption_key above still decrypt with it. See
+    # app/services/credential_crypto.py.
+    credential_kms_key: str = ""
+
     # Run the booking chain as direct PrimeFaces HTTP calls instead of browser
     # clicks. Login, navigation and slot discovery still run in Chrome; only the
     # chain itself moves to HTTP. A failure before the reservation is submitted

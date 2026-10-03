@@ -44,35 +44,46 @@ def credential_service(test_session_local, monkeypatch) -> CredentialService:
     """Create a CredentialService that uses the test database and a test encryption key."""
     monkeypatch.setattr("app.services.credential_service.AsyncSessionLocal", test_session_local)
     monkeypatch.setattr("app.config.settings.credential_encryption_key", TEST_KEY)
+    monkeypatch.setattr("app.config.settings.credential_kms_key", "")
     return CredentialService()
 
 
 class TestCredentialCrypto:
-    def test_encrypt_decrypt_round_trip(self, monkeypatch) -> None:
+    """The legacy Fernet scheme: what is written when no KMS key is configured.
+
+    The KMS scheme (#242) is tested in tests/test_credential_kms.py.
+    """
+
+    async def test_encrypt_decrypt_round_trip(self, monkeypatch) -> None:
         monkeypatch.setattr("app.config.settings.credential_encryption_key", TEST_KEY)
-        ciphertext = credential_crypto.encrypt("hunter2")
+        monkeypatch.setattr("app.config.settings.credential_kms_key", "")
+        ciphertext = await credential_crypto.encrypt("hunter2", context="1:password")
         assert ciphertext != "hunter2"
-        assert credential_crypto.decrypt(ciphertext) == "hunter2"
+        assert credential_crypto.scheme_of(ciphertext) == "fernet"
+        assert await credential_crypto.decrypt(ciphertext, context="1:password") == "hunter2"
 
-    def test_encrypt_without_key_raises(self, monkeypatch) -> None:
+    async def test_encrypt_without_any_key_raises(self, monkeypatch) -> None:
         monkeypatch.setattr("app.config.settings.credential_encryption_key", "")
+        monkeypatch.setattr("app.config.settings.credential_kms_key", "")
         with pytest.raises(credential_crypto.CredentialEncryptionError):
-            credential_crypto.encrypt("hunter2")
+            await credential_crypto.encrypt("hunter2", context="1:password")
 
-    def test_decrypt_with_wrong_key_raises(self, monkeypatch) -> None:
+    async def test_decrypt_with_wrong_key_raises(self, monkeypatch) -> None:
         monkeypatch.setattr("app.config.settings.credential_encryption_key", TEST_KEY)
-        ciphertext = credential_crypto.encrypt("hunter2")
+        monkeypatch.setattr("app.config.settings.credential_kms_key", "")
+        ciphertext = await credential_crypto.encrypt("hunter2", context="1:password")
 
         monkeypatch.setattr(
             "app.config.settings.credential_encryption_key", Fernet.generate_key().decode()
         )
         with pytest.raises(credential_crypto.CredentialEncryptionError):
-            credential_crypto.decrypt(ciphertext)
+            await credential_crypto.decrypt(ciphertext, context="1:password")
 
-    def test_invalid_key_raises(self, monkeypatch) -> None:
+    async def test_invalid_key_raises(self, monkeypatch) -> None:
         monkeypatch.setattr("app.config.settings.credential_encryption_key", "not-a-fernet-key")
+        monkeypatch.setattr("app.config.settings.credential_kms_key", "")
         with pytest.raises(credential_crypto.CredentialEncryptionError):
-            credential_crypto.encrypt("hunter2")
+            await credential_crypto.encrypt("hunter2", context="1:password")
 
 
 class TestCredentialServiceRequire:

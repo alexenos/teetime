@@ -165,9 +165,13 @@ echo -n "your_webhook_secret"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECR
 echo -n "your_group_chat_id" | gcloud secrets versions add TELEGRAM_MEMBERS_CHAT_ID --data-file=-
 
 # Per-friend Walden credential store (credential_store_enabled = true, issue #179).
-# Encrypts friends' own Walden logins at rest in the DB; the single global
-# WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account above keeps working unaffected
-# while this stays off. Generate with:
+# LEGACY: new logins are encrypted with the Cloud KMS key in terraform/kms.tf once
+# credential_kms_enabled = true (issue #242), and nobody holds that key. This
+# Fernet key still decrypts logins written before then, AND the temporary Fernet
+# fallback copy kept beside each KMS-encrypted login while this key is mounted.
+# Both stay readable with it until `clear-fallbacks` runs and the key is retired
+# - see operations/credential-encryption.md. A fresh install still needs a
+# version here until that retirement lands. Generate with:
 #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENCRYPTION_KEY --data-file=-
 

@@ -32,6 +32,7 @@ locals {
     "artifactregistry.googleapis.com",
     "iam.googleapis.com",
     "storage.googleapis.com",
+    "cloudkms.googleapis.com",
   ]
   discord_secrets = [
     "DISCORD_BOT_TOKEN",
@@ -115,7 +116,7 @@ locals {
   # variables.tf. cloudbuild.yaml applies with only four -var flags and *.tfvars
   # is gitignored, so terraform.tfvars is not in the Cloud Build checkout and
   # every other variable resolves to its default.
-  booking_env = {
+  booking_env_base = {
     TIMEZONE                             = var.timezone
     BOOKING_OPEN_HOUR                    = tostring(var.booking_open_hour)
     BOOKING_OPEN_MINUTE                  = tostring(var.booking_open_minute)
@@ -143,6 +144,15 @@ locals {
     WALDEN_FAST_BOOKING_IMMEDIATE        = tostring(var.walden_fast_booking_immediate)
     RACER_MAX_REQUESTERS                 = tostring(var.racer_max_requesters)
   }
+
+  # Tells the app which KMS key encrypts member logins (issue #242, terraform/
+  # kms.tf). Absent until credential_kms_enabled: new logins are then written
+  # with the legacy Fernet key, exactly as before.
+  kms_env = var.credential_kms_enabled ? {
+    CREDENTIAL_KMS_KEY = google_kms_crypto_key.walden_logins.id
+  } : {}
+
+  booking_env = merge(local.booking_env_base, local.kms_env)
 }
 
 # The Discord secrets were created (with versions) via gcloud before this

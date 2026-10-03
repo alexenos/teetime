@@ -22,6 +22,7 @@ own identity the one requester that never resolves to a credential at all -
 not even the shared fallback.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -30,6 +31,8 @@ from sqlalchemy import func, select
 from app.models.database import AsyncSessionLocal, WaldenCredentialRecord
 from app.services import credential_crypto
 from app.services.proxy_booking import is_proxy_admin, normalize_target
+
+logger = logging.getLogger(__name__)
 
 
 class WaldenCredentialRequiredError(RuntimeError):
@@ -125,10 +128,33 @@ class CredentialService:
         if record is None:
             return None
 
-        return WaldenCredentials(
-            member_number=credential_crypto.decrypt(str(record.member_number_encrypted)),
-            password=credential_crypto.decrypt(str(record.password_encrypted)),
-        )
+        try:
+            return WaldenCredentials(
+                member_number=await credential_crypto.decrypt(
+                    str(record.member_number_encrypted), context=f"{phone_number}:member_number"
+                ),
+                password=await credential_crypto.decrypt(
+                    str(record.password_encrypted), context=f"{phone_number}:password"
+                ),
+            )
+        except credential_crypto.CredentialEncryptionError as primary_error:
+            if not (record.member_number_fallback and record.password_fallback):
+                raise
+            # The migration safety net (#242): KMS failed, and this row still
+            # carries a Fernet copy. Loud, so a race report sees that the
+            # morning ran on the fallback rather than on KMS.
+            logger.warning(
+                "CREDENTIAL_FALLBACK: KMS decrypt failed for requester %s (%s); "
+                "using the Fernet fallback copy",
+                phone_number,
+                primary_error,
+            )
+            return WaldenCredentials(
+                member_number=await credential_crypto.decrypt(
+                    str(record.member_number_fallback), context=""
+                ),
+                password=await credential_crypto.decrypt(str(record.password_fallback), context=""),
+            )
 
     async def require_credentials(self, phone_number: str) -> WaldenCredentials:
         """This requester's own login, or refuse.
@@ -238,8 +264,14 @@ class CredentialService:
         so updating a friend's password does not silently erase the name that
         makes them addressable.
         """
-        member_number_encrypted = credential_crypto.encrypt(member_number)
-        password_encrypted = credential_crypto.encrypt(password)
+        # The context binds each KMS ciphertext to this row and field, so it
+        # cannot be copied onto another member's row and still decrypt.
+        member_number_encrypted = await credential_crypto.encrypt(
+            member_number, context=f"{phone_number}:member_number"
+        )
+        password_encrypted = await credential_crypto.encrypt(
+            password, context=f"{phone_number}:password"
+        )
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -258,6 +290,10 @@ class CredentialService:
             # Always overwritten, never left as it was: a new login replaces
             # the one that was verified, so an old date would vouch for it.
             record.verified_at = verified_at  # type: ignore[assignment]
+            # Rewritten every time, never left: a copy of the old login must
+            # not outlive the login it was a copy of.
+            record.member_number_fallback = credential_crypto.fallback_encrypt(member_number)  # type: ignore[assignment]
+            record.password_fallback = credential_crypto.fallback_encrypt(password)  # type: ignore[assignment]
             if label is not None:
                 record.label = label  # type: ignore[assignment]
             if name is not None:
@@ -274,6 +310,29 @@ class CredentialService:
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(func.count()).select_from(WaldenCredentialRecord))
             return int(result.scalar_one())
+
+    async def clear_fallbacks(self) -> int:
+        """Delete every Fernet fallback copy (#242). Returns how many rows had one.
+
+        Run when CREDENTIAL_ENCRYPTION_KEY is retired. Only copies whose row's
+        primary value is KMS are cleared - on a row still written with Fernet
+        there is no copy to begin with - so this can never strand a login.
+        """
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(WaldenCredentialRecord).where(
+                    WaldenCredentialRecord.password_fallback.is_not(None)
+                )
+            )
+            cleared = 0
+            for record in result.scalars().all():
+                if credential_crypto.scheme_of(str(record.password_encrypted)) != "kms":
+                    continue
+                record.member_number_fallback = None  # type: ignore[assignment]
+                record.password_fallback = None  # type: ignore[assignment]
+                cleared += 1
+            await session.commit()
+            return cleared
 
     async def remove_credentials(self, phone_number: str) -> bool:
         """Delete a friend's stored login. Returns False if none existed."""

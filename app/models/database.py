@@ -193,6 +193,11 @@ class WaldenCredentialRecord(Base):
     phone_number = Column(String(20), unique=True, nullable=False, index=True)
     member_number_encrypted = Column(Text, nullable=False)
     password_encrypted = Column(Text, nullable=False)
+    # Fernet copies of a KMS-encrypted login, read only if KMS fails (#242).
+    # Written while CREDENTIAL_ENCRYPTION_KEY is still mounted, cleared when it
+    # is retired. See credential_crypto.fallback_encrypt.
+    member_number_fallback = Column(Text, nullable=True)
+    password_fallback = Column(Text, nullable=True)
     name = Column(String(100), nullable=True)
     telegram_username = Column(String(64), nullable=True)
     label = Column(String(100), nullable=True)
@@ -309,6 +314,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("bookings", "asked_time", "TIME"),
     ("bookings", "fallback_ladder", "TEXT"),
     ("walden_credentials", "verified_at", "TIMESTAMP"),
+    ("walden_credentials", "member_number_fallback", "TEXT"),
+    ("walden_credentials", "password_fallback", "TEXT"),
 ]
 
 
