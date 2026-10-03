@@ -11,7 +11,9 @@ What remains needs no key and shows no secret:
     poetry run python scripts/add_walden_credential.py list
     poetry run python scripts/add_walden_credential.py remove <requester id>
 
-`list` shows which encryption each row uses. Before CREDENTIAL_ENCRYPTION_KEY
+`list` shows which encryption each row uses, and whether it keeps a Fernet
+fallback copy (written during the move to KMS; `clear-fallbacks` deletes them
+when the Fernet key is retired). Before CREDENTIAL_ENCRYPTION_KEY
 is deleted, every row must say `kms` - a `fernet` row is a member who has not
 re-entered their login since logins moved to Cloud KMS, and deleting the key
 would make it unreadable.
@@ -70,8 +72,9 @@ async def _list() -> None:
             scheme_of(str(record.password_encrypted)),
         }
         encryption = schemes.pop() if len(schemes) == 1 else "mixed"
+        fallback = "yes" if record.password_fallback else "no"
         print(
-            f"{record.phone_number}{suffix} - encryption={encryption}, "
+            f"{record.phone_number}{suffix} - encryption={encryption}, fallback={fallback}, "
             f"added {record.created_at}, updated {record.updated_at}"
         )
 
@@ -90,6 +93,13 @@ async def _list() -> None:
     else:
         print("No row depends on CREDENTIAL_ENCRYPTION_KEY.")
 
+    copies = sum(1 for r in records if r.password_fallback)
+    if copies:
+        print(
+            f"{copies} row(s) also keep a Fernet fallback copy, readable with that key. "
+            "When the key is retired, delete them with: clear-fallbacks"
+        )
+
 
 async def _main() -> None:
     """Parse the subcommand and dispatch to remove/list."""
@@ -99,6 +109,10 @@ async def _main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("set", help="Retired (#242): members connect their own login with /start")
+    subparsers.add_parser(
+        "clear-fallbacks",
+        help="Delete the Fernet fallback copies of KMS-encrypted logins (when retiring the key)",
+    )
     remove_parser = subparsers.add_parser("remove", help="Delete a stored credential")
     remove_parser.add_argument("phone_number")
 
@@ -121,6 +135,9 @@ async def _main() -> None:
         await _remove(args.phone_number)
     elif args.command == "list":
         await _list()
+    elif args.command == "clear-fallbacks":
+        cleared = await credential_service.clear_fallbacks()
+        print(f"Deleted the Fernet fallback copies on {cleared} row(s).")
 
 
 if __name__ == "__main__":

@@ -120,6 +120,25 @@ async def decrypt(stored: str, *, context: str) -> str:
     return base64.b64decode(plaintext).decode()
 
 
+def fallback_encrypt(value: str) -> str | None:
+    """A Fernet copy of a value being written with KMS, or None.
+
+    A safety net for the move to KMS (#242), at the maintainer's request: while
+    CREDENTIAL_ENCRYPTION_KEY is still mounted, each login written with KMS also
+    keeps a Fernet copy, so a race whose KMS call fails at 06:28 can still log
+    in. It is a deliberate, temporary step back from the KMS guarantee - the
+    copy is readable with the hand-made key, with no audit record - and it ends
+    when that key is retired: then nothing is written here, and
+    scripts/add_walden_credential.py clear-fallbacks deletes the copies.
+
+    None when KMS is not in use (the primary value is already Fernet) or when
+    the Fernet key is gone (the copy could never be read).
+    """
+    if not settings.credential_kms_key.strip() or not settings.credential_encryption_key:
+        return None
+    return _fernet().encrypt(value.encode()).decode()
+
+
 def _fernet() -> Fernet:
     """Build a Fernet cipher from CREDENTIAL_ENCRYPTION_KEY, or raise."""
     if not settings.credential_encryption_key:
