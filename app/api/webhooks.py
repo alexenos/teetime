@@ -9,12 +9,20 @@ from app.providers.telegram_provider import (
     TelegramProvider,
     addressee_prefix,
     is_addressed_to_bot,
+    parse_bot_command,
     strip_bot_prefix,
     verify_webhook_secret,
 )
 from app.providers.twilio_provider import TwilioSMSProvider
 from app.services.booking_service import booking_service
 from app.services.help_text import addressing_help_message
+from app.services.member_setup import (
+    BUTTON_TEXT,
+    MENU_BUTTON_TEXT,
+    SETUP_COMMANDS,
+    handle_command,
+    setup_url,
+)
 from app.services.sms_service import sms_service
 from app.services.telegram_members import handle_chat_member_update, is_authorized
 
@@ -171,6 +179,16 @@ async def handle_telegram_update(
     entities = message.get("entities")
     bot_username = await TelegramProvider().get_bot_username()
 
+    # /start, /login, /status and /forget connect and manage the member's own
+    # Walden login (#240). Answered here, deterministically, before the parser
+    # sees anything - and read from the raw text, since strip_bot_prefix below
+    # removes the very command they are routed on.
+    command = parse_bot_command(raw_text, entities, bot_username)
+    if command is not None and command[0] in SETUP_COMMANDS:
+        return await _answer_setup_command(
+            command, user_id, chat_id, chat, sender, message, bot_username
+        )
+
     # With group privacy mode on, Telegram only ever delivers a group message
     # that already addresses this bot. Some groups need privacy mode off to
     # get delivery working at all (see operations/telegram-setup.md), which means
@@ -252,6 +270,52 @@ async def handle_telegram_update(
         reply_to_message_id=reply_to_message_id,
     )
 
+    return {"status": "ok"}
+
+
+async def _answer_setup_command(
+    command: tuple[str, str],
+    user_id: str,
+    chat_id: str,
+    chat: dict[str, object],
+    sender: dict[str, object],
+    message: dict[str, object],
+    bot_username: str | None,
+) -> dict[str, str]:
+    """Answer a setup command, attaching the form's button in a private chat."""
+    private = chat.get("type") == "private"
+    try:
+        reply = await handle_command(command[0], command[1], user_id, private, bot_username)
+    except Exception:
+        logger.exception("Error handling Telegram setup command")
+        reply = None
+
+    if reply is None:
+        text = "Sorry, something went wrong processing that command."
+        open_form = False
+    else:
+        text, open_form = reply.text, reply.open_form
+
+    url = setup_url()
+    if private and open_form and url:
+        provider = TelegramProvider()
+        await provider.send_web_app_button(chat_id, text, BUTTON_TEXT, url)
+        await provider.set_chat_menu_button(chat_id, MENU_BUTTON_TEXT, url)
+        return {"status": "ok"}
+
+    reply_to_message_id: str | None = None
+    if not private:
+        text = addressee_prefix(sender) + text
+        message_id = message.get("message_id")
+        if message_id is not None:
+            reply_to_message_id = str(message_id)
+    await sms_service.send_sms(
+        user_id,
+        text,
+        origin_channel_id=chat_id,
+        channel="telegram",
+        reply_to_message_id=reply_to_message_id,
+    )
     return {"status": "ok"}
 
 

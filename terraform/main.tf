@@ -141,6 +141,7 @@ locals {
     WALDEN_ADHOC_EXECUTE_DELAY_S         = tostring(var.walden_adhoc_execute_delay_s)
     WALDEN_ADHOC_UNTIMED_RETRY           = tostring(var.walden_adhoc_untimed_retry)
     WALDEN_FAST_BOOKING_IMMEDIATE        = tostring(var.walden_fast_booking_immediate)
+    RACER_MAX_REQUESTERS                 = tostring(var.racer_max_requesters)
   }
 }
 

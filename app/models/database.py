@@ -157,9 +157,11 @@ class WaldenCredentialRecord(Base):
     account - see app/services/credential_service.py - so existing users keep
     working while friends are added incrementally.
 
-    Rows are admin-written only (see scripts/add_walden_credential.py); there
-    is no self-service onboarding flow, by design (a credential must never
-    transit chat history).
+    Members write their own rows through the setup form (#240,
+    app/services/member_setup.py), which checks the login with Walden first.
+    The form posts straight to this service, so a credential never transits
+    chat history. scripts/add_walden_credential.py still writes rows too, as
+    the admin's fallback, until #242 retires its `set`.
 
     Columns:
         id: Auto-incrementing primary key.
@@ -178,6 +180,9 @@ class WaldenCredentialRecord(Base):
         label: Optional free-text note purely for admin bookkeeping; never used
             to resolve which credential to book under. Distinct from name for
             exactly that reason - see credential_service.
+        verified_at: When Walden last accepted this login. Set by the
+            self-service setup form (#240), which checks a login before saving
+            it; null for rows the admin script added.
         created_at: When this credential was added.
         updated_at: When this credential was last changed.
     """
@@ -191,6 +196,9 @@ class WaldenCredentialRecord(Base):
     name = Column(String(100), nullable=True)
     telegram_username = Column(String(64), nullable=True)
     label = Column(String(100), nullable=True)
+    # When Walden last accepted this login, checked before it was saved
+    # (#240). Null for rows added by the admin script, which checks nothing.
+    verified_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -300,6 +308,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("bookings", "slot_confirmed", "BOOLEAN"),
     ("bookings", "asked_time", "TIME"),
     ("bookings", "fallback_ladder", "TEXT"),
+    ("walden_credentials", "verified_at", "TIMESTAMP"),
 ]
 
 

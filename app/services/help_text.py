@@ -34,6 +34,14 @@ COMMAND_EXAMPLES = (
 # request for tomorrow goes nowhere.
 RESERVATION_WINDOW = "Reservations open 7 days in advance at 6:30am CT."
 
+# The commands that manage a member's own Walden login (#240), answered without
+# the language model. Listed in the general help only - a bare-mention reply is
+# about how to phrase a booking, not about account setup.
+LOGIN_COMMANDS = (
+    "Your Walden login: /start to connect it, /status to check it, /login to update it, "
+    "/forget to delete it."
+)
+
 
 def command_examples(mention: str = "") -> str:
     """The example commands as a bulleted block.
@@ -54,7 +62,8 @@ def help_message() -> str:
         "I can help you book tee times at Northgate Country Club!\n\n"
         "Try saying:\n"
         f"{command_examples()}\n\n"
-        f"{RESERVATION_WINDOW}"
+        f"{RESERVATION_WINDOW}\n\n"
+        f"{LOGIN_COMMANDS}"
     )
 
 
