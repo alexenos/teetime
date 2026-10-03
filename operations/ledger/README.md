@@ -149,6 +149,11 @@ had not been read is `agreed=unchecked`, and its morning stays `false`. A trend
 drawn across that boundary shows a step that is not a change in performance. The
 scoreboard must not compare across it without saying so.
 
+The scoreboard no longer acts on it: on 2026-10-03 the maintainer judged the
+unconfirmed mornings' scoring good enough, and the page publishes exact and
+fallback for every morning (`operations/scoreboard.md` §1). The field is still
+written, so the stricter reading can be recovered.
+
 ## `scoreboard.jsonl`
 
 One row per scoreboard run: the metrics as published, at the moment they were
@@ -157,9 +162,9 @@ published. This is the history a trend is plotted from.
 ```json
 {"date":"2026-09-25","routine":"scoreboard","ok":true,
  "published":"docs/scoreboard.json",
- "outcome_all_time":{"exact":0,"fallback":0,"miss":0,"confirmed_slots":false},
- "outcome_4wk":{"exact":0,"fallback":0,"miss":0,"confirmed_slots":false},
- "streak":{"consecutive":0,"by_routine":{},"total_ok":0},
+ "outcome_all_time":{"exact":0,"fallback":0,"booked":0,"miss":0},
+ "outcome_4wk":{"exact":0,"fallback":0,"booked":0,"miss":0},
+ "streak":{"consecutive":0,"unverified":0,"by_routine":{},"total_ok":0},
  "cost":{"month":"2026-09","usd_total":null,"usd_per_booking":null,"source":"unavailable"}}
 ```
 

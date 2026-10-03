@@ -39,6 +39,12 @@ counts, written by the race report Routine from `RESERVATION_CHECK`.
 recorded in the `race-report` skill and the most likely element of this definition
 to regress.
 
+**Decision, 2026-10-03: Exact and Fallback are published for every morning.**
+The maintainer judged the mechanical scoring of the older mornings good enough,
+and dropped the page's disclaimer. The rest of this section is the stricter
+reading that was set aside; `confirmed_slots` is still recorded on every row, so
+it can be recovered.
+
 **Exact and Fallback are distinguishable only for agreed requests.** Separating
 them requires the member's request to have been resolved to a bookable slot and
 confirmed before the race, rather than selected from a ±32-minute window at race

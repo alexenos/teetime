@@ -189,10 +189,11 @@ def test_outcome_split_counts_backfill_and_routine_races_but_not_quiet_mornings(
         "mornings": 2,
         "booked": 1,
         "miss": 1,
-        "exact": None,
-        "fallback": None,
+        "exact": 1,
+        "fallback": 0,
     }
     assert board["backfill"]["routine_rows"] == 2
+    assert board["backfill"]["routine_raced"] == 1
 
 
 def test_changed_sources_ignores_the_streak_and_the_sliding_window() -> None:
@@ -247,19 +248,19 @@ def test_git_corrections_names_the_commit_after_the_one_that_added_the_report(
         ds.git_corrections(["never-committed.md"])
 
 
-def test_confirmed_mornings_are_counted_apart_from_an_unseparable_history() -> None:
+def test_exact_and_fallback_are_published_whether_or_not_slots_were_confirmed() -> None:
+    # Maintainer decision, 2026-10-03: the older, unconfirmed mornings count.
     before = RACE_START - dt.timedelta(days=3)
     agreed = _raced(RACE_START, "fallback")
     agreed["confirmed_slots"] = True
     rows = [_raced(before, backfill=True), agreed]
     o = ds.derive(rows, _ct(RACE_START, 7, 30), _no_corrections)["outcome"]
-    assert o["separable"] is False
-    assert o["all_time"]["exact"] is None
-    assert o["confirmed"] == {
-        "mornings": 1,
-        "booked": 1,
-        "miss": 0,
-        "exact": 0,
-        "fallback": 1,
-        "first": RACE_START.isoformat(),
-    }
+    assert o["all_time"] == {"mornings": 2, "booked": 2, "miss": 0, "exact": 1, "fallback": 1}
+
+
+def test_backfill_banner_condition_counts_only_routine_races() -> None:
+    before = RACE_START - dt.timedelta(days=3)
+    quiet = ds.derive(
+        [_raced(before, backfill=True), _quiet(RACE_START)], _ct(RACE_START, 7, 30), _no_corrections
+    )
+    assert quiet["backfill"]["routine_raced"] == 0

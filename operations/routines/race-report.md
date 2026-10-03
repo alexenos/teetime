@@ -68,9 +68,10 @@ matters more than it looks, because the automation streak treats a missing date 
 a failure.
 
 Correcting it is a prompt change: each stop path appends its row before it stops,
-with `raced: false` and `ok` set to whether the exit itself was correct. A
-wrong-hour fire is a correct exit and a clean run. A `NOT READY` environment is
-not.
+with `raced: false` and `ok` set to whether the run did its job. A wrong-hour
+fire is `ok: false`, as is a `NOT READY` environment; a morning with nothing
+scheduled is `ok: true`. (A wrong-hour fire was `ok: true` until 2026-10-03,
+when the maintainer ruled it a failure.)
 
 The prompt below does this on all three paths, and the trigger carries it. The
 first row it wrote is 2026-10-01 (`ok: true, raced: false`). Whether a run before
@@ -125,11 +126,13 @@ on record has approached it.
 | 2026-09-22 | Renamed to "Morning Race Report", and given standing authorization to commit, open and merge the report PR. The repository-side rename landed the same day in #221 (06:40 CT); the Routine was edited at 14:58 CT to match. The two are separate edits — nothing links them but the date. |
 | 2026-09-29 | Prompt rewritten here to write a ledger row on every path and to drop the `_RESERVE_TIMEOUT_S` escalation line. Applied to the trigger before the 2026-10-01 run, which wrote the first ledger row. |
 | 2026-10-02 | Naming rule and pre-commit name check added (skill §8a). Applied to the trigger by 2026-10-03 01:03Z (the trigger's `updated_at`); the live text contains the check. |
+| 2026-10-03 | Gate A writes a wrong-hour fire as `ok: false`, not `ok: true`. **Pending application to the trigger.** |
 
 ## The prompt
 
-**Status: applied.** On 2026-10-03 the trigger's text was compared with this file
-and matches it once whitespace and markdown are ignored. This file is the source; the
+**Status: one change pending.** On 2026-10-03 the trigger's text was compared with
+this file and matched it once whitespace and markdown are ignored. The Gate A
+change of the same day (a wrong-hour fire is `ok: false`) is not yet pasted in. This file is the source; the
 Routine holds the copy that executes, and an agent cannot edit it — the trigger
 was created through the API, so `update_trigger` refuses with *"Agents can only
 update routines they created"*. Applying it is a paste into
@@ -206,7 +209,7 @@ The schema is in operations/ledger/README.md. Read it rather than inventing fiel
 
 `raced` is false on a morning with no booking; omit `requests` and `outcome` on those rows.
 
-`ok` describes this run, not the morning. A correctly diagnosed loss is ok:true. A correctly reported "no booking was scheduled" is ok:true. A correctly reported wrong-hour fire is ok:true. A run that could not establish what happened, or that reported something later found wrong, is ok:false with a note saying what.
+`ok` describes this run, not the morning. A correctly diagnosed loss is ok:true. A correctly reported "no booking was scheduled" is ok:true. A wrong-hour fire is ok:false, however correctly it is reported: the run did not happen when it was scheduled to. A run that could not establish what happened, or that reported something later found wrong, is ok:false with a note saying what.
 
 This matters most on the paths that stop early. A morning with no row is indistinguishable from a morning this Routine never fired, and the scoreboard's automation streak counts a missing date as a failure. So every "stop" in this prompt means: write the row, send the push notification, then stop - in that order, because the row is the part nobody is awake to reconstruct.
 
@@ -233,7 +236,7 @@ Its last line is the answer. READY means both the gcloud CLI and the venv work. 
 Step 2 - two gates before you do any work
 Establish today's date in Central Time first: TZ=America/Chicago date '+%F %H:%M'.
 
-Gate A - did this session fire at the right hour? Cron is UTC and this routine is pinned to 11:40 UTC, which is 06:40 CT only during CDT. If the CT clock time above is earlier than 06:35, you have fired an hour early because Central has moved to CST. Say exactly that, state that the routine's cron needs changing from 40 11 * * * to 40 12 * * *, write the ledger row with raced:false and ok:true - the gate worked, and a correct early exit is a clean run - push, and stop. Do not report "no booking" in this case - you fired before the run, so you have no evidence either way. This gate does not apply to a manually fired run at some other time of day; say so and carry on.
+Gate A - did this session fire at the right hour? Cron is UTC and this routine is pinned to 11:40 UTC, which is 06:40 CT only during CDT. If the CT clock time above is earlier than 06:35, you have fired an hour early because Central has moved to CST. Say exactly that, state that the routine's cron needs changing from 40 11 * * * to 40 12 * * *, write the ledger row with raced:false, ok:false and the note "fired an hour early; cron must move to 40 12 * * *" - firing at the wrong hour is a failed run even though the gate caught it - push, and stop. Do not report "no booking" in this case - you fired before the run, so you have no evidence either way. This gate does not apply to a manually fired run at some other time of day; say so and carry on.
 
 Gate B - was there a booking at all? Pull the morning's logs (this script takes the dashed date form for logs, and the compact YYYYMMDD form for list/fetch):
 

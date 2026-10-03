@@ -198,10 +198,11 @@ morning since 2026-10-01. What remains:
   about itself. The only evidence that overrides that is a later commit to a
   report, and none of the Routine-written rows so far raced. The page says
   "not independently checked" for this reason (`operations/scoreboard.md` §2).
-- **A wrong-hour race report counts as clean.** `operations/scoreboard.md` §2 lists
-  a wrong-hour fire as `ok: false`; the race report prompt writes it as `ok: true`,
-  and the row carries no field that tells it apart from a quiet morning. The
-  derivation follows the row. Which rule is right is the maintainer's call.
+- **A wrong-hour race report is a failure**, as `operations/scoreboard.md` §2
+  says (maintainer, 2026-10-03). The race report prompt now writes it as
+  `ok: false`; until that change is pasted into its trigger, a wrong-hour row
+  still reads `ok: true` and the derivation, which follows the row, counts it.
+  Any later edit to a report breaks the streak, by the same ruling.
 - **The GCS write under `operations/scoreboard/`** is covered by the
   `operations/` grant on paper and has not been exercised.
 

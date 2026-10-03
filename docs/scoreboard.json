@@ -1,44 +1,36 @@
 {
   "sample": false,
-  "generated": "2026-10-03T19:02:24Z",
+  "generated": "2026-10-03T19:17:17Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
     "first": "2026-08-13",
     "last": "2026-09-27",
     "routine_rows": 3,
+    "routine_raced": 0,
     "source": "operations/ledger/backfill/race-report.jsonl"
   },
   "outcome": {
-    "separable": false,
     "all_time": {
       "mornings": 23,
       "booked": 25,
       "miss": 6,
-      "exact": null,
-      "fallback": null
+      "exact": 20,
+      "fallback": 5
     },
     "last_4wk": {
       "mornings": 12,
       "booked": 16,
       "miss": 4,
-      "exact": null,
-      "fallback": null
+      "exact": 13,
+      "fallback": 3
     },
     "prior_4wk": {
       "mornings": 11,
       "booked": 9,
       "miss": 2,
-      "exact": null,
-      "fallback": null
-    },
-    "confirmed": {
-      "mornings": 0,
-      "booked": 0,
-      "miss": 0,
-      "exact": 0,
-      "fallback": 0,
-      "first": null
+      "exact": 7,
+      "fallback": 2
     }
   },
   "streak": {

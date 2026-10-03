@@ -115,7 +115,7 @@ def validate(row: Row) -> None:
         raise ValueError(f"{where}: outcome {row['outcome']} != rollup {rollup}")
 
 
-def split(rows: list[Row], separable: bool) -> Row:
+def split(rows: list[Row]) -> Row:
     raced = [r for r in rows if r["raced"]]
     exact = sum(r["outcome"]["exact"] for r in raced)
     fallback = sum(r["outcome"]["fallback"] for r in raced)
@@ -123,8 +123,8 @@ def split(rows: list[Row], separable: bool) -> Row:
         "mornings": len(raced),
         "booked": exact + fallback,
         "miss": sum(r["outcome"]["miss"] for r in raced),
-        "exact": exact if separable else None,
-        "fallback": fallback if separable else None,
+        "exact": exact,
+        "fallback": fallback,
     }
 
 
@@ -269,15 +269,11 @@ def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_cor
     def within(lo: dt.date, hi: dt.date) -> list[Row]:
         return [r for r in races if lo < dt.date.fromisoformat(r["date"]) <= hi]
 
-    # Exact and fallback mean the strict thing only on a morning whose every
-    # request was agreed against the sheet (#216). A history that mixes those
-    # with older mornings is not separable as a whole, so the confirmed
-    # mornings are also counted on their own; the backfill keeps the whole
-    # history unseparable for good.
-    raced = [r for r in races if r["raced"]]
-    separable = bool(raced) and all(r["confirmed_slots"] for r in raced)
-    confirmed = [r for r in raced if r["confirmed_slots"]]
+    # Exact and fallback are published for every morning, confirmed slots or
+    # not: the maintainer judged the pre-#216 scoring good enough (2026-10-03).
+    # confirmed_slots stays on each row, so the stricter reading is recoverable.
     backfill = [r for r in races if "backfill" in r]
+    routine_raced = [r for r in races if "backfill" not in r and r["raced"]]
 
     return {
         "sample": False,
@@ -288,17 +284,15 @@ def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_cor
             "first": backfill[0]["date"] if backfill else None,
             "last": backfill[-1]["date"] if backfill else None,
             "routine_rows": len(races) - len(backfill),
+            # The page drops its backfill banner once a Routine has scored a
+            # race of its own (maintainer, 2026-10-03).
+            "routine_raced": len(routine_raced),
             "source": "operations/ledger/backfill/race-report.jsonl",
         },
         "outcome": {
-            "separable": separable,
-            "all_time": split(races, separable),
-            "last_4wk": split(within(last_start, as_of), separable),
-            "prior_4wk": split(within(prior_start, last_start), separable),
-            "confirmed": {
-                **split(confirmed, True),
-                "first": confirmed[0]["date"] if confirmed else None,
-            },
+            "all_time": split(races),
+            "last_4wk": split(within(last_start, as_of)),
+            "prior_4wk": split(within(prior_start, last_start)),
         },
         "streak": walk(rows, now, corrections),
         "cost": {
@@ -322,7 +316,6 @@ def ledger_row(board: Row, published: str) -> Row:
             "fallback": part["fallback"],
             "booked": part["booked"],
             "miss": part["miss"],
-            "confirmed_slots": o["separable"],
         }
 
     return {
