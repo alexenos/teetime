@@ -41,6 +41,31 @@ member's password.**
 Encrypt calls (`methodName="Encrypt"`) are logged the same way. Each one is a
 login being saved through the setup form.
 
+## The fallback copy, during the move
+
+At the maintainer's request (2026-10-03), the move to KMS has a safety net.
+While `CREDENTIAL_ENCRYPTION_KEY` is still mounted, every login written with
+KMS also keeps a **Fernet copy** (`member_number_fallback`,
+`password_fallback`). If a KMS decrypt fails for any reason (KMS
+unreachable, a permissions mistake, a bug), the read falls back to that copy,
+so the race still logs in. Each time it does, it logs a warning:
+
+```bash
+gcloud logging read 'textPayload:"CREDENTIAL_FALLBACK"' --freshness=7d --limit=20   --format="value(timestamp,resource.type,textPayload)"
+```
+
+**A morning that ran on the fallback is a KMS problem to fix, even though the
+race went fine.**
+
+**This is a deliberate, temporary step back from the guarantee above.** The
+copy can be read with the hand-made key, and that leaves no audit record.
+Two consequences:
+
+- **It ends at step 6 below.** Once the key is retired, no copy is written,
+  and `clear-fallbacks` deletes the existing ones.
+- **Invite new members only after step 6.** Until then, their login would
+  get a copy readable with the key the maintainer holds.
+
 ## Moving logins to the KMS key
 
 1. **Merge #242.** The apply creates the key ring, the key, its IAM grants and
@@ -68,7 +93,15 @@ login being saved through the setup form.
    Every row must read `encryption=kms`, and the last line must read `No row
    depends on CREDENTIAL_ENCRYPTION_KEY.` Run this against the production
    database, the same way the script was run before.
-5. **Retire the Fernet key.** A follow-up change removes
+5. **Run on KMS for a few mornings, then check that no race needed the
+   fallback** (the `CREDENTIAL_FALLBACK` query above should return nothing).
+6. **Retire the Fernet key.** First delete the fallback copies:
+
+   ```bash
+   poetry run python scripts/add_walden_credential.py clear-fallbacks
+   ```
+
+   Then a follow-up change removes
    `CREDENTIAL_ENCRYPTION_KEY` from `terraform/main.tf`, which deletes the
    secret and its versions. It must also loosen the precondition that ties
    `admin_proxy_enabled` to `credential_store_enabled`. Delete any local copy

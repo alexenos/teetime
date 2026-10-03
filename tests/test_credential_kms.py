@@ -154,12 +154,8 @@ class TestStoreWithKms:
         creds = await store.require_credentials("555")
         assert (creds.member_number, creds.password) == ("M-555", SECRET)
 
-    async def test_a_ciphertext_moved_to_another_member_does_not_decrypt(self, service) -> None:  # type: ignore[no-untyped-def]
-        """Someone with database write cannot hand member A's login to member B."""
-        store, session_local = service
-        await store.set_credentials("555", "M-555", SECRET)
-        await store.set_credentials("777", "M-777", "other-password")
-
+    @staticmethod
+    async def _move_555s_password_onto_777(session_local) -> None:  # type: ignore[no-untyped-def]
         async with session_local() as session:
             rows = {
                 r.phone_number: r
@@ -172,5 +168,131 @@ class TestStoreWithKms:
             )
             await session.commit()
 
+    async def test_a_ciphertext_moved_to_another_member_does_not_decrypt(
+        self, service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Someone with database write cannot hand member A's login to member B.
+
+        Shown with the Fernet key retired, which is the end state: no fallback
+        copy exists, so the binding alone decides.
+        """
+        store, session_local = service
+        monkeypatch.setattr(settings, "credential_encryption_key", "")
+        await store.set_credentials("555", "M-555", SECRET)
+        await store.set_credentials("777", "M-777", "other-password")
+        await self._move_555s_password_onto_777(session_local)
+
         with pytest.raises(CredentialEncryptionError):
             await store.require_credentials("777")
+
+    async def test_during_the_migration_a_moved_ciphertext_falls_back_to_the_rows_own_copy(
+        self, service, caplog: pytest.LogCaptureFixture
+    ) -> None:  # type: ignore[no-untyped-def]
+        """While fallback copies exist, the swap still never yields the other login."""
+        store, session_local = service
+        await store.set_credentials("555", "M-555", SECRET)
+        await store.set_credentials("777", "M-777", "other-password")
+        await self._move_555s_password_onto_777(session_local)
+
+        creds = await store.require_credentials("777")
+
+        assert creds.password == "other-password"
+        assert "CREDENTIAL_FALLBACK" in caplog.text
+
+
+class TestFernetFallback:
+    """The migration safety net: a Fernet copy, read only when KMS fails."""
+
+    async def test_kms_write_keeps_a_fernet_copy_while_the_key_is_mounted(self, service) -> None:  # type: ignore[no-untyped-def]
+        store, session_local = service
+        await store.set_credentials("555", "M-555", SECRET)
+        async with session_local() as session:
+            record = (await session.execute(select(WaldenCredentialRecord))).scalar_one()
+        assert scheme_of(str(record.password_encrypted)) == "kms"
+        assert record.password_fallback and scheme_of(str(record.password_fallback)) == "fernet"
+        assert SECRET not in str(record.password_fallback)
+
+    async def test_no_copy_without_the_fernet_key(
+        self, service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Once the key is retired nothing could read a copy, so none is written."""
+        store, session_local = service
+        monkeypatch.setattr(settings, "credential_encryption_key", "")
+        await store.set_credentials("555", "M-555", SECRET)
+        async with session_local() as session:
+            record = (await session.execute(select(WaldenCredentialRecord))).scalar_one()
+        assert record.password_fallback is None and record.member_number_fallback is None
+
+    async def test_no_copy_when_kms_is_off(self, service, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+        store, session_local = service
+        monkeypatch.setattr(settings, "credential_kms_key", "")
+        await store.set_credentials("555", "M-555", SECRET)
+        async with session_local() as session:
+            record = (await session.execute(select(WaldenCredentialRecord))).scalar_one()
+        assert scheme_of(str(record.password_encrypted)) == "fernet"
+        assert record.password_fallback is None
+
+    async def test_kms_working_means_the_copy_is_never_read(self, service, kms: FakeKms) -> None:  # type: ignore[no-untyped-def]
+        store, _ = service
+        await store.set_credentials("555", "M-555", SECRET)
+        creds = await store.require_credentials("555")
+        assert creds.password == SECRET
+        assert [op for op, _ in kms.calls].count("decrypt") == 2
+
+    @pytest.mark.parametrize("failure", ["unreachable", "http-503", "http-403"])
+    async def test_kms_failure_falls_back_to_the_copy(
+        self,
+        service,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        failure: str,
+    ) -> None:  # type: ignore[no-untyped-def]
+        store, _ = service
+        await store.set_credentials("555", "M-555", SECRET)
+
+        def broken(request: httpx.Request) -> httpx.Response:
+            if failure == "unreachable":
+                raise httpx.ConnectError("no route")
+            return httpx.Response(int(failure.split("-")[1]))
+
+        monkeypatch.setattr(credential_crypto, "_transport", httpx.MockTransport(broken))
+        creds = await store.require_credentials("555")
+
+        assert (creds.member_number, creds.password) == ("M-555", SECRET)
+        assert "CREDENTIAL_FALLBACK" in caplog.text
+        assert SECRET not in caplog.text
+
+    async def test_kms_failure_without_a_copy_still_fails_loudly(
+        self, service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:  # type: ignore[no-untyped-def]
+        store, _ = service
+        monkeypatch.setattr(settings, "credential_encryption_key", "")
+        await store.set_credentials("555", "M-555", SECRET)
+
+        def broken(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503)
+
+        monkeypatch.setattr(credential_crypto, "_transport", httpx.MockTransport(broken))
+        with pytest.raises(CredentialEncryptionError):
+            await store.require_credentials("555")
+
+    async def test_a_new_login_replaces_the_old_copy(self, service) -> None:  # type: ignore[no-untyped-def]
+        """A copy of an old password must not outlive the password."""
+        store, session_local = service
+        await store.set_credentials("555", "M-555", "old-password")
+        await store.set_credentials("555", "M-555", SECRET)
+        async with session_local() as session:
+            record = (await session.execute(select(WaldenCredentialRecord))).scalar_one()
+        assert await decrypt(str(record.password_fallback), context="") == SECRET
+
+    async def test_clear_fallbacks(self, service) -> None:  # type: ignore[no-untyped-def]
+        store, session_local = service
+        await store.set_credentials("555", "M-555", SECRET)
+        await store.set_credentials("777", "M-777", "other")
+        assert await store.clear_fallbacks() == 2
+        async with session_local() as session:
+            records = (await session.execute(select(WaldenCredentialRecord))).scalars().all()
+        assert all(
+            r.password_fallback is None and r.member_number_fallback is None for r in records
+        )
+        assert (await store.require_credentials("555")).password == SECRET

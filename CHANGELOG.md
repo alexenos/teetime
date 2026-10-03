@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each ciphertext is bound to its member and field, so it cannot be moved
     to another row.
   - Logins written with the Fernet key keep decrypting until re-entered.
+  - During the move, each KMS-encrypted login also keeps a Fernet copy while
+    the Fernet key is mounted. A failed KMS decrypt falls back to it and logs
+    `CREDENTIAL_FALLBACK`. `clear-fallbacks` deletes the copies when the key
+    is retired.
   - `scripts/add_walden_credential.py set` is retired. Members use `/start`
     instead (#240), and `list` shows each row's encryption.
   - Off until `credential_kms_enabled` is turned on, after the key exists.
