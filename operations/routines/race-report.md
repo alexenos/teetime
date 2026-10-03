@@ -151,7 +151,7 @@ page built from these rows are both public.
 **A naming rule, and a check before the commit (2026-10-02).** The report is
 public and merges unread, and it is written from logs and tee sheets that name
 everyone. Five reports already carried member names, handles, a member number
-and three rivals' names (#236). The prompt now requires labels (`member A`,
+and three rivals' names (#236). The prompt now requires labels (`Member A`,
 `Rival 1`), read from `MEMBER_PSEUDONYM_LABELS`, and requires
 `scripts/check_report_names.py` to pass before Step 5 commits. The rule lives in
 the skill's §8a; the prompt points at it and makes the check a gate.
@@ -208,7 +208,7 @@ This matters most on the paths that stop early. A morning with no row is indisti
 If the ledger write fails, say so in the push notification and carry on to send it. One retry, then report the failure rather than losing the notification.
 
 Rule that applies to every path through this prompt: no names
-The report, the PR title and body, and the commit message are public. Never write a person's name (in any order, or a bare first name or surname), a Telegram handle, an email, a phone number or chat id, or a member number. Use the labels from MEMBER_PSEUDONYM_LABELS in Secret Manager: member A, member B for the people this bot books for, and Rival 1, Rival 2 for anyone else. Write "an unregistered member" plus the sheet path and slot index for anyone not in it, and never invent a new number. The skill's §8a has the details and the command that reads the labels. Use labels in the push notification too.
+The report, the PR title and body, and the commit message are public. Never write a person's name (in any order, or a bare first name or surname), a Telegram handle, an email, a phone number or chat id, or a member number. Use the labels from MEMBER_PSEUDONYM_LABELS in Secret Manager: Member A, Member B for the people this bot books for, and Rival 1, Rival 2 for anyone else. Write "an unregistered member" plus the sheet path and slot index for anyone not in it, and never invent a new number. The skill's §8a has the details and the command that reads the labels. Use labels in the push notification too.
 
 Step 1 - name the session, then set it up
 Before anything else can fail, establish today's date in Central Time:

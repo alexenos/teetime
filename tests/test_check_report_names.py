@@ -83,7 +83,7 @@ class TestMain:
     def test_labels_file_adds_forms_not_on_any_sheet(self, tmp_path: Path) -> None:
         labels = tmp_path / "labels.json"
         labels.write_text(
-            json.dumps({"people": [{"label": "member A", "forms": ["@examplehandle"]}]}),
+            json.dumps({"people": [{"label": "Member A", "forms": ["@examplehandle"]}]}),
             encoding="utf-8",
         )
         report = _report(tmp_path, '"for @examplehandle book 9/23" received\n')

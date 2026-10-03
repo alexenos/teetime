@@ -69,7 +69,7 @@ there is public, and now holds only the site itself — index, privacy, terms.
 Operating material belongs in `operations/`, where #221 moved it. This applies
 to member identifiers too: do not write names, phone numbers or Telegram
 handles anywhere in the repository.
-Refer to people by label: `member A` for the people the bot books for, and
+Refer to people by label: `Member A` for the people the bot books for, and
 `Rival 1` for anyone else. The labels map to people in Secret Manager:
 `MEMBER_PSEUDONYM_REGISTRY` in full, readable by project owners only, and
 `MEMBER_PSEUDONYM_LABELS`, the subset a session needs. A race report is checked
