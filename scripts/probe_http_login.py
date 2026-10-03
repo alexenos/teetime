@@ -13,7 +13,8 @@ capture-rejected
     Makes ONE deliberate failed login - the real login with a random wrong
     password - and saves the page Walden returns, sanitized, to
     tests/fixtures/walden_login_rejected.html. That is the only way to pin the
-    REJECTED classification to real markup: no failed-login page has been seen.
+    REJECTED classification to real markup. The fixture is written only when the
+    page is classified REJECTED; anything else goes to a temp file instead.
     Walden's lockout policy is unknown, so this makes exactly one attempt and
     should not be repeated casually. Read the saved file before committing it.
 
@@ -31,6 +32,7 @@ import asyncio
 import re
 import secrets
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -112,12 +114,21 @@ async def _capture_rejected() -> int:
         if secret in saved:
             print("Sanitizing left a credential in the page. Saving nothing.")
             return 1
+    if check.outcome is not LoginOutcome.REJECTED:
+        # Worth keeping, to see what Walden's markup has become - but never as
+        # the fixture, whose contract is a page the check recognises as
+        # rejected. Overwriting it would fail the tests for the wrong reason.
+        scratch = Path(tempfile.gettempdir()) / "walden_login_unclassified.html"
+        scratch.write_text(saved, encoding="utf-8")
+        print(f"Not classified as rejected, so the fixture is untouched. Saved to {scratch}.")
+        print(
+            "If it is a rejection page, its error markup differs from stock Liferay - "
+            "update _ERROR_CLASSES in walden_http_login.py, then capture again."
+        )
+        return 1
+
     REJECTED_FIXTURE.write_text(saved, encoding="utf-8")
-    print(f"Saved {len(saved):,} bytes to {REJECTED_FIXTURE}")
-    print(
-        "Read it before committing. If the outcome above is 'unknown', the error markup "
-        "differs from stock Liferay - update _ERROR_CLASSES in walden_http_login.py to match."
-    )
+    print(f"Saved {len(saved):,} bytes to {REJECTED_FIXTURE}. Read it before committing.")
     return 0
 
 
