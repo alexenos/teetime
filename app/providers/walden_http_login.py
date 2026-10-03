@@ -193,7 +193,9 @@ async def check_login(
     behind. That is tidiness rather than necessity: one Walden account can
     hold several sessions at once (confirmed by the maintainer, 2026-10-02).
 
-    Never raises for an outcome; a failure to reach Walden is UNKNOWN.
+    Never raises for an outcome; a failure to reach Walden is UNKNOWN. Raises
+    ValueError for an empty login or password, which is a caller's bug: Walden
+    was never asked, so no outcome applies.
     """
     check, _ = await check_login_with_page(login, password, base_url=base_url, transport=transport)
     return check
@@ -214,7 +216,9 @@ async def check_login_with_page(
     nothing in the application should call this.
     """
     if not login or not password:
-        return LoginCheck(LoginOutcome.REJECTED, "the login or password was empty"), None
+        # Walden was never asked, so this is not REJECTED. The setup form
+        # refuses empty fields before it gets here; reaching this is a bug.
+        raise ValueError("check_login needs a non-empty login and password")
     base = (base_url or settings.walden_base_url).rstrip("/")
     try:
         return await asyncio.wait_for(
@@ -224,13 +228,54 @@ async def check_login_with_page(
         return LoginCheck(LoginOutcome.UNKNOWN, "Walden did not answer in time"), None
 
 
+MAX_REDIRECTS = 5
+
+
+def _same_origin(url: str, base: str) -> bool:
+    """Whether url is on the configured Walden origin, over HTTPS."""
+    try:
+        target = urllib.parse.urlsplit(url)
+        origin = urllib.parse.urlsplit(base)
+    except ValueError:
+        return False
+    return (
+        target.scheme == "https"
+        and origin.scheme == "https"
+        and target.netloc.casefold() == origin.netloc.casefold()
+    )
+
+
+async def _get_following(client: httpx.AsyncClient, url: str, base: str) -> httpx.Response | None:
+    """GET url, following redirects by hand, and only while they stay on Walden over HTTPS.
+
+    None when a redirect leaves the origin or there are too many. Every
+    request here is a GET with no body, so following carries no credential
+    except the session cookie, which httpx scopes to the domain anyway.
+    """
+    response = await client.get(url)
+    for _ in range(MAX_REDIRECTS):
+        if not response.is_redirect:
+            return response
+        location = urllib.parse.urljoin(str(response.url), response.headers.get("location", ""))
+        if not _same_origin(location, base):
+            return None
+        response = await client.get(location)
+    return None
+
+
 async def _check(
     login: str, password: str, base: str, transport: httpx.AsyncBaseTransport | None
 ) -> tuple[LoginCheck, str | None]:
+    if not _same_origin(base, base):
+        return LoginCheck(LoginOutcome.UNKNOWN, "the Walden base URL is not HTTPS"), None
+
+    # Redirects are never followed automatically: a 307 or 308 after the login
+    # POST would replay the password to wherever it points. _get_following
+    # follows the expected ones by hand, as GETs, on Walden's own origin.
     async with httpx.AsyncClient(
         base_url=base,
         timeout=REQUEST_TIMEOUT_S,
-        follow_redirects=True,
+        follow_redirects=False,
         transport=transport,
         headers={
             "User-Agent": USER_AGENT,
@@ -244,9 +289,12 @@ async def _check(
         )
 
         try:
-            page = await client.get(LOGIN_PATH)
+            page = await _get_following(client, f"{base}{LOGIN_PATH}", base)
         except httpx.HTTPError as exc:
             reason = f"could not reach Walden ({type(exc).__name__})"
+            return LoginCheck(LoginOutcome.UNKNOWN, reason), None
+        if page is None:
+            reason = "the login page redirected away from Walden"
             return LoginCheck(LoginOutcome.UNKNOWN, reason), None
         if page.status_code != 200:
             reason = f"the login page answered HTTP {page.status_code}"
@@ -261,6 +309,10 @@ async def _check(
         if form is None:
             reason = "the login page had no recognisable form"
             return LoginCheck(LoginOutcome.UNKNOWN, reason), None
+        # The action comes from the page. Credentials only ever go to Walden's
+        # own HTTPS origin, whatever the page says.
+        if not _same_origin(form.action, base):
+            return LoginCheck(LoginOutcome.UNKNOWN, "the login form posts somewhere else"), None
 
         body = [*form.fields, (form.login_field, login), (form.password_field, password)]
         try:
@@ -273,6 +325,25 @@ async def _check(
                     "Referer": str(page.url),
                 },
             )
+            if result.status_code in (307, 308):
+                # Following would resend the password; nothing Walden was seen
+                # to do needs it.
+                return LoginCheck(
+                    LoginOutcome.UNKNOWN,
+                    f"the login answered an unexpected HTTP {result.status_code}",
+                ), None
+            if result.is_redirect:
+                location = urllib.parse.urljoin(str(result.url), result.headers.get("location", ""))
+                if not _same_origin(location, base):
+                    return LoginCheck(
+                        LoginOutcome.UNKNOWN, "the login redirected away from Walden"
+                    ), None
+                followed = await _get_following(client, location, base)
+                if followed is None:
+                    return LoginCheck(
+                        LoginOutcome.UNKNOWN, "the login redirected away from Walden"
+                    ), None
+                result = followed
         except httpx.HTTPError as exc:
             # The exception names the request, never its body; still, only its
             # type is kept.
@@ -282,7 +353,7 @@ async def _check(
         check = classify_response(result.status_code, result.text, str(result.url))
         if check.outcome is LoginOutcome.ACCEPTED:
             try:
-                await client.get(LOGOUT_PATH)
+                await _get_following(client, f"{base}{LOGOUT_PATH}", base)
             except httpx.HTTPError:
                 # The answer is already known; a session left behind is harmless.
                 logger.info("Walden sign-out after a login check failed; ignoring")

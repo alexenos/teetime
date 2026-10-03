@@ -224,11 +224,119 @@ class TestCheckLogin:
         assert check.outcome is LoginOutcome.ACCEPTED
 
     @pytest.mark.parametrize("login,password", [("", PASSWORD), (LOGIN, "")])
-    async def test_empty_input_sends_nothing(self, login: str, password: str) -> None:
+    async def test_empty_input_is_a_caller_bug(self, login: str, password: str) -> None:
+        """Walden was never asked, so no outcome - least of all REJECTED - applies."""
         walden = FakeWalden()
-        check = await check_login(login, password, base_url=BASE, transport=walden.transport())
-        assert check.outcome is LoginOutcome.REJECTED
+        with pytest.raises(ValueError):
+            await check_login(login, password, base_url=BASE, transport=walden.transport())
         assert walden.requests == []
+
+
+class TestCredentialsStayOnWalden:
+    """The password only ever goes to Walden's own HTTPS origin."""
+
+    async def test_form_posting_elsewhere_is_refused(self) -> None:
+        hijacked = LOGIN_PAGE.replace(
+            'action="https://www.waldengolf.com/web/pages/login?',
+            'action="https://evil.example/collect?',
+        )
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, text=hijacked)
+
+        check = await check_login(
+            LOGIN, PASSWORD, base_url=BASE, transport=httpx.MockTransport(handler)
+        )
+        assert check.outcome is LoginOutcome.UNKNOWN
+        assert all(r.method == "GET" for r in requests)
+        assert all(r.url.host == "www.waldengolf.com" for r in requests)
+
+    async def test_form_posting_over_http_is_refused(self) -> None:
+        downgraded = LOGIN_PAGE.replace(
+            'action="https://www.waldengolf.com/', 'action="http://www.waldengolf.com/'
+        )
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, text=downgraded)
+
+        check = await check_login(
+            LOGIN, PASSWORD, base_url=BASE, transport=httpx.MockTransport(handler)
+        )
+        assert check.outcome is LoginOutcome.UNKNOWN
+        assert not any(r.method == "POST" for r in requests)
+
+    @pytest.mark.parametrize("status", [307, 308])
+    async def test_body_replaying_redirect_is_not_followed(self, status: int) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST":
+                return httpx.Response(status, headers={"Location": f"{BASE}/web/pages/login"})
+            return httpx.Response(200, text=LOGIN_PAGE)
+
+        check = await check_login(
+            LOGIN, PASSWORD, base_url=BASE, transport=httpx.MockTransport(handler)
+        )
+        assert check.outcome is LoginOutcome.UNKNOWN
+        assert [r.method for r in requests].count("POST") == 1
+
+    async def test_redirect_off_walden_after_login_is_not_followed(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.method == "POST":
+                return httpx.Response(302, headers={"Location": "https://evil.example/home"})
+            return httpx.Response(200, text=LOGIN_PAGE)
+
+        check = await check_login(
+            LOGIN, PASSWORD, base_url=BASE, transport=httpx.MockTransport(handler)
+        )
+        assert check.outcome is LoginOutcome.UNKNOWN
+        assert all(r.url.host == "www.waldengolf.com" for r in requests)
+
+    async def test_login_page_redirecting_off_walden(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(302, headers={"Location": "https://evil.example/login"})
+
+        check = await check_login(
+            LOGIN, PASSWORD, base_url=BASE, transport=httpx.MockTransport(handler)
+        )
+        assert check.outcome is LoginOutcome.UNKNOWN
+        assert len(requests) == 1
+
+    async def test_plain_http_base_url_is_refused(self) -> None:
+        walden = FakeWalden()
+        check = await check_login(
+            LOGIN, PASSWORD, base_url="http://www.waldengolf.com", transport=walden.transport()
+        )
+        assert check.outcome is LoginOutcome.UNKNOWN
+        assert walden.requests == []
+
+    async def test_the_real_redirect_chain_is_still_followed(self) -> None:
+        """POST -> 302 -> 302 -> home, all on Walden, as the live site does."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(302, headers={"Location": "/c"})
+            if request.url.path == "/c":
+                return httpx.Response(302, headers={"Location": f"{BASE}/group/pages/home"})
+            if request.url.path == "/group/pages/home":
+                return httpx.Response(200, text=SIGNED_IN_PAGE)
+            return httpx.Response(200, text=LOGIN_PAGE)
+
+        check = await check_login(
+            LOGIN, PASSWORD, base_url=BASE, transport=httpx.MockTransport(handler)
+        )
+        assert check.outcome is LoginOutcome.ACCEPTED
 
 
 class TestLogSafety:
