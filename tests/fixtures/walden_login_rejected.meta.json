@@ -1,0 +1,7 @@
+{
+  "state": "login_rejected",
+  "url": "https://www.waldengolf.com/web/pages/login",
+  "title": "Login - Northgate CC & Walden GC",
+  "captured_at": "2026-10-03",
+  "captured_by": "scripts/probe_http_login.py capture-rejected (one deliberate wrong password, sanitized)"
+}
