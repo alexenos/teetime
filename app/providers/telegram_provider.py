@@ -16,9 +16,13 @@ replies where it was asked for.
 """
 
 import asyncio
+import hashlib
 import hmac
+import json
 import logging
 import re
+import time
+import urllib.parse
 
 import httpx
 
@@ -89,6 +93,32 @@ def _bot_addressing_cuts(
             if not suffix or (bot_username and suffix.lower() == bot_username.lower()):
                 cuts.append((offset, length))
     return cuts
+
+
+def parse_bot_command(
+    text: str, entities: list[dict[str, object]] | None, bot_username: str | None
+) -> tuple[str, str] | None:
+    """The leading /command addressed to this bot, and the rest of the text.
+
+    Returns ("start", "setup") for "/start setup" or "/start@teetimebot setup",
+    with the command lowercased and without its slash. None when the message
+    does not open with a command for this bot - including "/start@otherbot".
+
+    Read from the raw text and entities, before strip_bot_prefix removes the
+    command: the setup commands (#240) are routed on the command itself, which
+    is exactly the part stripping throws away.
+    """
+    units = _utf16_units(text)
+    for offset, length in _bot_addressing_cuts(units, entities, bot_username):
+        if offset != 0:
+            continue
+        fragment = _utf16_slice(units, offset, length)
+        if not fragment.startswith("/"):
+            continue
+        command = fragment[1:].partition("@")[0].lower()
+        rest = units[(offset + length) * 2 :].decode("utf-16-le", errors="ignore").strip()
+        return command, rest
+    return None
 
 
 def strip_bot_prefix(
@@ -257,6 +287,65 @@ def verify_webhook_secret(header_value: str | None) -> bool:
     return hmac.compare_digest(header_value.encode("utf-8"), configured.encode("utf-8"))
 
 
+# How old a Mini App's signed init data may be before it is refused. Telegram
+# signs it when the Mini App opens; a member fills the form in well within
+# this, and anything older is more likely a replay than a slow typist.
+INIT_DATA_MAX_AGE_S = 600
+
+
+def validate_init_data(
+    raw: str, *, max_age_s: int = INIT_DATA_MAX_AGE_S, now: float | None = None
+) -> dict[str, object] | None:
+    """The Telegram user a Mini App's init data was signed for, or None.
+
+    The setup form (#240) sends the init data Telegram handed it, and this is
+    the only thing that says who the member is - the form never names a user
+    itself, so a member can only ever save their own login. Validated the way
+    Telegram's Web App documentation specifies: an HMAC-SHA256 over the sorted
+    "key=value" lines of every field except ``hash``, keyed with
+    HMAC-SHA256("WebAppData", bot token). Compared in constant time.
+
+    Refused when the signature does not match, when auth_date is older than
+    max_age_s or implausibly far in the future, when the bot token is unset,
+    and when the user field is missing or malformed.
+    """
+    token = settings.telegram_bot_token
+    if not token or not raw:
+        return None
+    try:
+        pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return None
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        return None  # a repeated key; the signed string would be ambiguous
+    received = fields.pop("hash", "")
+    if not received:
+        return None
+
+    check_string = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    expected = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected.encode(), received.encode()):
+        return None
+
+    try:
+        auth_date = int(fields.get("auth_date", ""))
+    except ValueError:
+        return None
+    current = time.time() if now is None else now
+    if current - auth_date > max_age_s or auth_date - current > 60:
+        return None
+
+    try:
+        user = json.loads(fields.get("user", ""))
+    except ValueError:
+        return None
+    if not isinstance(user, dict) or not isinstance(user.get("id"), int):
+        return None
+    return user
+
+
 class TelegramProvider(SMSProvider):
     """Sends messages to a Telegram user or group chat via the Bot API.
 
@@ -398,6 +487,66 @@ class TelegramProvider(SMSProvider):
             attempts,
         )
         return False
+
+    async def send_web_app_button(
+        self, chat_id: str, text: str, button_text: str, url: str
+    ) -> SMSResult:
+        """Send a message with one inline button that opens a Mini App at url.
+
+        Inline web_app buttons only work in private chats - Telegram rejects
+        them elsewhere - so callers send these to a member's own chat. The
+        button carries no data: the Mini App learns who opened it from the
+        init data Telegram signs (see validate_init_data).
+        """
+        if not settings.telegram_bot_token:
+            return SMSResult(success=False, error_message="TELEGRAM_BOT_TOKEN is not configured")
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": [[{"text": button_text, "web_app": {"url": url}}]]},
+        }
+        try:
+            async with self._client() as client:
+                resp = await client.post("/sendMessage", json=payload)
+                resp.raise_for_status()
+                message_id = str(resp.json()["result"]["message_id"])
+        except httpx.HTTPStatusError as exc:
+            # Status only: the request URL carries the bot token.
+            logger.error(
+                f"Telegram web_app button to chat {chat_id} failed: HTTP {exc.response.status_code}"
+            )
+            return SMSResult(success=False, error_message=f"HTTP {exc.response.status_code}")
+        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            logger.error(f"Telegram web_app button to chat {chat_id} failed: {type(exc).__name__}")
+            return SMSResult(success=False, error_message=type(exc).__name__)
+        return SMSResult(success=True, message_sid=message_id)
+
+    async def set_chat_menu_button(self, chat_id: str, button_text: str, url: str) -> bool:
+        """Make this private chat's menu button open the Mini App at url.
+
+        Keeps the setup form one tap away after the message carrying its
+        button has scrolled off. Best effort: a failure is logged and the
+        inline button still works.
+        """
+        if not settings.telegram_bot_token:
+            return False
+        payload = {
+            "chat_id": int(chat_id),
+            "menu_button": {"type": "web_app", "text": button_text, "web_app": {"url": url}},
+        }
+        try:
+            async with self._client() as client:
+                resp = await client.post("/setChatMenuButton", json=payload)
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                f"setChatMenuButton for chat {chat_id} failed: HTTP {exc.response.status_code}"
+            )
+            return False
+        except httpx.HTTPError as exc:
+            logger.warning(f"setChatMenuButton for chat {chat_id} failed: {type(exc).__name__}")
+            return False
+        return True
 
     async def get_chat_member(self, chat_id: str, user_id: str) -> dict[str, object] | None:
         """This user's ChatMember object in chat_id, or None if Telegram has none.

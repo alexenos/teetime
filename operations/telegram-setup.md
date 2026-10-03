@@ -237,6 +237,54 @@ directly. A removed member, though, keeps access for up to five minutes, and
 fixed, offboard by hand: cancel their bookings and run
 `scripts/add_walden_credential.py remove <telegram user id>`.
 
+## Connecting a Walden login (members do it themselves)
+
+A member connects their own Walden login (#240). The admin never sees it.
+
+1. In a private chat with the bot, the member sends `/start`, or taps the link
+   in the group's welcome message. The bot replies with a **Connect Walden
+   account** button, and pins the same form to the chat's menu button.
+2. The button opens a form inside Telegram (a Mini App) at
+   `<service URL>/onboarding/walden`. The member types their Walden member
+   number and password and ticks a consent box.
+3. The form posts straight to the service over HTTPS, with the data Telegram
+   signed when it opened the form. That signature is the only thing that
+   says who the member is, so nobody can save a login for someone else. The
+   password is never a chat message.
+4. The service checks the login with Walden over direct HTTP (#241), which
+   takes about 1.5s. It saves the login only if Walden accepted it.
+
+Commands, all answered without the language model:
+
+| Command | What it does |
+|---|---|
+| `/start` | Opens the form, or says a login is already connected |
+| `/login` | Opens the form, to update the login after a password change |
+| `/status` | Says whether a login is connected and when Walden last accepted it. Never shows the login |
+| `/forget` | Asks for `/forget confirm`, then deletes the login and cancels pending bookings |
+
+In a group, each command answers with a link to the private chat instead.
+
+**Limits.** Walden's lockout policy is unknown, so a member gets 3 rejected
+logins an hour before being asked to wait, and 10 attempts an hour in total.
+
+**Capacity.** When the number of connected logins reaches
+`racer_max_requesters`, the admin gets a message saying to raise it. Beyond
+that number, extra members race after the window opens.
+
+**Needs:** `TELEGRAM_WEBHOOK_BASE_URL` set to an `https://` URL (terraform
+fills in the service URL), and `CREDENTIAL_ENCRYPTION_KEY` mounted to encrypt
+the login. Turn on group access ("Members group" above) only once this has
+shipped. Until then, the welcome message's link leads nowhere useful.
+
+**Not verified against a real Telegram client:**
+- That Telegram passes the signed data to this page in the URL fragment for
+  an inline button. The official script reads it from there.
+- That the page closes itself after saving.
+- That Telegram Web is allowed to frame it (`frame-ancestors`).
+
+Test on iOS and Android before inviting anyone.
+
 ## Booking for someone else (admin proxy)
 
 One designated Telegram account can book under a *specific friend's* Walden

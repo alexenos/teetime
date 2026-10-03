@@ -23,8 +23,11 @@ and always refuses: this decides who may book under a Walden membership, so an
 outage must fail closed, but must not keep failing after it ends.
 """
 
+import asyncio
 import logging
 import time
+from collections import defaultdict
+from dataclasses import dataclass
 
 from app.config import settings
 from app.models.schemas import BookingStatus
@@ -178,6 +181,33 @@ async def handle_chat_member_update(update: dict[str, object]) -> str:
     return "ok"
 
 
+async def still_in_group(user_id: str) -> bool:
+    """Whether this user may still save a login, asked of Telegram right now.
+
+    For the setup form (#240) to call just before it saves, after the Walden
+    check. During a deploy Cloud Run runs the old and new revisions side by
+    side, and member_lock only holds within one of them, so a leave handled by
+    the other revision - which deletes the member's login - could otherwise be
+    followed by this one saving it again. Asking Telegram directly, bypassing
+    this process's cache, closes that across revisions.
+
+    True for the allowlist, which group membership does not decide, and when
+    group access is off. True when Telegram cannot be asked: the member was
+    authorized seconds ago, and a Telegram blip should not throw away a login
+    Walden just accepted. False only when Telegram says they are not in the
+    group.
+    """
+    if is_authorized_user(user_id, is_bot=False):
+        return True
+    chat_id = settings.telegram_members_chat()
+    if not chat_id:
+        return True
+    current = await _current_membership(chat_id, user_id)
+    if current is not None:
+        record_membership(user_id, current)
+    return current is not False
+
+
 async def _current_membership(chat_id: str, user_id: str) -> bool | None:
     """What Telegram says about this user's membership right now, bypassing the cache.
 
@@ -241,17 +271,12 @@ async def offboard(user: dict[str, object]) -> None:
         )
         return
 
-    today = CTDateTime.now().date()
-    cancelled = 0
-    still_reserved = 0
-    for booking in await booking_service.get_bookings(phone_number=user_id):
-        if booking.status in (BookingStatus.PENDING, BookingStatus.SCHEDULED):
-            if booking.id and await booking_service.cancel_booking(booking.id) is not None:
-                cancelled += 1
-        elif booking.status == BookingStatus.SUCCESS and booking.request.requested_date >= today:
-            still_reserved += 1
-
-    login_deleted = await credential_service.remove_credentials(user_id)
+    result = await forget_member(user_id)
+    cancelled, still_reserved, login_deleted = (
+        result.cancelled,
+        result.still_reserved,
+        result.login_deleted,
+    )
     logger.info(
         f"Offboarded Telegram user {user_id}: {cancelled} booking(s) cancelled, "
         f"login {'deleted' if login_deleted else 'not on file'}"
@@ -276,6 +301,56 @@ async def offboard(user: dict[str, object]) -> None:
         f"{name} left the members group. Cancelled {_bookings(cancelled, 'pending booking')}; "
         + ("deleted their Walden login." if login_deleted else "no Walden login was stored.")
     )
+
+
+# One lock per member, held across anything that writes or deletes their
+# stored login: the setup form's check-then-save (#240) and forget_member.
+# Without it, a /forget or a leave landing while Walden is checking a login is
+# undone a second later, when the check succeeds and saves the login again.
+# In-process: the service runs as a single instance (cloud_run_max_instances).
+_member_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def member_lock(user_id: str) -> asyncio.Lock:
+    """The lock guarding this member's stored login."""
+    return _member_locks[user_id]
+
+
+@dataclass(frozen=True)
+class ForgetResult:
+    """What forget_member did."""
+
+    cancelled: int
+    still_reserved: int
+    login_deleted: bool
+
+
+async def forget_member(user_id: str) -> ForgetResult:
+    """Cancel this member's bookings that have not started and delete their login.
+
+    Shared by offboarding (they left the group) and /forget (they asked, #240).
+    A tee time already reserved at the club is counted rather than touched: it
+    is the member's own, and with their login deleted it could not be
+    cancelled there anyway. An attempt in progress is left to finish.
+    """
+    # Waits for a setup-form check in flight, so what it saves is deleted here
+    # rather than written back afterwards.
+    async with member_lock(user_id):
+        return await _forget_member_locked(user_id)
+
+
+async def _forget_member_locked(user_id: str) -> ForgetResult:
+    today = CTDateTime.now().date()
+    cancelled = 0
+    still_reserved = 0
+    for booking in await booking_service.get_bookings(phone_number=user_id):
+        if booking.status in (BookingStatus.PENDING, BookingStatus.SCHEDULED):
+            if booking.id and await booking_service.cancel_booking(booking.id) is not None:
+                cancelled += 1
+        elif booking.status == BookingStatus.SUCCESS and booking.request.requested_date >= today:
+            still_reserved += 1
+    login_deleted = await credential_service.remove_credentials(user_id)
+    return ForgetResult(cancelled, still_reserved, login_deleted)
 
 
 def _bookings(count: int, noun: str = "booking") -> str:

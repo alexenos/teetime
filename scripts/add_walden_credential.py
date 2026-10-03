@@ -1,9 +1,12 @@
 """
 Admin tool for the per-friend Walden Golf credential store (issue #179).
 
-Each friend already has their own Walden membership; there is deliberately no
-self-service onboarding flow (a credential must never transit chat history),
-so Dax runs this locally to add, update, remove, or list them. Values are
+Members now connect their own login through the bot's setup form (#240,
+app/services/member_setup.py), so the admin never sees it. This script is the
+admin's fallback for listing and removing rows, and for adding one by hand -
+which means seeing that member's password, the thing the form exists to avoid.
+#242 retires `set` once logins are encrypted with a key the admin does not
+hold. Values are
 encrypted at rest with CREDENTIAL_ENCRYPTION_KEY (see
 app/services/credential_crypto.py) - set that in .env or the environment
 before running this. Generate one with:

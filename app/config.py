@@ -165,6 +165,12 @@ class Settings(BaseSettings):
     # row uses.
     credential_encryption_key: str = ""
 
+    # How many racer tasks start each morning (terraform racer_max_requesters).
+    # The service only reads it to warn the admin when the number of stored
+    # Walden logins reaches it (#240): members connect their own logins now,
+    # so that count can grow without the admin doing anything.
+    racer_max_requesters: int = 4
+
     # Run the booking chain as direct PrimeFaces HTTP calls instead of browser
     # clicks. Login, navigation and slot discovery still run in Chrome; only the
     # chain itself moves to HTTP. A failure before the reservation is submitted
