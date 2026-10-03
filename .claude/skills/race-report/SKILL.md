@@ -965,6 +965,13 @@ Delete it once the check below has passed: `rm -f ~/.teetime/labels.json`.
 
 - **Members this bot books for** are `Member A`, `Member B`, … — the same label
   in every report.
+  **Member labels are now assigned in the database** (#256), when a member
+  first connects a login through the bot, and the service, racer and observer
+  rewrite each member's Telegram ID to their label in every log line. A log
+  line already reading `<Member C>` is labelled: keep it as it is. That label
+  may be newer than `MEMBER_PSEUDONYM_LABELS`. It is still a member, not "an
+  unregistered member". Their name on a tee sheet is caught by the check
+  below either way.
 - **Rivals** are one label per person: `Rival 1`, `Rival 2`, …. A foursome is
   written as its people ("Rival 1's foursome", "Rivals 1–3"), since groups change
   week to week and people do not.

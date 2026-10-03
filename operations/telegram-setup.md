@@ -268,6 +268,14 @@ In a group, each command answers with a link to the private chat instead.
 **Limits.** Walden's lockout policy is unknown, so a member gets 3 rejected
 logins an hour before being asked to wait, and 10 attempts an hour in total.
 
+**Pseudonym.** The first time a member saves a login, they are given the next
+free label (`Member C`, ...) for logs and race reports (#256). Labels listed in
+`member_pseudonyms_reserved` are skipped. The admin gets a message naming the
+member and their label. Add them to `MEMBER_PSEUDONYM_REGISTRY` and
+`MEMBER_PSEUDONYM_LABELS` with their name forms and handle. The members who
+were labelled by hand before this existed are mapped once with
+`scripts/add_walden_credential.py set-pseudonym <requester id> "Member A"`.
+
 **Capacity.** When the number of connected logins reaches
 `racer_max_requesters`, the admin gets a message saying to raise it. Beyond
 that number, extra members race after the window opens.

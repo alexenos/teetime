@@ -43,6 +43,7 @@ import sys
 from sqlalchemy import select
 
 from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, init_db
+from app.services import pseudonyms
 from app.services.credential_service import credential_service
 
 
@@ -107,6 +108,8 @@ async def _list() -> None:
         result = await session.execute(select(WaldenCredentialRecord))
         records = result.scalars().all()
 
+    labels = await pseudonyms.load_all()
+
     if not records:
         print("No per-friend Walden credentials stored.")
         return
@@ -124,10 +127,20 @@ async def _list() -> None:
             if part
         )
         suffix = f" ({identity})" if identity else " (no name or handle - not proxy-bookable)"
+        pseudonym = labels.get(str(record.phone_number), "none - map with set-pseudonym")
         print(
-            f"{record.phone_number}{suffix} - added {record.created_at}, "
-            f"updated {record.updated_at}"
+            f"{record.phone_number}{suffix} - pseudonym={pseudonym}, "
+            f"added {record.created_at}, updated {record.updated_at}"
         )
+
+
+async def _set_pseudonym(requester_id: str, label: str) -> None:
+    """Record which existing member a hand-assigned registry label belongs to (#256)."""
+    try:
+        await pseudonyms.set_label(requester_id, label)
+    except pseudonyms.PseudonymError as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"{requester_id} is {label} in logs from the next deploy or job run on.")
 
 
 async def _main() -> None:
@@ -160,6 +173,15 @@ async def _main() -> None:
         help="Optional free-text note; never used to resolve a target (see --name)",
     )
 
+    pseudonym_parser = subparsers.add_parser(
+        "set-pseudonym",
+        help='Map an existing member to their registry label, e.g. "Member A" (#256)',
+    )
+    pseudonym_parser.add_argument("phone_number", help="The member's requester ID")
+    pseudonym_parser.add_argument(
+        "label", help='Their label in MEMBER_PSEUDONYM_REGISTRY, e.g. "Member A"'
+    )
+
     remove_parser = subparsers.add_parser("remove", help="Delete a stored credential")
     remove_parser.add_argument("phone_number")
 
@@ -183,6 +205,8 @@ async def _main() -> None:
         await _remove(args.phone_number)
     elif args.command == "list":
         await _list()
+    elif args.command == "set-pseudonym":
+        await _set_pseudonym(args.phone_number, args.label)
 
 
 if __name__ == "__main__":

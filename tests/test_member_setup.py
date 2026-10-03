@@ -77,6 +77,7 @@ async def test_db(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-d
     session_local = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     monkeypatch.setattr("app.services.credential_service.AsyncSessionLocal", session_local)
     monkeypatch.setattr("app.services.database_service.AsyncSessionLocal", session_local)
+    monkeypatch.setattr("app.services.pseudonyms.AsyncSessionLocal", session_local)
     monkeypatch.setattr(settings, "credential_encryption_key", Fernet.generate_key().decode())
     yield
     await engine.dispose()
@@ -257,8 +258,8 @@ class TestSubmitLogin:
         owner = await credential_service.get_owner(str(MEMBER))
         assert owner is not None and owner.verified_at is not None
         assert owner.name == "Sam" and owner.telegram_username == "sam_golf"
-        assert [m["to"] for m in sent] == [str(MEMBER)]
-        assert "You're connected" in sent[0]["message"]
+        to_member = [m for m in sent if m["to"] == str(MEMBER)]
+        assert len(to_member) == 1 and "You're connected" in to_member[0]["message"]
 
     async def test_rejected_login_is_not_saved(
         self, monkeypatch: pytest.MonkeyPatch, test_db: None
@@ -356,7 +357,7 @@ class TestSubmitLogin:
 
         await submit_login(USER, LOGIN, PASSWORD, True)
 
-        to_admin = [m for m in sent if m["to"] == "111"]
+        to_admin = [m for m in sent if m["to"] == "111" and "racer_max_requesters" in m["message"]]
         assert len(to_admin) == 1
         assert "2 members now have Walden logins" in to_admin[0]["message"]
 
@@ -366,7 +367,7 @@ class TestSubmitLogin:
         sent = sent_messages(monkeypatch)
         walden_says(monkeypatch, LoginOutcome.ACCEPTED)
         await submit_login(USER, LOGIN, PASSWORD, True)
-        assert [m["to"] for m in sent] == [str(MEMBER)]
+        assert not any("racer_max_requesters" in m["message"] for m in sent)
 
 
 class TestConcurrency:

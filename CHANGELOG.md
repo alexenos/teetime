@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Members get a pseudonym when they connect a login, and logs use it (#256).**
+  Race reports are public and name people by label. Self-onboarded members
+  were never added to the hand-kept registry, and the logs carried their
+  Telegram IDs.
+  - A new `member_pseudonyms` table assigns the next free `Member <letter>`
+    the first time a member saves a login. It skips the hand-assigned labels
+    in `member_pseudonyms_reserved` (`Member A,Member B`).
+  - The table survives offboarding, so a label is never reused.
+  - A log filter in the service, racer and observer rewrites each member's
+    Telegram ID to `<Member C>` in every line.
+  - The admin is told the new label, to add the member's name forms to the
+    registry.
+  - `scripts/add_walden_credential.py set-pseudonym` maps the members labelled
+    before this existed.
+
 - **Members connect their own Walden login; the admin never sees it (#240).**
   Before this, the admin entered every login with
   `scripts/add_walden_credential.py`. Now `/start` in a private chat with the
