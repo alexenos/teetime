@@ -38,7 +38,12 @@ from app.config import settings
 from app.providers.walden_http_login import LoginOutcome, check_login
 from app.services.credential_service import credential_service
 from app.services.sms_service import sms_service
-from app.services.telegram_members import forget_member, is_authorized, member_lock
+from app.services.telegram_members import (
+    forget_member,
+    is_authorized,
+    member_lock,
+    still_in_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +273,16 @@ async def _check_and_save(
             SubmitStatus.UNKNOWN,
             "I couldn't get an answer from Walden just now, so nothing was saved. "
             "Please try again in a few minutes.",
+        )
+
+    if not await still_in_group(user_id):
+        # They left, or were removed, while Walden was checking. Possibly
+        # handled by the other revision during a deploy, which deleted their
+        # login; saving now would bring it back.
+        logger.info(f"Telegram user {user_id} left the group during a login check; not saved")
+        return SubmitResult(
+            SubmitStatus.FORBIDDEN,
+            "You're no longer in the tee time group, so your login wasn't saved.",
         )
 
     first_name = user.get("first_name")

@@ -430,6 +430,86 @@ class TestConcurrency:
         assert await credential_service.get_owner(str(MEMBER)) is None
 
 
+class TestLeftDuringTheCheck:
+    """A leave handled by another revision mid-check must not be undone by the save."""
+
+    GROUP = "-1001234567890"
+
+    @pytest.fixture(autouse=True)
+    def _group_member_not_allowlisted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "telegram_allowed_user_ids", "111")
+        monkeypatch.setattr(settings, "telegram_members_chat_id", self.GROUP)
+
+    @staticmethod
+    def telegram_says(monkeypatch: pytest.MonkeyPatch, *answers: object) -> list[str]:
+        """getChatMember answers in order: a status string, or an exception to raise."""
+        queue = list(answers)
+        asked: list[str] = []
+
+        async def fake(self, chat_id: str, user_id: str):  # type: ignore[no-untyped-def]
+            asked.append(user_id)
+            answer = queue.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return {"status": answer}
+
+        monkeypatch.setattr(TelegramProvider, "get_chat_member", fake)
+        return asked
+
+    async def test_left_during_the_check_is_not_saved(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        sent = sent_messages(monkeypatch)
+        walden_says(monkeypatch, LoginOutcome.ACCEPTED)
+        asked = self.telegram_says(monkeypatch, "member", "left")
+
+        result = await submit_login(USER, LOGIN, PASSWORD, True)
+
+        assert result.status is SubmitStatus.FORBIDDEN
+        assert len(asked) == 2  # once to authorize, once fresh before saving
+        assert await credential_service.get_owner(str(MEMBER)) is None
+        assert sent == []
+
+    async def test_still_a_member_is_saved(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        sent_messages(monkeypatch)
+        walden_says(monkeypatch, LoginOutcome.ACCEPTED)
+        asked = self.telegram_says(monkeypatch, "member", "member")
+
+        result = await submit_login(USER, LOGIN, PASSWORD, True)
+
+        assert result.status is SubmitStatus.SAVED
+        assert len(asked) == 2
+
+    async def test_telegram_blip_at_save_time_still_saves(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """Authorized seconds ago; a lookup failure must not discard an accepted login."""
+        from app.providers.telegram_provider import ChatMemberLookupError
+
+        sent_messages(monkeypatch)
+        walden_says(monkeypatch, LoginOutcome.ACCEPTED)
+        self.telegram_says(monkeypatch, "member", ChatMemberLookupError("HTTP 502"))
+
+        result = await submit_login(USER, LOGIN, PASSWORD, True)
+
+        assert result.status is SubmitStatus.SAVED
+
+    async def test_allowlisted_members_are_not_asked_again(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_allowed_user_ids", str(MEMBER))
+        sent_messages(monkeypatch)
+        walden_says(monkeypatch, LoginOutcome.ACCEPTED)
+        asked = self.telegram_says(monkeypatch)
+
+        result = await submit_login(USER, LOGIN, PASSWORD, True)
+
+        assert result.status is SubmitStatus.SAVED
+        assert asked == []
+
+
 @pytest.fixture
 def client() -> TestClient:
     app = FastAPI()

@@ -181,6 +181,33 @@ async def handle_chat_member_update(update: dict[str, object]) -> str:
     return "ok"
 
 
+async def still_in_group(user_id: str) -> bool:
+    """Whether this user may still save a login, asked of Telegram right now.
+
+    For the setup form (#240) to call just before it saves, after the Walden
+    check. During a deploy Cloud Run runs the old and new revisions side by
+    side, and member_lock only holds within one of them, so a leave handled by
+    the other revision - which deletes the member's login - could otherwise be
+    followed by this one saving it again. Asking Telegram directly, bypassing
+    this process's cache, closes that across revisions.
+
+    True for the allowlist, which group membership does not decide, and when
+    group access is off. True when Telegram cannot be asked: the member was
+    authorized seconds ago, and a Telegram blip should not throw away a login
+    Walden just accepted. False only when Telegram says they are not in the
+    group.
+    """
+    if is_authorized_user(user_id, is_bot=False):
+        return True
+    chat_id = settings.telegram_members_chat()
+    if not chat_id:
+        return True
+    current = await _current_membership(chat_id, user_id)
+    if current is not None:
+        record_membership(user_id, current)
+    return current is not False
+
+
 async def _current_membership(chat_id: str, user_id: str) -> bool | None:
     """What Telegram says about this user's membership right now, bypassing the cache.
 
