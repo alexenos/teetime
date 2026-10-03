@@ -1,5 +1,5 @@
 title: TeeTime Bot
-description: Golf tee time reservation assistant via SMS
+description: Golf tee time booking assistant on Telegram
 theme: minima
 baseurl: "/teetime"
 url: "https://alexenos.github.io"

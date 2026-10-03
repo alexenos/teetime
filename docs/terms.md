@@ -6,47 +6,28 @@ permalink: /terms/
 
 # Terms of Service
 
-**Last Updated: February 5, 2026**
+**Last Updated: October 3, 2026**
 
-These Terms of Service ("Terms") govern your use of the TeeTime Bot SMS service ("Service"). By using our Service, you agree to these Terms.
+These Terms of Service ("Terms") govern your use of TeeTime Bot (the "Service"), a Telegram bot. By using the Service, you agree to these Terms.
 
 ## Service Description
 
-TeeTime Bot is an SMS-based golf tee time reservation assistant. The Service allows authorized users to request and manage tee time bookings at participating golf courses via text message.
+TeeTime Bot books golf tee times at Northgate Country Club when reservations open. You ask for a time in a Telegram chat with the bot, and at the moment the reservation window opens it books for you, logging in to the club's booking site (Walden Golf) as you, under your own membership.
 
 ## Eligibility
 
-This Service is available only to a private group of golfers who have received a direct invitation. Access is granted exclusively via private invitation. By using the Service, you represent that you have been invited to use this Service and are at least 18 years old.
+The Service is available only to a private group of golfers, by invitation. To use it you must be a member of that Telegram group, hold your own Walden Golf membership, and be at least 18 years old.
 
-## SMS Messaging Terms
+## Your Walden Login
 
-By opting in to receive SMS messages from TeeTime Bot, you agree to the following:
+- You connect your own Walden login through the bot's setup form. By doing so, you authorize the Service to log in to Walden as you, to make the bookings you ask for.
+- The group's admin can ask the Service to book for you, under your membership. Ask them if you would rather they did not.
+- You can delete your login at any time with `/forget`. Leaving the group deletes it too.
+- How your login is stored and protected is described in the [Privacy Policy](/teetime/privacy/).
 
-### Message Frequency
+## Club Rules
 
-- Message frequency varies based on your booking activity and requests
-- You will receive messages related to: booking confirmations, booking failures, status updates, and responses to your inquiries
-
-### Message and Data Rates
-
-- **Message and data rates may apply** depending on your mobile carrier and plan
-- Check with your wireless carrier for details about your text messaging plan
-
-### Opt-In Consent
-
-- You consent to receive SMS messages by texting START or sending an initial booking request to our service number
-- Your consent is not required as a condition of any purchase
-
-### Opt-Out
-
-- You may opt out at any time by texting **STOP** to any message from TeeTime Bot
-- After opting out, you will receive a confirmation message and no further messages will be sent
-- To rejoin, text **START** to our service number
-
-### Help
-
-- For assistance, text **HELP** to receive support information
-- You may also contact us through the methods described in our [Privacy Policy](/teetime/privacy/)
+Bookings are made under your own membership, so the club's rules apply to them as if you had booked yourself, including its limits on rounds per member per day, its cancellation policy, and any rules about automated booking. You are responsible for following them.
 
 ## User Responsibilities
 
@@ -82,8 +63,8 @@ These Terms shall be governed by the laws of the State of Texas, without regard 
 
 ## Contact
 
-For questions about these Terms, text HELP to our service number or refer to our [Privacy Policy](/teetime/privacy/) for contact information.
+For questions about these Terms, ask the person who invited you. How your information is handled is in the [Privacy Policy](/teetime/privacy/).
 
 ---
 
-*TeeTime Bot is a personal golf assistant application for authorized users only.*
+*TeeTime Bot is a private application for invited members only.*

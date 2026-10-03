@@ -5,27 +5,21 @@ title: TeeTime Bot
 
 # TeeTime Bot
 
-A personal golf assistant that helps you book tee times at the Northgate Country Club via SMS.
+A private Telegram bot that books Northgate Country Club tee times the moment reservations open, under each member's own Walden membership.
 
 ## How It Works
 
-1. **Text your request** - Send a message like "Saturday 8am" to book a tee time
-2. **Get confirmation** - Receive an SMS when your booking is confirmed
-3. **Manage bookings** - Check status and receive updates via text
+1. **Ask in Telegram.** Send the bot something like "Book Saturday 8am for 4 players".
+2. **It confirms a real tee time.** If your exact time isn't on the sheet, it offers the nearest ones.
+3. **It books at 6:30am, 7 days ahead.** That's the moment reservations open, and it tells you what it got.
 
-## SMS Program Details
-
-- **Program**: TeeTime Bot - Golf Tee Time Reservations
-- **Message Frequency**: Varies based on your booking activity
-- **Message & Data Rates May Apply**
-- **Text STOP to opt out** at any time
-- **Text HELP for assistance**
+Membership is by invitation. If you've been invited, start with **[How to join](/teetime/join/)**.
 
 ## Legal
 
-- [Privacy Policy](/teetime/privacy/) - How we handle your information
-- [Terms of Service](/teetime/terms/) - Terms governing use of this service
+- [Privacy Policy](/teetime/privacy/): what is stored and how your Walden login is protected
+- [Terms of Service](/teetime/terms/): the terms governing use of this service
 
 ---
 
-*TeeTime Bot is a personal golf assistant application for authorized users only.*
+*TeeTime Bot is a private application for invited members only.*

@@ -166,6 +166,9 @@ gateway answers a bare `@mention` the same way.
 
 ## Members group (who may use the bot)
 
+For the per-member routine (inviting, approving, offboarding), see
+`operations/onboarding.md`. This section is the group's one-time setup.
+
 Anyone in the members' Telegram group may use the bot, as well as anyone in
 `TELEGRAM_ALLOWED_USER_IDS` (issue #239). Letting a member in means approving
 their request to join the group. There is no secret version to add and nothing
