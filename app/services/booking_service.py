@@ -626,9 +626,8 @@ class BookingService:
             logger.info("Proxy target %r matched no stored credential", target)
             return (
                 f'I don\'t know who "{target}" is - nobody with that name or Telegram '
-                "handle has a stored Walden login. Add one with "
-                "add_walden_credential.py set <id> --name ... --telegram-username ..., "
-                "or tell me a different name."
+                "handle has a stored Walden login. They connect their own by sending me "
+                "/start in a private chat. Or tell me a different name."
             )
 
         if len(matches) > 1:

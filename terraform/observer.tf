@@ -155,6 +155,16 @@ resource "google_cloud_run_v2_job" "observer" {
           value = var.log_level
         }
 
+        # The observer decrypts the login of the booking it watches, so it needs
+        # the KMS key name too once logins are written with it (issue #242).
+        dynamic "env" {
+          for_each = local.kms_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+
         env {
           name  = "OBSERVER_ENABLED"
           value = tostring(var.observer_enabled)

@@ -234,6 +234,28 @@ variable "telegram_group_access_enabled" {
   default     = false
 }
 
+variable "credential_kms_enabled" {
+  description = <<-EOT
+    Write member Walden logins with the Cloud KMS key in terraform/kms.tf
+    instead of the hand-made Fernet key (issue #242), by passing its name to the
+    service, racer and observer as CREDENTIAL_KMS_KEY.
+
+    The key, its IAM grants and the KMS audit logging are created whether or
+    not this is on. Turn it on once an apply has created them - read the build
+    log for the google_kms_crypto_key creation (CLAUDE.md) - because an app
+    told about a key it cannot yet use fails every login it saves.
+
+    On, new logins are written with KMS; logins already stored with the Fernet
+    key keep decrypting with it until they are re-entered. See "Moving logins
+    to the KMS key" in operations/credential-encryption.md for the rest of the
+    migration, ending with deleting CREDENTIAL_ENCRYPTION_KEY.
+
+    Off, everything works exactly as before this change.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "admin_proxy_enabled" {
   description = <<-EOT
     Expose TELEGRAM_ADMIN_USER_ID to the running service, letting one
