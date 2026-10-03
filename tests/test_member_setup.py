@@ -360,6 +360,23 @@ class TestSubmitLogin:
         assert len(to_admin) == 1
         assert "2 members now have Walden logins" in to_admin[0]["message"]
 
+    async def test_a_failure_after_saving_still_reports_saved(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """Otherwise the member is told nothing was saved while their login is stored."""
+        sent_messages(monkeypatch)
+        walden_says(monkeypatch, LoginOutcome.ACCEPTED)
+
+        async def count_fails() -> int:
+            raise RuntimeError("database went away")
+
+        monkeypatch.setattr(credential_service, "count", count_fails)
+
+        result = await submit_login(USER, LOGIN, PASSWORD, True)
+
+        assert result.status is SubmitStatus.SAVED
+        assert await credential_service.get_owner(str(MEMBER)) is not None
+
     async def test_no_warning_below_the_ceiling(
         self, monkeypatch: pytest.MonkeyPatch, test_db: None
     ) -> None:

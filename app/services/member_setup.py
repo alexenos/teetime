@@ -297,13 +297,19 @@ async def _check_and_save(
     )
     logger.info(f"Saved a verified Walden login for Telegram user {user_id}")
 
-    await sms_service.send_sms(
-        user_id,
-        "You're connected - Walden accepted your login. To book, just tell me what you want, "
-        'e.g. "Book Saturday 8am for 4 players". Reservations open 7 days ahead at 6:30am CT.',
-        channel="telegram",
-    )
-    await _warn_if_at_racer_ceiling()
+    # The login is committed. Nothing after this may turn the answer into a
+    # failure: the endpoint would tell the member "nothing was saved" while
+    # their login sits in the database, and they would not know to /forget it.
+    try:
+        await sms_service.send_sms(
+            user_id,
+            "You're connected - Walden accepted your login. To book, just tell me what you want, "
+            'e.g. "Book Saturday 8am for 4 players". Reservations open 7 days ahead at 6:30am CT.',
+            channel="telegram",
+        )
+        await _warn_if_at_racer_ceiling()
+    except Exception:
+        logger.exception("A step after saving a login failed; the login is saved")
     return SubmitResult(SubmitStatus.SAVED, "Connected. Walden accepted your login.")
 
 
