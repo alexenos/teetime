@@ -121,7 +121,8 @@ async def set_label(requester_id: str, label: str) -> None:
 
     Used by scripts/add_walden_credential.py set-pseudonym, to record that the
     members labelled in the registry before this existed are who they are.
-    Refuses a malformed label and one already held by someone else.
+    Refuses a malformed label, one already held by someone else, and any change
+    to a requester's existing label, which would free the old one for reuse.
     """
     if not LABEL_PATTERN.match(label):
         raise PseudonymError(f'A member label looks like "Member A"; got {label!r}')
@@ -140,12 +141,18 @@ async def set_label(requester_id: str, label: str) -> None:
                 )
             )
         ).scalar_one_or_none()
-        if record is None:
-            session.add(
-                MemberPseudonymRecord(requester_id=requester_id, label=label, assigned_at=_utcnow())
+        if record is not None:
+            if str(record.label) == label:
+                return
+            # Changing it would free the old label for assign() to hand to
+            # someone else, and old reports would then mean two people by it.
+            raise PseudonymError(
+                f"This requester is already {record.label}. A label is never changed or "
+                "reused once assigned."
             )
-        else:
-            record.label = label  # type: ignore[assignment]
+        session.add(
+            MemberPseudonymRecord(requester_id=requester_id, label=label, assigned_at=_utcnow())
+        )
         await session.commit()
 
 

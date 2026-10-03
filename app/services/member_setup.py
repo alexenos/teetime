@@ -30,6 +30,7 @@ parser ever sees them - a setup step must not depend on how a model reads it.
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -261,7 +262,9 @@ async def _check_and_save(
     _attempts[user_id].append(now)
 
     check = await check_login(login, password)
-    logger.info(f"Setup form login check for Telegram user {user_id}: {check.outcome.value}")
+    # No requester ID in these lines: a first-time member has no pseudonym yet,
+    # so the log filter (#256) could not hide it.
+    logger.info(f"Setup form login check: {check.outcome.value}")
 
     if check.outcome is LoginOutcome.REJECTED:
         _rejected[user_id].append(now)
@@ -280,7 +283,7 @@ async def _check_and_save(
         # They left, or were removed, while Walden was checking. Possibly
         # handled by the other revision during a deploy, which deleted their
         # login; saving now would bring it back.
-        logger.info(f"Telegram user {user_id} left the group during a login check; not saved")
+        logger.info("A member left the group during a login check; not saved")
         return SubmitResult(
             SubmitStatus.FORBIDDEN,
             "You're no longer in the tee time group, so your login wasn't saved.",
@@ -296,23 +299,33 @@ async def _check_and_save(
         telegram_username=username if isinstance(username, str) and username else None,
         verified_at=_utcnow(),
     )
-    logger.info(f"Saved a verified Walden login for Telegram user {user_id}")
+    logger.info("Saved a verified Walden login")
 
     # The login is committed. Nothing after this may turn the answer into a
     # failure: the endpoint would tell the member "nothing was saved" while
     # their login sits in the database, and they would not know to /forget it.
-    try:
-        await sms_service.send_sms(
+    # Each step has its own guard, so one failing never skips the others - the
+    # pseudonym above all, which keeps this member's ID out of later logs.
+    await _after_save(
+        "confirmation message",
+        sms_service.send_sms(
             user_id,
             "You're connected - Walden accepted your login. To book, just tell me what you want, "
             'e.g. "Book Saturday 8am for 4 players". Reservations open 7 days ahead at 6:30am CT.',
             channel="telegram",
-        )
-        await _assign_pseudonym(user_id, user)
-        await _warn_if_at_racer_ceiling()
-    except Exception:
-        logger.exception("A step after saving a login failed; the login is saved")
+        ),
+    )
+    await _after_save("pseudonym", _assign_pseudonym(user_id, user))
+    await _after_save("capacity warning", _warn_if_at_racer_ceiling())
     return SubmitResult(SubmitStatus.SAVED, "Connected. Walden accepted your login.")
+
+
+async def _after_save(step: str, work: Awaitable[object]) -> None:
+    """Run one post-save step, logging rather than raising if it fails."""
+    try:
+        await work
+    except Exception:
+        logger.exception(f"Post-save step failed ({step}); the login is saved")
 
 
 def _utcnow() -> datetime:
