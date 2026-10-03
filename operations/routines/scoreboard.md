@@ -247,9 +247,11 @@ Gate - right hour? The cron is UTC and pinned to 12:30, which is 07:30 CT only d
 
 Step 2 - read every ledger
 B=gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations
-for r in race-report scoreboard; do mkdir -p ledger/$r && gcloud storage cp --no-clobber "$B/$r/*.json" ledger/$r/ || echo "no rows under $r"; done
+mkdir -p ledger/race-report ledger/scoreboard
+gcloud storage cp --no-clobber "$B/race-report/*.json" ledger/race-report/
+gcloud storage cp --no-clobber "$B/scoreboard/*.json" ledger/scoreboard/
 
-One directory per Routine, because every Routine names its objects by date and two Routines' rows for the same day would collide in one. The race-report prefix holds the backfill rows beside the Routine's own. A prefix with no objects yet (the scoreboard's, on its first run) is not a failure. Do not read operations/ledger/*.jsonl in the checkout: those files are empty by design. Read only these prefixes - an object directly under operations/ (a grant probe) is not a ledger row, and a Routine the script has no schedule for makes it refuse. When the cost Routine is deployed it is added to this list and to SCHEDULES together.
+One directory per Routine, because every Routine names its objects by date and two Routines' rows for the same day would collide in one. The race-report prefix holds the backfill rows beside the Routine's own, so it is never empty: if that copy fails for any reason, it is a failed run - ok:false with the error as the note, notify, stop. The scoreboard copy may fail on its first run only, and only with "matched no objects"; any other error from it is also a failed run. The script refuses a run with no race-report rows as a second guard. Do not read operations/ledger/*.jsonl in the checkout: those files are empty by design. Read only these prefixes - an object directly under operations/ (a grant probe) is not a ledger row, and a Routine the script has no schedule for makes it refuse. When the cost Routine is deployed it is added to this list and to SCHEDULES together.
 
 Step 3 - derive
 python operations/ledger/derive_scoreboard.py ledger/race-report ledger/scoreboard --out docs/scoreboard.json --row scoreboard-row.json

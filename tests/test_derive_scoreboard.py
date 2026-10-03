@@ -244,8 +244,19 @@ def test_git_corrections_names_the_commit_after_the_one_that_added_the_report(
     assert list(found) == [fixed]
     assert "Correct the fixed report" in found[fixed]
 
-    with pytest.raises(SystemExit, match="no commit adds"):
-        ds.git_corrections(["never-committed.md"])
+    # A report whose PR never merged has no commit, and so no correction:
+    # it stays unverified rather than stopping the run.
+    assert ds.git_corrections(["never-committed.md"]) == {}
+
+    # Ledger paths are repository-relative, wherever the script runs from.
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path / "sub")
+    assert list(ds.git_corrections([clean, fixed])) == [fixed]
+
+
+def test_no_race_report_rows_is_a_failed_read_not_a_zero_board() -> None:
+    with pytest.raises(ValueError, match="no race-report rows"):
+        ds.derive([_quiet(RACE_START, "scoreboard")], _ct(RACE_START, 9, 0), _no_corrections)
 
 
 def test_exact_and_fallback_are_published_whether_or_not_slots_were_confirmed() -> None:

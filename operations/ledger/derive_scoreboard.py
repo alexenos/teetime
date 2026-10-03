@@ -133,29 +133,29 @@ def git_corrections(reports: list[str]) -> dict[str, str]:
 
     Any later commit counts, whatever it changed: scoreboard.md section 2 takes
     a modification as the evidence and leaves reading it to a person, which is
-    what the note is for.
+    what the note is for. A report with no commit at all - its PR never merged -
+    has no correction either, so it is left unverified rather than refused.
+
+    Paths are repository-relative, as the ledger records them, so git runs at
+    the checkout's top level whatever the working directory.
     """
-    shallow = subprocess.run(
-        ["git", "rev-parse", "--is-shallow-repository"],
-        capture_output=True,
-        text=True,
-        check=True,
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", top, *args], capture_output=True, text=True, check=True
+        ).stdout
+
+    top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
     ).stdout.strip()
-    if shallow == "true":
+    if git("rev-parse", "--is-shallow-repository").strip() == "true":
         raise SystemExit(
             "shallow clone: corrections to a report cannot be ruled out. "
             "Run `git fetch --unshallow` first."
         )
     found: dict[str, str] = {}
     for path in reports:
-        log = subprocess.run(
-            ["git", "log", "--reverse", "--format=%h %cs %s", "--", path],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.splitlines()
-        if not log:
-            raise SystemExit(f"{path}: no commit adds this report; cannot check it")
+        log = git("log", "--reverse", "--format=%h %cs %s", "--", path).splitlines()
         if len(log) > 1:
             found[path] = f"report modified after merge: {log[1]}"
     return found
@@ -260,6 +260,11 @@ def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_cor
     keys = [(r["routine"], r["date"]) for r in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("two rows share a Routine and date; the ledger holds one object per run")
+
+    if not any(r["routine"] == "race-report" for r in rows):
+        # The backfill alone guarantees rows here, so none means the read
+        # failed. Publishing zeros would look like a measured result.
+        raise ValueError("no race-report rows at all; the GCS read failed or was skipped")
 
     as_of = now.astimezone(CT).date()
     races = sorted((r for r in rows if r["routine"] == "race-report"), key=lambda r: r["date"])
