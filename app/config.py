@@ -179,6 +179,20 @@ class Settings(BaseSettings):
     # app/services/credential_crypto.py.
     credential_kms_key: str = ""
 
+    # Member labels already assigned by hand in MEMBER_PSEUDONYM_REGISTRY
+    # (issue #256), comma-separated: "Member A,Member B". The service gives
+    # each new member the next label that is neither here nor already in the
+    # member_pseudonyms table, so a self-onboarded member never collides with
+    # someone labelled by hand. Labels are not identifying - they are what the
+    # public race reports use - so this needs no secret.
+    member_pseudonyms_reserved: str = ""
+
+    def reserved_member_pseudonyms(self) -> frozenset[str]:
+        """The hand-assigned member labels, as a set."""
+        return frozenset(
+            part.strip() for part in self.member_pseudonyms_reserved.split(",") if part.strip()
+        )
+
     # Run the booking chain as direct PrimeFaces HTTP calls instead of browser
     # clicks. Login, navigation and slot discovery still run in Chrome; only the
     # chain itself moves to HTTP. A failure before the reservation is submitted

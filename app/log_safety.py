@@ -59,6 +59,53 @@ class RedactTelegramToken(logging.Filter):
 _REDACT_TELEGRAM_TOKEN = RedactTelegramToken()
 
 
+class MemberPseudonyms(logging.Filter):
+    """Rewrites each known member's Telegram ID to their label (issue #256).
+
+    Race reports are public and quote log lines; a Telegram ID identifies a
+    person (race-report skill §8a). The service, racer and observer load every
+    stored label at startup (app.services.pseudonyms.refresh_log_filter), and
+    this replaces each ID, as a whole number, with "<Member C>" in every record
+    - so the ~dozen log calls that name a requester, and any added later, never
+    write the ID.
+
+    Attached to the root logger's handlers rather than to loggers: a logger's
+    filters only see records logged on that logger, and these come from
+    everywhere. IDs of people who are not members (a stranger messaging the bot)
+    are not known here and pass through, as before.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pattern: re.Pattern[str] | None = None
+        self._labels: dict[str, str] = {}
+
+    def set(self, mapping: dict[str, str]) -> None:
+        # Only plausible Telegram IDs - long digit runs - so no short number in
+        # a log line (a count, a port, a millisecond figure) is ever rewritten.
+        ids = sorted((i for i in mapping if i.isdigit() and len(i) >= 6), key=len, reverse=True)
+        self._labels = {i: mapping[i] for i in ids}
+        self._pattern = re.compile(r"(?<!\d)(" + "|".join(ids) + r")(?!\d)") if ids else None
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self._pattern is None:
+            return True
+        message = record.getMessage()
+        rewritten = self._pattern.sub(lambda m: f"<{self._labels[m.group(1)]}>", message)
+        if rewritten != message:
+            record.msg = rewritten
+            record.args = None
+        return True
+
+
+_MEMBER_PSEUDONYMS = MemberPseudonyms()
+
+
+def set_member_pseudonyms(mapping: dict[str, str]) -> None:
+    """Tell the log filter every member's label, keyed by Telegram ID."""
+    _MEMBER_PSEUDONYMS.set(mapping)
+
+
 def silence_wire_loggers() -> None:
     """Pin the WebDriver wire loggers at WARNING, and redact httpx's URLs.
 
@@ -71,3 +118,7 @@ def silence_wire_loggers() -> None:
     # A logger's filters see only records logged on that logger itself, and
     # httpx logs every request on "httpx" - not on a child.
     logging.getLogger("httpx").addFilter(_REDACT_TELEGRAM_TOKEN)
+    # Member Telegram IDs become their labels (#256). On the root handlers,
+    # because records from every logger pass through them.
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_MEMBER_PSEUDONYMS)

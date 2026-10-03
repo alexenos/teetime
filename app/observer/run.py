@@ -35,6 +35,7 @@ from app.services.credential_service import (
     credential_service,
 )
 from app.services.database_service import database_service
+from app.services.pseudonyms import refresh_log_filter
 from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
@@ -359,6 +360,9 @@ async def observe() -> bool:
     if not settings.observer_enabled:
         logger.info("OBSERVER: observer_enabled is false - nothing to do")
         return True
+
+    # Before anything logs a requester: their Telegram IDs become labels (#256).
+    await refresh_log_filter()
 
     run_id = _run_id()
     now_ct = CTDateTime.now()

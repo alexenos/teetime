@@ -36,6 +36,7 @@ from enum import Enum
 
 from app.config import settings
 from app.providers.walden_http_login import LoginOutcome, check_login
+from app.services import pseudonyms
 from app.services.credential_service import credential_service
 from app.services.sms_service import sms_service
 from app.services.telegram_members import (
@@ -307,6 +308,7 @@ async def _check_and_save(
             'e.g. "Book Saturday 8am for 4 players". Reservations open 7 days ahead at 6:30am CT.',
             channel="telegram",
         )
+        await _assign_pseudonym(user_id, user)
         await _warn_if_at_racer_ceiling()
     except Exception:
         logger.exception("A step after saving a login failed; the login is saved")
@@ -316,6 +318,44 @@ async def _check_and_save(
 def _utcnow() -> datetime:
     """Naive UTC, matching how the database stores every other timestamp."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+async def _assign_pseudonym(user_id: str, user: dict[str, object]) -> None:
+    """Give a newly connected member their label for logs and reports (#256).
+
+    The admin is told, because the registry still needs the member's name
+    forms and handle - which the admin sees in the group - for the race-report
+    name check. Never fails the save: the login is already stored, and a member
+    without a label is only logged by ID, as before.
+    """
+    try:
+        label, new = await pseudonyms.assign(user_id)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning(f"Could not assign a pseudonym: {type(exc).__name__}")
+        return
+    admin = settings.telegram_admin_id()
+    if not new or not admin:
+        return
+    first_name = user.get("first_name")
+    username = user.get("username")
+    who = (
+        " ".join(
+            part
+            for part in (
+                first_name if isinstance(first_name, str) else "",
+                f"(@{username})" if isinstance(username, str) and username else "",
+            )
+            if part
+        )
+        or "A new member"
+    )
+    await sms_service.send_sms(
+        admin,
+        f"{who} connected a Walden login and is {label} in logs and race reports. Add "
+        f"them to MEMBER_PSEUDONYM_REGISTRY and MEMBER_PSEUDONYM_LABELS as {label}, with "
+        "their name forms and handle, so the race-report name check knows them.",
+        channel="telegram",
+    )
 
 
 async def _warn_if_at_racer_ceiling() -> None:

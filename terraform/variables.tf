@@ -895,6 +895,19 @@ variable "racer_schedule" {
   default     = "25 6 * * *"
 }
 
+variable "member_pseudonyms_reserved" {
+  description = <<-EOT
+    Member labels already assigned by hand in MEMBER_PSEUDONYM_REGISTRY
+    (issue #256), comma-separated. The service gives each member who connects
+    a login the next "Member <letter>" that is neither listed here nor already
+    stored, so a self-onboarded member never collides with someone labelled
+    by hand. Labels are what the public race reports use, so this is not
+    secret. Add a label here if one is ever assigned by hand again.
+  EOT
+  type        = string
+  default     = "Member A,Member B"
+}
+
 variable "racer_max_requesters" {
   description = <<-EOT
     How many racer tasks start each morning - a ceiling on the number of
