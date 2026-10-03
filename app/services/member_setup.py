@@ -38,7 +38,7 @@ from app.config import settings
 from app.providers.walden_http_login import LoginOutcome, check_login
 from app.services.credential_service import credential_service
 from app.services.sms_service import sms_service
-from app.services.telegram_members import forget_member, is_authorized
+from app.services.telegram_members import forget_member, is_authorized, member_lock
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,22 @@ async def submit_login(
     if len(login) > MAX_LOGIN_LEN or len(password) > MAX_PASSWORD_LEN:
         return SubmitResult(SubmitStatus.INVALID, "That login or password is too long.")
 
+    lock = member_lock(user_id)
+    if lock.locked():
+        # A second submission while one is with Walden. Refused rather than
+        # queued: it would pass the rejection limit below before the first
+        # one's rejection was recorded, and it is almost certainly a double tap.
+        return SubmitResult(
+            SubmitStatus.RATE_LIMITED, "Still checking your last try with Walden - one moment."
+        )
+    async with lock:
+        return await _check_and_save(user, user_id, login, password)
+
+
+async def _check_and_save(
+    user: dict[str, object], user_id: str, login: str, password: str
+) -> SubmitResult:
+    """The rate limits, the Walden check and the save, under the member's lock."""
     now = time.monotonic()
     if _recent(_rejected[user_id], now) >= MAX_REJECTED_PER_HOUR:
         return SubmitResult(

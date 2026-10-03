@@ -1,5 +1,6 @@
 """Tests for a member connecting their own Walden login (issue #240)."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -366,6 +367,67 @@ class TestSubmitLogin:
         walden_says(monkeypatch, LoginOutcome.ACCEPTED)
         await submit_login(USER, LOGIN, PASSWORD, True)
         assert [m["to"] for m in sent] == [str(MEMBER)]
+
+
+class TestConcurrency:
+    """One member's check-then-save is serialized with itself and with forgetting."""
+
+    @staticmethod
+    def held_walden(monkeypatch: pytest.MonkeyPatch, outcome: LoginOutcome) -> asyncio.Event:
+        """A Walden check that does not answer until the returned event is set."""
+        release = asyncio.Event()
+
+        async def fake_check(login: str, password: str) -> LoginCheck:
+            await release.wait()
+            return LoginCheck(outcome, "scripted")
+
+        monkeypatch.setattr(member_setup, "check_login", fake_check)
+        return release
+
+    async def test_a_second_submission_mid_check_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """Otherwise parallel tries all pass the rejection limit before any is recorded."""
+        release = self.held_walden(monkeypatch, LoginOutcome.REJECTED)
+        first = asyncio.create_task(submit_login(USER, LOGIN, PASSWORD, True))
+        await asyncio.sleep(0)
+
+        second = await submit_login(USER, LOGIN, PASSWORD, True)
+
+        assert second.status is SubmitStatus.RATE_LIMITED
+        release.set()
+        assert (await first).status is SubmitStatus.REJECTED
+
+    async def test_parallel_tries_cannot_beat_the_rejection_limit(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        release = self.held_walden(monkeypatch, LoginOutcome.REJECTED)
+        tasks = [asyncio.create_task(submit_login(USER, LOGIN, PASSWORD, True)) for _ in range(6)]
+        await asyncio.sleep(0)
+        release.set()
+        results = [r.status for r in await asyncio.gather(*tasks)]
+        assert results.count(SubmitStatus.REJECTED) == 1
+        assert results.count(SubmitStatus.RATE_LIMITED) == 5
+
+    async def test_forget_during_a_check_is_not_undone(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """/forget waits for the check in flight, then deletes what it saved."""
+        sent_messages(monkeypatch)
+        release = self.held_walden(monkeypatch, LoginOutcome.ACCEPTED)
+        saving = asyncio.create_task(submit_login(USER, LOGIN, PASSWORD, True))
+        await asyncio.sleep(0)
+        forgetting = asyncio.create_task(
+            handle_command("forget", "confirm", str(MEMBER), True, "teetimebot")
+        )
+        await asyncio.sleep(0)
+
+        release.set()
+        assert (await saving).status is SubmitStatus.SAVED
+        reply = await forgetting
+
+        assert "Deleted your Walden login" in reply.text
+        assert await credential_service.get_owner(str(MEMBER)) is None
 
 
 @pytest.fixture

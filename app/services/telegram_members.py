@@ -23,8 +23,10 @@ and always refuses: this decides who may book under a Walden membership, so an
 outage must fail closed, but must not keep failing after it ends.
 """
 
+import asyncio
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 
 from app.config import settings
@@ -274,6 +276,19 @@ async def offboard(user: dict[str, object]) -> None:
     )
 
 
+# One lock per member, held across anything that writes or deletes their
+# stored login: the setup form's check-then-save (#240) and forget_member.
+# Without it, a /forget or a leave landing while Walden is checking a login is
+# undone a second later, when the check succeeds and saves the login again.
+# In-process: the service runs as a single instance (cloud_run_max_instances).
+_member_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def member_lock(user_id: str) -> asyncio.Lock:
+    """The lock guarding this member's stored login."""
+    return _member_locks[user_id]
+
+
 @dataclass(frozen=True)
 class ForgetResult:
     """What forget_member did."""
@@ -291,6 +306,13 @@ async def forget_member(user_id: str) -> ForgetResult:
     is the member's own, and with their login deleted it could not be
     cancelled there anyway. An attempt in progress is left to finish.
     """
+    # Waits for a setup-form check in flight, so what it saves is deleted here
+    # rather than written back afterwards.
+    async with member_lock(user_id):
+        return await _forget_member_locked(user_id)
+
+
+async def _forget_member_locked(user_id: str) -> ForgetResult:
     today = CTDateTime.now().date()
     cancelled = 0
     still_reserved = 0
