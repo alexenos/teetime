@@ -20,10 +20,13 @@ two paths, a green `Tests` check, nothing else. It is defined in
 `operations/routines/scoreboard.md`. That Routine is not yet deployed, because it
 has no ledger rows to read until the race report writes them.
 
-A commit touching only `operations/` or `docs/` does not redeploy: the Cloud
-Build trigger sets `ignored_files = ["operations/**", "docs/**"]`
+A commit touching only `operations/`, `docs/` or `.claude/` does not redeploy:
+the Cloud Build trigger sets
+`ignored_files = ["operations/**", "docs/**", ".claude/**"]`
 (`terraform/main.tf`). The filter applies only when every changed file matches,
-so a commit that also touches app code still deploys.
+so a commit that also touches app code still deploys. `CLAUDE.md` itself is at
+the root, outside the filter, so an edit to it does deploy. `.claude/**` is live
+only once the merge that adds it has applied; check the build log, below.
 
 **A merge to `main` applies terraform.** `cloudbuild.yaml` runs
 `terraform apply -auto-approve` as its last step, so the Cloud Build trigger both
@@ -31,7 +34,8 @@ deploys the image and reconciles infrastructure. An infrastructure change is liv
 once it merges and the build succeeds — there is no separate manual apply.
 
 The exception is a commit the filter above suppresses: a change touching only
-`operations/` or `docs/` fires no build, so it also applies no terraform. A
+`operations/`, `docs/` or `.claude/` fires no build, so it also applies no
+terraform. A
 terraform change always touches `terraform/`, so it always builds.
 
 **Verify an apply by reading the build log, not by describing the resource.**
