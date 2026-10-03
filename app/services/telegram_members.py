@@ -139,15 +139,47 @@ async def handle_chat_member_update(update: dict[str, object]) -> str:
 
     was_member = is_member_status(old)
     is_member = is_member_status(new)
-    record_membership(user_id, is_member)
 
     if not was_member and is_member:
+        record_membership(user_id, True)
         await _welcome(members_chat, user)
         return "ok"
     if was_member and not is_member:
+        if await _rejoined_since(members_chat, user_id):
+            return "ignored"
+        record_membership(user_id, False)
         await offboard(user)
         return "ok"
+    record_membership(user_id, is_member)
     return "ignored"
+
+
+async def _rejoined_since(chat_id: str, user_id: str) -> bool:
+    """Whether Telegram says this user is in the group right now.
+
+    A leave update can arrive late: a failed one is redelivered (the webhook
+    answers 500 so that offboarding is retried), and by then the member may
+    have rejoined. Offboarding them on the strength of the stale update would
+    delete the login of someone who is back. So ask Telegram directly, without
+    the cache, before deleting anything.
+
+    Only a definite "is a member" stops offboarding. A lookup that fails lets
+    it proceed: the update itself says they left, and keeping the login of a
+    departed member is the worse mistake.
+    """
+    try:
+        member = await TelegramProvider().get_chat_member(chat_id, user_id)
+    except ChatMemberLookupError as exc:
+        logger.warning(f"Could not re-check {user_id} before offboarding ({exc}); proceeding")
+        return False
+    if member is not None and is_member_status(member):
+        logger.info(
+            f"Ignoring a stale leave update for Telegram user {user_id}: "
+            "they are in the members group again"
+        )
+        record_membership(user_id, True)
+        return True
+    return False
 
 
 async def _welcome(chat_id: str, user: dict[str, object]) -> None:

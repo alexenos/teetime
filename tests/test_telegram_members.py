@@ -289,6 +289,11 @@ def _booking(booking_id: str, status: BookingStatus, days_ahead: int = 7) -> Tee
 
 
 class TestLeave:
+    @pytest.fixture(autouse=True)
+    def _telegram_says_they_left(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Offboarding re-checks membership live; by default Telegram agrees they left."""
+        _patch_lookup(monkeypatch, {"status": "left"})
+
     async def test_cancels_pending_deletes_login_and_tells_both(
         self, monkeypatch: pytest.MonkeyPatch, test_db: None
     ) -> None:
@@ -344,11 +349,44 @@ class TestLeave:
         _patch_lookup(monkeypatch, {"status": "member"})
         assert await telegram_members.is_authorized(MEMBER, is_bot=False) is True
 
+        _patch_lookup(monkeypatch, {"status": "left"})
         await telegram_members.handle_chat_member_update(_chat_member_update("member", "left"))
 
         calls = _patch_lookup(monkeypatch, AssertionError("should answer from the update"))
         assert await telegram_members.is_authorized(MEMBER, is_bot=False) is False
         assert calls == []
+
+    async def test_stale_leave_after_rejoining_is_ignored(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """A redelivered leave must not offboard someone who is back in the group."""
+        sent = _sent(monkeypatch)
+        await credential_service.set_credentials(MEMBER, "M123", "pw")
+        await database_service.create_booking(_booking("schd0001", BookingStatus.SCHEDULED))
+        _patch_lookup(monkeypatch, {"status": "member"})
+
+        status = await telegram_members.handle_chat_member_update(
+            _chat_member_update("member", "left")
+        )
+
+        assert status == "ignored"
+        assert sent == []
+        assert await credential_service.get_owner(MEMBER) is not None
+        [booking] = await database_service.get_bookings(phone_number=MEMBER)
+        assert booking.status == BookingStatus.SCHEDULED
+        assert await telegram_members.is_authorized(MEMBER, is_bot=False) is True
+
+    async def test_failed_recheck_still_offboards(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """The update says they left; keeping a departed member's login is worse."""
+        _sent(monkeypatch)
+        await credential_service.set_credentials(MEMBER, "M123", "pw")
+        _patch_lookup(monkeypatch, ChatMemberLookupError("HTTP 502"))
+
+        await telegram_members.handle_chat_member_update(_chat_member_update("member", "left"))
+
+        assert await credential_service.get_owner(MEMBER) is None
 
     async def test_running_twice_is_harmless(
         self, monkeypatch: pytest.MonkeyPatch, test_db: None
