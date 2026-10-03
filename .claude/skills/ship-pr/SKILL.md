@@ -32,12 +32,33 @@ gh api repos/alexenos/teetime --jq .stargazers_count   # against the threshold a
 
 The bot states its own configuration in the summary comment it posts on every
 PR, inside a "⚙️ Run configuration" block. Read it there rather than trusting
-this file - on #211, #212 and #217 it said **Plan: Advanced**, profile
-`ASSERTIVE`, configuration from the Organization UI.
+this file. *Historical:* on #211, #212 and #217 (2026-09) it said **Plan:
+Advanced**, profile `ASSERTIVE`, configuration from the Organization UI. On #247
+(2026-10-03) it said profile `CHILL`, configuration from the repository
+`.coderabbit.yaml`, which is the current setup.
 
-**An earlier version of this skill said to read the quota off an "Included
-review availability" line. No such line appears in the current summary
-comments.** Do not go looking for it; §Rate limits below is what to do instead.
+**The quota line goes wherever the review's output goes.** An earlier version
+of this skill said it did not appear at all; that was a search in the wrong
+place. Two observed placements, 2026-10-03:
+
+- **Review with findings** - in the review body, inside its "Review info"
+  details block (`gh api repos/alexenos/teetime/pulls/<N>/reviews`). #247,
+  submitted 00:50:15Z for `63d701b`.
+- **Clean review** - no review object is created at all. The summary comment
+  is edited to "No actionable comments were generated in the recent review",
+  and the quota line is there. #249, edited 04:19:58Z for `a14b433`.
+
+So check both before concluding a review has not landed. The `CodeRabbit`
+check showed "Review completed" on #249 while `pulls/249/reviews` was empty.
+The line reads:
+
+```
+Included review availability: This review used your included allowance. Your
+plan provides up to 1 included review per hour; 0 remain after this review.
+```
+
+It reports the state *after* a review, so it tells you whether the next trigger
+will be refused; it does not replace §Rate limits below.
 
 So the trigger is a comment, posted by you, naming the commit you want looked at
 (CodeRabbit is incremental and will not re-review commits it has already seen -
@@ -103,6 +124,16 @@ changes in this PR"* while it runs, and findings arrive afterwards as inline
 review comments ("## 4. Read the review properly"). On #217 that gap was about
 six minutes.
 
+**The first wording is provisional; read the reply twice.** The command reply
+is edited in place within seconds. On #248 it was created at 01:08:33Z reading
+"Review triggered." and edited at 01:08:41Z to "⚠️ Action not completed /
+Review rate limited."; on #249 the same, 01:47:46Z → 01:47:54Z (2026-10-03,
+both read from the API). A session that read #248 at about +20 seconds
+reported an accepted review that never came. Wait 30 seconds after the reply
+appears, re-fetch it, and classify only a reply whose `updated_at` has
+stopped moving. It is edited again later, too: #247's accepted retry now
+reads "Review finished." after an edit when the review landed (step 3).
+
 **2. Classify the reply.** Three outcomes, and they need different waits:
 
 - **Ack, as above** → triggered. Go to "## 3. Wait" below and poll for
@@ -117,7 +148,8 @@ six minutes.
   still shows no ack, re-post once. If that attempt is also silent, treat it as
   rate-limited and use the fallback estimate in step 4.
 
-**3. When it is rate limited, it tells you how long. Use its number.** The bot
+**3. When it is rate limited, it tells you how long. Start from its number.**
+It has not always held - see "The named wait is a lower bound" below. The bot
 states the remaining wait in the comment itself, so read the answer rather than
 estimating around it. Take the most recent `coderabbitai[bot]` issue comment
 after your trigger, pull the duration out of its text - it is written for
@@ -161,6 +193,39 @@ its `created_at` would compute a retry time most of a day in the past. The
 command reply is created fresh for each trigger, so its `created_at` is the
 right anchor; if you can only read the summary comment, use its `updated_at`.
 
+**Observed again, #247, 2026-10-02/03.** Trigger at 21:52:09Z; command reply
+"Review rate limited." at 21:52:31Z; the summary comment was edited at
+21:52:37Z to "Next included review available in 57 minutes." The retry at
+00:43:49Z got "Review triggered." at 00:44:04Z, and the review landed at
+00:50:15Z, about six minutes later. Established from the API on 2026-10-02: the
+two trigger and reply timestamps, the "Review rate limited." text, and the
+review's `submitted_at`. Not re-readable: the "57 minutes" text and the
+"Review triggered." wording are as reported at the time, because both comments
+have since been edited in place - the summary at 00:50:56Z, and the retry reply
+at 00:51:01Z to read "Review finished." So a command reply's current text
+can describe the review's end state rather than what it said when it was
+posted. Check `updated_at` against `created_at` (step 1).
+
+**The named wait is a lower bound, not a promise. #248 and #249, 2026-10-03.**
+The quota is shared across PRs, not per PR: #248 had no review of its own
+when it was refused, after #247's review at 00:50:15Z reported "0 remain".
+And the stated wait did not hold:
+
+| Time (UTC) | PR | Event |
+|---|---|---|
+| 01:08:41Z | #248 | refused; summary says "Next included review available in 35 minutes" (→ ~01:44Z) |
+| 01:47:31Z | #249 | trigger, ~4 minutes past that time |
+| 01:47:54Z | #249 | refused; summary now says "59 minutes" |
+| 04:10:44Z | #249 | trigger; reply at 04:10:59Z, "Review triggered.", unchanged at +60 s |
+| 04:19:58Z | #249 | clean review lands in the summary comment, ~9 minutes after the trigger |
+
+Established: those timestamps and texts, from the API. Not established: why
+the second attempt was refused. One hypothesis is that a refused trigger
+restarts the window; another is that the "35 minutes" was computed against a
+different limit (the refusal text names both an "included review" and "free
+OSS reviews"). Neither is tested. Until one is, add margin beyond the two
+minutes below, and expect a refusal past the stated time to be possible.
+
 Note also that the refusal does not mean the trigger was lost - the walkthrough
 still lists the commits it would have covered. Nothing was reviewed, so the
 findings for that commit are still owed.
@@ -183,18 +248,23 @@ here and the bot, a window measured from a slightly later instant than the one
 you anchored on, a retry that fires a few seconds early. Each near-miss costs a
 whole cycle to discover, so buy the margin.
 
-The hour is a **guess, not a measured limit** - a stand-in for a number the bot
-will give you directly if you let it. Claude checked #204, #211, #212 and #217
-on 2026-09-19 and found no rate-limit comment in any of them, so there is no
-captured example in this repo yet; that is four PRs out of roughly two hundred,
-not evidence the limit is rare. Step 3 is the real path. Replace this hour with
-an observed figure once one is written down.
+The hour is now **observed, not guessed**: the #247 review body (2026-10-03,
+quoted near the top of this file) says the plan provides "up to 1 included review
+per hour". Earlier versions of this skill called it a guess because a check of
+#204, #211, #212 and #217 on 2026-09-19 found no rate-limit comment; #217 and
+#247 have since produced two (step 3). What is still not established is how
+the window is measured - rolling from the last review, or a fixed reset - so
+keep the extra minute. Step 3 is still the real path when the bot names a wait.
 
 **5. Back off, and stop.** Retry at `next_eligible`. If that attempt is also
 refused, double the wait each time - 61 → 122 → 244 minutes - and **stop after
 three refusals.** Tell the user what the bot said and that the review is not
 coming on its own. Never spam the PR: each trigger is a public comment on the
 thread, and a column of them is noise a reviewer has to scroll past.
+
+Because the quota is shared, two PRs waiting on it compete for one review an
+hour. Pick which gets the next slot - the one that must merge first - and
+trigger only that one, rather than spending a refusal on each.
 
 **6. Schedule the retry; do not wait for it.** The re-prompt is a scheduled
 wake-up, not a sleep. Use the `send_later` tool
@@ -211,6 +281,13 @@ Carry in the message the PR number, the head sha you want reviewed, which
 attempt this is, and what the bot last said. Then end the turn. A foreground
 `sleep` burns the session for an hour and dies with the container; a scheduled
 wake-up survives both.
+
+**`send_later` is not available everywhere.** It exists in Claude Code on the
+web; the desktop Code tab does not have it (observed 2026-10-02). There, a
+background Bash wait works - `sleep <seconds>` with `run_in_background` - but it
+is subject to the Bash background timeout and dies with the session, so it is a
+weaker clock than a scheduled wake-up. Check that the wait fits inside the
+timeout before relying on it.
 
 Fold this into the PR check-in if one is already armed rather than running two
 clocks against the same PR.
