@@ -25,6 +25,21 @@ from app.services.credential_service import WaldenCredentialRequiredError
 from app.utils.timezone import CTDateTime
 
 
+@pytest.fixture(autouse=True)
+def _no_pseudonym_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the startup pseudonym load (#256) off the app's real database.
+
+    The real engine's aiosqlite connection runs on its own thread, and left
+    open it keeps the test process alive after every test has passed - the
+    whole suite then never exits.
+    """
+
+    async def _none() -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr("app.observer.run.refresh_log_filter", _none)
+
+
 def _booking(booking_id: str, phone: str, when: date, at: dtime) -> SimpleNamespace:
     return SimpleNamespace(
         id=booking_id,
