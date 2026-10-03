@@ -1,6 +1,7 @@
 """Tests for the Telegram messaging provider and its inbound webhook."""
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app import log_safety
 from app.config import Settings, settings
 from app.models.schemas import ConversationState, UserSession
 from app.providers import telegram_provider
@@ -258,6 +260,81 @@ class TestSendSms:
 
         result = await make_provider(handler).send_sms("111", "hello")
         assert not result.success
+
+
+class TestTokenNeverLogged:
+    """httpx logs every request URL at INFO, and the bot token is in the path.
+
+    Production runs at LOG_LEVEL=DEBUG, so before log_safety redacted it, every
+    Telegram call wrote the token to Cloud Logging.
+    """
+
+    TOKEN = "123456789:AAH-fake_token-for-tests"
+
+    @pytest.fixture
+    def httpx_records(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> pytest.LogCaptureFixture:
+        monkeypatch.setattr(settings, "telegram_bot_token", self.TOKEN)
+        caplog.set_level(logging.INFO, logger="httpx")
+        return caplog
+
+    @staticmethod
+    def _ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    async def test_request_log_omits_the_token(
+        self, httpx_records: pytest.LogCaptureFixture
+    ) -> None:
+        log_safety.silence_wire_loggers()
+
+        result = await make_provider(self._ok).send_sms("111", "tee time confirmed")
+
+        assert result.success
+        lines = [r.getMessage() for r in httpx_records.records if r.name == "httpx"]
+        assert lines, "httpx logged no request line, so this test checked nothing"
+        assert all(self.TOKEN not in line for line in lines)
+        # The line itself survives - the race report reads it - with the
+        # method and status intact.
+        assert any(
+            "POST https://api.telegram.org/bot<redacted>/sendMessage" in line and "200 OK" in line
+            for line in lines
+        )
+
+    async def test_without_the_filter_the_token_is_logged(
+        self, httpx_records: pytest.LogCaptureFixture
+    ) -> None:
+        """Proves the test above exercises the line that leaked."""
+        httpx_logger = logging.getLogger("httpx")
+        removed = [f for f in httpx_logger.filters if isinstance(f, log_safety.RedactTelegramToken)]
+        for f in removed:
+            httpx_logger.removeFilter(f)
+        try:
+            await make_provider(self._ok).send_sms("111", "tee time confirmed")
+        finally:
+            for f in removed:
+                httpx_logger.addFilter(f)
+
+        assert any(self.TOKEN in r.getMessage() for r in httpx_records.records)
+
+    def test_repeated_installs_do_not_stack(self) -> None:
+        log_safety.silence_wire_loggers()
+        log_safety.silence_wire_loggers()
+        filters = logging.getLogger("httpx").filters
+        assert sum(isinstance(f, log_safety.RedactTelegramToken) for f in filters) == 1
+
+    def test_other_urls_pass_through_unchanged(self) -> None:
+        record = logging.LogRecord(
+            "httpx",
+            logging.INFO,
+            __file__,
+            0,
+            "HTTP Request: %s %s",
+            ("POST", "https://example.test/bot/reserve"),
+            None,
+        )
+        assert log_safety.RedactTelegramToken().filter(record)
+        assert record.args == ("POST", "https://example.test/bot/reserve")
 
 
 class TestSendSmsMalformedResponse:
