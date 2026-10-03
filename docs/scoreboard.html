@@ -245,13 +245,29 @@
     rows.push(["Requests booked, all time", at.booked + " of " + total]);
     rows.push(["Race mornings, all time", at.mornings]);
 
+    // Exact and fallback are only meaningful on mornings whose every request
+    // was agreed against the club's sheet (#216). Older mornings never were,
+    // so the whole history stays unseparable and those mornings count alone.
+    var cf = o.confirmed;
+    var i216 = "(<a href=\"https://github.com/alexenos/teetime/issues/216\">#216</a>)";
+    if (cf && cf.mornings > 0) {
+      rows.push(["Exact, confirmed mornings", cf.exact + " of " + (cf.booked + cf.miss)]);
+      rows.push(["Fallback, confirmed mornings", cf.fallback]);
+    }
     if (!o.separable) {
       $("exact-note").hidden = false;
-      $("exact-note").innerHTML = "<strong>Exact and fallback are not yet separable.</strong> "
-        + "Until requested times are confirmed against a real slot before the race "
-        + "(<a href=\"https://github.com/alexenos/teetime/issues/216\">#216</a>), a booking "
-        + "cannot be scored against the time the member actually wanted. This reads "
-        + "booked against missed, which is the strongest honest claim.";
+      $("exact-note").innerHTML = cf && cf.mornings > 0
+        ? "<strong>Exact and fallback, confirmed mornings only.</strong> On the "
+          + cf.mornings + " race " + (cf.mornings === 1 ? "morning" : "mornings")
+          + " since " + cf.first + " where every request was agreed against a real "
+          + "slot on the club's sheet " + i216 + ": " + cf.exact + " exact, " + cf.fallback
+          + " fallback, " + cf.miss + " missed. Earlier mornings read booked against "
+          + "missed only, because nobody confirmed what the member actually wanted."
+        : "<strong>Exact and fallback are not yet separable.</strong> Requested times are "
+          + "now agreed against a real slot before the race " + i216 + ", but no race "
+          + "since has had every request agreed that way. Until one does, a booking "
+          + "cannot be scored against the time the member actually wanted, so this reads "
+          + "booked against missed, which is the strongest honest claim.";
     }
 
     // ---- windows + trend ----
@@ -285,11 +301,16 @@
       rows.push(["Automation streak", "not available"]);
     } else {
       $("streak-val").textContent = s.consecutive;
-      $("streak-sub").textContent = "consecutive successful runs"
+      // A run reports on itself, and nothing yet checks it (scoreboard.md §2),
+      // so these are runs with no failure and no gap, not runs known to be right.
+      $("streak-sub").textContent = "consecutive runs with no failure or missed run"
         + (s.last_failure ? " since " + s.last_failure : "")
-        + " · " + s.total_ok + " successful all time";
+        + " · " + s.total_ok + " all time"
+        + (s.unverified ? " · self-reported, " + s.unverified + " not independently checked" : "");
       rows.push(["Automation streak", s.consecutive]);
-      rows.push(["Successful runs, all time", s.total_ok]);
+      rows.push(["Runs with no failure, all time", s.total_ok]);
+      if (s.unverified) { rows.push(["Streak runs not independently checked", s.unverified]); }
+      if (s.last_failure_reason) { rows.push(["Last break", s.last_failure + " (" + s.last_failure_reason + ")"]); }
 
       // Streak history: one series, so no legend. Bars, 4px rounded data-ends.
       var h = s.history || [];

@@ -210,5 +210,5 @@ Specified in `operations/routines/scoreboard.md` and
 **The outcome split has a value, backfilled.** The page shows 23 mornings
 transcribed from the race reports (2026-08-13 to 2026-09-27), derived by
 `operations/ledger/derive_scoreboard.py` and flagged as backfilled on the page.
-The streak has no value, because no Routine has written a row. Cost has no source
-at all.
+The streak has a value from 2026-10-01, the race report Routine's first row, and
+every run in it is self-reported (§2). Cost has no source at all.

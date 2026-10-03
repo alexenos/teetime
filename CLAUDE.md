@@ -112,7 +112,7 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 - `operations/routines/` — one file per Routine, including its prompt and what it
   is authorized to do. A file states whether it is deployed.
 - `operations/ledger/` — one ledger per Routine: did it run, and what did it
-  measure. Schemas written; nothing writes to them yet.
+  measure. The race report writes its rows to GCS from 2026-10-01.
 - `operations/race-reports/` — one report per race morning
 
 One Routine is deployed: the race report, daily at `40 11 * * *` UTC. Two are
