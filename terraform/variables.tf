@@ -251,9 +251,12 @@ variable "credential_kms_enabled" {
     migration, ending with deleting CREDENTIAL_ENCRYPTION_KEY.
 
     Off, everything works exactly as before this change.
+
+    On since 2026-10-03: #255's apply created the key, its grants and the KMS
+    audit config (build log 18:57Z, "6 added, 3 changed, 0 destroyed").
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "admin_proxy_enabled" {
