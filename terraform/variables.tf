@@ -229,9 +229,12 @@ variable "telegram_group_access_enabled" {
     true - see "Members group" in operations/telegram-setup.md.
 
     Off, the allowlist is the only way in, exactly as before.
+
+    On since 2026-10-03: the members group exists with the bot as an admin,
+    and TELEGRAM_MEMBERS_CHAT_ID has its version.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "credential_kms_enabled" {
