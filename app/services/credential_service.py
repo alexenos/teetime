@@ -1,8 +1,9 @@
 """
 Per-requester Walden Golf credential resolution (issue #179).
 
-Each friend already has their own Walden membership; Dax adds their login
-here himself (see scripts/add_walden_credential.py) once, encrypted at rest.
+Each member already has their own Walden membership, and connects their own
+login through the setup form (#240, app/services/member_setup.py), encrypted
+at rest. scripts/add_walden_credential.py remains as the admin's fallback.
 
 There is no shared account any more. A requester with no row of their own is
 refused - see WaldenCredentialRequiredError - rather than falling back to
@@ -22,8 +23,9 @@ not even the shared fallback.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.database import AsyncSessionLocal, WaldenCredentialRecord
 from app.services import credential_crypto
@@ -80,6 +82,7 @@ class CredentialOwner:
     phone_number: str
     name: str | None
     telegram_username: str | None
+    verified_at: datetime | None = None
 
     @property
     def display_name(self) -> str:
@@ -168,6 +171,7 @@ class CredentialService:
             phone_number=str(record.phone_number),
             name=str(record.name) if record.name else None,
             telegram_username=str(record.telegram_username) if record.telegram_username else None,
+            verified_at=record.verified_at,  # type: ignore[arg-type]
         )
 
     async def find_by_name_or_telegram_username(self, target: str) -> list[CredentialOwner]:
@@ -220,8 +224,13 @@ class CredentialService:
         label: str | None = None,
         name: str | None = None,
         telegram_username: str | None = None,
+        verified_at: datetime | None = None,
     ) -> None:
-        """Add or update a friend's Walden login. Admin-only - see the script.
+        """Add or update a member's Walden login.
+
+        Written by the member themselves through the setup form (#240), which
+        passes ``verified_at`` because it checked the login with Walden first,
+        or by the admin script, which does not.
 
         ``name`` and ``telegram_username`` are what a proxy admin's "for @X"
         matches against (issue #185); ``label`` remains a free-text note that
@@ -246,6 +255,9 @@ class CredentialService:
 
             record.member_number_encrypted = member_number_encrypted  # type: ignore[assignment]
             record.password_encrypted = password_encrypted  # type: ignore[assignment]
+            # Always overwritten, never left as it was: a new login replaces
+            # the one that was verified, so an old date would vouch for it.
+            record.verified_at = verified_at  # type: ignore[assignment]
             if label is not None:
                 record.label = label  # type: ignore[assignment]
             if name is not None:
@@ -256,6 +268,12 @@ class CredentialService:
                 record.telegram_username = telegram_username.strip().lstrip("@") or None  # type: ignore[assignment]
 
             await session.commit()
+
+    async def count(self) -> int:
+        """How many members have a stored login - each one a requester the racer may race."""
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(func.count()).select_from(WaldenCredentialRecord))
+            return int(result.scalar_one())
 
     async def remove_credentials(self, phone_number: str) -> bool:
         """Delete a friend's stored login. Returns False if none existed."""

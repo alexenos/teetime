@@ -1784,8 +1784,8 @@ class BookingService:
         if await credential_service.get_dedicated_credentials(phone_number) is None:
             raise ValueError(
                 "Your account isn't set up for booking yet - I don't have a Walden "
-                "login on file for you, and I won't book under anyone else's. Ask Dax "
-                "to add yours, then try again."
+                "login on file for you, and I won't book under anyone else's. Send /start "
+                "to me in a private chat to connect yours, then try again."
             )
 
         # Check 48-hour restriction for multi-player bookings

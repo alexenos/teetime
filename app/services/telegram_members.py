@@ -25,6 +25,7 @@ outage must fail closed, but must not keep failing after it ends.
 
 import logging
 import time
+from dataclasses import dataclass
 
 from app.config import settings
 from app.models.schemas import BookingStatus
@@ -241,17 +242,12 @@ async def offboard(user: dict[str, object]) -> None:
         )
         return
 
-    today = CTDateTime.now().date()
-    cancelled = 0
-    still_reserved = 0
-    for booking in await booking_service.get_bookings(phone_number=user_id):
-        if booking.status in (BookingStatus.PENDING, BookingStatus.SCHEDULED):
-            if booking.id and await booking_service.cancel_booking(booking.id) is not None:
-                cancelled += 1
-        elif booking.status == BookingStatus.SUCCESS and booking.request.requested_date >= today:
-            still_reserved += 1
-
-    login_deleted = await credential_service.remove_credentials(user_id)
+    result = await forget_member(user_id)
+    cancelled, still_reserved, login_deleted = (
+        result.cancelled,
+        result.still_reserved,
+        result.login_deleted,
+    )
     logger.info(
         f"Offboarded Telegram user {user_id}: {cancelled} booking(s) cancelled, "
         f"login {'deleted' if login_deleted else 'not on file'}"
@@ -276,6 +272,36 @@ async def offboard(user: dict[str, object]) -> None:
         f"{name} left the members group. Cancelled {_bookings(cancelled, 'pending booking')}; "
         + ("deleted their Walden login." if login_deleted else "no Walden login was stored.")
     )
+
+
+@dataclass(frozen=True)
+class ForgetResult:
+    """What forget_member did."""
+
+    cancelled: int
+    still_reserved: int
+    login_deleted: bool
+
+
+async def forget_member(user_id: str) -> ForgetResult:
+    """Cancel this member's bookings that have not started and delete their login.
+
+    Shared by offboarding (they left the group) and /forget (they asked, #240).
+    A tee time already reserved at the club is counted rather than touched: it
+    is the member's own, and with their login deleted it could not be
+    cancelled there anyway. An attempt in progress is left to finish.
+    """
+    today = CTDateTime.now().date()
+    cancelled = 0
+    still_reserved = 0
+    for booking in await booking_service.get_bookings(phone_number=user_id):
+        if booking.status in (BookingStatus.PENDING, BookingStatus.SCHEDULED):
+            if booking.id and await booking_service.cancel_booking(booking.id) is not None:
+                cancelled += 1
+        elif booking.status == BookingStatus.SUCCESS and booking.request.requested_date >= today:
+            still_reserved += 1
+    login_deleted = await credential_service.remove_credentials(user_id)
+    return ForgetResult(cancelled, still_reserved, login_deleted)
 
 
 def _bookings(count: int, noun: str = "booking") -> str:

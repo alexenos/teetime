@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Members connect their own Walden login; the admin never sees it (#240).**
+  Before this, the admin entered every login with
+  `scripts/add_walden_credential.py`. Now `/start` in a private chat with the
+  bot opens a form inside Telegram (a Mini App served at
+  `/onboarding/walden`).
+  - The password goes from the member's phone straight to the service. It is
+    never a chat message.
+  - The member is identified only by the data Telegram signs when the form
+    opens.
+  - The login is checked with Walden (#241) and saved only if accepted, with
+    the time it was checked.
+  - `/status`, `/login` and `/forget` manage it.
+  - The admin is warned when connected logins reach `racer_max_requesters`.
+    The service now receives `RACER_MAX_REQUESTERS` to know that number.
+
+  Not yet verified on a real Telegram client: that the signed data reaches the
+  page, and that the page closes after saving. See "Connecting a Walden login"
+  in `operations/telegram-setup.md`.
+
 - **Anyone in the members' Telegram group can use the bot (#239).** Before
   this, adding a member took a new version of the `TELEGRAM_ALLOWED_USER_IDS`
   secret and a redeploy. Now the bot also accepts anyone currently in the group
