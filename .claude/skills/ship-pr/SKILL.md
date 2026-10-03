@@ -115,6 +115,16 @@ changes in this PR"* while it runs, and findings arrive afterwards as inline
 review comments ("## 4. Read the review properly"). On #217 that gap was about
 six minutes.
 
+**The first wording is provisional; read the reply twice.** The command reply
+is edited in place within seconds. On #248 it was created at 01:08:33Z reading
+"Review triggered." and edited at 01:08:41Z to "⚠️ Action not completed /
+Review rate limited."; on #249 the same, 01:47:46Z → 01:47:54Z (2026-10-03,
+both read from the API). A session that read #248 at about +20 seconds
+reported an accepted review that never came. Wait 30 seconds after the reply
+appears, re-fetch it, and classify only a reply whose `updated_at` has
+stopped moving. It is edited again later, too: #247's accepted retry now
+reads "Review finished." after an edit when the review landed (step 3).
+
 **2. Classify the reply.** Three outcomes, and they need different waits:
 
 - **Ack, as above** → triggered. Go to "## 3. Wait" below and poll for
@@ -129,7 +139,8 @@ six minutes.
   still shows no ack, re-post once. If that attempt is also silent, treat it as
   rate-limited and use the fallback estimate in step 4.
 
-**3. When it is rate limited, it tells you how long. Use its number.** The bot
+**3. When it is rate limited, it tells you how long. Start from its number.**
+It has not always held - see "The named wait is a lower bound" below. The bot
 states the remaining wait in the comment itself, so read the answer rather than
 estimating around it. Take the most recent `coderabbitai[bot]` issue comment
 after your trigger, pull the duration out of its text - it is written for
@@ -184,8 +195,26 @@ review's `submitted_at`. Not re-readable: the "57 minutes" text and the
 have since been edited in place - the summary at 00:50:56Z, and the retry reply
 at 00:51:01Z to read "Review finished." So a command reply's current text
 can describe the review's end state rather than what it said when it was
-posted. Read it soon after the trigger, or check `updated_at` against
-`created_at`.
+posted. Check `updated_at` against `created_at` (step 1).
+
+**The named wait is a lower bound, not a promise. #248 and #249, 2026-10-03.**
+The quota is shared across PRs, not per PR: #248 had no review of its own
+when it was refused, after #247's review at 00:50:15Z reported "0 remain".
+And the stated wait did not hold:
+
+| Time (UTC) | PR | Event |
+|---|---|---|
+| 01:08:41Z | #248 | refused; summary says "Next included review available in 35 minutes" (→ ~01:44Z) |
+| 01:47:31Z | #249 | trigger, ~4 minutes past that time |
+| 01:47:54Z | #249 | refused; summary now says "59 minutes" |
+| 04:10:44Z | #249 | trigger; reply at 04:10:59Z, "Review triggered.", unchanged at +60 s |
+
+Established: those timestamps and texts, from the API. Not established: why
+the second attempt was refused. One hypothesis is that a refused trigger
+restarts the window; another is that the "35 minutes" was computed against a
+different limit (the refusal text names both an "included review" and "free
+OSS reviews"). Neither is tested. Until one is, add margin beyond the two
+minutes below, and expect a refusal past the stated time to be possible.
 
 Note also that the refusal does not mean the trigger was lost - the walkthrough
 still lists the commits it would have covered. Nothing was reviewed, so the
@@ -222,6 +251,10 @@ refused, double the wait each time - 61 → 122 → 244 minutes - and **stop aft
 three refusals.** Tell the user what the bot said and that the review is not
 coming on its own. Never spam the PR: each trigger is a public comment on the
 thread, and a column of them is noise a reviewer has to scroll past.
+
+Because the quota is shared, two PRs waiting on it compete for one review an
+hour. Pick which gets the next slot - the one that must merge first - and
+trigger only that one, rather than spending a refusal on each.
 
 **6. Schedule the retry; do not wait for it.** The re-prompt is a scheduled
 wake-up, not a sleep. Use the `send_later` tool
