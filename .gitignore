@@ -84,3 +84,15 @@ key.json
 key.json.b64
 *-service-account.json
 *.pem
+
+# Race-report Routine downloads (.claude/skills/race-report/,
+# operations/routines/race-report.md). scripts/fetch_debug_artifacts.py writes
+# Cloud Run logs to run.txt (`logs --out run.txt`) and GCS debug artifacts to
+# ./artifacts (the default `--out` of `fetch` and `gate`). The artifacts include
+# raw tee sheets, which name club members, and this repository is public. The
+# Routine's environment tells the session to commit untracked files, so these
+# must never be untracked-and-visible.
+/artifacts/
+/run.txt
+# Local-only race-report working directory; never published.
+/operations/rr/
