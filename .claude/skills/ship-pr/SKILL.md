@@ -37,11 +37,20 @@ Advanced**, profile `ASSERTIVE`, configuration from the Organization UI. On #247
 (2026-10-03) it said profile `CHILL`, configuration from the repository
 `.coderabbit.yaml`, which is the current setup.
 
-**The quota line is in the review body, not the summary comment.** An earlier
-version of this skill said it did not appear at all; that was a search in the
-wrong place. The review CodeRabbit submitted on #247 (2026-10-03T00:50:15Z,
-commit `63d701b`) carries it inside its "Review info" details block, read from
-`gh api repos/alexenos/teetime/pulls/<N>/reviews`:
+**The quota line goes wherever the review's output goes.** An earlier version
+of this skill said it did not appear at all; that was a search in the wrong
+place. Two observed placements, 2026-10-03:
+
+- **Review with findings** - in the review body, inside its "Review info"
+  details block (`gh api repos/alexenos/teetime/pulls/<N>/reviews`). #247,
+  submitted 00:50:15Z for `63d701b`.
+- **Clean review** - no review object is created at all. The summary comment
+  is edited to "No actionable comments were generated in the recent review",
+  and the quota line is there. #249, edited 04:19:58Z for `a14b433`.
+
+So check both before concluding a review has not landed. The `CodeRabbit`
+check showed "Review completed" on #249 while `pulls/249/reviews` was empty.
+The line reads:
 
 ```
 Included review availability: This review used your included allowance. Your
@@ -208,6 +217,7 @@ And the stated wait did not hold:
 | 01:47:31Z | #249 | trigger, ~4 minutes past that time |
 | 01:47:54Z | #249 | refused; summary now says "59 minutes" |
 | 04:10:44Z | #249 | trigger; reply at 04:10:59Z, "Review triggered.", unchanged at +60 s |
+| 04:19:58Z | #249 | clean review lands in the summary comment, ~9 minutes after the trigger |
 
 Established: those timestamps and texts, from the API. Not established: why
 the second attempt was refused. One hypothesis is that a refused trigger
