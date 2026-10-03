@@ -161,9 +161,10 @@ $/booking is the input to the Cloud SQL retention decision open since #41 and #1
 needs no new source.
 
 **Source:** `cost.jsonl`, written by the cost Routine. **Not yet available.** The
-project has no billing export and no BigQuery dataset, and no service account in
-`terraform/` holds a billing role. #227 covers what enabling it requires, and why
-BigQuery is the only path to the figure.
+billing export is not enabled. `terraform/cost.tf` creates the dataset it writes
+to and grants the Routine read access; turning the export on is a Console step on
+the billing account. #227 covers why BigQuery is the only path to the figure, and
+`operations/routines/cost.md` the remaining steps.
 
 **Scope is GCP only, and the page must say so.** Whether Anthropic agent and token
 spend can be measured is open in #228. For a project developed agentically against
