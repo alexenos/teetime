@@ -1,11 +1,13 @@
 # Routine: scoreboard
 
-**Status: ready to deploy. Not deployed.** No trigger exists. This file is the
-specification and holds the prompt; deploying it is the steps in *Deploying it*.
+**Status: deployed** on 2026-10-04, first run due 12:30Z that day. This file is
+the specification and the source of the prompt.
 
 | | |
 |---|---|
-| **Trigger** | daily, `30 12 * * *` UTC (07:30 CT), proposed |
+| **Trigger** | daily, `30 12 * * *` UTC (07:30 CT) |
+| **Deployed as** | a Routine (scheduled trigger), "TeeTime Scoreboard", `trig_01PBT2QSyBigfseoVtjuZ9ck` |
+| **Model** | `claude-sonnet-5-5` |
 | **Authorization** | reads every ledger, writes `docs/scoreboard.json`, appends to its own ledger. **Requires a repository write — see below.** |
 | **Emits** | `docs/scoreboard.json`, and one ledger object per run at `operations/scoreboard/<YYYY-MM-DD>.json` in GCS |
 | **Owns** | the derived metrics; no source data of its own |
@@ -184,8 +186,8 @@ Three prerequisites are met: the authorization is granted, `docs/**` is live in
 the deploy filter, and the race report Routine has written a ledger row every
 morning since 2026-10-01. What remains:
 
-1. Create the Routine from the prompt below at `30 12 * * *`, record its trigger
-   ID in the table above, and change **Status** to deployed.
+1. ~~Create the Routine.~~ Done 2026-10-04 by the maintainer, in the routines UI
+   (an agent's create was refused by auto mode as unauthorized persistence).
 2. After its first run, set `SCHEDULES["scoreboard"].start` in
    `derive_scoreboard.py` to that date. Until then the scoreboard's own schedule
    starts at its first row, which cannot detect a missed first run.
@@ -208,13 +210,29 @@ morning since 2026-10-01. What remains:
 
 ## The prompt
 
-**Status: written here, not yet in a trigger.** This file is the source. Once the
-trigger exists it holds the copy that executes; change this file in a PR first,
-then update the Routine to match. Created by an agent through the API, it stays
-editable by later agent sessions, unlike the race report's.
+**Status: in the trigger, with one paste pending (Step 2, below).** This file is
+the source; the trigger holds the copy that executes. Change this file in a PR
+first, then update the Routine to match. The maintainer created it in the UI, so
+treat it like the race report's: an agent should not expect to edit it.
 
-Model `claude-sonnet-5`, with the race report's environment, repository source and
-tool list: the work is shell, git and the GitHub tools.
+**The routines UI reads a pasted prompt as markdown.** Two effects, both seen on
+the first paste (2026-10-04): a pair of `*` is taken as emphasis and deleted,
+which turned `"$B/race-report/*.json"` into `"$B/race-report/.json"` and would
+have failed every run; and single line breaks are joined, so three commands on
+consecutive lines became one. So the prompt below has no wildcards and puts
+each command in its own paragraph. Keep it that way, and compare the live text
+with this file *including* `*` after any paste.
+
+Settings, as created: the race report's environment and repository, model
+`claude-sonnet-5-5`, tools Bash, Read, Write, Edit, Glob, Grep, WebFetch,
+WebSearch, no connectors, and the routine's own push notification on.
+
+**No PushNotification tool.** The UI does not offer it, and Claude_Code_Remote
+(which the session-title call needs) is not selectable either. The prompt
+therefore puts its verdict in the session's final message, which the routine's
+own push notification carries. That push fires on every run, not only on a
+change, so the notify-on-change rule is not enforced by the tool set. Not
+established: whether the routine's push shows the final message's text.
 
 ---
 
@@ -234,10 +252,11 @@ gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard/<Y
 named for the run date in Central Time, written with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them; if the object already exists, say so in the notification rather than forcing it. On a run that derived, the row is the file the script writes with --row (Step 3). On any other path it is {"date":"<run date CT>","routine":"scoreboard","ok":false,"note":"<what failed>"}. The schema is in operations/ledger/README.md under scoreboard.jsonl.
 
 Rule that applies to every path through this prompt: notify on a change or a failure, and only then
-Call the PushNotification tool when a source metric changed, when the streak broke, or when anything failed - including the ledger write, and a PR that could not merge. Do not notify on a run where only the streak moved: it moves by one every day, and that is not news. Write it for a phone screen, verdict first, one or two sentences, no markdown. Shapes: Scoreboard - outcome changed: 26 of 32 booked all time, PR #260 merged. / Scoreboard - streak broke: race-report missing on 10/07. PR #261 merged. / Scoreboard could not publish - Tests failed on PR #262, left open. / Scoreboard could not run - derive_scoreboard.py: invalid ledger row: <message>.
+
+If the PushNotification tool is available, call it when a source metric changed, when the streak broke, or when anything failed - including the ledger write, and a PR that could not merge. Do not notify on a run where only the streak moved: it moves by one every day, and that is not news. Write it for a phone screen, verdict first, one or two sentences, no markdown. Shapes: Scoreboard - outcome changed: 26 of 32 booked all time, PR #260 merged. / Scoreboard - streak broke: race-report missing on 10/07. PR #261 merged. / Scoreboard could not publish - Tests failed on PR #262, left open. / Scoreboard could not run - derive_scoreboard.py: invalid ledger row: <message>. If PushNotification is not available, which is the case in this Routine as deployed, end the session with that one line as your final message instead - the Routine's own notification carries it. On a run where only the streak moved, that line is: Scoreboard - no change, streak <N>, PR #<n> merged.
 
 Step 1 - set up
-Establish today's date and time in Central Time: TZ=America/Chicago date '+%F %H:%M'. Name the session MM/DD Scoreboard with mcp__Claude_Code_Remote__set_session_title.
+Establish today's date and time in Central Time: TZ=America/Chicago date '+%F %H:%M'. If mcp__Claude_Code_Remote__set_session_title is available, name the session MM/DD Scoreboard with it; if not, skip this.
 
 Run bash scripts/setup_remote_env.sh. Its last line is the answer. This run needs the gcloud CLI and git; it does not use the venv, so PARTIAL with only the venv failing is fine. If gcloud does not work, the ledger write cannot work either: notify, saying so, and stop.
 
@@ -246,14 +265,17 @@ The derivation reads git history to find reports corrected after they merged, an
 Gate - right hour? The cron is UTC and pinned to 12:30, which is 07:30 CT only during CDT. If the CT time is earlier than 07:00, Central has moved to CST and you have fired at 06:30 CT, during the race and before its report. Do not derive. Write the ledger row with ok:false and the note "fired at 06:30 CT; cron must move from 30 12 * * * to 30 13 * * *", notify saying exactly that, and stop. This gate does not apply to a manually fired run at some other time of day; say so and carry on.
 
 Step 2 - read every ledger
-B=gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations
-mkdir -p ledger/race-report ledger/scoreboard
-gcloud storage cp --no-clobber "$B/race-report/*.json" ledger/race-report/
-gcloud storage cp --no-clobber "$B/scoreboard/*.json" ledger/scoreboard/
 
-One directory per Routine, because every Routine names its objects by date and two Routines' rows for the same day would collide in one. The race-report prefix holds the backfill rows beside the Routine's own, so it is never empty: if that copy fails for any reason, it is a failed run - ok:false with the error as the note, notify, stop. The scoreboard copy may fail on its first run only, and only with "matched no objects"; any other error from it is also a failed run. The script refuses a run with no race-report rows as a second guard. Do not read operations/ledger/*.jsonl in the checkout: those files are empty by design. Read only these prefixes - an object directly under operations/ (a grant probe) is not a ledger row, and a Routine the script has no schedule for makes it refuse. When the cost Routine is deployed it is added to this list and to SCHEDULES together.
+mkdir -p ledger/race-report ledger/scoreboard
+
+gcloud storage rsync gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/race-report ledger/race-report
+
+gcloud storage rsync gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard ledger/scoreboard
+
+Run those as three separate commands. rsync copies a whole prefix and needs no wildcard. One directory per Routine, because every Routine names its objects by date and two Routines' rows for the same day would collide in one. The race-report prefix holds the backfill rows beside the Routine's own, so it is never empty: if that rsync fails for any reason, it is a failed run - ok:false with the error as the note, notify, stop. The scoreboard rsync may fail on its first run only, and only with "Did not find existing container"; any other error from it is also a failed run. The script refuses a run with no race-report rows as a second guard. Do not read operations/ledger/ in the checkout: its .jsonl files are empty by design. Read only these two prefixes - an object directly under operations/ (a grant probe) is not a ledger row, and a Routine the script has no schedule for makes it refuse. When the cost Routine is deployed it is added here and to SCHEDULES together.
 
 Step 3 - derive
+
 python operations/ledger/derive_scoreboard.py ledger/race-report ledger/scoreboard --out docs/scoreboard.json --row scoreboard-row.json
 
 Do not pass --now or --as-of; the script reads the clock. It validates every row before deriving anything. If it exits non-zero, publish nothing: do not hand-edit the JSON, do not edit the script, and do not drop the row it names. Write the ok:false ledger row with its message as the note, notify, and stop. A refusal is the script working - it is what stops a malformed row or a shallow clone from becoming a published number.
