@@ -39,6 +39,12 @@ counts, written by the race report Routine from `RESERVATION_CHECK`.
 recorded in the `race-report` skill and the most likely element of this definition
 to regress.
 
+**Decision, 2026-10-03: Exact and Fallback are published for every morning.**
+The maintainer judged the mechanical scoring of the older mornings good enough,
+and dropped the page's disclaimer. The rest of this section is the stricter
+reading that was set aside; `confirmed_slots` is still recorded on every row, so
+it can be recovered.
+
 **Exact and Fallback are distinguishable only for agreed requests.** Separating
 them requires the member's request to have been resolved to a bookable slot and
 confirmed before the race, rather than selected from a ±32-minute window at race
@@ -210,5 +216,5 @@ Specified in `operations/routines/scoreboard.md` and
 **The outcome split has a value, backfilled.** The page shows 23 mornings
 transcribed from the race reports (2026-08-13 to 2026-09-27), derived by
 `operations/ledger/derive_scoreboard.py` and flagged as backfilled on the page.
-The streak has no value, because no Routine has written a row. Cost has no source
-at all.
+The streak has a value from 2026-10-01, the race report Routine's first row, and
+every run in it is self-reported (§2). Cost has no source at all.

@@ -148,7 +148,6 @@
     <div class="meter" role="img" id="rate-meter-wrap" aria-label="">
       <i id="rate-meter" style="width:0%"></i>
     </div>
-    <div class="banner" id="exact-note" hidden></div>
   </section>
 
   <div class="grid">
@@ -221,13 +220,17 @@
       + " · definitions " + d.definitions;
     if (d.sample) { $("sample-banner").hidden = false; }
     var bf = d.backfill;
-    if (bf && bf.rows > 0) {
+    // The banner goes once a Routine has scored a race of its own; the
+    // table row below keeps the provenance.
+    if (bf && bf.rows > 0 && !bf.routine_raced) {
       $("backfill-banner").hidden = false;
       $("backfill-banner").innerHTML = "<strong>Backfilled.</strong> The outcomes of "
         + bf.rows + " mornings, " + bf.first + " to " + bf.last + ", were transcribed "
         + "from the published <a href=\"https://github.com/alexenos/teetime/tree/main/operations/race-reports\">race reports</a>, "
         + "not read from the logs by a Routine. Source: <a href=\"https://github.com/alexenos/teetime/blob/main/"
         + bf.source + "\">" + bf.source + "</a>.";
+    }
+    if (bf && bf.rows > 0) {
       rows.push(["Backfilled rows", bf.rows + " (" + bf.first + " to " + bf.last + ")"]);
     }
 
@@ -238,21 +241,15 @@
     $("rate-hero").textContent = rate === null ? "No data" : rate + "%";
     $("rate-sub").textContent = total === 0
       ? "No requests recorded yet."
-      : at.booked + " of " + total + " requests booked, across " + at.mornings + " race mornings.";
+      : at.booked + " of " + total + " requests booked (" + at.exact + " exact, "
+        + at.fallback + " fallback), across " + at.mornings + " race mornings.";
     $("rate-meter").style.width = (rate || 0) + "%";
     $("rate-meter-wrap").setAttribute("aria-label",
       rate === null ? "No data" : rate + " percent of requests booked");
     rows.push(["Requests booked, all time", at.booked + " of " + total]);
+    rows.push(["Exact, all time", at.exact]);
+    rows.push(["Fallback, all time", at.fallback]);
     rows.push(["Race mornings, all time", at.mornings]);
-
-    if (!o.separable) {
-      $("exact-note").hidden = false;
-      $("exact-note").innerHTML = "<strong>Exact and fallback are not yet separable.</strong> "
-        + "Until requested times are confirmed against a real slot before the race "
-        + "(<a href=\"https://github.com/alexenos/teetime/issues/216\">#216</a>), a booking "
-        + "cannot be scored against the time the member actually wanted. This reads "
-        + "booked against missed, which is the strongest honest claim.";
-    }
 
     // ---- windows + trend ----
     var wins = [["Last 4 weeks", o.last_4wk], ["Prior 4 weeks", o.prior_4wk]];
@@ -285,11 +282,16 @@
       rows.push(["Automation streak", "not available"]);
     } else {
       $("streak-val").textContent = s.consecutive;
-      $("streak-sub").textContent = "consecutive successful runs"
+      // A run reports on itself, and nothing yet checks it (scoreboard.md §2),
+      // so these are runs with no failure and no gap, not runs known to be right.
+      $("streak-sub").textContent = "consecutive runs with no failure or missed run"
         + (s.last_failure ? " since " + s.last_failure : "")
-        + " · " + s.total_ok + " successful all time";
+        + " · " + s.total_ok + " all time"
+        + (s.unverified ? " · self-reported, " + s.unverified + " not independently checked" : "");
       rows.push(["Automation streak", s.consecutive]);
-      rows.push(["Successful runs, all time", s.total_ok]);
+      rows.push(["Runs with no failure, all time", s.total_ok]);
+      if (s.unverified) { rows.push(["Streak runs not independently checked", s.unverified]); }
+      if (s.last_failure_reason) { rows.push(["Last break", s.last_failure + " (" + s.last_failure_reason + ")"]); }
 
       // Streak history: one series, so no legend. Bars, 4px rounded data-ends.
       var h = s.history || [];

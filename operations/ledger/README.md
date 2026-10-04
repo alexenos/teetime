@@ -149,6 +149,11 @@ had not been read is `agreed=unchecked`, and its morning stays `false`. A trend
 drawn across that boundary shows a step that is not a change in performance. The
 scoreboard must not compare across it without saying so.
 
+The scoreboard no longer acts on it: on 2026-10-03 the maintainer judged the
+unconfirmed mornings' scoring good enough, and the page publishes exact and
+fallback for every morning (`operations/scoreboard.md` §1). The field is still
+written, so the stricter reading can be recovered.
+
 ## `scoreboard.jsonl`
 
 One row per scoreboard run: the metrics as published, at the moment they were
@@ -157,9 +162,9 @@ published. This is the history a trend is plotted from.
 ```json
 {"date":"2026-09-25","routine":"scoreboard","ok":true,
  "published":"docs/scoreboard.json",
- "outcome_all_time":{"exact":0,"fallback":0,"miss":0,"confirmed_slots":false},
- "outcome_4wk":{"exact":0,"fallback":0,"miss":0,"confirmed_slots":false},
- "streak":{"consecutive":0,"by_routine":{},"total_ok":0},
+ "outcome_all_time":{"exact":0,"fallback":0,"booked":0,"miss":0},
+ "outcome_4wk":{"exact":0,"fallback":0,"booked":0,"miss":0},
+ "streak":{"consecutive":0,"unverified":0,"by_routine":{},"total_ok":0},
  "cost":{"month":"2026-09","usd_total":null,"usd_per_booking":null,"source":"unavailable"}}
 ```
 
@@ -216,10 +221,10 @@ does not widen it; committing rows would.
 
 ## Current state
 
-**Backfilled; no Routine writes rows yet.** The 23 rows in
-`backfill/race-report.jsonl` are the only race-report rows, and
-`derive_scoreboard.py` is the only reader. The race report Routine starts writing
-once its rewritten prompt is pasted into the trigger (#234).
+**The race report Routine writes a row every run, from 2026-10-01.** Those sit
+beside the 23 backfill rows under `operations/race-report/`. The scoreboard
+Routine is specified and not yet deployed (#234); until it is,
+`derive_scoreboard.py` run by hand is the only reader.
 
 ## Backfill
 
@@ -289,8 +294,11 @@ python operations/ledger/derive_scoreboard.py operations/ledger/backfill/race-re
 ```
 
 It validates every row (the rollup against `requests`, `booked` against
-`outcome`, `member` null, one row per date) before deriving anything. It derives
-the outcome split only. The streak is published as unavailable while every row is
-a backfill row. The first Routine-written row makes the script exit rather than
-publish a streak it has no walk for; that walk belongs to the scoreboard Routine
-(#234).
+`outcome`, `member` null, one row per Routine and date) before deriving anything.
+It derives the outcome split from race-report rows, backfill included, and the
+streak by walking each Routine's scheduled dates (`SCHEDULES` in the script) and
+breaking on a missing row, an `ok: false` row, or a report modified after the
+commit that added it. Backfill rows are outside the walk. It needs full git
+history and refuses a shallow clone. The scoreboard Routine's prompt
+(`operations/routines/scoreboard.md`) reads every prefix from GCS and passes them
+all.

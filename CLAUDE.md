@@ -17,8 +17,9 @@ exception is defined in `operations/routines/race-report.md` and nowhere else.
 A second exception was **granted on 2026-09-29**: the scoreboard Routine may
 merge `docs/scoreboard.json` and `docs/scoreboard.html`, on the same terms — those
 two paths, a green `Tests` check, nothing else. It is defined in
-`operations/routines/scoreboard.md`. That Routine is not yet deployed, because it
-has no ledger rows to read until the race report writes them.
+`operations/routines/scoreboard.md`. That Routine is not yet deployed. Its
+prerequisite is met - the race report has written ledger rows since 2026-10-01 -
+and what remains is creating its trigger.
 
 A commit touching only `operations/`, `docs/` or `.claude/` does not redeploy:
 the Cloud Build trigger sets
@@ -112,7 +113,7 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 - `operations/routines/` — one file per Routine, including its prompt and what it
   is authorized to do. A file states whether it is deployed.
 - `operations/ledger/` — one ledger per Routine: did it run, and what did it
-  measure. Schemas written; nothing writes to them yet.
+  measure. The race report writes its rows to GCS from 2026-10-01.
 - `operations/race-reports/` — one report per race morning
 
 One Routine is deployed: the race report, daily at `40 11 * * *` UTC. Two are
