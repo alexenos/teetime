@@ -220,6 +220,7 @@ The run has a fixed shape. Walk it and note where it diverges:
 | Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot, and **`round trip`** against the 3.0s budget (§7b) |
 | Boundary | `RACE_LEDGER: club granted ... at +Nms` | Which rung won, and the last that lost |
 | Outcome | `Chain finished - phase=..., success=..., blocked=...` | Phase says how far it got |
+| Confirmation | `sending SMS notifications`, then the provider's send for each booking | One delivered message per booking. A 4xx means a member was not told. A timeout or 5xx is unconfirmed (§7h) |
 
 The sweep means a run now fires several Reserves for the **same** slot before it
 touches the fallback list. A refused attempt 1 is expected and is not the story;
@@ -914,6 +915,70 @@ throttling, with every `writeDriftMs` within ~2ms in `BURST_TIMING`, means CPU
 is not what makes members late. Only a morning or two back on `racer_cpu = 1`
 with the same plan proves the second one is the reason.
 
+## 7h. Added 2026-10-04: the confirmation message is part of the race
+
+The race is not over until the member has been told. After its chain, each racer
+task logs `BATCH_JOB: Batch execution complete, sending SMS notifications` and
+sends one message per booking: a confirmation on success, a failure notice
+otherwise. That message is the only part of the morning the member sees. Check it
+every morning, win or lose.
+
+**No summary line records whether it arrived.** `app/api/jobs.py` discards the
+send result. `BATCH_JOB: Complete - succeeded=N` and `RACER: task N/M finished -
+succeeded=N` count bookings, not deliveries, and read the same either way. The
+evidence is the provider's own lines:
+
+| Channel | Delivered | Not delivered | Unconfirmed |
+|---|---|---|---|
+| Telegram | `api.telegram.org/bot<redacted>/sendMessage "HTTP/1.1 200 OK"` | that line at 4xx, then `Telegram API error sending to chat ...: 4xx {"ok":false,...}` | `Telegram request failed sending to chat ...` (timeout or connection error; the POST may have landed); a 5xx; `Unexpected Telegram sendMessage response ...`, which is logged on a 2xx, so it most likely posted |
+| Discord | the API POST at 2xx | `Discord API error sending to ...` at 4xx | `Discord request failed sending to ...`; a 5xx |
+| SMS | `SMS Status Update - SID: ..., Status: delivered`, only if Twilio's status callback is configured | `Error sending ... to ...`; a status update reading `failed` or `undelivered` | anything else. `twilio_provider.py` logs nothing on success, so an SMS with no status update is unverified, not delivered |
+
+Expect at least one send per booking in the batch; a long message split into
+chunks sends more. Fewer sends than bookings, or a Not delivered line, is a
+member who was not told. Report an Unconfirmed send as unconfirmed, quoting
+the line. Do not report it as a failure unless other evidence settles it, such
+as the member saying they got nothing.
+
+**Attribute each send to its booking by task, never by order.** The tasks run
+concurrently, their lines interleave in `run.txt`, and `run.txt` does not carry
+the task. Cloud Logging does:
+
+```bash
+gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="teetime-racer" AND (textPayload:"api.telegram.org" OR textPayload:"sending to") AND timestamp>="<window>" AND timestamp<="<window + 1 min>"' \
+  --project=gen-lang-client-0822973627 \
+  --format='value(timestamp,labels."run.googleapis.com/task_index",textPayload)' --limit=50
+```
+
+`RACER: task N/M claimed 1 booking(s) ['<id>']` then maps the task index to its
+booking. On 2026-10-04 task 1's send was `200 OK` and task 3's was `400`.
+
+**Where the message goes.** A Telegram send goes to the chat the booking was
+*requested in*, stored on the booking as `origin_channel_id` when it was made
+(`app/services/booking_service.py`), falling back to the requester's private
+chat (`TelegramProvider.resolve_chat_id`). It does not use
+`TELEGRAM_MEMBERS_CHAT_ID`, which only gates who may talk to the bot. So a
+booking requested days ago carries the chat ID that chat had then.
+
+**2026-10-04, the first morning checked.** Both bookings were won and both
+passed `RESERVATION_CHECK`, but only one confirmation arrived. The other
+returned `400 ... group chat was upgraded to a supergroup chat` with a
+`migrate_to_chat_id`. Telegram had upgraded the members' group between the two
+requests, which gives the group a new chat ID, and the earlier booking still
+carried the old one. Nothing in the app handles `migrate_to_chat_id`. Every
+booking requested in that group before an upgrade fails this way until its
+stored ID is changed. When you see this error, find the other bookings that will
+hit it. Search the webhook logs for requests made in the old chat
+(`Telegram message received from ... in chat <old id>`) and list their target
+dates. Those are the next mornings it will recur.
+
+**Scoring is unaffected.** `exact`, `fallback` and `miss` follow
+`RESERVATION_CHECK`, and a booked request whose confirmation failed is still
+booked. Put the failure in the report and in the push notification instead.
+
+Chat IDs and Telegram user IDs are identifiers (§8a). Use them in your queries,
+but never write them in the report, the PR or the commit.
+
 ## 8. Report
 
 State separately: what the run did, what is established from artifacts, what is
@@ -930,6 +995,14 @@ the ledger. If the observer has no artifacts for that target date (job did not
 run, or declined to capture per §7f's last paragraph), say that explicitly
 rather than omitting the check; an absent observer is itself worth a sentence,
 not silence.
+
+Include the confirmation delivery (§7h) for every booking, every time. Give a
+row in the timing table and a line in the report: delivered, not delivered,
+or unconfirmed, per §7h's table, with the line quoted and chat IDs redacted.
+A failed or unconfirmed delivery is a finding even on a clean win. It goes in the push notification and in Recommendations, so a morning
+with one is never "no issues found". For example: `Won both - 12:00 and 12:08
+booked. Report PR #266 merged. Member B's confirmation did not send (Telegram
+400, group upgraded) - needs a look.`
 
 Booking itself still cannot be exercised locally — testing it means deploying to
 main behind a flag, so that kind of experiment costs a morning. Say which morning
