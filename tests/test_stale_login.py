@@ -1,6 +1,7 @@
 """Tests for recovering from a stored Walden login that stops working (issue #244)."""
 
-from datetime import date, datetime, time
+import asyncio
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -107,6 +108,25 @@ class TestTheInvalidMark:
         await credential_service.mark_invalid(MEMBER)
         assert (await credential_service.get_owner(MEMBER)).invalid_since == first  # type: ignore[union-attr]
 
+    async def test_a_login_written_after_the_attempt_began_is_not_marked(self, store: None) -> None:
+        await credential_service.set_credentials(MEMBER, "M-1", "old")
+        # Explicit offsets, not back-to-back clock reads: Windows' clock can tick
+        # in ~15ms steps, so two reads in a row may compare equal.
+        attempt_started = datetime.utcnow() - timedelta(seconds=5)
+        await credential_service.set_credentials(MEMBER, "M-1", "new")  # /login mid-race
+
+        assert (
+            await credential_service.mark_invalid(MEMBER, unchanged_since=attempt_started) is False
+        )
+        assert (await credential_service.require_credentials(MEMBER)).password == "new"
+
+    async def test_an_unchanged_login_is_marked(self, store: None) -> None:
+        await credential_service.set_credentials(MEMBER, "M-1", "old")
+        attempt_started = datetime.utcnow()
+        assert (
+            await credential_service.mark_invalid(MEMBER, unchanged_since=attempt_started) is True
+        )
+
     async def test_marking_with_no_stored_login(self, store: None) -> None:
         assert await credential_service.mark_invalid(MEMBER) is False
 
@@ -173,6 +193,39 @@ class TestTheRace:
         # The member-facing reason, not "Could not resolve booking credentials".
         assert (results["b2"].error_message or "").startswith("Not attempted: Walden rejected")
         assert "/login" in (results["b2"].error_message or "")
+
+    async def test_a_login_replaced_during_the_race_survives_its_rejection(
+        self, store: None
+    ) -> None:
+        """The member fixed it with /login while the old login was being rejected."""
+        await credential_service.set_credentials(MEMBER, "M-1", "stale")
+
+        async def book_multiple(target_date, requests, execute_at=None) -> BatchBookingResult:  # type: ignore[no-untyped-def]
+            # Past the clock's tick, so the save is measurably after the attempt began.
+            await asyncio.sleep(0.05)
+            await credential_service.set_credentials(MEMBER, "M-1", "fixed")
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id=r.booking_id,
+                        result=BookingResult(success=False, error_message=LOGIN_REJECTED_MESSAGE),
+                    )
+                    for r in requests
+                ],
+                total_failed=len(requests),
+            )
+
+        provider = MagicMock()
+        provider.book_multiple_tee_times = AsyncMock(side_effect=book_multiple)
+        service = BookingService()
+        service.set_reservation_provider(provider)
+
+        with patch("app.services.booking_service.database_service") as db:
+            db.update_booking = AsyncMock()
+            await service.execute_bookings_batch([_booking("b4")])
+
+        creds = await credential_service.require_credentials(MEMBER)
+        assert creds.password == "fixed" and creds.invalid_since is None
 
     async def test_a_login_that_merely_failed_is_not_marked(self, store: None) -> None:
         """A timeout or a changed page must not lock the member out of booking."""

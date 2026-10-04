@@ -330,12 +330,19 @@ class CredentialService:
 
             await session.commit()
 
-    async def mark_invalid(self, phone_number: str) -> bool:
+    async def mark_invalid(
+        self, phone_number: str, *, unchanged_since: datetime | None = None
+    ) -> bool:
         """Record that Walden rejected this requester's login (#244).
 
         Returns whether a row was marked. The first rejection's time is kept:
         later attempts are refused before reaching Walden, so a second one
         should not happen, and the original date is what the member is told.
+
+        ``unchanged_since`` is when the rejected attempt began. If the row has
+        been written since - the member saved a new login with /login while the
+        attempt was still running - the rejection was of the old login, so the
+        new one is left alone.
         """
         async with AsyncSessionLocal() as session:
             result = await session.execute(
@@ -345,6 +352,17 @@ class CredentialService:
             )
             record = result.scalar_one_or_none()
             if record is None:
+                return False
+            if (
+                unchanged_since is not None
+                and record.updated_at is not None
+                and record.updated_at > unchanged_since
+            ):
+                logger.info(
+                    "Not marking requester %s's login invalid: it was replaced after the "
+                    "rejected attempt began",
+                    phone_number,
+                )
                 return False
             if record.invalid_since is None:
                 record.invalid_since = datetime.now(UTC).replace(tzinfo=None)
