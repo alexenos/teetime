@@ -204,6 +204,10 @@ class WaldenCredentialRecord(Base):
     # When Walden last accepted this login, checked before it was saved
     # (#240). Null for rows added by the admin script, which checks nothing.
     verified_at = Column(DateTime, nullable=True)
+    # When Walden rejected this login at a booking attempt (#244). Set, the
+    # login is not tried again - each try is a failed login on the member's real
+    # account - until they save a new one, which clears it.
+    invalid_since = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -342,6 +346,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("bookings", "asked_time", "TIME"),
     ("bookings", "fallback_ladder", "TEXT"),
     ("walden_credentials", "verified_at", "TIMESTAMP"),
+    ("walden_credentials", "invalid_since", "TIMESTAMP"),
     ("walden_credentials", "member_number_fallback", "TEXT"),
     ("walden_credentials", "password_fallback", "TEXT"),
 ]

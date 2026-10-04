@@ -276,6 +276,13 @@ member and their label. Add them to `MEMBER_PSEUDONYM_REGISTRY` and
 were labelled by hand before this existed are mapped once with
 `scripts/add_walden_credential.py set-pseudonym <requester id> "Member A"`.
 
+**A login that stops working (#244).** If Walden rejects a member's stored login
+at a booking, the member is told to send `/login`, and the login is marked
+invalid. No race or new booking tries it again until they save a new one, so
+the member's Walden account doesn't collect a failed login every morning. The
+log line is `LOGIN_REJECTED`. A login that fails for any other reason (a
+timeout, a changed page) is not marked.
+
 **Capacity.** When the number of connected logins reaches
 `racer_max_requesters`, the admin gets a message saying to raise it. Beyond
 that number, extra members race after the window opens.

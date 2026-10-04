@@ -82,6 +82,16 @@ _SIGNED_IN = re.compile(r"isSignedIn\s*:\s*function\s*\(\s*\)\s*\{\s*return\s+(t
 _ERROR_CLASSES = ("alert-danger", "portlet-msg-error", "alert-error")
 
 
+# What a booking reports when Walden rejected the member's stored login (#244).
+# It reaches the member's phone as the failure reason, so it says what to do.
+# BookingService recognises it by equality to mark the login invalid, so a
+# rejected login stops being retried against the member's real account.
+LOGIN_REJECTED_MESSAGE = (
+    "Walden rejected your saved login - your password may have changed. Send /login to me "
+    "in a private chat to update it."
+)
+
+
 class LoginOutcome(str, Enum):
     """What a login check established."""
 

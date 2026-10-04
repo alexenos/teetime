@@ -24,7 +24,7 @@ not even the shared fallback.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 
@@ -51,6 +51,17 @@ class WaldenCredentialRequiredError(RuntimeError):
     """
 
 
+class WaldenCredentialInvalidError(RuntimeError):
+    """Raised when the requester's stored login is marked as rejected by Walden (#244).
+
+    Its message is written for the member, because it reaches them as the
+    failure reason: the booking was not attempted, and saving a new login with
+    /login is what fixes it. Not attempting it is the point - each attempt with
+    a login Walden has already rejected is another failed login on the
+    member's real account, whose lockout policy is unknown.
+    """
+
+
 class ProxyAdminHasNoCredentialError(WaldenCredentialRequiredError):
     """Raised when something tries to book under the proxy admin's own identity.
 
@@ -70,6 +81,9 @@ class WaldenCredentials:
 
     member_number: str
     password: str
+    # When Walden rejected this login at a booking (#244), or None. Carried
+    # here so a caller that already holds the login needs no second lookup.
+    invalid_since: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +100,7 @@ class CredentialOwner:
     name: str | None
     telegram_username: str | None
     verified_at: datetime | None = None
+    invalid_since: datetime | None = None
 
     @property
     def display_name(self) -> str:
@@ -136,6 +151,7 @@ class CredentialService:
                 password=await credential_crypto.decrypt(
                     str(record.password_encrypted), context=f"{phone_number}:password"
                 ),
+                invalid_since=record.invalid_since,  # type: ignore[arg-type]
             )
         except credential_crypto.CredentialEncryptionError as primary_error:
             if not (record.member_number_fallback and record.password_fallback):
@@ -154,6 +170,7 @@ class CredentialService:
                     str(record.member_number_fallback), context=""
                 ),
                 password=await credential_crypto.decrypt(str(record.password_fallback), context=""),
+                invalid_since=record.invalid_since,  # type: ignore[arg-type]
             )
 
     async def require_credentials(self, phone_number: str) -> WaldenCredentials:
@@ -168,8 +185,13 @@ class CredentialService:
         if dedicated is None:
             raise WaldenCredentialRequiredError(
                 f"No Walden login is on file for requester {phone_number}, and there is "
-                "no shared account to fall back on. Add one with "
-                "scripts/add_walden_credential.py before booking for them."
+                "no shared account to fall back on. They connect their own with /start."
+            )
+        if dedicated.invalid_since is not None:
+            raise WaldenCredentialInvalidError(
+                "Not attempted: Walden rejected your saved login on "
+                f"{dedicated.invalid_since:%B %d}. Send /login to me in a private chat to "
+                "update it."
             )
         return dedicated
 
@@ -198,6 +220,7 @@ class CredentialService:
             name=str(record.name) if record.name else None,
             telegram_username=str(record.telegram_username) if record.telegram_username else None,
             verified_at=record.verified_at,  # type: ignore[arg-type]
+            invalid_since=record.invalid_since,  # type: ignore[arg-type]
         )
 
     async def find_by_name_or_telegram_username(self, target: str) -> list[CredentialOwner]:
@@ -290,6 +313,8 @@ class CredentialService:
             # Always overwritten, never left as it was: a new login replaces
             # the one that was verified, so an old date would vouch for it.
             record.verified_at = verified_at  # type: ignore[assignment]
+            # A new login is a fresh start: whatever Walden rejected was the old one.
+            record.invalid_since = None  # type: ignore[assignment]
             # Rewritten every time, never left: a copy of the old login must
             # not outlive the login it was a copy of.
             record.member_number_fallback = credential_crypto.fallback_encrypt(member_number)  # type: ignore[assignment]
@@ -304,6 +329,27 @@ class CredentialService:
                 record.telegram_username = telegram_username.strip().lstrip("@") or None  # type: ignore[assignment]
 
             await session.commit()
+
+    async def mark_invalid(self, phone_number: str) -> bool:
+        """Record that Walden rejected this requester's login (#244).
+
+        Returns whether a row was marked. The first rejection's time is kept:
+        later attempts are refused before reaching Walden, so a second one
+        should not happen, and the original date is what the member is told.
+        """
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(WaldenCredentialRecord).where(
+                    WaldenCredentialRecord.phone_number == phone_number
+                )
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return False
+            if record.invalid_since is None:
+                record.invalid_since = datetime.now(UTC).replace(tzinfo=None)
+                await session.commit()
+            return True
 
     async def count(self) -> int:
         """How many members have a stored login - each one a requester the racer may race."""

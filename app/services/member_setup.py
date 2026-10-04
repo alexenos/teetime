@@ -145,6 +145,13 @@ async def handle_command(
             return CommandReply(
                 "You don't have a Walden login connected. Send /start to connect one."
             )
+        if owner.invalid_since is not None:
+            # Rejected at a booking attempt (#244); nothing books until replaced.
+            return CommandReply(
+                f"Walden rejected your saved login on {owner.invalid_since:%Y-%m-%d} (UTC), "
+                "so I'm not booking with it - your password may have changed. Send /login to "
+                "update it."
+            )
         if owner.verified_at is None:
             checked = "It was added before logins were checked when saved."
         else:
