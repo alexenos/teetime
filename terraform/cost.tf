@@ -13,8 +13,10 @@
 #   Billing > Billing export > BigQuery export > Detailed usage cost
 #     project: this one    dataset: billing_export
 #
-# Until that happens the dataset is empty and costs nothing. The export is not
-# retroactive: it starts from the day it is enabled.
+# Until that happens the dataset is empty and costs nothing. The first export to
+# a multi-region dataset (US here) backfills from the start of the previous
+# month, which can take up to five days; nothing older is recoverable. A
+# single-region dataset would get no backfill at all, which is why this is US.
 ###############################################################################
 
 resource "google_bigquery_dataset" "billing_export" {

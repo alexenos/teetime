@@ -30,9 +30,11 @@ billing account — the maintainer does — to turn it on once in the Console.
 
 Everything else is in `terraform/cost.tf` (#227):
 
-- the `bigquery` and `bigquerydatatransfer` APIs
-- the dataset `billing_export` (US), with `prevent_destroy`, because the export
-  is not retroactive and a lost dataset is lost history
+- the `bigquery` API
+- the dataset `billing_export` (US), with `prevent_destroy`. A first export to a
+  multi-region dataset backfills from the start of the previous month, up to five
+  days to complete; nothing older is recoverable, and a lost dataset is lost
+  history. A single-region dataset would get no backfill, which is why it is US
 - `roles/bigquery.jobUser` on the project for `teetime-artifact-reader`, to run
   a query
 - `roles/bigquery.dataViewer` on `billing_export` only, to read it
@@ -91,8 +93,8 @@ trigger to the 5th.
 
 1. Merge `terraform/cost.tf` (#227) and confirm the apply in the build log.
 2. Enable the billing export in the Console, as above (outside this repository).
-3. After a full calendar month of export, run `cost.sql` by hand and check it
-   against the Console's figure for that month.
+3. Once the initial backfill has finished (up to five days), run `cost.sql` by
+   hand for the previous month and check it against the Console's figure for it.
 4. Create the Routine, record its trigger ID here, and change **Status**.
 5. Resolve #228 and record the scope decision here.
 
