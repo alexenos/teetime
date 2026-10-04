@@ -6,62 +6,97 @@ permalink: /privacy/
 
 # Privacy Policy
 
-**Last Updated: February 5, 2026**
+**Last updated: October 3, 2026**
 
-This Privacy Policy describes how TeeTime Bot ("we," "us," or "our") collects, uses, and protects your information when you use our SMS-based golf tee time reservation service.
+TeeTime Bot is a private, invitation-only Telegram bot that books golf tee times
+at Northgate Country Club for members of a small group, each under their own
+Walden Golf membership. This page says what it stores, where, who can see it,
+and how to delete it.
 
-## Information We Collect
+## What is stored
 
-When you use TeeTime Bot, we collect and store:
+**About you, from Telegram**
+- Your numeric Telegram user ID.
+- Your first name and Telegram @username, if you have one.
 
-- **Phone Number**: Your mobile phone number used to communicate with our service
-- **Booking Information**: Tee time preferences, dates, times, and number of players
-- **Message Content**: SMS messages exchanged with our service to process your booking requests
+These identify your requests, let the bot reply to you, and let the group's
+admin ask the bot to book on your behalf.
 
-## How We Use Your Information
+**Your Walden login**
+- Your Walden member number and password, which you enter yourself in the bot's
+  setup form. The bot uses them only to log in to Walden as you and book the
+  tee times you ask for.
+- When Walden last accepted the login.
 
-We use your information solely to:
+**Your bookings and conversations**
+- Your booking requests: date, time, number of players. Also the result, and
+  any confirmation the club returned.
+- The state of your current conversation with the bot, for example a booking
+  waiting for you to confirm.
 
-- Process and confirm your tee time reservation requests
-- Send booking confirmations and status updates
-- Respond to your inquiries and provide customer support
-- Maintain records of your bookings
+**A label**
+- A pseudonym such as "Member C", used instead of your name or ID in the
+  service's logs and in the public race reports described below.
 
-## Data Protection
+## How your Walden login is protected
 
-We implement appropriate security measures to protect your personal information against unauthorized access, alteration, disclosure, or destruction.
+- **It never passes through chat.** The setup form sends it from your phone
+  directly to the booking service over an encrypted connection. It is never a
+  Telegram message, so it is not in your chat history or on Telegram's servers.
+- **It is encrypted at rest with a Google Cloud KMS key** that nobody can copy
+  or export.
+- **Every decryption is recorded** in an audit log, along with which account
+  made it.
+- **It is checked with Walden before it is saved,** and it is never shown back
+  to you or anyone else.
 
-## No Sharing of Mobile Information
+The code that handles your login is public:
+[github.com/alexenos/teetime](https://github.com/alexenos/teetime).
 
-**We will never sell, rent, or share your mobile phone number or any mobile opt-in data with third parties or affiliates for marketing or promotional purposes.**
+## Who your information goes to
 
-Your mobile information is used exclusively to provide the tee time booking service you requested.
+- **Telegram** carries your messages to and from the bot. See
+  [Telegram's privacy policy](https://telegram.org/privacy).
+- **Google Cloud** (United States) runs the bot and stores everything above.
+- **Google's Gemini AI** receives the text of your booking messages, for example
+  "Book Saturday 8am for 4", to understand what you are asking for. It does not
+  receive your Walden login.
+- **Walden Golf**, the club's booking site, receives your login when the bot
+  books for you, exactly as if you had logged in yourself.
 
-## Data Retention
+Nothing is sold or shared for marketing.
 
-We retain your information only as long as necessary to provide our services and fulfill the purposes described in this policy. Booking records may be retained for operational and legal compliance purposes.
+## Public race reports
 
-## Your Rights
+The project publishes reports about how each morning's booking race went, in a
+public code repository. They refer to people only by label ("Member A",
+"Rival 1"), never by name, Telegram handle, ID or member number. Every report is
+checked automatically for names before it is published.
 
-You may:
+## How long things are kept
 
-- Request access to the personal information we hold about you
-- Request correction of inaccurate information
-- Request deletion of your data by contacting us
-- Opt out of SMS communications at any time by texting STOP
+- **Your Walden login:** until you delete it or leave the group.
+- **Booking records:** kept, so the bot can tell you what it booked and so
+  problems can be diagnosed.
+- **Service logs:** 30 days.
+- **Copies of the club's tee-sheet pages** taken during bookings, which can show
+  members' names: kept for diagnosing booking problems, with no automatic
+  deletion at present.
 
-## Opt-Out
+## Deleting your information
 
-You can stop receiving SMS messages at any time by replying **STOP** to any message. You will receive a confirmation that you have been unsubscribed. To rejoin, text **START**.
+- **`/forget`** in your private chat with the bot deletes your saved Walden login
+  and cancels bookings it has not made yet.
+- **Leaving the group** does the same automatically.
+- For anything else, such as booking records or your label, ask the person who
+  invited you.
 
-## Contact Us
+Tee times already reserved at the club are your own, and are not affected.
 
-If you have questions about this Privacy Policy or your personal information, please contact us by texting HELP to our service number.
+## Changes
 
-## Changes to This Policy
-
-We may update this Privacy Policy from time to time. We will notify you of any material changes by posting the updated policy on this page with a new "Last Updated" date.
+If this policy changes, the date at the top changes with it.
 
 ---
 
-*TeeTime Bot is a personal golf assistant application for authorized users only.*
+*TeeTime Bot is a private application for invited members only.*

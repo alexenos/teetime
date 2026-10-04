@@ -115,6 +115,11 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 - `operations/ledger/` — one ledger per Routine: did it run, and what did it
   measure. The race report writes its rows to GCS from 2026-10-01.
 - `operations/race-reports/` — one report per race morning
+- `operations/onboarding.md` — letting members in and out: the maintainer
+  approves a join request, members connect their own Walden login (never seen
+  by the maintainer), and what must be true before inviting anyone new
+- `operations/credential-encryption.md` — the Cloud KMS key, who has read a
+  login, and the migration off the hand-made Fernet key
 
 Two Routines are deployed: the race report, daily at `40 11 * * *` UTC, and the
 scoreboard, daily at `30 12 * * *` UTC. The cost Routine is specified and not
