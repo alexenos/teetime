@@ -220,7 +220,7 @@ The run has a fixed shape. Walk it and note where it diverges:
 | Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot, and **`round trip`** against the 3.0s budget (§7b) |
 | Boundary | `RACE_LEDGER: club granted ... at +Nms` | Which rung won, and the last that lost |
 | Outcome | `Chain finished - phase=..., success=..., blocked=...` | Phase says how far it got |
-| Confirmation | `sending SMS notifications`, then the provider's send for each booking | One delivered message per booking. A non-2xx means a member was not told (§7h) |
+| Confirmation | `sending SMS notifications`, then the provider's send for each booking | One delivered message per booking. A 4xx means a member was not told. A timeout or 5xx is unconfirmed (§7h) |
 
 The sweep means a run now fires several Reserves for the **same** slot before it
 touches the fallback list. A refused attempt 1 is expected and is not the story;
@@ -928,15 +928,17 @@ send result. `BATCH_JOB: Complete - succeeded=N` and `RACER: task N/M finished -
 succeeded=N` count bookings, not deliveries, and read the same either way. The
 evidence is the provider's own lines:
 
-| Channel | Delivered | Not delivered |
-|---|---|---|
-| Telegram | `api.telegram.org/bot<redacted>/sendMessage "HTTP/1.1 200 OK"` | that line at non-2xx, then `Telegram API error sending to chat ...`; or `Telegram request failed sending to chat ...`, `Unexpected Telegram sendMessage response ...` |
-| Discord | the API POST at 2xx | `Discord API error sending to ...`, `Discord request failed sending to ...` |
-| SMS | — | `Error sending ... to ...` |
+| Channel | Delivered | Not delivered | Unconfirmed |
+|---|---|---|---|
+| Telegram | `api.telegram.org/bot<redacted>/sendMessage "HTTP/1.1 200 OK"` | that line at 4xx, then `Telegram API error sending to chat ...: 4xx {"ok":false,...}` | `Telegram request failed sending to chat ...` (timeout or connection error; the POST may have landed); a 5xx; `Unexpected Telegram sendMessage response ...`, which is logged on a 2xx, so it most likely posted |
+| Discord | the API POST at 2xx | `Discord API error sending to ...` at 4xx | `Discord request failed sending to ...`; a 5xx |
+| SMS | `SMS Status Update - SID: ..., Status: delivered`, only if Twilio's status callback is configured | `Error sending ... to ...`; a status update reading `failed` or `undelivered` | anything else. `twilio_provider.py` logs nothing on success, so an SMS with no status update is unverified, not delivered |
 
 Expect at least one send per booking in the batch; a long message split into
-chunks sends more. Fewer sends than bookings, or any failure line, is a member
-who was not told.
+chunks sends more. Fewer sends than bookings, or a Not delivered line, is a
+member who was not told. Report an Unconfirmed send as unconfirmed, quoting
+the line. Do not report it as a failure unless other evidence settles it, such
+as the member saying they got nothing.
 
 **Attribute each send to its booking by task, never by order.** The tasks run
 concurrently, their lines interleave in `run.txt`, and `run.txt` does not carry
@@ -995,9 +997,9 @@ rather than omitting the check; an absent observer is itself worth a sentence,
 not silence.
 
 Include the confirmation delivery (§7h) for every booking, every time. Give a
-row in the timing table and a line in the report: delivered, or the failure
-quoted with chat IDs redacted. A failed delivery is a finding even on a clean
-win. It goes in the push notification and in Recommendations, so a morning
+row in the timing table and a line in the report: delivered, not delivered,
+or unconfirmed, per §7h's table, with the line quoted and chat IDs redacted.
+A failed or unconfirmed delivery is a finding even on a clean win. It goes in the push notification and in Recommendations, so a morning
 with one is never "no issues found". For example: `Won both - 12:00 and 12:08
 booked. Report PR #266 merged. Member B's confirmation did not send (Telegram
 400, group upgraded) - needs a look.`
