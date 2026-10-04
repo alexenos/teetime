@@ -53,6 +53,7 @@ from app.providers.walden_http_booker import (
     backfill_reserve_telemetry,
     container_message_text,
 )
+from app.providers.walden_http_login import LOGIN_REJECTED_MESSAGE, LoginOutcome, classify_response
 from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
@@ -792,6 +793,9 @@ class WaldenGolfProvider(ReservationProvider):
         fail at login time.
         """
         self._member_number = member_number
+        # Set by _perform_login: whether the last failed login was Walden
+        # rejecting the credentials, as opposed to a timeout or a changed page.
+        self._login_rejected = False
         self._password = password
         self.wait_strategy = WaitStrategy()
         # The tee sheet the slot finder judged from, kept from staging so a
@@ -871,6 +875,28 @@ class WaldenGolfProvider(ReservationProvider):
         finally:
             driver.quit()
 
+    def _walden_rejected_login(self, driver: webdriver.Chrome) -> bool:
+        """Whether the page after a failed login is Walden saying the login is wrong (#244).
+
+        Read with the HTTP login check's own classifier (#241), so both paths
+        agree: only a signed-out login form carrying Walden's error alert is a
+        rejection. A timeout, a changed page, or a dead driver is not - telling
+        a member their correct password is wrong, and refusing their bookings
+        until they re-enter it, is the worse mistake.
+        """
+        try:
+            page = driver.page_source
+            url = driver.current_url
+        except WebDriverException:
+            return False
+        return classify_response(200, page, url).outcome is LoginOutcome.REJECTED
+
+    def login_failure_message(self) -> str:
+        """What a booking reports after this provider's login failed."""
+        if self._login_rejected:
+            return LOGIN_REJECTED_MESSAGE
+        return "Failed to log in to Walden Golf"
+
     def _perform_login(self, driver: webdriver.Chrome) -> bool:
         """
         Perform the login flow on an existing driver.
@@ -881,6 +907,7 @@ class WaldenGolfProvider(ReservationProvider):
         Returns:
             True if login was successful, False otherwise.
         """
+        self._login_rejected = False
         try:
             logger.info("Navigating to login page...")
             driver.get(self.LOGIN_URL)
@@ -914,7 +941,11 @@ class WaldenGolfProvider(ReservationProvider):
                 logger.info(f"Login successful. Current URL: {driver.current_url}")
                 return True
 
-            logger.error(f"Login failed. Still on URL: {driver.current_url}")
+            self._login_rejected = self._walden_rejected_login(driver)
+            logger.error(
+                f"Login failed ({'Walden rejected the login' if self._login_rejected else 'not a rejection'}). "
+                f"Still on URL: {driver.current_url}"
+            )
             return False
 
         except TimeoutException as e:
@@ -1007,7 +1038,7 @@ class WaldenGolfProvider(ReservationProvider):
                 logger.error("BOOKING_DEBUG: Login failed")
                 return BookingResult(
                     success=False,
-                    error_message="Failed to log in to Walden Golf",
+                    error_message=self.login_failure_message(),
                 )
             logger.debug("BOOKING_DEBUG: Login successful")
 
@@ -1179,7 +1210,7 @@ class WaldenGolfProvider(ReservationProvider):
                             booking_id=req.booking_id,
                             result=BookingResult(
                                 success=False,
-                                error_message="Failed to log in to Walden Golf",
+                                error_message=self.login_failure_message(),
                             ),
                         )
                     )

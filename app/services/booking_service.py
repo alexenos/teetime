@@ -26,9 +26,10 @@ from app.models.schemas import (
     UserSession,
 )
 from app.providers.base import BatchBookingRequest, BookingResult, ReservationProvider
+from app.providers.walden_http_login import LOGIN_REJECTED_MESSAGE
 from app.providers.walden_sheet_grid import SheetGrid
 from app.services import slot_agreement
-from app.services.credential_service import credential_service
+from app.services.credential_service import WaldenCredentialInvalidError, credential_service
 from app.services.database_service import database_service
 from app.services.gemini_service import gemini_service
 from app.services.help_text import help_message
@@ -1780,11 +1781,20 @@ class BookingService:
         # the attempt runs - which for a scheduled booking is 6:30 a week later,
         # long after the user was told it was booked. Asked and answered here
         # instead, while there is still someone reading the reply.
-        if await credential_service.get_dedicated_credentials(phone_number) is None:
+        stored_login = await credential_service.get_dedicated_credentials(phone_number)
+        if stored_login is None:
             raise ValueError(
                 "Your account isn't set up for booking yet - I don't have a Walden "
                 "login on file for you, and I won't book under anyone else's. Send /start "
                 "to me in a private chat to connect yours, then try again."
+            )
+        # A login Walden has already rejected would fail at 6:30 a week from now,
+        # so say so while someone is reading (#244).
+        if stored_login.invalid_since is not None:
+            raise ValueError(
+                f"Walden rejected the saved login for this account on "
+                f"{stored_login.invalid_since:%B %d}, so I can't book with it. Send /login to "
+                "me in a private chat to update it, then try again."
             )
 
         # Check 48-hour restriction for multi-player bookings
@@ -2318,6 +2328,7 @@ class BookingService:
         # reported to the user like any other booking failure, instead of
         # escaping to _execute_booking_in_background's bare log-and-swallow.
         provider: ReservationProvider | None = None
+        attempt_started = datetime.now(UTC).replace(tzinfo=None)
         try:
             provider = await self._provider_for(booking.phone_number)
             if not provider:
@@ -2354,6 +2365,7 @@ class BookingService:
                 booking.status = BookingStatus.FAILED
                 booking.error_message = result.error_message
                 await database_service.update_booking(booking)
+                await self._record_login_rejection(booking.phone_number, [result], attempt_started)
 
                 await self._try_notify_booking_result(booking, result)
                 return False
@@ -2370,6 +2382,36 @@ class BookingService:
         finally:
             if provider is not None:
                 await self._release_provider(provider)
+
+    async def _record_login_rejection(
+        self, phone_number: str, results: list[BookingResult], attempt_started: datetime
+    ) -> None:
+        """Mark the requester's login invalid if Walden rejected it (#244).
+
+        Recognised by the provider's rejection message, which is only used when
+        the page after the login was Walden's login form with its error alert.
+        The member is told by the booking's own failure notification, whose
+        reason is that message. Marking stops later races and new bookings
+        trying the same login again, until the member saves a new one.
+
+        Never raises: the booking result is already persisted, and failing to
+        mark only means the next attempt finds out the same way.
+        """
+        if not any(r.error_message == LOGIN_REJECTED_MESSAGE for r in results):
+            return
+        try:
+            marked = await credential_service.mark_invalid(
+                phone_number, unchanged_since=attempt_started
+            )
+        except Exception:
+            logger.exception("Could not mark a rejected Walden login invalid")
+            return
+        logger.warning(
+            "LOGIN_REJECTED: Walden rejected the stored login for requester %s; marked "
+            "invalid until they save a new one (%s)",
+            phone_number,
+            "marked" if marked else "not marked: no stored login, or replaced mid-attempt",
+        )
 
     async def _notify_booking_result(
         self, booking: TeeTimeBooking, result: BookingResult
@@ -2513,6 +2555,9 @@ class BookingService:
             # One requester's missing or bad credential must not sink every
             # other requester's bookings in the same batch, so it's caught
             # here, per group, rather than left to escape the loop.
+            # When this group's attempt began, before its login is read, so a
+            # rejection is only pinned on that login (see mark_invalid).
+            attempt_started = datetime.now(UTC).replace(tzinfo=None)
             try:
                 # A provider is configured at this point (checked above), so
                 # _provider_for either returns one or raises for a requester
@@ -2526,7 +2571,13 @@ class BookingService:
                 for booking in group_bookings:
                     booking_id = booking.id or ""
                     booking.status = BookingStatus.FAILED
-                    booking.error_message = f"Could not resolve booking credentials: {e}"
+                    # A login marked rejected (#244) carries a message meant
+                    # for the member; anything else is a fault to diagnose.
+                    booking.error_message = (
+                        str(e)
+                        if isinstance(e, WaldenCredentialInvalidError)
+                        else f"Could not resolve booking credentials: {e}"
+                    )
                     await database_service.update_booking(booking)
                     all_results.append(
                         (
@@ -2560,6 +2611,10 @@ class BookingService:
                     )
             finally:
                 await self._release_provider(provider)
+
+            await self._record_login_rejection(
+                phone_number, [item.result for item in batch_result.results], attempt_started
+            )
 
             booking_map = {b.id: b for b in group_bookings if b.id is not None}
             for item_result in batch_result.results:

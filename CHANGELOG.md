@@ -24,6 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `scripts/add_walden_credential.py set-pseudonym` maps the members labelled
     before this existed.
 
+- **A stored login Walden rejects is caught once, not every morning (#244).**
+  Members manage their own logins now, so a changed Walden password leaves a
+  stale one behind. Until now the 06:28 race found out, and every later race
+  found out again, with a fresh failed login against the member's real account
+  each time.
+  - When the race's Chrome login fails, the page is classified with the HTTP
+    check's rule (#241). Only Walden's own rejection (the login form again,
+    with its error alert) counts.
+  - On a rejection, the member is told "Walden rejected your saved login …
+    Send /login", the row is marked `invalid_since`, and `LOGIN_REJECTED` is
+    logged.
+  - While a login is marked, races for that member are not attempted, new
+    bookings are refused with the same advice, and `/status` says so.
+  - Saving a new login through `/login` clears the mark.
+  - A timeout or a changed page is still "Failed to log in", unmarked, as
+    before.
+
 - **Members connect their own Walden login; the admin never sees it (#240).**
   Before this, the admin entered every login with
   `scripts/add_walden_credential.py`. Now `/start` in a private chat with the
