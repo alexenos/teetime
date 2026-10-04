@@ -146,6 +146,7 @@ locals {
     WALDEN_ADHOC_UNTIMED_RETRY           = tostring(var.walden_adhoc_untimed_retry)
     WALDEN_FAST_BOOKING_IMMEDIATE        = tostring(var.walden_fast_booking_immediate)
     RACER_MAX_REQUESTERS                 = tostring(var.racer_max_requesters)
+    MEMBER_PSEUDONYMS_RESERVED           = var.member_pseudonyms_reserved
   }
 
   # Tells the app which KMS key encrypts member logins (issue #242, terraform/

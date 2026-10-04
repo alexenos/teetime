@@ -75,8 +75,10 @@ handles anywhere in the repository.
 Refer to people by label: `Member A` for the people the bot books for, and
 `Rival 1` for anyone else. The labels map to people in Secret Manager:
 `MEMBER_PSEUDONYM_REGISTRY` in full, readable by project owners only, and
-`MEMBER_PSEUDONYM_LABELS`, the subset a session needs. A race report is checked
-before it commits; see `.claude/skills/race-report/` §8a.
+`MEMBER_PSEUDONYM_LABELS`, the subset a session needs. Member labels are also
+assigned automatically when a member connects a login (#256, `member_pseudonyms`
+table), and logs show members as `<Member C>` rather than by Telegram ID. A race
+report is checked before it commits; see `.claude/skills/race-report/` §8a.
 
 ## Race timing
 

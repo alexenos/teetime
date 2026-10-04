@@ -25,6 +25,22 @@ from app.racer import run as racer_run
 from app.services.database_service import DatabaseService
 from app.utils.timezone import CTDateTime
 
+
+@pytest.fixture(autouse=True)
+def _no_pseudonym_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the startup pseudonym load (#256) off the app's real database.
+
+    The real engine's aiosqlite connection runs on its own thread, and left
+    open it keeps the test process alive after every test has passed - the
+    whole suite then never exits.
+    """
+
+    async def _none() -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr("app.racer.run.refresh_log_filter", _none)
+
+
 DUE_BEFORE = datetime(2026, 9, 13, 6, 30)
 
 

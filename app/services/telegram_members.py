@@ -229,7 +229,8 @@ async def _welcome(chat_id: str, user: dict[str, object]) -> None:
     begins (#240).
     """
     user_id = str(user["id"])
-    logger.info(f"Telegram user {user_id} joined the members group")
+    # No ID: a new member has no pseudonym yet for the log filter to apply.
+    logger.info("A new member joined the members group")
 
     bot_username = await TelegramProvider().get_bot_username()
     if bot_username:

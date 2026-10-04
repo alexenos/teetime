@@ -60,6 +60,10 @@ SHUTDOWN_BOOKING_TIMEOUT_SECONDS = 8
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
+    # Members' Telegram IDs become their labels in every log line (#256).
+    from app.services.pseudonyms import refresh_log_filter
+
+    await refresh_log_filter()
 
     # Telegram is mounted whenever a token is configured, independently of
     # MESSAGING_CHANNEL, so it can be exercised end to end while Discord is

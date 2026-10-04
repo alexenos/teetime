@@ -30,12 +30,14 @@ parser ever sees them - a setup step must not depend on how a model reads it.
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 
 from app.config import settings
 from app.providers.walden_http_login import LoginOutcome, check_login
+from app.services import pseudonyms
 from app.services.credential_service import credential_service
 from app.services.sms_service import sms_service
 from app.services.telegram_members import (
@@ -260,7 +262,9 @@ async def _check_and_save(
     _attempts[user_id].append(now)
 
     check = await check_login(login, password)
-    logger.info(f"Setup form login check for Telegram user {user_id}: {check.outcome.value}")
+    # No requester ID in these lines: a first-time member has no pseudonym yet,
+    # so the log filter (#256) could not hide it.
+    logger.info(f"Setup form login check: {check.outcome.value}")
 
     if check.outcome is LoginOutcome.REJECTED:
         _rejected[user_id].append(now)
@@ -279,12 +283,15 @@ async def _check_and_save(
         # They left, or were removed, while Walden was checking. Possibly
         # handled by the other revision during a deploy, which deleted their
         # login; saving now would bring it back.
-        logger.info(f"Telegram user {user_id} left the group during a login check; not saved")
+        logger.info("A member left the group during a login check; not saved")
         return SubmitResult(
             SubmitStatus.FORBIDDEN,
             "You're no longer in the tee time group, so your login wasn't saved.",
         )
 
+    # Someone who already had a login stored predates automatic pseudonyms and
+    # may already be labelled by hand in the registry (#256).
+    had_login = await credential_service.get_owner(user_id) is not None
     first_name = user.get("first_name")
     username = user.get("username")
     await credential_service.set_credentials(
@@ -295,27 +302,97 @@ async def _check_and_save(
         telegram_username=username if isinstance(username, str) and username else None,
         verified_at=_utcnow(),
     )
-    logger.info(f"Saved a verified Walden login for Telegram user {user_id}")
+    logger.info("Saved a verified Walden login")
 
     # The login is committed. Nothing after this may turn the answer into a
     # failure: the endpoint would tell the member "nothing was saved" while
     # their login sits in the database, and they would not know to /forget it.
-    try:
-        await sms_service.send_sms(
+    # Each step has its own guard, so one failing never skips the others - the
+    # pseudonym above all, which keeps this member's ID out of later logs.
+    await _after_save(
+        "confirmation message",
+        sms_service.send_sms(
             user_id,
             "You're connected - Walden accepted your login. To book, just tell me what you want, "
             'e.g. "Book Saturday 8am for 4 players". Reservations open 7 days ahead at 6:30am CT.',
             channel="telegram",
-        )
-        await _warn_if_at_racer_ceiling()
-    except Exception:
-        logger.exception("A step after saving a login failed; the login is saved")
+        ),
+    )
+    await _after_save("pseudonym", _assign_pseudonym(user_id, user, had_login))
+    await _after_save("capacity warning", _warn_if_at_racer_ceiling())
     return SubmitResult(SubmitStatus.SAVED, "Connected. Walden accepted your login.")
+
+
+async def _after_save(step: str, work: Awaitable[object]) -> None:
+    """Run one post-save step, logging rather than raising if it fails."""
+    try:
+        await work
+    except Exception:
+        logger.exception(f"Post-save step failed ({step}); the login is saved")
 
 
 def _utcnow() -> datetime:
     """Naive UTC, matching how the database stores every other timestamp."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+async def _assign_pseudonym(user_id: str, user: dict[str, object], had_login: bool) -> None:
+    """Give a newly connected member their label for logs and reports (#256).
+
+    Only a member with no login stored before this save is labelled
+    automatically. Anyone who already had one predates automatic pseudonyms
+    and may already be "Member A" in the hand-kept registry: an automatic label
+    would be a second one, and labels are never changed. The admin is asked to
+    map them with set-pseudonym instead.
+
+    The admin is told either way, because the registry still needs the
+    member's name forms and handle - which the admin sees in the group - for
+    the race-report name check. Never fails the save: the login is already
+    stored, and a member without a label is only logged by ID, as before.
+    """
+    admin = settings.telegram_admin_id()
+    if had_login:
+        if admin and await pseudonyms.label_for(user_id) is None:
+            await sms_service.send_sms(
+                admin,
+                f"{_who(user)} re-saved their Walden login but has no pseudonym yet, so none "
+                "was assigned automatically - they may already have one in the registry. Map "
+                "it with: scripts/add_walden_credential.py set-pseudonym <their requester id> "
+                '"Member X"',
+                channel="telegram",
+            )
+        return
+    try:
+        label, new = await pseudonyms.assign(user_id)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning(f"Could not assign a pseudonym: {type(exc).__name__}")
+        return
+    if not new or not admin:
+        return
+    await sms_service.send_sms(
+        admin,
+        f"{_who(user)} connected a Walden login and is {label} in logs and race reports. Add "
+        f"them to MEMBER_PSEUDONYM_REGISTRY and MEMBER_PSEUDONYM_LABELS as {label}, with "
+        "their name forms and handle, so the race-report name check knows them.",
+        channel="telegram",
+    )
+
+
+def _who(user: dict[str, object]) -> str:
+    """How to name this member to the admin: first name and @handle."""
+    first_name = user.get("first_name")
+    username = user.get("username")
+    return (
+        " ".join(
+            part
+            for part in (
+                first_name if isinstance(first_name, str) else "",
+                f"(@{username})" if isinstance(username, str) and username else "",
+            )
+            if part
+        )
+        or "A member"
+    )
 
 
 async def _warn_if_at_racer_ceiling() -> None:

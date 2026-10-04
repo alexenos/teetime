@@ -38,6 +38,7 @@ from app.models.schemas import TeeTimeBooking
 from app.providers.setup import install_reservation_provider
 from app.services.booking_service import booking_service
 from app.services.database_service import database_service
+from app.services.pseudonyms import refresh_log_filter
 from app.utils.timezone import CTDateTime
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,8 @@ async def race() -> bool:
     and a red task for every lost slot would bury the runs that really broke.
     """
     started = _clock()
+    # Before anything logs a requester: their Telegram IDs become labels (#256).
+    await refresh_log_filter()
     now_ct = CTDateTime.now()
     window_ct = _window_instant(now_ct)
     label = _task_label()

@@ -179,6 +179,20 @@ class Settings(BaseSettings):
     # app/services/credential_crypto.py.
     credential_kms_key: str = ""
 
+    # Member labels already assigned by hand in MEMBER_PSEUDONYM_REGISTRY
+    # (issue #256), comma-separated: "Member A,Member B". The service gives
+    # each new member the next label that is neither here nor already in the
+    # member_pseudonyms table, so a self-onboarded member never collides with
+    # someone labelled by hand. Labels are not identifying - they are what the
+    # public race reports use - so this needs no secret.
+    member_pseudonyms_reserved: str = ""
+
+    def reserved_member_pseudonyms(self) -> frozenset[str]:
+        """The hand-assigned member labels, as a set."""
+        return frozenset(
+            part.strip() for part in self.member_pseudonyms_reserved.split(",") if part.strip()
+        )
+
     # Run the booking chain as direct PrimeFaces HTTP calls instead of browser
     # clicks. Login, navigation and slot discovery still run in Chrome; only the
     # chain itself moves to HTTP. A failure before the reservation is submitted
@@ -732,6 +746,24 @@ class Settings(BaseSettings):
                 "operations/telegram-setup.md for how to read it from the logs. Leave it "
                 "unset to turn group access off."
             )
+        return v
+
+    @field_validator("member_pseudonyms_reserved")
+    @classmethod
+    def _validate_member_pseudonyms_reserved(cls, v: str) -> str:
+        """Reject a reserved label that is not exactly "Member <capitals>".
+
+        The assigner compares labels exactly, so "Member a" would be reserved
+        while "Member A" - the label actually in use in public reports - could
+        still be handed to someone new.
+        """
+        for part in v.split(","):
+            part = part.strip()
+            if part and not re.fullmatch(r"Member [A-Z]+", part):
+                raise ValueError(
+                    "MEMBER_PSEUDONYMS_RESERVED must be comma-separated labels like "
+                    f'"Member A,Member B"; got {part!r}.'
+                )
         return v
 
     @field_validator("telegram_admin_user_id")

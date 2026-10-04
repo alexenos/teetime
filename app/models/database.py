@@ -208,6 +208,34 @@ class WaldenCredentialRecord(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class MemberPseudonymRecord(Base):
+    """
+    The label a member is called by in logs and race reports (issue #256).
+
+    Race reports are public and name people by label ("Member A"), never by
+    name or Telegram ID. Members who onboard themselves (#240) are given the
+    next free label when they first save a login, and app.log_safety rewrites
+    their Telegram ID to it in every log line.
+
+    Kept apart from walden_credentials on purpose: offboarding deletes the
+    credential row, but a label is never reused - an old report must not come
+    to mean someone else - and a member who rejoins keeps theirs.
+
+    Columns:
+        requester_id: The member's identity, as on their bookings (their
+            Telegram user ID). Unique.
+        label: "Member A", "Member B", ... Unique.
+        assigned_at: When the label was assigned.
+    """
+
+    __tablename__ = "member_pseudonyms"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    requester_id = Column(String(20), unique=True, nullable=False, index=True)
+    label = Column(String(32), unique=True, nullable=False)
+    assigned_at = Column(DateTime, default=datetime.utcnow)
+
+
 class TeeSheetGridRecord(Base):
     """
     Database model for one reading of a date's Northgate slot grid (issue #216).

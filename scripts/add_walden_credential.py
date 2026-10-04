@@ -10,6 +10,11 @@ What remains needs no key and shows no secret:
 
     poetry run python scripts/add_walden_credential.py list
     poetry run python scripts/add_walden_credential.py remove <requester id>
+    poetry run python scripts/add_walden_credential.py set-pseudonym <requester id> "Member A"
+
+`set-pseudonym` records which existing member a label from the hand-kept
+registry belongs to (#256). New members get theirs automatically when they
+connect a login, and a label is never changed once assigned.
 
 `list` shows which encryption each row uses, and whether it keeps a Fernet
 fallback copy (written during the move to KMS; `clear-fallbacks` deletes them
@@ -29,6 +34,7 @@ import sys
 from sqlalchemy import select
 
 from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, init_db
+from app.services import pseudonyms
 from app.services.credential_crypto import scheme_of
 from app.services.credential_service import credential_service
 
@@ -48,6 +54,8 @@ async def _list() -> None:
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(WaldenCredentialRecord))
         records = result.scalars().all()
+
+    labels = await pseudonyms.load_all()
 
     if not records:
         print("No per-friend Walden credentials stored.")
@@ -73,8 +81,10 @@ async def _list() -> None:
         }
         encryption = schemes.pop() if len(schemes) == 1 else "mixed"
         fallback = "yes" if record.password_fallback else "no"
+        pseudonym = labels.get(str(record.phone_number), "none - map with set-pseudonym")
         print(
-            f"{record.phone_number}{suffix} - encryption={encryption}, fallback={fallback}, "
+            f"{record.phone_number}{suffix} - pseudonym={pseudonym}, "
+            f"encryption={encryption}, fallback={fallback}, "
             f"added {record.created_at}, updated {record.updated_at}"
         )
 
@@ -101,6 +111,15 @@ async def _list() -> None:
         )
 
 
+async def _set_pseudonym(requester_id: str, label: str) -> None:
+    """Record which existing member a hand-assigned registry label belongs to (#256)."""
+    try:
+        await pseudonyms.set_label(requester_id, label)
+    except pseudonyms.PseudonymError as exc:
+        raise SystemExit(str(exc)) from None
+    print(f"{requester_id} is {label} in logs from the next deploy or job run on.")
+
+
 async def _main() -> None:
     """Parse the subcommand and dispatch to remove/list."""
     parser = argparse.ArgumentParser(
@@ -113,6 +132,15 @@ async def _main() -> None:
         "clear-fallbacks",
         help="Delete the Fernet fallback copies of KMS-encrypted logins (when retiring the key)",
     )
+    pseudonym_parser = subparsers.add_parser(
+        "set-pseudonym",
+        help='Map an existing member to their registry label, e.g. "Member A" (#256)',
+    )
+    pseudonym_parser.add_argument("phone_number", help="The member's requester ID")
+    pseudonym_parser.add_argument(
+        "label", help='Their label in MEMBER_PSEUDONYM_REGISTRY, e.g. "Member A"'
+    )
+
     remove_parser = subparsers.add_parser("remove", help="Delete a stored credential")
     remove_parser.add_argument("phone_number")
 
@@ -138,6 +166,8 @@ async def _main() -> None:
     elif args.command == "clear-fallbacks":
         cleared = await credential_service.clear_fallbacks()
         print(f"Deleted the Fernet fallback copies on {cleared} row(s).")
+    elif args.command == "set-pseudonym":
+        await _set_pseudonym(args.phone_number, args.label)
 
 
 if __name__ == "__main__":
