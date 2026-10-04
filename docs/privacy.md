@@ -50,13 +50,7 @@ admin ask the bot to book on your behalf.
 - **It is checked with Walden before it is saved,** and it is never shown back
   to you or anyone else.
 
-**What this cannot promise.** The booking service has to decrypt your login to
-use it, and the person who operates the service controls the Google Cloud
-project it runs in. That person could, deliberately, read a login, and doing so
-would leave a record in the audit log. During a short transition period while
-the service moves to the KMS key, each login also keeps a backup copy encrypted
-with an older key held by the operator, which is not audit-logged. That copy is
-deleted when the transition ends. The code that handles your login is public:
+The code that handles your login is public:
 [github.com/alexenos/teetime](https://github.com/alexenos/teetime).
 
 ## Who your information goes to
