@@ -28,22 +28,17 @@ locals {
 
   # Exactly what the observer needs to log in and nothing else. The two Walden
   # secrets already carry versions (the racer reads them today), so referencing
-  # them cannot fail a deploy. CREDENTIAL_ENCRYPTION_KEY is added only when
-  # credential_store_enabled, for the same reason as on the service: Terraform
-  # creates that secret empty and a revision referencing a version-less secret
-  # fails to deploy.
+  # them cannot fail a deploy. Member logins themselves are decrypted with the
+  # KMS key, whose name reaches the observer as CREDENTIAL_KMS_KEY (local.kms_env).
   #
   # The observer resolves credentials through the same credential_service the
   # racer uses, so if the watched member ever gets a dedicated login the
   # observer follows it - which is the point, since the sheet is rendered for
   # whoever is looking at it.
-  observer_secrets = concat(
-    [
-      "WALDEN_MEMBER_NUMBER",
-      "WALDEN_PASSWORD",
-    ],
-    var.credential_store_enabled ? local.credential_secrets : [],
-  )
+  observer_secrets = [
+    "WALDEN_MEMBER_NUMBER",
+    "WALDEN_PASSWORD",
+  ]
 }
 
 resource "google_service_account" "observer" {

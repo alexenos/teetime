@@ -106,12 +106,23 @@ Two consequences:
    poetry run python scripts/add_walden_credential.py clear-fallbacks
    ```
 
-   Then a follow-up change removes
-   `CREDENTIAL_ENCRYPTION_KEY` from `terraform/main.tf`, which deletes the
-   secret and its versions. It must also loosen the precondition that ties
-   `admin_proxy_enabled` to `credential_store_enabled`. Delete any local copy
-   in `.env` as well. Until then, the old key could still decrypt those
-   members' **old** ciphertexts, if anyone kept a database backup.
+   Then merge the retirement PR. It removes
+   `CREDENTIAL_ENCRYPTION_KEY` from `terraform/main.tf`, which deletes the secret
+   and its versions, drops `credential_store_enabled`, and ties
+   `admin_proxy_enabled` to `credential_kms_enabled` instead. **Delete any local
+   copy of the key in `.env` as well**: until it is gone everywhere, the old key
+   could still decrypt old ciphertexts from a database backup.
+
+## After the retirement
+
+- **Production reads member logins only through KMS.** The Fernet code path
+  remains for local development, where no KMS key is configured. In
+  production it has no key, so it can neither write a copy nor read one.
+- **No fallback copy is written.** If KMS fails at race time, that member's
+  booking fails loudly, the same as any other credential problem, and the
+  member is told.
+- **`list`** still reports each row's encryption. A `fernet` row now means a
+  login nothing in production can read: ask that member to `/login` again.
 
 ## Mechanics
 

@@ -164,22 +164,14 @@ echo -n "your_webhook_secret"| gcloud secrets versions add TELEGRAM_WEBHOOK_SECR
 # operations/telegram-setup.md for the group's setup and how to read its ID.
 echo -n "your_group_chat_id" | gcloud secrets versions add TELEGRAM_MEMBERS_CHAT_ID --data-file=-
 
-# Per-friend Walden credential store (credential_store_enabled = true, issue #179).
-# LEGACY: new logins are encrypted with the Cloud KMS key in terraform/kms.tf once
-# credential_kms_enabled = true (issue #242), and nobody holds that key. This
-# Fernet key still decrypts logins written before then, AND the temporary Fernet
-# fallback copy kept beside each KMS-encrypted login while this key is mounted.
-# Both stay readable with it until `clear-fallbacks` runs and the key is retired
-# - see operations/credential-encryption.md. A fresh install still needs a
-# version here until that retirement lands. Generate with:
-#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-echo -n "your_generated_fernet_key" | gcloud secrets versions add CREDENTIAL_ENCRYPTION_KEY --data-file=-
+# Member Walden logins need no secret: they are encrypted with the Cloud KMS
+# key terraform creates (terraform/kms.tf, credential_kms_enabled, issue #242),
+# which nobody holds. See operations/credential-encryption.md.
 
 # Admin proxy booking (admin_proxy_enabled = true, issue #185). Lets this one
 # Telegram ID book on a friend's behalf ("for @alex book 9/12 at 8a"). The ID
-# must ALSO be in TELEGRAM_ALLOWED_USER_IDS above. Requires the credential
-# store above (credential_store_enabled = true, with a versioned
-# CREDENTIAL_ENCRYPTION_KEY) - proxy booking always books under a friend's
+# must ALSO be in TELEGRAM_ALLOWED_USER_IDS above. Requires
+# credential_kms_enabled = true - proxy booking always books under a friend's
 # stored login. See operations/telegram-setup.md.
 echo -n "your_user_id" | gcloud secrets versions add TELEGRAM_ADMIN_USER_ID --data-file=-
 ```
