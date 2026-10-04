@@ -17,9 +17,7 @@ exception is defined in `operations/routines/race-report.md` and nowhere else.
 A second exception was **granted on 2026-09-29**: the scoreboard Routine may
 merge `docs/scoreboard.json` and `docs/scoreboard.html`, on the same terms — those
 two paths, a green `Tests` check, nothing else. It is defined in
-`operations/routines/scoreboard.md`. That Routine is not yet deployed. Its
-prerequisite is met - the race report has written ledger rows since 2026-10-01 -
-and what remains is creating its trigger.
+`operations/routines/scoreboard.md`. That Routine is deployed as of 2026-10-04.
 
 A commit touching only `operations/`, `docs/`, `.claude/` or `CLAUDE.md` does
 not redeploy: the Cloud Build trigger sets
@@ -116,8 +114,11 @@ Measurement, and the Routines that run on a schedule: `operations/`.
   measure. The race report writes its rows to GCS from 2026-10-01.
 - `operations/race-reports/` — one report per race morning
 
-One Routine is deployed: the race report, daily at `40 11 * * *` UTC. Two are
-specified and not deployed — the scoreboard and the cost Routine. `ship-pr` and
+Two Routines are deployed: the race report, daily at `40 11 * * *` UTC, and the
+scoreboard, daily at `30 12 * * *` UTC. The cost Routine is specified and not
+deployed. Both crons move an hour on 2026-11-01. A prompt pasted into the
+routines UI is read as markdown and loses paired `*`; compare the live text
+after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
 the PR check-ins are not Routines; they are maintainer-invoked and push only to
 their own open PR.
 
