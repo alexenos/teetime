@@ -81,11 +81,25 @@ class MemberPseudonyms(logging.Filter):
         self._labels: dict[str, str] = {}
 
     def set(self, mapping: dict[str, str]) -> None:
+        """Merge these labels into the ones already known. Never removes one.
+
+        Labels are never changed or reused once assigned, so the mapping only
+        grows - which makes merging safe, and replacing unsafe: two refreshes
+        overlapping could otherwise let an older database snapshot overwrite a
+        newer one and drop a member, whose ID would then reach the logs.
+        """
         # Only plausible Telegram IDs - long digit runs - so no short number in
         # a log line (a count, a port, a millisecond figure) is ever rewritten.
-        ids = sorted((i for i in mapping if i.isdigit() and len(i) >= 6), key=len, reverse=True)
-        self._labels = {i: mapping[i] for i in ids}
+        added = {i: label for i, label in mapping.items() if i.isdigit() and len(i) >= 6}
+        merged = {**self._labels, **added}
+        ids = sorted(merged, key=len, reverse=True)
+        self._labels = {i: merged[i] for i in ids}
         self._pattern = re.compile(r"(?<!\d)(" + "|".join(ids) + r")(?!\d)") if ids else None
+
+    def clear(self) -> None:
+        """Forget every label. For tests."""
+        self._labels = {}
+        self._pattern = None
 
     def filter(self, record: logging.LogRecord) -> bool:
         if self._pattern is None:
@@ -102,8 +116,13 @@ _MEMBER_PSEUDONYMS = MemberPseudonyms()
 
 
 def set_member_pseudonyms(mapping: dict[str, str]) -> None:
-    """Tell the log filter every member's label, keyed by Telegram ID."""
+    """Add members' labels, keyed by Telegram ID, to the log filter. Merges."""
     _MEMBER_PSEUDONYMS.set(mapping)
+
+
+def clear_member_pseudonyms() -> None:
+    """Forget every label the log filter knows. For tests."""
+    _MEMBER_PSEUDONYMS.clear()
 
 
 def silence_wire_loggers() -> None:

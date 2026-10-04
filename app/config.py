@@ -748,6 +748,24 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("member_pseudonyms_reserved")
+    @classmethod
+    def _validate_member_pseudonyms_reserved(cls, v: str) -> str:
+        """Reject a reserved label that is not exactly "Member <capitals>".
+
+        The assigner compares labels exactly, so "Member a" would be reserved
+        while "Member A" - the label actually in use in public reports - could
+        still be handed to someone new.
+        """
+        for part in v.split(","):
+            part = part.strip()
+            if part and not re.fullmatch(r"Member [A-Z]+", part):
+                raise ValueError(
+                    "MEMBER_PSEUDONYMS_RESERVED must be comma-separated labels like "
+                    f'"Member A,Member B"; got {part!r}.'
+                )
+        return v
+
     @field_validator("telegram_admin_user_id")
     @classmethod
     def _validate_telegram_admin_user_id(cls, v: str) -> str:

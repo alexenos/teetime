@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import log_safety
 from app.config import settings
-from app.log_safety import MemberPseudonyms, set_member_pseudonyms
+from app.log_safety import MemberPseudonyms, clear_member_pseudonyms
 from app.models.database import Base
 from app.services import pseudonyms
 from app.services.pseudonyms import PseudonymError, assign, next_label, set_label
@@ -27,7 +27,7 @@ async def db(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     monkeypatch.setattr("app.services.pseudonyms.AsyncSessionLocal", session_local)
     monkeypatch.setattr(settings, "member_pseudonyms_reserved", "")
     yield
-    set_member_pseudonyms({})
+    clear_member_pseudonyms()
     await engine.dispose()
 
 
@@ -165,8 +165,8 @@ class TestSetupFormAssignsALabel:
         monkeypatch.setattr(settings, "member_pseudonyms_reserved", "Member A,Member B")
         user = {"id": int(MEMBER_ID), "first_name": "Sam", "username": "sam_golf"}
 
-        await member_setup._assign_pseudonym(MEMBER_ID, user)
-        await member_setup._assign_pseudonym(MEMBER_ID, user)  # re-entering a login
+        await member_setup._assign_pseudonym(MEMBER_ID, user, had_login=False)
+        await member_setup._assign_pseudonym(MEMBER_ID, user, had_login=True)  # re-entering
 
         assert len(sent) == 1
         to, message = sent[0]
@@ -196,6 +196,7 @@ class TestSetupFormAssignsALabel:
         monkeypatch.setattr(member_setup.sms_service, "send_sms", send_fails)
         monkeypatch.setattr(member_setup, "check_login", accepted)
         monkeypatch.setattr(member_setup.credential_service, "set_credentials", saved)
+        monkeypatch.setattr(member_setup.credential_service, "get_owner", saved)  # first-time
         monkeypatch.setattr(member_setup, "_warn_if_at_racer_ceiling", no_ceiling)
         monkeypatch.setattr(settings, "telegram_allowed_user_ids", MEMBER_ID)
         monkeypatch.setattr(settings, "telegram_members_chat_id", "")
@@ -222,6 +223,7 @@ class TestSetupFormAssignsALabel:
 
         monkeypatch.setattr(member_setup, "check_login", accepted)
         monkeypatch.setattr(member_setup.credential_service, "set_credentials", quiet)
+        monkeypatch.setattr(member_setup.credential_service, "get_owner", quiet)  # first-time
         monkeypatch.setattr(member_setup.sms_service, "send_sms", quiet)
         monkeypatch.setattr(member_setup, "_warn_if_at_racer_ceiling", quiet)
         monkeypatch.setattr(settings, "telegram_allowed_user_ids", MEMBER_ID)
@@ -236,3 +238,84 @@ class TestSetupFormAssignsALabel:
         app_lines = [r.getMessage() for r in caplog.records if r.name.startswith("app")]
         assert app_lines
         assert not any(MEMBER_ID in line for line in app_lines)
+
+    async def test_an_existing_member_is_not_labelled_automatically(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """They may already be "Member A" in the registry; a second label is permanent."""
+        from app.services import member_setup
+
+        sent: list[tuple[str, str]] = []
+
+        async def fake_send(to_number, message, **kwargs):  # type: ignore[no-untyped-def]
+            sent.append((to_number, message))
+            return "msg-1"
+
+        monkeypatch.setattr(member_setup.sms_service, "send_sms", fake_send)
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        user = {"id": int(MEMBER_ID), "first_name": "Sam"}
+
+        await member_setup._assign_pseudonym(MEMBER_ID, user, had_login=True)
+
+        assert await pseudonyms.label_for(MEMBER_ID) is None
+        assert len(sent) == 1 and "set-pseudonym" in sent[0][1]
+
+    async def test_an_existing_member_already_mapped_gets_no_message(
+        self, db: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.services import member_setup
+
+        sent: list[str] = []
+
+        async def fake_send(to_number, message, **kwargs):  # type: ignore[no-untyped-def]
+            sent.append(message)
+            return "msg-1"
+
+        monkeypatch.setattr(member_setup.sms_service, "send_sms", fake_send)
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        await set_label(MEMBER_ID, "Member A")
+
+        await member_setup._assign_pseudonym(MEMBER_ID, {"id": int(MEMBER_ID)}, had_login=True)
+
+        assert sent == []
+        assert await pseudonyms.label_for(MEMBER_ID) == "Member A"
+
+
+class TestReservedLabelSetting:
+    def test_well_formed_labels_accepted(self) -> None:
+        from app.config import Settings
+
+        assert Settings(
+            member_pseudonyms_reserved="Member A, Member B"
+        ).reserved_member_pseudonyms() == {
+            "Member A",
+            "Member B",
+        }
+
+    @pytest.mark.parametrize("value", ["Member a", "member A", "Rival 1", "Member A,Alex"])
+    def test_malformed_labels_rejected(self, value: str) -> None:
+        from pydantic import ValidationError
+
+        from app.config import Settings
+
+        with pytest.raises(ValidationError, match="MEMBER_PSEUDONYMS_RESERVED"):
+            Settings(member_pseudonyms_reserved=value)
+
+
+class TestFilterOnlyGrows:
+    def test_an_older_snapshot_cannot_drop_a_label(self) -> None:
+        """Overlapping refreshes: the stale one must not remove a newer member."""
+        filt = MemberPseudonyms()
+        filt.set({MEMBER_ID: "Member C"})
+        filt.set({})  # an older database snapshot, from before the insert
+        record = logging.LogRecord("t", logging.INFO, "", 0, "user %s", (MEMBER_ID,), None)
+        filt.filter(record)
+        assert record.getMessage() == "user <Member C>"
+
+    def test_later_mappings_merge_in(self) -> None:
+        filt = MemberPseudonyms()
+        filt.set({MEMBER_ID: "Member C"})
+        filt.set({OTHER_ID: "Member D"})
+        record = logging.LogRecord("t", logging.INFO, "", 0, f"{MEMBER_ID} {OTHER_ID}", None, None)
+        filt.filter(record)
+        assert record.getMessage() == "<Member C> <Member D>"

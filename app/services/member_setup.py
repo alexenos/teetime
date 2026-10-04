@@ -289,6 +289,9 @@ async def _check_and_save(
             "You're no longer in the tee time group, so your login wasn't saved.",
         )
 
+    # Someone who already had a login stored predates automatic pseudonyms and
+    # may already be labelled by hand in the registry (#256).
+    had_login = await credential_service.get_owner(user_id) is not None
     first_name = user.get("first_name")
     username = user.get("username")
     await credential_service.set_credentials(
@@ -315,7 +318,7 @@ async def _check_and_save(
             channel="telegram",
         ),
     )
-    await _after_save("pseudonym", _assign_pseudonym(user_id, user))
+    await _after_save("pseudonym", _assign_pseudonym(user_id, user, had_login))
     await _after_save("capacity warning", _warn_if_at_racer_ceiling())
     return SubmitResult(SubmitStatus.SAVED, "Connected. Walden accepted your login.")
 
@@ -333,25 +336,53 @@ def _utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-async def _assign_pseudonym(user_id: str, user: dict[str, object]) -> None:
+async def _assign_pseudonym(user_id: str, user: dict[str, object], had_login: bool) -> None:
     """Give a newly connected member their label for logs and reports (#256).
 
-    The admin is told, because the registry still needs the member's name
-    forms and handle - which the admin sees in the group - for the race-report
-    name check. Never fails the save: the login is already stored, and a member
-    without a label is only logged by ID, as before.
+    Only a member with no login stored before this save is labelled
+    automatically. Anyone who already had one predates automatic pseudonyms
+    and may already be "Member A" in the hand-kept registry: an automatic label
+    would be a second one, and labels are never changed. The admin is asked to
+    map them with set-pseudonym instead.
+
+    The admin is told either way, because the registry still needs the
+    member's name forms and handle - which the admin sees in the group - for
+    the race-report name check. Never fails the save: the login is already
+    stored, and a member without a label is only logged by ID, as before.
     """
+    admin = settings.telegram_admin_id()
+    if had_login:
+        if admin and await pseudonyms.label_for(user_id) is None:
+            await sms_service.send_sms(
+                admin,
+                f"{_who(user)} re-saved their Walden login but has no pseudonym yet, so none "
+                "was assigned automatically - they may already have one in the registry. Map "
+                "it with: scripts/add_walden_credential.py set-pseudonym <their requester id> "
+                '"Member X"',
+                channel="telegram",
+            )
+        return
     try:
         label, new = await pseudonyms.assign(user_id)
     except Exception as exc:  # noqa: BLE001 - see docstring
         logger.warning(f"Could not assign a pseudonym: {type(exc).__name__}")
         return
-    admin = settings.telegram_admin_id()
     if not new or not admin:
         return
+    await sms_service.send_sms(
+        admin,
+        f"{_who(user)} connected a Walden login and is {label} in logs and race reports. Add "
+        f"them to MEMBER_PSEUDONYM_REGISTRY and MEMBER_PSEUDONYM_LABELS as {label}, with "
+        "their name forms and handle, so the race-report name check knows them.",
+        channel="telegram",
+    )
+
+
+def _who(user: dict[str, object]) -> str:
+    """How to name this member to the admin: first name and @handle."""
     first_name = user.get("first_name")
     username = user.get("username")
-    who = (
+    return (
         " ".join(
             part
             for part in (
@@ -360,14 +391,7 @@ async def _assign_pseudonym(user_id: str, user: dict[str, object]) -> None:
             )
             if part
         )
-        or "A new member"
-    )
-    await sms_service.send_sms(
-        admin,
-        f"{who} connected a Walden login and is {label} in logs and race reports. Add "
-        f"them to MEMBER_PSEUDONYM_REGISTRY and MEMBER_PSEUDONYM_LABELS as {label}, with "
-        "their name forms and handle, so the race-report name check knows them.",
-        channel="telegram",
+        or "A member"
     )
 
 
