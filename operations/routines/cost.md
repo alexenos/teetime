@@ -20,24 +20,37 @@ Routine does; those issues record what has to exist first.
 
 ## What it is blocked on
 
-**Cloud Billing export to BigQuery is not enabled.** Verified: no service account
-in `terraform/` holds a billing role — the grants are storage, logging, run,
-cloudsql, secretmanager, artifactregistry, cloudscheduler and serviceusage — and
-there is no BigQuery dataset or billing configuration anywhere in the repository.
+**Cloud Billing export to BigQuery is not enabled.** Verified 2026-10-03: the
+project billing link is enabled, the BigQuery API was not enabled on the project,
+so no export dataset could exist.
 
-The export is configured on the **billing account**, not the project. Terraform
-here manages the project, so this repository cannot enable it. It needs someone
-holding `roles/billing.admin` on the billing account to turn on "Detailed usage
-cost" export, which creates a dataset named
-`gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>`.
+The export is configured on the **billing account**, not the project, and has no
+API or terraform resource. It needs someone holding `roles/billing.admin` on the
+billing account — the maintainer does — to turn it on once in the Console.
 
-Once that exists, this repository can grant the access:
+Everything else is in `terraform/cost.tf` (#227):
 
-- `roles/bigquery.jobUser` on the project, to run a query
-- `roles/bigquery.dataViewer` on the export dataset, to read it
+- the `bigquery` API
+- the dataset `billing_export` (US), with `prevent_destroy`. A first export to a
+  multi-region dataset backfills from the start of the previous month, up to five
+  days to complete; nothing older is recoverable, and a lost dataset is lost
+  history. A single-region dataset would get no backfill, which is why it is US
+- `roles/bigquery.jobUser` on the project for `teetime-artifact-reader`, to run
+  a query
+- `roles/bigquery.dataViewer` on `billing_export` only, to read it
 
-Both are ordinary terraform. `bq` is already installed in the session environment,
-so the query needs no new tooling.
+Once that has applied, the Console step is:
+
+> Billing → Billing export → BigQuery export → **Detailed usage cost** → Edit
+> settings → project `gen-lang-client-0822973627`, dataset `billing_export`
+
+"Detailed" rather than "Standard" because it carries per-resource attribution,
+which is what makes the Cloud SQL question (#41, #168) answerable from data. It
+creates one table, `gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>`.
+
+The query is `cost.sql`, beside this file. It filters on `project.id`, because the
+billing account may pay for other projects, and on `invoice.month`. It has not
+been run against real rows.
 
 ## What it cannot cover
 
@@ -67,12 +80,23 @@ this one is cosmetic rather than load-bearing — unlike the race report, where 
 CT lands before the race it reports on. Recorded so the set of crons needing the
 2026-11-01 review is complete, even where the answer is "leave it".
 
+## When to run it
+
+**Not verified:** Google documents that export rows can arrive with a delay, and
+`invoice.month` attributes late adjustments to the month they bill in. A run at
+08:00 CT on the 1st may read a month whose last day is incomplete. Check this
+against the first real month before choosing the trigger: run `cost.sql` for the
+same month on the 1st and again on the 5th, and compare. If they differ, move the
+trigger to the 5th.
+
 ## Deploying it
 
-1. Enable the billing export (outside this repository).
-2. Add the two IAM grants in `terraform/`.
-3. Create the Routine, record its trigger ID here, and change **Status**.
-4. Resolve #228 and record the scope decision here.
+1. Merge `terraform/cost.tf` (#227) and confirm the apply in the build log.
+2. Enable the billing export in the Console, as above (outside this repository).
+3. Once the initial backfill has finished (up to five days), run `cost.sql` by
+   hand for the previous month and check it against the Console's figure for it.
+4. Create the Routine, record its trigger ID here, and change **Status**.
+5. Resolve #228 and record the scope decision here.
 
 Until step 1 happens, cost is `null` on every scoreboard row and the page shows it
 as unavailable rather than as zero.

@@ -33,6 +33,9 @@ locals {
     "iam.googleapis.com",
     "storage.googleapis.com",
     "cloudkms.googleapis.com",
+    # The billing export's dataset (cost.tf). The Data Transfer API is needed
+    # only for the pricing export, which the cost Routine does not read.
+    "bigquery.googleapis.com",
   ]
   discord_secrets = [
     "DISCORD_BOT_TOKEN",
