@@ -25,6 +25,14 @@ would make it unreadable.
 
 <requester id> is whatever identity the member's bookings use - for Telegram,
 their numeric user ID.
+
+Against production, run through the Cloud SQL Auth Proxy, not the Cloud Run
+form of DATABASE_URL (`host=/cloudsql/...`), which is a Unix socket that exists
+only inside Cloud Run and fails on Windows (#270):
+
+    cloud-sql-proxy <instance> --port 5432
+
+then point DATABASE_URL at `127.0.0.1:5432`.
 """
 
 import argparse
@@ -33,7 +41,7 @@ import sys
 
 from sqlalchemy import select
 
-from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, init_db
+from app.models.database import AsyncSessionLocal, WaldenCredentialRecord, engine, init_db
 from app.services import pseudonyms
 from app.services.credential_crypto import scheme_of
 from app.services.credential_service import credential_service
@@ -157,17 +165,21 @@ async def _main() -> None:
             "replaced."
         )
 
-    await init_db()
-
-    if args.command == "remove":
-        await _remove(args.phone_number)
-    elif args.command == "list":
-        await _list()
-    elif args.command == "clear-fallbacks":
-        cleared = await credential_service.clear_fallbacks()
-        print(f"Deleted the Fernet fallback copies on {cleared} row(s).")
-    elif args.command == "set-pseudonym":
-        await _set_pseudonym(args.phone_number, args.label)
+    try:
+        await init_db()
+        if args.command == "remove":
+            await _remove(args.phone_number)
+        elif args.command == "list":
+            await _list()
+        elif args.command == "clear-fallbacks":
+            cleared = await credential_service.clear_fallbacks()
+            print(f"Deleted the Fernet fallback copies on {cleared} row(s).")
+        elif args.command == "set-pseudonym":
+            await _set_pseudonym(args.phone_number, args.label)
+    finally:
+        # aiosqlite keeps each connection on a non-daemon thread; left open, it
+        # holds the interpreter alive after the command has finished (#270).
+        await engine.dispose()
 
 
 if __name__ == "__main__":
