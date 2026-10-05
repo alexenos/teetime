@@ -12,6 +12,7 @@ Not in `docs/`, which is served publicly as GitHub Pages.
 | [`scoreboard.md`](scoreboard.md) | Three metrics and their sources |
 | [`routines/`](routines/) | One file per Routine: trigger, authorization, prompt |
 | [`ledger/`](ledger/) | One ledger per Routine: did it run, and what did it measure |
+| [`retention.md`](retention.md) | How long each store keeps data, and what enforces it |
 | [`race-reports/`](race-reports/) | One report per race morning |
 | `hypotheses/`, `*-setup.md`, `design-*.md` | Runbooks and design notes, moved here from the public site by #221 |
 
