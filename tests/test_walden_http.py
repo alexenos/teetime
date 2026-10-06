@@ -3383,6 +3383,7 @@ class SourceRecorder(ChainRecorder):
         self.gate_at_ms = gate_at_ms
         self.arrival_stall_s = arrival_stall_s
         self._arrivals = 0
+        self.recorded_order: list[int] = []
         self.by_source = by_source
         self.status_on = status_on or {}
         self.status_body = status_body
@@ -3398,13 +3399,15 @@ class SourceRecorder(ChainRecorder):
         """Answer by the requested source, or fail the request as configured."""
         params = dict(urllib.parse.parse_qsl(request.content.decode()))
         source = params.get("javax.faces.source", "")
+        ordinal = 0
         if self.arrival_stall_s:
             with self._lock:
                 self._arrivals += 1
-                stalled = self._arrivals == 3
-            if stalled:
+                ordinal = self._arrivals
+            if ordinal == 3:
                 time_module.sleep(self.arrival_stall_s)
         with self._lock:
+            self.recorded_order.append(ordinal)
             self.requests.append(params)
             self.sources.append(source)
             index = len(self.sources)
@@ -3994,6 +3997,10 @@ class TestVariableBurst:
         assert result.success, result.error
         (bracket,) = result.timing["gateBrackets"]
         assert bracket["slot"] == RESERVE_SLOT_TIME.strftime("%I:%M %p")
+        if arrival_stall_s:
+            # Without this the stalled case could pass having reordered nothing.
+            order = recorder.recorded_order
+            assert order.index(4) < order.index(3), order
         refused = [t for t in recorder.sent_at_ms[:4] if t < gate]
         assert bracket["refusedBefore"] == len(refused)
         if not arrival_stall_s:
