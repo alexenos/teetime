@@ -11,8 +11,8 @@ What is deliberately *not* here:
 
 * member_pseudonyms. A label is never reused - an old public race report must
   not come to mean someone else - so these rows outlive the member.
-* Live bookings. Only rows in a terminal status are ever deleted, so a booking
-  the racer may still claim or report on is never touched.
+* bookings. They are kept for good, to look for trends in how members book over
+  years. Nothing here deletes one, of any status or age.
 * A credential that is merely old. A login is deleted when the member forgets
   it or leaves (telegram_members), or here when Walden has rejected it and
   nobody has replaced it. An unused but working login is the member's to remove.
@@ -28,22 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.database import (
     AsyncSessionLocal,
-    BookingRecord,
     SessionRecord,
     TeeSheetGridRecord,
     WaldenCredentialRecord,
 )
-from app.models.schemas import BookingStatus, ConversationState
+from app.models.schemas import ConversationState
 
 logger = logging.getLogger(__name__)
-
-# A booking in one of these can no longer change. PENDING, SCHEDULED and
-# IN_PROGRESS are still the racer's or the reconciler's to act on.
-_TERMINAL_BOOKING_STATUSES = (
-    BookingStatus.SUCCESS,
-    BookingStatus.FAILED,
-    BookingStatus.CANCELLED,
-)
 
 
 @dataclass
@@ -90,16 +81,6 @@ async def purge_expired(dry_run: bool = False, now: datetime | None = None) -> P
             & (
                 SessionRecord.last_interaction
                 < now - timedelta(days=settings.retention_session_days)
-            ),
-        ),
-        # Judged by the date played, not by when the row was written: a request
-        # made months ahead is not "old" until its date is.
-        "bookings": (
-            BookingRecord,
-            BookingRecord.status.in_(_TERMINAL_BOOKING_STATUSES)
-            & (
-                BookingRecord.requested_date
-                < (now - timedelta(days=settings.retention_booking_days)).date()
             ),
         ),
         # Appended, never updated, and the latest reading of a date is the one

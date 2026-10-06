@@ -13,7 +13,7 @@ change. Applying them deletes data (see Applying), so merge is the decision.
 
 | Store | Holds | Kept | Enforced by |
 |---|---|---|---|
-| `bookings` (Cloud SQL) | requests and outcomes | finished rows until 400 days after the date played; live rows never | `purge_expired`, `retention_booking_days` |
+| `bookings` (Cloud SQL) | requests and outcomes | **indefinitely**, to study booking trends over years | nothing deletes it, by decision of the maintainer |
 | `sessions` (Cloud SQL) | conversation state | idle rows 90 days after the last message; a mid-conversation row never | `retention_session_days` |
 | `tee_sheet_grids` (Cloud SQL) | observer slot-grid readings | 90 days after the reading | `retention_tee_sheet_grid_days` |
 | `walden_credentials` (Cloud SQL) | a member's stored login | until `/forget` or leaving the group (existing); 90 days after Walden rejected it with no replacement | `retention_invalid_login_days` |
@@ -32,13 +32,12 @@ race, so it cannot hold a lock when the racer claims its bookings.
 
 ## Why these periods
 
-- **Finished bookings, 400 days after play.** The scoreboard and cost metrics
-  read GCS ledgers, not this table, so history here serves only the member
-  ("what did you book?") and diagnosis. A little over a year lets a season be
-  compared with the last one. Counted from the date played, so a request made
-  months ahead is not old until its date is. Only SUCCESS, FAILED and CANCELLED
-  are ever deleted; PENDING, SCHEDULED and IN_PROGRESS belong to the racer and
-  the startup reconciler however old they look.
+- **Bookings, indefinitely.** Kept on purpose, to look for trends in how members
+  book over years (maintainer, 2026-10-06). The row holds a member's requester ID
+  (their Telegram ID), so this is the one table where keeping everything leaves
+  a member's history on file after they leave; `docs/privacy.md` says so, and
+  removal is by asking. Anonymising a leaver's rows instead of deleting them
+  would keep the trend data without the identity, and is not built.
 - **Idle sessions, 90 days.** An idle session carries nothing: the next message
   creates a new one.
 - **Grid readings, 90 days.** The booking conversation reads only the latest
@@ -82,8 +81,6 @@ curl -s -X POST "$SERVICE_URL/jobs/purge-expired?dry_run=true" \
 
 ## What is not established
 
-- Whether anyone relies on a booking row older than 400 days. Nothing in the repo
-  reads one; that is a search of this code, not of a person's habits.
 - Cloud Logging retention was read from the bucket list (`_Default` 30 days) and
   not from the sink configuration. A log-based export would change the answer;
   none was looked for.

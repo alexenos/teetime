@@ -77,9 +77,9 @@ checked automatically for names before it is published.
 
 - **Your Walden login:** until you delete it or leave the group. If Walden
   rejects it and you do not save a new one, it is deleted after 90 days.
-- **Booking records:** finished bookings for 400 days after the date you played,
-  then deleted. They let the bot tell you what it booked and let problems be
-  diagnosed.
+- **Booking records:** kept, with no automatic deletion. They let the bot tell
+  you what it booked, let problems be diagnosed, and let the group's booking
+  patterns be studied over the years.
 - **Conversation state:** deleted after 90 days without a message from you.
 - **Your label** (such as "Member C"): kept, so an old public race report never
   comes to mean someone else.

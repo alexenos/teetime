@@ -54,36 +54,16 @@ async def _ids(db: async_sessionmaker, column: object) -> set[object]:
 
 
 @pytest.mark.asyncio
-async def test_old_finished_bookings_go_and_live_ones_stay(db: async_sessionmaker) -> None:
-    old = settings.retention_booking_days + 1
+async def test_bookings_are_never_deleted(db: async_sessionmaker) -> None:
+    """Kept for good, to study booking trends over years - whatever status or age."""
     async with db() as s:
-        s.add_all(
-            [
-                _booking("old-ok", BookingStatus.SUCCESS, old),
-                _booking("old-failed", BookingStatus.FAILED, old),
-                _booking("old-cancelled", BookingStatus.CANCELLED, old),
-                # A date this old with a non-terminal status is a stuck row, and
-                # still not one for a retention job to decide about.
-                _booking("old-pending", BookingStatus.PENDING, old),
-                _booking("old-scheduled", BookingStatus.SCHEDULED, old),
-                _booking("old-in-progress", BookingStatus.IN_PROGRESS, old),
-                _booking("recent-ok", BookingStatus.SUCCESS, 10),
-                # Played in the future, finished early: judged by the date played.
-                _booking("future-cancelled", BookingStatus.CANCELLED, -5),
-            ]
-        )
+        s.add_all([_booking(f"old-{status.value}", status, 5000) for status in BookingStatus])
         await s.commit()
 
     result = await purge_expired(now=NOW)
 
-    assert result.deleted["bookings"] == 3
-    assert await _ids(db, BookingRecord.booking_id) == {
-        "old-pending",
-        "old-scheduled",
-        "old-in-progress",
-        "recent-ok",
-        "future-cancelled",
-    }
+    assert "bookings" not in result.deleted
+    assert len(await _ids(db, BookingRecord.booking_id)) == len(BookingStatus)
 
 
 @pytest.mark.asyncio
@@ -182,14 +162,20 @@ async def test_pseudonyms_are_never_deleted(db: async_sessionmaker) -> None:
 @pytest.mark.asyncio
 async def test_dry_run_counts_and_deletes_nothing(db: async_sessionmaker) -> None:
     async with db() as s:
-        s.add(_booking("old", BookingStatus.SUCCESS, settings.retention_booking_days + 1))
+        s.add(
+            SessionRecord(
+                phone_number="idle-old",
+                state=ConversationState.IDLE,
+                last_interaction=_ago(settings.retention_session_days + 1),
+            )
+        )
         await s.commit()
 
     result = await purge_expired(dry_run=True, now=NOW)
 
     assert result.dry_run is True
-    assert result.deleted["bookings"] == 1
-    assert await _ids(db, BookingRecord.booking_id) == {"old"}
+    assert result.deleted["sessions"] == 1
+    assert await _ids(db, SessionRecord.phone_number) == {"idle-old"}
 
 
 @pytest.mark.asyncio
@@ -209,7 +195,7 @@ async def test_one_failing_rule_does_not_stop_the_others(
     real_apply = __import__("app.services.retention", fromlist=["_apply"])._apply
 
     async def flaky(session: object, table: type, condition: object, dry_run: bool) -> int:
-        if table is BookingRecord:
+        if table is TeeSheetGridRecord:
             raise RuntimeError("connection reset")
         return await real_apply(session, table, condition, dry_run)
 
@@ -217,7 +203,7 @@ async def test_one_failing_rule_does_not_stop_the_others(
 
     result = await purge_expired(now=NOW)
 
-    assert result.errors == {"bookings": "RuntimeError"}
+    assert result.errors == {"tee_sheet_grids": "RuntimeError"}
     assert result.deleted["sessions"] == 1
 
 
