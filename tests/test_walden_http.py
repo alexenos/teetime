@@ -3356,6 +3356,13 @@ class SourceRecorder(ChainRecorder):
     request numbers with that HTTP status instead, ``stall_on`` raises a read
     timeout for them, and ``delay_on`` answers them late. Every 200 carries a
     Date header, because the gate summary is read off the club's clock.
+
+    A queue is served in arrival order, which is the sender's order only while
+    the runner keeps up. ``gate_at_ms`` takes that dependence away for a slot's
+    queue: with it set, the queue is ``[refusal, grant]`` and a request is
+    refused or granted by when it arrived against the gate, as the club does
+    (#252). ``arrival_stall_s`` makes the third arrival wait before it is
+    recorded, so the members behind it overtake it, as a stalled runner does.
     """
 
     def __init__(
@@ -3368,9 +3375,15 @@ class SourceRecorder(ChainRecorder):
         stall_on: set[int] | None = None,
         delay_on: set[int] | None = None,
         delay_s: float = 0.0,
+        gate_at_ms: int | None = None,
+        arrival_stall_s: float = 0.0,
     ) -> None:
         """Queue the per-slot pages and the chain pages that follow a grant."""
         super().__init__(chain)
+        self.gate_at_ms = gate_at_ms
+        self.arrival_stall_s = arrival_stall_s
+        self._arrivals = 0
+        self.recorded_order: list[int] = []
         self.by_source = by_source
         self.status_on = status_on or {}
         self.status_body = status_body
@@ -3386,11 +3399,20 @@ class SourceRecorder(ChainRecorder):
         """Answer by the requested source, or fail the request as configured."""
         params = dict(urllib.parse.parse_qsl(request.content.decode()))
         source = params.get("javax.faces.source", "")
+        ordinal = 0
+        if self.arrival_stall_s:
+            with self._lock:
+                self._arrivals += 1
+                ordinal = self._arrivals
+            if ordinal == 3:
+                time_module.sleep(self.arrival_stall_s)
         with self._lock:
+            self.recorded_order.append(ordinal)
             self.requests.append(params)
             self.sources.append(source)
             index = len(self.sources)
-            self.sent_at_ms.append(int(time_module.time() * 1000))
+            arrived_ms = int(time_module.time() * 1000)
+            self.sent_at_ms.append(arrived_ms)
         if index in self.stall_on:
             raise httpx.ReadTimeout("stalled by the test", request=request)
         if index in self.status_on:
@@ -3406,6 +3428,8 @@ class SourceRecorder(ChainRecorder):
             if queue is None:
                 page = self.pages[min(self._chain_served, len(self.pages) - 1)]
                 self._chain_served += 1
+            elif self.gate_at_ms is not None:
+                page = queue[0] if arrived_ms < self.gate_at_ms else queue[1]
             else:
                 served = self._served.get(source, 0)
                 self._served[source] = served + 1
@@ -3947,23 +3971,43 @@ class TestVariableBurst:
         assert [row["plannedSendMsPastWindow"] for row in rows] == [-60, -30, 0, 30]
         assert all(0 <= row["writeDriftMs"] <= 50 for row in rows)
 
-    def test_the_gate_is_bracketed_between_the_last_refusal_and_the_grant(self) -> None:
-        """Three refusals then a grant: the gate is after the third and by the fourth."""
+    @pytest.mark.parametrize("arrival_stall_s", [0.0, 0.08], ids=["steady", "stalled-runner"])
+    def test_the_gate_is_bracketed_between_the_last_refusal_and_the_grant(
+        self, arrival_stall_s: float
+    ) -> None:
+        """Refusals then a grant: the gate is after the last refusal and by the grant.
+
+        The club's gate is a moment, not a count, so the mock answers by arrival
+        time against one (#252). The expected count is then read off what the
+        recorder saw rather than assumed to be three: a runner that stalls
+        mid-burst sends members late, and the bracket is right to report that.
+        """
+        target = window_about_to_open(in_ms=300)
+        gate = target + 15  # between the members planned at 0 and +30
         recorder = SourceRecorder(
-            {RESERVE_ID: [BLOCKED_ALL, BLOCKED_ALL, BLOCKED_ALL, ACCEPTED_PAGE]},
+            {RESERVE_ID: [BLOCKED_ALL, ACCEPTED_PAGE]},
             CHAIN_AFTER_GRANT,
+            gate_at_ms=gate,
+            arrival_stall_s=arrival_stall_s,
         )
         booker = burst_booker(recorder, -60, -30, 0, 30, target_only=4, fallbacks=())
         with _CaptureLogs("app.providers.walden_http_booker") as records:
-            result = booker.book(1, target_timestamp_ms=window_about_to_open(in_ms=300))
+            result = booker.book(1, target_timestamp_ms=target)
 
         assert result.success, result.error
         (bracket,) = result.timing["gateBrackets"]
         assert bracket["slot"] == RESERVE_SLOT_TIME.strftime("%I:%M %p")
-        assert bracket["refusedBefore"] == 3
-        assert bracket["askedAfter"] == 0
-        assert -2 <= bracket["lastRefusedBeforeMs"] <= 50
-        assert 28 <= bracket["grantedMs"] <= 80
+        if arrival_stall_s:
+            # Without this the stalled case could pass having reordered nothing.
+            order = recorder.recorded_order
+            assert order.index(4) < order.index(3), order
+        refused = [t for t in recorder.sent_at_ms[:4] if t < gate]
+        assert bracket["refusedBefore"] == len(refused)
+        if not arrival_stall_s:
+            assert bracket["refusedBefore"] == 3
+            assert bracket["askedAfter"] == 0
+            assert -2 <= bracket["lastRefusedBeforeMs"] <= 50
+            assert 28 <= bracket["grantedMs"] <= 80
         assert bracket["grantedMs"] > bracket["lastRefusedBeforeMs"]
         # A mocked transport records no write time, so the send time stands in
         # and the line says so rather than passing it off as a write.
