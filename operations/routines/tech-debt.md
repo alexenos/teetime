@@ -15,7 +15,7 @@ happened.
 
 ## What it does
 
-Two jobs in one run, in order.
+Three jobs in one run, in order.
 
 1. **Scan.** Look for new debt in the categories below and file one GitHub issue
    per finding that is not already filed.
@@ -38,8 +38,10 @@ only way to know a finding is already filed is to ask GitHub.
 **A fingerprint on every issue.** The body ends with an HTML comment
 `<!-- td-id: <category>:<path>:<identifier> -->`, where the identifier is a
 function, class, test name, variable name or rule code, not a line number, which
-moves. Before filing, the scan searches **open and closed** issues for the
-fingerprint. Open: skip. Closed `wontfix`: skip, because the maintainer already
+moves. Before filing, the scan reads the fingerprints out of the bodies of **all**
+`tech-debt` issues, open and closed, and compares locally. It does not rely on
+GitHub's issue search finding text inside an HTML comment, which is not verified.
+Open: skip. Closed `wontfix`: skip, because the maintainer already
 decided. Closed completed: file again only if the finding is still present, and
 link the earlier issue.
 
@@ -119,9 +121,14 @@ backed-up maintainer is not buried; it is a count, not a quality judgment.
 | write one object to the `operations/tech-debt/` prefix in GCS | edit another Routine's file or ledger |
 
 This is not a standing authorization to write to `main`. CLAUDE.md names two
-exceptions and this is not a third. A fix PR touching `app/` or `terraform/`
-redeploys the service when the maintainer merges it, and that is the maintainer's
-decision.
+exceptions and this is not a third. Only `operations/`, `docs/`, `.claude/` and
+`CLAUDE.md` are in `ignored_files`, so a fix PR touching anything else, `tests/`
+included, rebuilds and redeploys the service when the maintainer merges it, and
+that is the maintainer's decision. A merge landing close to the 06:28 CT job is
+worth avoiding; the PR says when it would be safe.
+
+The Routine also reads `MEMBER_PSEUDONYM_LABELS` from Secret Manager, for the name
+check below.
 
 ## CodeRabbit review
 
@@ -186,11 +193,16 @@ The maintainer reviews the PR, so the PR has to make review cheap and honest.
   applies terraform, or does neither. A change that touches only `operations/`,
   `docs/`, `.claude/` or `CLAUDE.md` does neither; any other path does both.
 - **Race exposure:** whether anything the 06:28 CT job executes changed, and what
-  the maintainer should watch on the next race morning if so.
+  the maintainer should watch on the next race morning if so. If the merge
+  redeploys, say that it should not land between 06:15 and 06:45 CT.
 - **Behavior:** the PR is meant to preserve behavior. If it does not, the PR says
   how, and that belongs in the title.
 
-**A Review section** records what CodeRabbit covered: the short sha it reviewed, the sha of the head, whether those differ, each finding with its disposition (fixed, filed as an issue, declined with the reason), and anything it never reviewed. A review that was refused, or never landed, is stated at the top of the PR, not omitted.
+**A Review section** records what CodeRabbit covered: the short sha it reviewed,
+the sha of the head, whether those differ, each finding with its disposition
+(fixed, filed as an issue, declined with the reason), and anything it never
+reviewed. A review that was refused, or never landed, is stated at the top of the
+PR, not omitted.
 
 **Verified and not verified, in separate sections**, as CLAUDE.md requires. The
 pre-push command is run in full and its result is quoted, not summarized:
@@ -207,8 +219,8 @@ not cover for the changed code, and what remains a hypothesis.
 
 ## The member-name check
 
-Every issue, issue comment, PR body, PR title, review reply, commit message and branch name is
-public. The repository is public, and the scan reads code, tests and fixtures that
+Every issue, issue comment, PR body, PR title, review reply, commit message and
+branch name, and every later edit to any of them, is public. The repository is public, and the scan reads code, tests and fixtures that
 may contain names, phone numbers, Telegram handles or member numbers.
 
 **Before any of those is created**, the text is written to a file and checked,
@@ -241,11 +253,13 @@ established; check how `--artifacts` reads a directory before relying on it.
 1. **Set up.** `TZ=America/Chicago date '+%F %H:%M'` for the date, then
    `bash scripts/setup_remote_env.sh`. `READY` is the only pass. On anything else,
    write a ledger row with `ok: false` and the failed path, notify, stop.
-2. **Read the backlog.** List open and recently closed issues labelled
-   `tech-debt`. This is the dedup set and the fix pool.
-3. **Review last week's PRs.** List this Routine's PRs and record how many were
-   merged, closed unmerged, or still open since the last run. This is the quality
-   measure and costs one list call.
+2. **Read the backlog.** List every issue labelled `tech-debt`, open and closed,
+   with bodies. This is the dedup set and the fix pool. There is no date window:
+   a `wontfix` closed long ago must still suppress a refile.
+3. **Count the Routine's PRs.** List PRs labelled `tech-debt` and record how many
+   are merged, closed unmerged, or open, cumulatively. The Routine has no memory of
+   the last run, so a reader diffs consecutive rows for the week's change. This is
+   the quality measure and costs one list call.
 4. **Scan.** Run each category's checks. File an issue per new finding, after the
    name check. Record per-category coverage.
 5. **Fix.** Apply the cap. If clear, choose an issue by the rule above, comment
@@ -266,6 +280,9 @@ One object per run, never an edit, per `operations/ledger/README.md`:
 gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/tech-debt/<YYYY-MM-DD>.json
 ```
 
+The values below are invented to show the shape; the issue and PR numbers are
+not real runs.
+
 ```json
 {"date":"2026-10-10","routine":"tech-debt","ok":true,
  "scan":{
@@ -273,7 +290,7 @@ gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/tech-debt/<YY
      "lint-suppression":{"ran":true,"files_covered":84,"found":6,"filed":2},
      "todo":{"ran":true,"files_covered":84,"found":9,"filed":1}},
    "filed_total":3,"open_backlog":14},
- "fix":{"issue":281,"pr":282,"skipped":null,
+ "fix":{"issue":301,"pr":302,"skipped":null,
         "sensitive_area":false,"open_prs_at_start":1},
  "review":{"requested":true,"rounds":1,"outcome":"reviewed",
            "findings":4,"fixed":2,"filed":1,"declined":1,
@@ -294,8 +311,8 @@ the severity labels. A run that opens a PR CodeRabbit never reviewed is still
 `ok: true` if it said so; one that implies a review that did not happen is
 `ok: false`.
 
-**The measure that matters is `prior_prs.closed_unmerged` against `merged`.** If the
-maintainer closes more than about half of what this Routine opens, the categories
+**The measure that matters is `prior_prs.closed_unmerged` against `merged`**, both
+cumulative. If the maintainer closes more than about half of what this Routine opens, the categories
 or the selection rule are wrong, and that is the signal to change them. It is
 sampled once a week, so it is slow; that is acceptable at this volume.
 
@@ -305,8 +322,11 @@ The schema belongs in `operations/ledger/README.md` beside the others, with a
 ## Notification
 
 Notify the maintainer every run, since a weekly cadence makes silence ambiguous.
-One or two sentences, no markdown, labels not names. e.g. `Tech debt - 3 new issues filed, 14 open. Fix PR #282 opened for #281, CodeRabbit reviewed it and 2 of 4 findings were fixed, touches tests only, merge does not redeploy.` or
-`Tech debt - 2 new issues filed. No fix: 3 PRs already open.` or `Tech debt - fix PR #282 opened, CodeRabbit rate limited, not reviewed.`
+One or two sentences, no markdown, labels not names. For example:
+
+- `Tech debt - 3 new issues filed, 14 open. Fix PR #302 opened for #301, CodeRabbit reviewed it and 2 of 4 findings were fixed, touches docs only, merge does not redeploy.`
+- `Tech debt - 2 new issues filed. No fix: 3 PRs already open.`
+- `Tech debt - fix PR #302 opened, touches tests, merge redeploys, CodeRabbit rate limited so not reviewed.`
 
 ## Open items
 
@@ -345,13 +365,13 @@ GitHub is the source of truth for findings. The ledger is run metadata only.
 
 Rule that applies to every path through this prompt: always write your ledger row, then always send a push notification, in that order. Whatever happens, finish by writing one object to gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/tech-debt/ named for the run date in Central Time, never overwriting, and then calling PushNotification. Every stop in this prompt means ledger row, push, stop. If the ledger write fails, retry once and then say so in the notification.
 
-Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as .claude/skills/race-report/SKILL.md section 8a describes. Exit 0 is the only pass. Exit 1 means replace the named lines with labels and recheck. Exit 2 means it could not check; that is not a pass, so do not create it, record ok false with a note, and say so in the notification. If a finding is itself an identifier committed to the repo, give the file, line and kind of identifier and never the string.
+Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating or editing any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as .claude/skills/race-report/SKILL.md section 8a describes. Exit 0 is the only pass. Exit 1 means replace the named lines with labels and recheck. Exit 2 means it could not check; that is not a pass, so do not create it, record ok false with a note, and say so in the notification. If a finding is itself an identifier committed to the repo, give the file, line and kind of identifier and never the string.
 
 Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop.
 
-Step 2 - read the backlog. List open issues and closed issues from the last 90 days labelled tech-debt. This is your dedup set and your fix pool. Then list this Routine's PRs and count how many were merged, closed without merging, or are still open.
+Step 2 - read the backlog. List every issue labelled tech-debt, open and closed, with bodies, and extract the fingerprint from each body. Use no date window: a wontfix closed long ago must still suppress a refile. This is your dedup set and your fix pool. Then list PRs labelled tech-debt and count, cumulatively, how many are merged, closed without merging, or open.
 
-Step 3 - scan. For each category in the spec, run its checks and record how many files each covered and how many findings it produced. A check that covered zero files failed; say so and mark the run ok false. For each finding compute its fingerprint, category:path:identifier with no line number, and search open and closed issues for it. Skip it if it is open, or closed wontfix. Otherwise file one issue, after the name check, with the tech-debt label and one td: category label. The body must give the location, the command or comparison that produced the finding, why it is debt, a suggested fix, which sensitive area it touches if any, what you verified and what you did not, and end with the fingerprint as an HTML comment. Do not file more than 15 issues in one run; if there are more, file the 15 most clearly supported and say how many remain in the ledger note.
+Step 3 - scan. For each category in the spec, run its checks and record how many files each covered and how many findings it produced. A check that covered zero files failed; say so and mark the run ok false. For each finding compute its fingerprint, category:path:identifier with no line number, and compare it with the fingerprints from Step 2. Skip it if the matching issue is open, or closed wontfix. If the matching issue is closed as completed and the finding is still present, file a new issue that links the old one. Otherwise file one issue, after the name check, with the tech-debt label and one td: category label. The body must give the location, the command or comparison that produced the finding, why it is debt, a suggested fix, which sensitive area it touches if any, what you verified and what you did not, and end with the fingerprint as an HTML comment. Do not file more than 15 issues in one run; if there are more, file the 15 most clearly supported and say how many remain in the ledger note.
 
 Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or more, fix nothing and record skipped as cap. Otherwise consider every open tech-debt issue except those labelled wontfix or td:blocked or that already have an open PR. Prefer small, self-contained issues the existing tests, ruff and mypy can verify; among those, oldest first. Deprioritize issues in the sensitive areas the spec lists, but do not refuse them if nothing else is open, and say so in the PR. Comment on the chosen issue saying why you chose it. Make a branch named tech-debt/<issue number>-<short slug>, preserve behavior, and make the change.
 
@@ -365,7 +385,7 @@ If it refuses, read the wait it names. If you can schedule a wake-up, schedule o
 
 If it reviews, judge each finding on its reasoning, not its severity label, and check it against the code before agreeing or disagreeing. Run a suggested diff before committing it. Fix a real finding that is inside this issue's scope in a new commit with the test that would have caught it. If a finding is real but outside this issue, or would change behavior, do not widen the PR: reply to it and file it as a new tech-debt issue. If a finding is wrong, reply with evidence from the code. Reply on each finding's own thread using the parent comment id. Run the name check over every reply before posting it. Do not mark threads resolved; your reply is the record.
 
-Run the full pre-push command before every push. After pushing fixes, re-trigger once if a fresh quota hour is reachable, naming the new sha; otherwise do not, and say in the PR exactly which commits CodeRabbit reviewed and which it did not. At most two rounds. Update the Review section of the PR body to the final state: the sha reviewed, the sha of the head, each finding and what you did with it. A clean review, or a green CodeRabbit check, is not approval and you must not describe it as one.
+Run the full pre-push command before every push. After pushing fixes, re-trigger once, naming the new sha, only if you can schedule a wake-up for a time after the quota hour has reset; this session just used that hour. Otherwise do not, and say in the PR exactly which commits CodeRabbit reviewed and which it did not. At most two rounds. Update the Review section of the PR body to the final state: the sha reviewed, the sha of the head, each finding and what you did with it. A clean review, or a green CodeRabbit check, is not approval and you must not describe it as one.
 
 Step 5 - ledger row, then notification. The schema is in the spec. ok describes the run: a run that scanned honestly and found nothing is ok true; a failed check, a name check that could not run, or any problem is ok false with a note. Then push a notification of one or two sentences, no markdown, using labels not names: how many issues were filed, how many are open, and either the fix PR number with whether merging redeploys and whether CodeRabbit reviewed it, or why nothing was fixed.
 ```
