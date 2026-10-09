@@ -47,8 +47,11 @@ link the earlier issue.
 
 **Labels.** `tech-debt` on every issue and every fix PR. One category label each:
 `td:lint-suppression`, `td:todo`, `td:test-health`, `td:dead-code`,
-`td:docs-drift`, `td:duplication`. `td:blocked` for an issue the fix step should
-skip until the maintainer removes it. The existing `wontfix` label means "decided
+`td:docs-drift`, `td:duplication`, `td:legacy-feature`, `td:code-quality`.
+`td:blocked` for an issue the fix step should skip until the maintainer removes
+it. `td:digest` for the one standing digest issue (below), which carries
+`td:digest` and **not** `tech-debt`, so it is never in the dedup set or the fix
+pool. The existing `wontfix` label means "decided
 against".
 
 ## Categories
@@ -64,10 +67,61 @@ A finding must carry the command or comparison that produced it.
 | `td:dead-code` | unused functions, classes and imports (vulture, or a grep that shows no references), terraform variables never referenced, config flags with no reader |
 | `td:docs-drift` | a claim in `CLAUDE.md`, `operations/` or `.claude/skills/` that the code or the repository contradicts: a Routine marked "not deployed" that has a trigger ID, a path or function that no longer exists, a count that no longer matches |
 | `td:duplication` | logic copied between modules, above all between the racer and the observer, which the maintainer has already said must share the booking path rather than fork it |
+| `td:legacy-feature` | code that exists for a feature that is old, replaced, or never finished. **Judged against the feature manifest, not guessed**; see below |
+| `td:code-quality` | code that is hard to read or wasteful, found by a measurable signal: ruff complexity and length rules, deep nesting, repeated I/O in a loop, a function whose docstring and body disagree. **Lowest priority.** At most 3 filed per run |
 
-Two more categories are deliberately absent for now: performance, and "this could
-be designed better". Neither has a signal a run can check. Add them when there is
-one.
+`td:code-quality` is the one category where the signal is partly judgment, so it
+is fenced: a finding must name the measurable thing (a complexity score, a nesting
+depth, a loop that repeats a call) and the concrete simpler form, and the fix step
+takes one only when nothing else is available. "This could be designed better"
+without either is not a finding.
+
+### Legacy features need a manifest
+
+Whether code is abandoned is the maintainer's call, and code alone does not
+establish it. A function with no callers may be an entry point nobody grep finds;
+a provider that is switched off may be about to be switched on. So this category
+runs against `operations/features.md`, a list the maintainer owns, one row per
+feature: name, status, the paths that implement it, and the date the status was
+decided.
+
+| Status | Meaning to the Routine |
+|---|---|
+| `live` | in use; never a finding |
+| `experimental` | in progress; never a finding |
+| `deprecated` | being retired; files an issue if its paths still exist, no fix |
+| `removable` | maintainer has decided it can go; **eligible for a removal PR** |
+| `planned` | not built yet; code for it is a question, not a finding |
+
+The Routine files an issue when:
+
+- a manifest path no longer exists (the manifest is stale, a `td:docs-drift` finding)
+- a `deprecated` or `removable` feature still has code
+- code under `app/` belongs to no manifest feature, **as a request to classify it,
+  never as a claim that it is dead**. "No callers found" is stated as a hypothesis
+  with the search that produced it
+
+It never decides on its own that a feature is abandoned and never removes
+anything the manifest does not mark `removable`. The manifest does not exist yet.
+Until it does, the category records `ran: false, reason: "no_manifest"` and is
+skipped. That is **not** a failed check and does not make the run `ok: false`.
+
+Candidates the maintainer may want to classify first, from the file names alone.
+These are hypotheses, not findings: the Discord provider and gateway, the Twilio
+and SMS paths, the Gemini service, and the browser-driven `walden_provider`
+alongside the HTTP booker.
+
+### Finding nothing is a valid outcome
+
+A run may file no issues, may fix nothing, or both. Each is `ok: true` when the
+checks ran and covered files:
+
+- scanned honestly, found nothing new: `ok: true`
+- scanned, nothing new, but open issues exist: it still fixes one
+- scanned, nothing new, no open issues to fix: `ok: true`, `fix.skipped:
+  "no_candidate"`, a short digest comment saying so, a notification, and nothing
+  else. It does not invent work, lower its bar, or open a PR to have something to
+  show.
 
 ### A scan that finds nothing must be distinguishable from one that did not run
 
@@ -87,7 +141,9 @@ in a comment on the issue before touching code.
 1. Prefer a finding that is small, self-contained and verifiable by the existing
    test suite, ruff and mypy.
 2. Among those, oldest first, so the backlog does not only grow.
-3. **Deprioritize, but do not forbid,** anything in the sensitive areas below.
+3. `td:code-quality` goes last: take one only when nothing else is eligible.
+   `td:legacy-feature` is eligible only for a `removable` feature.
+4. **Deprioritize, but do not forbid,** anything in the sensitive areas below.
    Skip one only if an alternative exists; if nothing else is open, it may be
    chosen, and the PR says so.
 
@@ -115,7 +171,7 @@ backed-up maintainer is not buried; it is a count, not a quality judgment.
 | Can | Cannot |
 |---|---|
 | read the repository, GitHub, and the ledgers | merge any PR, by any route, including its own |
-| create and edit issues and labels, and comment on issues | close an issue itself, or reopen one the maintainer closed `wontfix`. A fix PR's `Closes #<n>` closes the issue only when the maintainer merges it. |
+| create and edit issues and labels, comment on issues, and keep the one digest issue | close an issue itself, or reopen one the maintainer closed `wontfix`. A fix PR's `Closes #<n>` closes the issue only when the maintainer merges it. |
 | push one branch and open one non-draft PR per run, and push further commits to that branch in response to review | push to `main`, or to a branch that is not its own |
 | trigger CodeRabbit on its own PR, and reply to its findings there | trigger or reply on any other PR |
 | write one object to the `operations/tech-debt/` prefix in GCS | edit another Routine's file or ledger |
@@ -221,6 +277,37 @@ cannot exercise booking says nothing about booking: this project has no local wa
 to exercise it (testing means deploying). The PR names what the tests do and do
 not cover for the changed code, and what remains a hypothesis.
 
+## The digest: the list to review
+
+Reviewing the week should not mean opening every issue. The Routine keeps **one
+standing issue** labelled `td:digest` (created on the first run, titled
+`Tech debt digest`) and adds **one comment per run**. Subscribing to that issue
+is the review queue. The digest is a pointer; the findings themselves stay in
+their own issues, which remain the source of truth.
+
+The comment lists every issue the run created or found, each as the title
+linked to the issue, then one sentence saying what it is:
+
+```markdown
+Tech debt scan 2026-10-10
+
+New this week (2)
+- [Remove unused noqa on parse_slots](https://github.com/OWNER/REPO/issues/1) - The suppression no longer silences anything, so it can be deleted.
+- [Skipped test for the retired SMS path](https://github.com/OWNER/REPO/issues/2) - A test has been skipped since the SMS flow was replaced and asserts nothing.
+
+Found again, still open (1)
+- [Duplicate login retry in racer and observer](https://github.com/OWNER/REPO/issues/3) - The same retry loop is copied in two modules.
+
+Fix this week: [PR](https://github.com/OWNER/REPO/pull/4) for issue 3, risk low, merge does not redeploy.
+```
+
+The URLs above are placeholders. Rules: a sentence is a sentence, not a
+paragraph; one line per issue; "found again" means the scan re-detected a finding
+whose issue is already open; a week with nothing says `Nothing new, nothing
+open to fix.` rather than posting nothing, because a missing comment would be
+indistinguishable from a missed run. The comment passes the name check like
+everything else public.
+
 ## The member-name check
 
 Every issue, issue comment, PR body, PR title, review reply, commit message and
@@ -274,7 +361,9 @@ established; check how `--artifacts` reads a directory before relying on it.
 6. **Review.** Trigger CodeRabbit on the PR, within the budget above. Judge and
    answer each finding, push fixes, and re-trigger if quota allows. Update the PR
    body's Review section to match the final state.
-7. **Ledger row, then notify.** In that order, on every path.
+7. **Digest.** Post the run's comment on the digest issue: new, found again, and
+   the fix PR with its risk line.
+8. **Ledger row, then notify.** In that order, on every path.
 
 ## The ledger row
 
@@ -292,8 +381,10 @@ not real runs.
  "scan":{
    "categories":{
      "lint-suppression":{"ran":true,"files_covered":84,"found":6,"filed":2},
-     "todo":{"ran":true,"files_covered":84,"found":9,"filed":1}},
-   "filed_total":3,"open_backlog":14},
+     "todo":{"ran":true,"files_covered":84,"found":9,"filed":1},
+     "legacy-feature":{"ran":false,"reason":"no_manifest"}},
+   "filed_total":3,"open_backlog":14,
+   "digest_comment":"<url>"},
  "fix":{"issue":301,"pr":302,"skipped":null,
         "sensitive_area":false,"open_prs_at_start":1},
  "review":{"requested":true,"rounds":1,"outcome":"reviewed",
@@ -303,7 +394,9 @@ not real runs.
 ```
 
 `ok` describes the run. A run that scanned honestly and found nothing is
-`ok: true`. A run whose check covered zero files, whose name check could not run,
+`ok: true`, and so is a run that fixed nothing because nothing was eligible. A
+category with `ran: false` and `reason: "no_manifest"` is skipped, not failed. A
+run whose check covered zero files, whose name check could not run,
 or whose PR failed its own pre-push command and was opened anyway is `ok: false`
 with a note. `fix.skipped` is `null` when a fix was opened, otherwise one of
 `cap`, `no_candidate`, `check_failed`, `error`.
@@ -356,8 +449,9 @@ One or two sentences, no markdown, labels not names. For example:
   The prompt therefore caps filing at 15 issues per run, which is a first guess
   chosen for that reason; the remainder is counted in the ledger note and filed on
   later runs.
-- **Label creation.** The labels do not exist yet. The first run, or whoever
-  deploys it, has to create them.
+- **Label creation.** The labels do not exist yet. The Routine creates any that are
+  missing at the start of each run (Step 1 of the prompt), so no manual step is
+  needed, but it makes the first run's GitHub write access the first thing tested.
 
 ## The prompt
 
@@ -372,13 +466,13 @@ Rule that applies to every path through this prompt: always write your ledger ro
 
 Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating or editing any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as .claude/skills/race-report/SKILL.md section 8a describes. Exit 0 is the only pass. Exit 1 means replace the named lines with labels and recheck. Exit 2 means it could not check; that is not a pass, so do not create it, record ok false with a note, and say so in the notification. If a finding is itself an identifier committed to the repo, give the file, line and kind of identifier and never the string.
 
-Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop.
+Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Then make sure these labels exist and create any that are missing: tech-debt, td:blocked, td:digest, td:lint-suppression, td:todo, td:test-health, td:dead-code, td:docs-drift, td:duplication, td:legacy-feature, td:code-quality. If you cannot create a label, that is a failed run: record ok false, notify, and stop.
 
 Step 2 - read the backlog. List every issue labelled tech-debt, open and closed, with bodies, and extract the fingerprint from each body. Use no date window: a wontfix closed long ago must still suppress a refile. This is your dedup set and your fix pool. Then list PRs labelled tech-debt and count, cumulatively, how many are merged, closed without merging, or open.
 
-Step 3 - scan. For each category in the spec, run its checks and record how many files each covered and how many findings it produced. A check that covered zero files failed; say so and mark the run ok false. For each finding compute its fingerprint, category:path:identifier with no line number, and compare it with the fingerprints from Step 2. Skip it if the matching issue is open, or closed wontfix. If the matching issue is closed as completed and the finding is still present, file a new issue that links the old one. Otherwise file one issue, after the name check, with the tech-debt label and one td: category label. The body must give the location, the command or comparison that produced the finding, why it is debt, a suggested fix, which sensitive area it touches if any, what you verified and what you did not, and end with the fingerprint as an HTML comment. Do not file more than 15 issues in one run; if there are more, file the 15 most clearly supported and say how many remain in the ledger note.
+Step 3 - scan. For each category in the spec, run its checks and record how many files each covered and how many findings it produced. A check that covered zero files failed; say so and mark the run ok false. For each finding compute its fingerprint, category:path:identifier with no line number, and compare it with the fingerprints from Step 2. Skip it if the matching issue is open, or closed wontfix. If the matching issue is closed as completed and the finding is still present, file a new issue that links the old one. Otherwise file one issue, after the name check, with the tech-debt label and one td: category label. The body must give the location, the command or comparison that produced the finding, why it is debt, a suggested fix, which sensitive area it touches if any, what you verified and what you did not, and end with the fingerprint as an HTML comment. For td:legacy-feature, read operations/features.md. If it does not exist, record ran false with reason no_manifest and skip the category; that is not a failure. Never decide a feature is abandoned yourself: classify against the manifest, and state any no-callers observation as a hypothesis with the search that produced it. For td:code-quality, name the measurable signal and the concrete simpler form, and file at most 3 per run. Do not file more than 15 issues in one run; if there are more, file the 15 most clearly supported and say how many remain in the ledger note. Filing nothing is a valid outcome: do not invent findings to have something to report.
 
-Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or more, fix nothing and record skipped as cap. Otherwise consider every open tech-debt issue except those labelled wontfix or td:blocked or that already have an open PR. Prefer small, self-contained issues the existing tests, ruff and mypy can verify; among those, oldest first. Deprioritize issues in the sensitive areas the spec lists, but do not refuse them if nothing else is open, and say so in the PR. Comment on the chosen issue saying why you chose it. Make a branch named tech-debt/<issue number>-<short slug>, preserve behavior, and make the change.
+Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or more, fix nothing and record skipped as cap. Otherwise consider every open tech-debt issue except those labelled wontfix or td:blocked or that already have an open PR. Prefer small, self-contained issues the existing tests, ruff and mypy can verify; among those, oldest first. Take a td:code-quality issue only if nothing else is eligible, and a td:legacy-feature issue only if the manifest marks the feature removable. If nothing is eligible, fix nothing and record skipped as no_candidate; do not open a PR to have something to show. Deprioritize issues in the sensitive areas the spec lists, but do not refuse them if nothing else is open, and say so in the PR. Comment on the chosen issue saying why you chose it. Make a branch named tech-debt/<issue number>-<short slug>, preserve behavior, and make the change.
 
 Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed.
 
@@ -392,23 +486,28 @@ If it reviews, judge each finding on its reasoning, not its severity label, and 
 
 Run the full pre-push command before every push. After pushing fixes, re-trigger once, naming the new sha, only if you can schedule a wake-up for a time after the quota hour has reset; this session just used that hour. Otherwise do not, and say in the PR exactly which commits CodeRabbit reviewed and which it did not. At most two rounds. Update the Review section of the PR body to the final state: the sha reviewed, the sha of the head, each finding and what you did with it. A clean review, or a green CodeRabbit check, is not approval and you must not describe it as one.
 
-Step 5 - ledger row, then notification. The schema is in the spec. ok describes the run: a run that scanned honestly and found nothing is ok true; a failed check, a name check that could not run, or any problem is ok false with a note. Then push a notification of one or two sentences, no markdown, using labels not names: how many issues were filed, how many are open, and either the fix PR number with whether merging redeploys and whether CodeRabbit reviewed it, or why nothing was fixed.
+Step 5 - digest. Find the issue labelled td:digest, or create it, titled Tech debt digest, with only that label. Post one comment for this run: a heading with the date, then New this week and Found again, still open, each issue on one line as the title linked to the issue followed by a dash and one sentence saying what it is, then one line for the fix PR with its risk, or why there is none. If there is nothing, say Nothing new, nothing open to fix. Never post nothing. Run the name check over the comment first. Record the comment URL in the ledger.
+
+Step 6 - ledger row, then notification. The schema is in the spec. ok describes the run: a run that scanned honestly and found nothing is ok true; a failed check, a name check that could not run, or any problem is ok false with a note. Then push a notification of one or two sentences, no markdown, using labels not names: how many issues were filed, how many are open, that the digest is posted, and either the fix PR number with whether merging redeploys and whether CodeRabbit reviewed it, or why nothing was fixed.
 ```
 
 ## Deploying it
 
-1. Merge this file.
-2. Create the labels: `tech-debt`, `td:blocked`, and the six `td:` categories.
-3. Add the `operations/tech-debt/` row and schema to `operations/ledger/README.md`.
-4. Run the category checks once by hand, to see how many findings the first scan
-   will file, and whether the 15-issue per-run cap in the prompt is right.
-5. Confirm the Routine's service account can read `MEMBER_PSEUDONYM_LABELS` and
-   can create objects under `operations/tech-debt/`. Neither is established.
-   `terraform/main.tf` grants `objectCreator` on the `operations/` prefix, which
-   probably covers the second; check, don't assume.
-6. Create the Routine, compare the live prompt text after pasting (a pasted prompt
-   is read as markdown and loses paired asterisks; this one has none), record the
-   trigger ID here, and change **Status**.
-7. Add the Routine to CLAUDE.md's list once deployed.
-8. Confirm the session can post PR comments and review replies, and whether
-   `send_later` is available. Neither is established.
+Who does each step. **You** means a manual step that only the maintainer can do;
+**merge** means it happens when this PR merges; **Claude** means a session can do
+it when asked.
+
+| # | Step | Who |
+|---|---|---|
+| 1 | Merge this PR. Touches only `operations/`, so no build and no deploy. | **You** |
+| 2 | The ledger prefix row and schema in `operations/ledger/README.md`, and the empty `tech-debt.jsonl` | Done in this PR (**merge**) |
+| 3 | Create the labels: `tech-debt`, `td:blocked`, `td:digest`, and the eight `td:` categories | **Automatic**: the Routine creates any missing label at the start of each run. Optional to do it yourself first |
+| 4 | Write `operations/features.md` (the feature manifest). Without it `td:legacy-feature` is skipped, which is allowed, so this is not a blocker for deploying | **You** decide each status. Claude can draft the table from the code for you to correct |
+| 5 | Confirm the Routine can write the ledger. `teetime-artifact-reader` holds `objectCreator` on the `operations/` prefix (`terraform/main.tf`, `routine_ledger_writer`), which covers `operations/tech-debt/`. **Not confirmed:** that the Routine runs as that account | **You**, in the Routine's environment |
+| 6 | Confirm the Routine's account can read `MEMBER_PSEUDONYM_LABELS`. `terraform/` grants Secret Manager access to the Cloud Run account, and **nothing found grants it to `teetime-artifact-reader`**; the race report Routine reads the same secret, so it probably works, but this is unverified | **You** check; add a terraform grant if it fails |
+| 7 | Confirm the Routine's GitHub access can create issues and labels, push branches and open PRs. The race report only needs to push and open PRs | **You**, in the Routine's repository and connector settings |
+| 8 | Create the Routine in the routines UI: name, cron `0 9 * * 6`, model, repository, environment, and paste the prompt below | **You**. An agent cannot create it; the existing triggers say so |
+| 9 | After pasting, compare the live text with this file (a pasted prompt is read as markdown and loses paired asterisks; this one has none) | **You** |
+| 10 | Record the trigger ID in this file, change **Status**, and add the Routine to `CLAUDE.md`'s list | Claude, in a small PR once you have the ID. The commit touches only ignored paths |
+| 11 | Optional: run the category checks once by hand to see how many findings the first scan files | Claude, on request |
+| 12 | Watch the first run, Saturday 2026-10-10 at 04:00 CDT. It is the first test of: label use, the 15-issue cap, the digest, the name check, and whether a Routine session can schedule a wake-up for a CodeRabbit retry | **You** (Claude can review the result) |
