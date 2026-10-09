@@ -3022,6 +3022,8 @@ class WaldenGolfProvider(ReservationProvider):
                         site_message=site_message,
                         technical=technical,
                         unchecked=unchecked,
+                        requested_time=target_time,
+                        attempted_time=booked_time,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -3108,6 +3110,8 @@ class WaldenGolfProvider(ReservationProvider):
                         site_message=site_message,
                         technical=technical,
                         unchecked=held is None,
+                        requested_time=target_time,
+                        attempted_time=booked_time,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -6059,7 +6063,13 @@ class WaldenGolfProvider(ReservationProvider):
         return bool(confirmed)
 
     def _member_facing_failure(
-        self, *, site_message: str | None, technical: str, unchecked: bool
+        self,
+        *,
+        site_message: str | None,
+        technical: str,
+        unchecked: bool,
+        requested_time: time | None = None,
+        attempted_time: time | None = None,
     ) -> str:
         """Phrase a failed direct-HTTP booking for the member who asked for it.
 
@@ -6081,10 +6091,36 @@ class WaldenGolfProvider(ReservationProvider):
         """
         if site_message:
             logger.error("DIRECT_HTTP: %s; the site said: %s", technical, site_message)
+            site_message = self._lead_with_restriction(site_message)
         message = site_message or technical
+        if (
+            requested_time is not None
+            and attempted_time is not None
+            and attempted_time != requested_time
+        ):
+            # The notice header names the time the member asked for; the
+            # refusal came on a fallback, and "09:23 AM was refused" would be
+            # false (issue #284).
+            message = (
+                f"The club refused {attempted_time:%I:%M %p}, a fallback for your "
+                f"{requested_time:%I:%M %p} request: {message}"
+            )
         if unchecked:
             message += " (the member's reservations page could not be checked)"
         return message
+
+    @staticmethod
+    def _lead_with_restriction(site_message: str) -> str:
+        """Keep only the club's restriction when the message carries one.
+
+        A restriction (e.g. one round per day) is the whole reason for the
+        refusal. Any "slot is blocked by another user" alert beside it is
+        stale - the booker has already discounted it - and sending both
+        misled a member into thinking a rival took the slot (issue #284).
+        """
+        parts = [p.strip() for p in site_message.split(";")]
+        restrictions = [p for p in parts if p.startswith("Restriction:")]
+        return "; ".join(restrictions) if restrictions else site_message
 
     def _booking_text_verdict(self, text: str, context: str) -> tuple[bool | None, str]:
         """Classify booking text as confirmed, refused, or silent.

@@ -4571,3 +4571,45 @@ class TestRaceRunId:
         monkeypatch.delenv("CLOUD_RUN_TASK_INDEX", raising=False)
         monkeypatch.delenv("CLOUD_RUN_EXECUTION", raising=False)
         assert _race_run_id() != _race_run_id()
+
+
+class TestMemberFacingFailure:
+    """The notice leads with the club's restriction and names the time tried (#284)."""
+
+    STALE = "Reservation Alert: This slot is blocked by another user."
+    RESTRICTION = (
+        "Restriction: Member: <Member B> is restricted for 1 round(s) on Northgate per Day"
+    )
+
+    def test_restriction_sent_without_stale_alert(self, provider: WaldenGolfProvider) -> None:
+        message = provider._member_facing_failure(
+            site_message=f"{self.STALE}; {self.RESTRICTION}", technical="x", unchecked=False
+        )
+        assert message == self.RESTRICTION
+
+    def test_message_without_restriction_is_untouched(self, provider: WaldenGolfProvider) -> None:
+        message = provider._member_facing_failure(
+            site_message=self.STALE, technical="x", unchecked=False
+        )
+        assert message == self.STALE
+
+    def test_names_both_times_when_fallback_was_tried(self, provider: WaldenGolfProvider) -> None:
+        message = provider._member_facing_failure(
+            site_message=self.RESTRICTION,
+            technical="x",
+            unchecked=False,
+            requested_time=time(9, 23),
+            attempted_time=time(9, 15),
+        )
+        assert message.startswith("The club refused 09:15 AM, a fallback for your 09:23 AM")
+        assert message.endswith(self.RESTRICTION)
+
+    def test_same_time_adds_no_prefix(self, provider: WaldenGolfProvider) -> None:
+        message = provider._member_facing_failure(
+            site_message=self.RESTRICTION,
+            technical="x",
+            unchecked=False,
+            requested_time=time(9, 23),
+            attempted_time=time(9, 23),
+        )
+        assert message == self.RESTRICTION

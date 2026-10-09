@@ -176,6 +176,8 @@ class TestBookingServiceBookings:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -430,6 +432,7 @@ class TestBookingServiceImmediateExecution:
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(return_value=created_booking)
             mock_db.get_booking = AsyncMock(return_value=executed_booking)
 
@@ -506,6 +509,7 @@ class TestBookingServiceImmediateExecution:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             mock_provider = MagicMock()
@@ -555,6 +559,7 @@ class TestBookingServiceImmediateExecution:
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(return_value=created_booking)
             mock_db.get_booking = AsyncMock(return_value=executed_booking)
 
@@ -769,6 +774,7 @@ class TestBookingServiceIntentHandling:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -1763,6 +1769,7 @@ class TestBookingService48HourRestriction:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
             mock_db.get_booking = AsyncMock(return_value=None)  # For execute path
             mock_db.update_booking = AsyncMock(side_effect=create_booking_side_effect)
@@ -1804,6 +1811,7 @@ class TestBookingService48HourRestriction:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -2201,6 +2209,7 @@ class TestOriginChannelRouting:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             future_request = TeeTimeRequest(
@@ -2515,6 +2524,7 @@ class TestImmediateMultiBookingRunsAsOneBatch:
             found = stored.get(booking_id)
             return found.model_copy(deep=True) if found is not None else None
 
+        mock_db.get_bookings = AsyncMock(return_value=[])
         mock_db.create_booking = AsyncMock(side_effect=save)
         mock_db.update_booking = AsyncMock(side_effect=save)
         mock_db.get_booking = AsyncMock(side_effect=load)
@@ -3109,6 +3119,7 @@ class TestImmediateBookingDoesNotBlockReply:
             )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.get_booking = AsyncMock(
@@ -3721,6 +3732,7 @@ class TestCredentialIsRequired:
     ) -> None:
         """A row would look scheduled to the user and fail a week later."""
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock()
 
             with pytest.raises(ValueError):
@@ -3742,6 +3754,7 @@ class TestCredentialIsRequired:
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_or_create_session = AsyncMock(return_value=session)
             mock_db.update_session = AsyncMock(return_value=session)
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock()
 
             response = await booking_service.handle_incoming_message("+15551234567", "yes")
@@ -4543,6 +4556,7 @@ class TestSlotAgreement:
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda booking: booking)
             with patch.object(CTDateTime, "now") as mock_now:
                 mock_now.return_value = pytz.timezone("America/Chicago").localize(
@@ -4651,3 +4665,60 @@ async def test_a_changed_party_size_is_a_new_request_not_a_pick(
     assert (request.requested_time, request.num_players) == (time(7, 54), 2)
     assert request.asked_time is None
     assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+
+
+class TestSameDayDuplicateRefusal:
+    """One Northgate round per member per day: refuse the second request (#284)."""
+
+    @staticmethod
+    def _existing(status: BookingStatus, day: date = date(2025, 12, 30)) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id="aaaa1111",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(requested_date=day, requested_time=time(9, 23), num_players=4),
+            status=status,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status", [BookingStatus.PENDING, BookingStatus.SCHEDULED, BookingStatus.IN_PROGRESS]
+    )
+    async def test_second_request_same_date_refused(
+        self, booking_service: BookingService, status: BookingStatus
+    ) -> None:
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=1
+        )
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[self._existing(status)])
+            mock_db.create_booking = AsyncMock()
+            with pytest.raises(ValueError, match=r"already have 09:23 AM on Tue Dec 30"):
+                await booking_service.create_booking("+15551234567", request)
+            mock_db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "existing",
+        [
+            (BookingStatus.FAILED, date(2025, 12, 30)),
+            (BookingStatus.CANCELLED, date(2025, 12, 30)),
+            (BookingStatus.SCHEDULED, date(2025, 12, 31)),
+        ],
+    )
+    async def test_settled_or_other_date_bookings_do_not_block(
+        self, booking_service: BookingService, existing: tuple[BookingStatus, date]
+    ) -> None:
+        import pytz
+
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=1
+        )
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[self._existing(*existing)])
+            mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                    datetime(2025, 12, 22, 10, 0)
+                )
+                booking = await booking_service.create_booking("+15551234567", request)
+        assert booking.status == BookingStatus.SCHEDULED

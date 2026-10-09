@@ -109,6 +109,7 @@ class TestBookingsEndpoints:
             ) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             response = test_client.post("/bookings/", json=request_data)
@@ -137,6 +138,7 @@ class TestBookingsEndpoints:
             ) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             response = test_client.post("/bookings/", json=request_data)
@@ -474,6 +476,7 @@ class TestBookingsEndpointsIntegration:
                 created_booking = booking
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             create_response = test_client.post("/bookings/", json=request_data)
@@ -508,6 +511,7 @@ class TestBookingsEndpointsIntegration:
                 created_booking = booking
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             create_response = test_client.post("/bookings/", json=request_data)

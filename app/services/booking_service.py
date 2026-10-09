@@ -1815,6 +1815,23 @@ class BookingService:
                     f"You can still book for 1 player, or choose a tee time more than 48 hours away."
                 )
 
+        # The club allows one Northgate round per member per day, so a second
+        # request for the same date can only fail at 6:30 (issue #284). Keyed
+        # on the booking's phone_number, which for a proxy booking is the
+        # friend whose login books it - the identity the club restricts.
+        for existing in await database_service.get_bookings(phone_number=phone_number):
+            if (
+                existing.status
+                in (BookingStatus.PENDING, BookingStatus.SCHEDULED, BookingStatus.IN_PROGRESS)
+                and existing.request.requested_date == request.requested_date
+            ):
+                raise ValueError(
+                    f"You already have {existing.request.requested_time:%I:%M %p} on "
+                    f"{request.requested_date:%a %b %d} queued. The club allows one Northgate "
+                    "round per member per day, so I can't book a second. Cancel the "
+                    "existing one first if you'd rather have a different time."
+                )
+
         booking_id = str(uuid.uuid4())[:8]
 
         execution_time = self._calculate_execution_time(request.requested_date)
