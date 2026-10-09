@@ -180,3 +180,40 @@ def test_the_observer_horizon_reaches_the_observer() -> None:
         r'name\s*=\s*"OBSERVER_HORIZON_DAYS"\s*\n\s*value\s*=\s*tostring\(var\.observer_horizon_days\)',
         observer_tf,
     ), "OBSERVER_HORIZON_DAYS is not set from var.observer_horizon_days in terraform/observer.tf"
+
+
+_REPO = _TERRAFORM.parent
+
+
+def test_the_deploy_filter_skips_tests_and_scripts() -> None:
+    """The trigger's ``ignored_files`` is pinned, so a refactor cannot drop an entry."""
+    text = (_TERRAFORM / "main.tf").read_text(encoding="utf-8")
+    match = re.search(r"ignored_files\s*=\s*\[([^\]]*)\]", text)
+    assert match, "the Cloud Build trigger lost its ignored_files filter"
+    entries = set(re.findall(r'"([^"]+)"', match.group(1)))
+    assert {"operations/**", "docs/**", ".claude/**", "CLAUDE.md"} <= entries
+    assert {"tests/**", "scripts/**"} <= entries
+
+
+def test_nothing_deployed_depends_on_scripts() -> None:
+    """``scripts/**`` is out of the deploy filter only while the service never uses it.
+
+    A change to a directory the filter skips does not rebuild the image. So if
+    app/ imports scripts, or a Cloud Run job or the image runs one, that change
+    would reach ``main`` and not the live service.
+    """
+    importing = re.compile(r"^\s*(from|import)\s+scripts\b", re.MULTILINE)
+    offenders = [
+        str(path.relative_to(_REPO))
+        for path in (_REPO / "app").rglob("*.py")
+        if importing.search(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, f"app/ imports scripts/: {offenders}"
+
+    commands = re.compile(r"^\s*(command|args)\s*=\s*\[[^\]]*scripts[^\]]*\]", re.MULTILINE)
+    for tf in _TERRAFORM.glob("*.tf"):
+        assert not commands.search(tf.read_text(encoding="utf-8")), f"{tf.name} runs a script"
+    for name in ("Dockerfile", "cloudbuild.yaml"):
+        for line in (_REPO / name).read_text(encoding="utf-8").splitlines():
+            code = line.split("#", 1)[0]
+            assert not re.search(r"\bscripts/", code), f"{name} uses scripts/: {line.strip()}"
