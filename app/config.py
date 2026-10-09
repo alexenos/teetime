@@ -655,7 +655,7 @@ class Settings(BaseSettings):
     # #269). Reasons per period: operations/retention.md. These live here and
     # nowhere in terraform, so there is one default to keep honest.
     #
-    # Idle conversation sessions, by last message.
+    # Conversation sessions, by last message.
     retention_session_days: int = 90
     # Observer readings of the slot grid, by when they were read.
     retention_tee_sheet_grid_days: int = 90

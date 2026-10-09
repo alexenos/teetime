@@ -14,7 +14,7 @@ change. Applying them deletes data (see Applying), so merge is the decision.
 | Store | Holds | Kept | Enforced by |
 |---|---|---|---|
 | `bookings` (Cloud SQL) | requests and outcomes | **indefinitely**, to study booking trends over years | nothing deletes it, by decision of the maintainer |
-| `sessions` (Cloud SQL) | conversation state | idle rows 90 days after the last message; a mid-conversation row never | `retention_session_days` |
+| `sessions` (Cloud SQL) | conversation state | 90 days after the last message, in any state | `retention_session_days` |
 | `tee_sheet_grids` (Cloud SQL) | observer slot-grid readings | 90 days after the reading | `retention_tee_sheet_grid_days` |
 | `walden_credentials` (Cloud SQL) | a member's stored login | until `/forget` or leaving the group (existing); 90 days after Walden rejected it with no replacement | `retention_invalid_login_days` |
 | `member_pseudonyms` (Cloud SQL) | label per member | **indefinitely** | nothing deletes it, by design |
@@ -40,8 +40,10 @@ race, so it cannot hold a lock when the racer claims its bookings.
   a member's history on file after they leave; `docs/privacy.md` says so, and
   removal is by asking. Anonymising a leaver's rows instead of deleting them
   would keep the trend data without the identity, and is not built.
-- **Idle sessions, 90 days.** An idle session carries nothing: the next message
-  creates a new one.
+- **Sessions, 90 days after the last message.** A session carries no booking
+  state (that is in `bookings`), and the next message creates a new one. One
+  abandoned mid-conversation still holds the half-made request and nothing else
+  resets it, so state does not matter.
 - **Grid readings, 90 days.** The booking conversation reads only the latest
   reading of an upcoming date. Older ones serve a post-mortem, and a morning is
   diagnosed within days.
@@ -77,9 +79,16 @@ night. Both delete:
 - Whatever the SQL rules match. Run `?dry_run=true` first and read the counts:
 
 ```bash
+SA=$(terraform -chdir=terraform output -raw scheduler_service_account)
 curl -s -X POST "$SERVICE_URL/jobs/purge-expired?dry_run=true" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)"
+  -H "Authorization: Bearer $(gcloud auth print-identity-token \
+      --impersonate-service-account="$SA" --audiences="$SERVICE_URL")"
 ```
+
+The endpoint accepts only a token from the scheduler's service account with the
+service URL as audience, so a plain `gcloud auth print-identity-token` for your
+own account is refused. Impersonating needs `roles/iam.serviceAccountTokenCreator`
+on that account. This command has not been run.
 
 ## What is not established
 

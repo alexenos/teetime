@@ -85,7 +85,8 @@ checked automatically for names before it is published.
   comes to mean someone else.
 - **Service logs:** 30 days.
 - **Copies of the club's tee-sheet pages** taken during bookings, which can show
-  members' names: 90 days.
+  members' names: about 90 days, then up to two more weeks in a recovery
+  window before they are gone for good.
 - **Backups** of the database are kept for a short rolling period, so a row
   deleted from the database can remain in a backup for up to about a week.
 

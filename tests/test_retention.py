@@ -67,7 +67,8 @@ async def test_bookings_are_never_deleted(db: async_sessionmaker) -> None:
 
 
 @pytest.mark.asyncio
-async def test_only_idle_old_sessions_go(db: async_sessionmaker) -> None:
+async def test_old_sessions_go_in_any_state(db: async_sessionmaker) -> None:
+    """An abandoned mid-conversation session holds a half-made request; it goes too."""
     old = _ago(settings.retention_session_days + 1)
     async with db() as s:
         s.add_all(
@@ -81,6 +82,11 @@ async def test_only_idle_old_sessions_go(db: async_sessionmaker) -> None:
                     last_interaction=old,
                 ),
                 SessionRecord(
+                    phone_number="mid-conversation-recent",
+                    state=ConversationState.AWAITING_CONFIRMATION,
+                    last_interaction=_ago(1),
+                ),
+                SessionRecord(
                     phone_number="idle-recent",
                     state=ConversationState.IDLE,
                     last_interaction=_ago(1),
@@ -91,8 +97,8 @@ async def test_only_idle_old_sessions_go(db: async_sessionmaker) -> None:
 
     result = await purge_expired(now=NOW)
 
-    assert result.deleted["sessions"] == 1
-    assert await _ids(db, SessionRecord.phone_number) == {"mid-conversation-old", "idle-recent"}
+    assert result.deleted["sessions"] == 2
+    assert await _ids(db, SessionRecord.phone_number) == {"mid-conversation-recent", "idle-recent"}
 
 
 @pytest.mark.asyncio
@@ -254,3 +260,24 @@ def test_retention_periods_below_one_day_are_rejected(name: str, value: int) -> 
 
     with pytest.raises(ValidationError):
         Settings(**{name: value})
+
+
+def test_every_bucket_lifecycle_rule_is_scoped_to_walden() -> None:
+    """operations/ holds the append-only Routine ledgers; no rule may reach it.
+
+    A lifecycle rule with no matches_prefix applies to the whole bucket. Terraform
+    would accept it, and the first apply would start deleting ledgers.
+    """
+    import re
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parent.parent / "terraform" / "main.tf").read_text(
+        encoding="utf-8"
+    )
+    bucket = text[text.index('resource "google_storage_bucket" "debug_artifacts"') :]
+    bucket = bucket[: bucket.index('resource "google_storage_bucket_iam_member"')]
+    rules = re.findall(r"lifecycle_rule \{.*?\n  \}", bucket, flags=re.DOTALL)
+
+    assert rules, "the retention rules are gone"
+    for rule in rules:
+        assert 'matches_prefix = ["walden/"]' in re.sub(r" +", " ", rule), rule

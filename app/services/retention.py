@@ -32,7 +32,6 @@ from app.models.database import (
     TeeSheetGridRecord,
     WaldenCredentialRecord,
 )
-from app.models.schemas import ConversationState
 
 logger = logging.getLogger(__name__)
 
@@ -73,15 +72,13 @@ async def purge_expired(dry_run: bool = False, now: datetime | None = None) -> P
     result = PurgeResult(dry_run=dry_run)
 
     rules: dict[str, tuple[type, ColumnElement[bool]]] = {
-        # Idle sessions carry no state worth keeping: the next message from the
-        # member creates a fresh one. A session mid-conversation is never idle.
+        # Any session, whatever its state, that nobody has written to in this
+        # long. One abandoned mid-conversation (AWAITING_*) still holds the
+        # half-made request, and nothing else ever resets it; the member's next
+        # message creates a fresh session. Booking state is in bookings, not here.
         "sessions": (
             SessionRecord,
-            (SessionRecord.state == ConversationState.IDLE)
-            & (
-                SessionRecord.last_interaction
-                < now - timedelta(days=settings.retention_session_days)
-            ),
+            SessionRecord.last_interaction < now - timedelta(days=settings.retention_session_days),
         ),
         # Appended, never updated, and the latest reading of a date is the one
         # used. Past dates are never read by a booking conversation; the older
