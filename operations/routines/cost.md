@@ -1,12 +1,12 @@
 # Routine: cost
 
-**Status: proposed. Not deployed, and cannot be until a billing export exists.**
+**Status: proposed, no longer blocked. Not deployed.** The billing export is on and the query has run against real rows (2026-10-09); what remains is creating the Routine (Deploying it, step 4).
 
 | | |
 |---|---|
 | **Trigger** | monthly, proposed — `0 14 1 * *` UTC (08:00 CT on the 1st), reporting the month just ended |
-| **Authorization** | queries BigQuery, appends to GCS. Commits nothing. |
-| **Emits** | one row in `operations/ledger/cost.jsonl` |
+| **Authorization** | queries BigQuery, writes one new object to GCS. Commits nothing. |
+| **Emits** | one object per run at `operations/cost/<YYYY-MM>.json` in GCS |
 | **Owns** | the cost metric |
 
 Separate from the scoreboard Routine on the same rule as every other source: a
@@ -18,9 +18,9 @@ Scope, prerequisites and the reasoning for BigQuery are in **#227**. Whether
 Anthropic spend can be measured at all is **#228**. This file records what the
 Routine does; those issues record what has to exist first.
 
-## What it is blocked on
+## What it was blocked on
 
-**Cloud Billing export to BigQuery is not enabled.** Verified 2026-10-03: the
+**Resolved 2026-10-04: the export is enabled**, and by 2026-10-09 it held September in full. What follows is the history of why it took a Console step. Verified 2026-10-03: the
 project billing link is enabled, the BigQuery API was not enabled on the project,
 so no export dataset could exist.
 
@@ -49,8 +49,12 @@ which is what makes the Cloud SQL question (#41, #168) answerable from data. It
 creates one table, `gcp_billing_export_resource_v1_<BILLING_ACCOUNT_ID>`.
 
 The query is `cost.sql`, beside this file. It filters on `project.id`, because the
-billing account may pay for other projects, and on `invoice.month`. It has not
-been run against real rows.
+billing account may pay for other projects, and on `invoice.month`. Run against real rows on 2026-10-09: September
+net $37.17, gross $42.39, matching the Console's $37.17 ("includes -$2.92 in
+savings, $2.30 tax"). The $2.30 is the `Invoice` service, which is tax, so the
+figure is net of credits and includes tax. The export holds only $5.64 for August
+against the Console's ~$71: the backfill starts the previous month but is not
+complete for it, so **August is not a usable prior month**.
 
 ## What it cannot cover
 
@@ -64,11 +68,12 @@ invites $/booking comparisons against a denominator that does not match.
 ## What a run does
 
 1. Query the billing export for the month just ended, grouped by service.
-2. Read `exact + fallback` for that month from `race-report.jsonl` — the booking
-   count, and the divisor for $/booking.
-3. Append one row to `cost.jsonl`, with `scope` stating what the figure covers and
-   `usd_agent` as `null` unless a figure was supplied.
-4. If the query fails or returns no rows, append a row with `ok: false` and the
+2. Write one row to GCS at `operations/cost/<YYYY-MM>.json`, with `scope` stating
+   what the figure covers and `usd_agent` as `null` unless a figure was supplied.
+   `scripts/cost_row.py` does steps 1 and 2's row: `python scripts/cost_row.py --out
+   cost-row.json`, then `gcloud storage cp --no-clobber`. $/booking is not stored: the
+   scoreboard derives it from `race-report` rows for the same month.
+3. If the query fails or returns no rows, append a row with `ok: false` and the
    reason. A month with no row is indistinguishable from a month that was never
    checked.
 
@@ -91,12 +96,17 @@ trigger to the 5th.
 
 ## Deploying it
 
-1. Merge `terraform/cost.tf` (#227) and confirm the apply in the build log.
-2. Enable the billing export in the Console, as above (outside this repository).
-3. Once the initial backfill has finished (up to five days), run `cost.sql` by
-   hand for the previous month and check it against the Console's figure for it.
+1. ~~Merge `terraform/cost.tf` (#227) and confirm the apply.~~ Done 2026-10-04.
+2. ~~Enable the billing export in the Console.~~ Done 2026-10-04.
+3. ~~Run `cost.sql` for September and check it against the Console.~~ Done
+   2026-10-09: $37.17 both. The seed row is written by `scripts/cost_row.py --seed`
+   to `operations/cost/2026-09.json`; it carries a `backfill` object, so it is
+   outside the streak.
 4. Create the Routine, record its trigger ID here, and change **Status**.
 5. Resolve #228 and record the scope decision here.
 
-Until step 1 happens, cost is `null` on every scoreboard row and the page shows it
-as unavailable rather than as zero.
+The scoreboard shows the seeded September figure once the scoreboard Routine's
+prompt reads `operations/cost` (see `operations/routines/scoreboard.md`, Step 2).
+The cost Routine's first scheduled run is 2026-11-01 for October; until then the
+seed is the newest row, and `derive_scoreboard.py` expects that run on that date
+and counts its absence as a break in the streak.
