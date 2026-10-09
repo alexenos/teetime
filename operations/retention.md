@@ -85,8 +85,10 @@ curl -s -X POST "$SERVICE_URL/jobs/purge-expired?dry_run=true" \
       --impersonate-service-account="$SA" --audiences="$SERVICE_URL")"
 ```
 
-The endpoint accepts only a token from the scheduler's service account with the
-service URL as audience, so a plain `gcloud auth print-identity-token` for your
+The endpoint prefers a token from the scheduler's service account with the
+service URL as audience. When `SCHEDULER_API_KEY` is configured it also accepts
+the legacy `X-Scheduler-API-Key` header (`verify_scheduler_auth`, as for the
+other `/jobs` endpoints). A plain `gcloud auth print-identity-token` for your
 own account is refused. Impersonating needs `roles/iam.serviceAccountTokenCreator`
 on that account. This command has not been run.
 
