@@ -121,10 +121,13 @@ backed-up maintainer is not buried; it is a count, not a quality judgment.
 | write one object to the `operations/tech-debt/` prefix in GCS | edit another Routine's file or ledger |
 
 This is not a standing authorization to write to `main`. CLAUDE.md names two
-exceptions and this is not a third. Only `operations/`, `docs/`, `.claude/` and
-`CLAUDE.md` are in `ignored_files`, so a fix PR touching anything else, `tests/`
-included, rebuilds and redeploys the service when the maintainer merges it, and
-that is the maintainer's decision. A merge landing close to the 06:28 CT job is
+exceptions and this is not a third. A fix PR touching a path outside the Cloud
+Build `ignored_files` list rebuilds and redeploys the service when the maintainer
+merges it, and that is the maintainer's decision. The list is read from
+`terraform/main.tf` on each run, not copied here, because it changes: #280 added
+`tests/**` and `scripts/**` on 2026-10-09 (applied 03:03Z), so a tests-only or
+scripts-only merge no longer deploys. A filter entry is live only once its own
+merge has applied; the build log shows it (CLAUDE.md, "Verify an apply"). A merge landing close to the 06:28 CT job is
 worth avoiding; the PR says when it would be safe.
 
 The Routine also reads `MEMBER_PSEUDONYM_LABELS` from Secret Manager, for the name
@@ -189,9 +192,10 @@ The maintainer reviews the PR, so the PR has to make review cheap and honest.
 
 - **Area:** which files, and whether any is in a sensitive area above.
 - **What merging does:** compare the changed paths against the Cloud Build
-  `ignored_files` list. Say plainly whether the merge redeploys the live service,
-  applies terraform, or does neither. A change that touches only `operations/`,
-  `docs/`, `.claude/` or `CLAUDE.md` does neither; any other path does both.
+  `ignored_files` list in `terraform/main.tf`, read fresh. Say plainly whether the
+  merge redeploys the live service and applies terraform, or does neither. The
+  filter skips the build only when every changed file matches, so one file outside
+  the list is enough to deploy. A commit that touches `terraform/` always builds.
 - **Race exposure:** whether anything the 06:28 CT job executes changed, and what
   the maintainer should watch on the next race morning if so. If the merge
   redeploys, say that it should not land between 06:15 and 06:45 CT.
@@ -326,7 +330,7 @@ One or two sentences, no markdown, labels not names. For example:
 
 - `Tech debt - 3 new issues filed, 14 open. Fix PR #302 opened for #301, CodeRabbit reviewed it and 2 of 4 findings were fixed, touches docs only, merge does not redeploy.`
 - `Tech debt - 2 new issues filed. No fix: 3 PRs already open.`
-- `Tech debt - fix PR #302 opened, touches tests, merge redeploys, CodeRabbit rate limited so not reviewed.`
+- `Tech debt - fix PR #302 opened, touches app code, merge redeploys, CodeRabbit rate limited so not reviewed.`
 
 ## Open items
 
@@ -377,7 +381,7 @@ Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or mor
 
 Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed.
 
-Open a normal PR into main with the tech-debt label and Closes #<n>. The first section of the body is Risk, stating: the files and whether any is a sensitive area; whether merging redeploys the service or applies terraform, determined by comparing the changed paths with the Cloud Build ignored_files list in terraform/main.tf, where a change touching only operations/, docs/, .claude/ or CLAUDE.md does neither; whether anything the 06:28 CT race executes changed and what to watch on the next race morning; and whether behavior changed. Then a Review section (filled in at Step 4b), then Verified and Not verified, kept separate. Say what the tests do and do not cover for the changed code. The project has no local way to exercise booking, so do not imply a green suite establishes booking behavior.
+Open a normal PR into main with the tech-debt label and Closes #<n>. The first section of the body is Risk, stating: the files and whether any is a sensitive area; whether merging redeploys the service or applies terraform, determined by comparing the changed paths with the Cloud Build ignored_files list, read fresh from terraform/main.tf rather than recalled, where a change whose every file matches the list does neither and any file outside it does both; whether anything the 06:28 CT race executes changed and what to watch on the next race morning; and whether behavior changed. Then a Review section (filled in at Step 4b), then Verified and Not verified, kept separate. Say what the tests do and do not cover for the changed code. The project has no local way to exercise booking, so do not imply a green suite establishes booking behavior.
 
 Step 4b - CodeRabbit. Read .claude/skills/ship-pr/SKILL.md and follow its sections on triggering, rate limits, reading the review and judging each comment. CodeRabbit never reviews this repo on its own, so post a comment on your PR reading @coderabbitai review - new commit <short sha>, with the sha of the head. Wait until its reply has stopped changing for 30 seconds, because the first wording can be edited into a refusal, then poll for findings for up to 20 minutes. Fetch both the inline review comments and the issue comments, and take only top-level comments.
 
