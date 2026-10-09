@@ -115,7 +115,7 @@ backed-up maintainer is not buried; it is a count, not a quality judgment.
 | Can | Cannot |
 |---|---|
 | read the repository, GitHub, and the ledgers | merge any PR, by any route, including its own |
-| create and edit issues and labels, and comment on issues | close an issue it did not file, or reopen one the maintainer closed `wontfix` |
+| create and edit issues and labels, and comment on issues | close an issue itself, or reopen one the maintainer closed `wontfix`. A fix PR's `Closes #<n>` closes the issue only when the maintainer merges it. |
 | push one branch and open one non-draft PR per run, and push further commits to that branch in response to review | push to `main`, or to a branch that is not its own |
 | trigger CodeRabbit on its own PR, and reply to its findings there | trigger or reply on any other PR |
 | write one object to the `operations/tech-debt/` prefix in GCS | edit another Routine's file or ledger |
@@ -353,8 +353,9 @@ One or two sentences, no markdown, labels not names. For example:
 - **The category checks are unrun.** None of the commands above has been run
   against this repository for this purpose. Number of existing suppressions, TODOs
   and skipped tests is not established, so the first scan may file a large batch.
-  Consider a cap on issues filed per run (not set here) to stop a first run
-  flooding the tracker.
+  The prompt therefore caps filing at 15 issues per run, which is a first guess
+  chosen for that reason; the remainder is counted in the ledger note and filed on
+  later runs.
 - **Label creation.** The labels do not exist yet. The first run, or whoever
   deploys it, has to create them.
 
@@ -400,7 +401,7 @@ Step 5 - ledger row, then notification. The schema is in the spec. ok describes 
 2. Create the labels: `tech-debt`, `td:blocked`, and the six `td:` categories.
 3. Add the `operations/tech-debt/` row and schema to `operations/ledger/README.md`.
 4. Run the category checks once by hand, to see how many findings the first scan
-   will file and to decide on the per-run issue cap.
+   will file, and whether the 15-issue per-run cap in the prompt is right.
 5. Confirm the Routine's service account can read `MEMBER_PSEUDONYM_LABELS` and
    can create objects under `operations/tech-debt/`. Neither is established.
    `terraform/main.tf` grants `objectCreator` on the `operations/` prefix, which
