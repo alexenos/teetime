@@ -18,12 +18,14 @@ change. Applying them deletes data (see Applying), so merge is the decision.
 | `tee_sheet_grids` (Cloud SQL) | observer slot-grid readings | 90 days after the reading | `retention_tee_sheet_grid_days` |
 | `walden_credentials` (Cloud SQL) | a member's stored login | until `/forget` or leaving the group (existing); 90 days after Walden rejected it with no replacement | `retention_invalid_login_days` |
 | `member_pseudonyms` (Cloud SQL) | label per member | **indefinitely** | nothing deletes it, by design |
-| `walden/` in the debug-artifacts bucket | failure captures, race artifacts, observer snapshots | 90 days, then a 7-day noncurrent version, then 7 days of soft delete | bucket lifecycle rules, `debug_artifact_retention_days` |
+| `walden/` in the debug-artifacts bucket | failure captures, race artifacts, observer snapshots | 90 days, then 7 days as a noncurrent version, then 7 days of soft delete; an overwritten object's old version goes at 90 days too, not sooner | bucket lifecycle rules, `debug_artifact_retention_days` |
 | `operations/` in the same bucket | Routine ledgers | **indefinitely** | no rule matches the prefix |
 | `billing_export` (BigQuery) | Cloud Billing export | **indefinitely** | none; it cannot be re-run for past days |
 | Cloud Logging | service and job logs | 30 days (`_Default`); 400 days locked (`_Required`) | Cloud Logging defaults, unchanged |
-| Cloud SQL backups | automated backups, point-in-time logs | 7 backups | Cloud SQL setting, unchanged |
+| Cloud SQL backups | automated backups, point-in-time logs | 7 daily backups and 7 days of transaction logs | Cloud SQL settings, unchanged |
 | `operations/` in git | race reports, scoreboard | indefinitely | git; the repository is public |
+
+Read from the live instance on 2026-10-09: `retainedBackups: 7` (7 daily backups listed, 2026-10-02 to 2026-10-08) and `transactionLogRetentionDays: 7`. So a row deleted from the live database can remain in a backup or the logs for about a week, and "deleted" above means deleted from the live database.
 
 The SQL periods are settings in `app/config.py`, read in one place: the purge,
 `app/services/retention.py`. It runs daily at 03:15 CT (Cloud Scheduler
@@ -86,10 +88,6 @@ curl -s -X POST "$SERVICE_URL/jobs/purge-expired?dry_run=true" \
   none was looked for.
 - Secret Manager version retention. Old versions of a secret may persist after a
   rotation; this was not checked, and no rule here covers it.
-- Cloud SQL point-in-time log retention, and the exact age of the oldest backup.
-  Only `retainedBackups=7` was read. A deleted row can persist in a backup for
-  that long, so "deleted" in the table above means deleted from the live
-  database.
 - Telegram's own copy of a conversation, and Gemini's handling of message text,
   are outside this system's control. `docs/privacy.md` names Gemini as a
   recipient.

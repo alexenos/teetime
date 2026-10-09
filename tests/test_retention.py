@@ -215,3 +215,42 @@ def test_purge_endpoint_requires_scheduler_auth() -> None:
     response = TestClient(app).post("/jobs/purge-expired")
 
     assert response.status_code in (401, 403, 422)
+
+
+def test_purge_endpoint_fails_when_a_rule_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 2xx would tell Cloud Scheduler not to retry, leaving the rule for tomorrow."""
+    from fastapi.testclient import TestClient
+
+    from app.api import jobs
+    from app.main import app
+    from app.services.retention import PurgeResult
+
+    async def failed(dry_run: bool = False) -> PurgeResult:
+        return PurgeResult(
+            dry_run=dry_run, deleted={"sessions": 2}, errors={"tee_sheet_grids": "OperationalError"}
+        )
+
+    monkeypatch.setattr(jobs, "purge_expired", failed)
+    app.dependency_overrides[jobs.verify_scheduler_auth] = lambda: None
+    try:
+        response = TestClient(app).post("/jobs/purge-expired")
+    finally:
+        app.dependency_overrides.pop(jobs.verify_scheduler_auth, None)
+
+    assert response.status_code == 500
+    assert response.json()["deleted"] == {"sessions": 2}
+    assert response.json()["errors"] == {"tee_sheet_grids": "OperationalError"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["retention_session_days", "retention_tee_sheet_grid_days", "retention_invalid_login_days"],
+)
+@pytest.mark.parametrize("value", [0, -1])
+def test_retention_periods_below_one_day_are_rejected(name: str, value: int) -> None:
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(**{name: value})

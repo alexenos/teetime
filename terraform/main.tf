@@ -389,6 +389,7 @@ resource "google_storage_bucket" "debug_artifacts" {
   lifecycle_rule {
     condition {
       age            = var.debug_artifact_retention_days
+      with_state     = "LIVE"
       matches_prefix = ["walden/"]
     }
     action {
@@ -396,9 +397,15 @@ resource "google_storage_bucket" "debug_artifacts" {
     }
   }
 
+  # Conditions in one rule are ANDed, rules are ORed. Without age here, a
+  # version superseded by an overwrite on day 1 would go on day 8, not day 90;
+  # without with_state, the rule above would also delete noncurrent versions on
+  # age alone, skipping the 7-day wait.
   lifecycle_rule {
     condition {
+      age                        = var.debug_artifact_retention_days
       days_since_noncurrent_time = 7
+      with_state                 = "ARCHIVED"
       matches_prefix             = ["walden/"]
     }
     action {

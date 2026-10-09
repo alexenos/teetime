@@ -16,6 +16,7 @@ from datetime import date, datetime, time
 from enum import Enum
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -235,7 +236,7 @@ class PurgeResponse(BaseModel):
 async def purge_expired_data(
     dry_run: bool = False,
     _: None = Depends(verify_scheduler_auth),
-) -> PurgeResponse:
+) -> PurgeResponse | JSONResponse:
     """Delete rows that have outlived their retention period (issue #269).
 
     Called daily by Cloud Scheduler, hours before the booking race. Periods are
@@ -243,7 +244,13 @@ async def purge_expired_data(
     `?dry_run=true` counts what would go and deletes nothing.
     """
     result = await purge_expired(dry_run=dry_run)
-    return PurgeResponse(dry_run=result.dry_run, deleted=result.deleted, errors=result.errors)
+    body = PurgeResponse(dry_run=result.dry_run, deleted=result.deleted, errors=result.errors)
+    if result.errors:
+        # A 2xx is an acknowledgement to Cloud Scheduler, which would then skip
+        # its retry and leave the failed rule for tomorrow. The rules that did
+        # run are in the body either way.
+        return JSONResponse(status_code=500, content=body.model_dump())
+    return body
 
 
 async def run_bookings_and_report(
