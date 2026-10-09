@@ -528,7 +528,13 @@ resource "google_cloudbuild_trigger" "deploy_main" {
   # run where a metric moved. Without this entry each of those publishes would
   # rebuild the image and redeploy the live booking service - daily, for a file
   # the service never reads.
-  ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md"]
+  # tests/ and scripts/ are skipped for the same reason: the image carries them
+  # only because the Dockerfile copies the whole tree. The service, racer and
+  # observer run `app.*` entry points and nothing reads either directory; tests
+  # are checked by the GitHub Actions `Tests` check, not by this build. If app/
+  # ever imports from scripts/ (today a few docstrings only mention it), or a job
+  # runs a script, remove scripts/** here or that change will not deploy.
+  ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md", "tests/**", "scripts/**"]
 
   filename        = "cloudbuild.yaml"
   service_account = google_service_account.cloud_build.id
