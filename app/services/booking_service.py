@@ -129,6 +129,24 @@ def _member_safe_error(error: str | None) -> str:
 # outlived the container that claimed it.
 INTERRUPTED_MIN_AGE = timedelta(minutes=30)
 
+# Booking requests and changes are declined while the 6:30 race runs (issue
+# #284): the racer is driving the club's site and a cancel or a new request
+# racing it can lose a tee time. CT wall clock, every day.
+RACE_FREEZE_START = dtime(6, 28)
+RACE_FREEZE_END = dtime(6, 35)
+RACE_FREEZE_MESSAGE = (
+    "Sorry, I can't take new bookings or changes between 6:28 and 6:35 AM CT while the "
+    "booking race is running. Please try again after 6:35."
+)
+
+# Statuses that hold, or are about to hold, a member's one round for the day.
+LIVE_BOOKING_STATUSES = (
+    BookingStatus.PENDING,
+    BookingStatus.SCHEDULED,
+    BookingStatus.IN_PROGRESS,
+    BookingStatus.SUCCESS,
+)
+
 # Replies that settle a pending booking confirmation without asking the LLM
 # what they mean. The bot just printed the bookings and said "Reply 'yes' to
 # confirm", so a bare "yes" needs no interpretation - and sending it to Gemini
@@ -467,6 +485,11 @@ class BookingService:
                 await self.update_session(session)
                 return picked
 
+        if session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION:
+            response = await self._handle_replace_reply(session, message)
+            await self.update_session(session)
+            return response
+
         affirmative = self._confirmation_shortcut(session, message)
         if affirmative is not None:
             response = await self._handle_confirmation_shortcut(session, affirmative)
@@ -751,6 +774,23 @@ class BookingService:
             )
 
     async def _handle_book_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
+
+        named = parsed.tee_time_requests or (
+            [parsed.tee_time_request] if parsed.tee_time_request else []
+        )
+        dates = [r.requested_date for r in named]
+        if len(dates) > 1 and len(set(dates)) < len(dates):
+            repeated = next(d for d in dates if dates.count(d) > 1)
+            self._set_pending(session, [])
+            self._clear_pending_proxy_target(session)
+            session.state = ConversationState.IDLE
+            return (
+                "The club only allows one round per member per day, so I can't book more "
+                f"than one tee time on {repeated:%A, %B %d}. Tell me which time you'd like."
+            )
+
         if parsed.tee_time_requests and len(parsed.tee_time_requests) > 1:
             session.pending_requests = parsed.tee_time_requests
             session.pending_request = None
@@ -864,8 +904,264 @@ class BookingService:
                 session.state = ConversationState.AWAITING_SLOT_CHOICE
                 return self._slot_question(request, position, len(requests), check)
 
+        conflict_reply = await self._resolve_same_day_conflicts(session)
+        if conflict_reply is not None:
+            return conflict_reply
+
         session.state = ConversationState.AWAITING_CONFIRMATION
         return await self._confirmation_prompt(session)
+
+    @staticmethod
+    def _in_race_freeze() -> bool:
+        """True from 6:28 to 6:35 CT, while the booking race is running."""
+        now = CTDateTime.now().time().replace(tzinfo=None)
+        return RACE_FREEZE_START <= now < RACE_FREEZE_END
+
+    def _decline_during_race(self, session: UserSession) -> str:
+        session.pending_request = None
+        session.pending_requests = None
+        self._clear_pending_proxy_target(session)
+        self._clear_replace(session)
+        session.state = ConversationState.IDLE
+        return RACE_FREEZE_MESSAGE
+
+    @staticmethod
+    def _clear_replace(session: UserSession) -> None:
+        session.pending_replace_booking_id = None
+        session.replace_clarifications = 0
+
+    @staticmethod
+    def _set_pending(session: UserSession, requests: list[TeeTimeRequest]) -> None:
+        """Store ``requests`` the way a conversation holds one or several."""
+        session.pending_request = requests[0] if len(requests) == 1 else None
+        session.pending_requests = requests if len(requests) > 1 else None
+
+    @staticmethod
+    def _held_time(booking: TeeTimeBooking) -> dtime:
+        return booking.actual_booked_time or booking.request.requested_time
+
+    def _window_open(self, target_date: date) -> bool:
+        """True when the booking window for ``target_date`` has already opened."""
+        exec_ct = CTDateTime.normalize_to_ct(self._calculate_execution_time(target_date))
+        return exec_ct <= CTDateTime.now()
+
+    async def _resolve_same_day_conflicts(self, session: UserSession) -> str | None:
+        """Deal with requests on a date where the member already has a booking.
+
+        The club allows one Northgate round per member per day (issue #284), so
+        a second request can only fail at 6:30. The same time and party is
+        answered and dropped; a booking already being attempted is left alone;
+        anything else asks whether to replace the existing booking, one request
+        at a time. Returns the reply, or None when no request conflicts.
+        """
+        attribution = await self._attribution_for(session)
+        live = [
+            b
+            for b in await database_service.get_bookings(phone_number=attribution.phone_number)
+            if b.status in LIVE_BOOKING_STATUSES
+        ]
+        subject = (
+            f"{attribution.display_name} already has"
+            if attribution.is_proxy
+            else "You already have"
+        )
+
+        notes: list[str] = []
+        keep: list[TeeTimeRequest] = []
+        conflict: tuple[TeeTimeRequest, TeeTimeBooking] | None = None
+        for request in self._pending(session):
+            held = next(
+                (b for b in live if b.request.requested_date == request.requested_date), None
+            )
+            if held is None:
+                keep.append(request)
+                continue
+            day = f"{request.requested_date:%A, %B %d}"
+            held_at = f"{self._held_time(held):%I:%M %p}"
+            if (
+                self._held_time(held) == request.requested_time
+                and held.request.num_players == request.num_players
+                and held.request.fallback_window_minutes == request.fallback_window_minutes
+            ):
+                verb = "booked" if held.status == BookingStatus.SUCCESS else "queued"
+                notes.append(f"{subject} {held_at} {verb} for {day}.")
+            elif held.status == BookingStatus.IN_PROGRESS:
+                notes.append(
+                    f"{subject} {held_at} on {day}, and it is being booked right now, so I "
+                    "can't change it. Try again in a few minutes."
+                )
+            elif self._window_open(request.requested_date) and request.slot_confirmed is not True:
+                # The window is open, so the new time books at once. It has to
+                # be known open before anything existing is touched.
+                notes.append(
+                    f"I can't confirm {request.requested_time:%I:%M %p} is open on {day}, "
+                    f"so I've left your {held_at} booking as it is."
+                )
+            else:
+                keep.append(request)
+                if conflict is None:
+                    conflict = (request, held)
+
+        if not notes and conflict is None:
+            return None
+        prefix = "\n".join(notes) + ("\n\n" if notes and keep else "")
+
+        if conflict is not None:
+            request, held = conflict
+            self._set_pending(session, keep)
+            session.state = ConversationState.AWAITING_REPLACE_CONFIRMATION
+            session.pending_replace_booking_id = held.id
+            session.replace_clarifications = 0
+            return prefix + self._replace_question(
+                request, held, subject, self._window_open(request.requested_date)
+            )
+
+        if not keep:
+            self._set_pending(session, [])
+            self._clear_pending_proxy_target(session)
+            session.state = ConversationState.IDLE
+            return prefix.strip()
+        self._set_pending(session, keep)
+        session.state = ConversationState.AWAITING_CONFIRMATION
+        return prefix + await self._confirmation_prompt(session)
+
+    def _replace_question(
+        self,
+        request: TeeTimeRequest,
+        held: TeeTimeBooking,
+        subject: str,
+        window_open: bool,
+    ) -> str:
+        day = f"{request.requested_date:%A, %B %d}"
+        text = (
+            f"{subject} {self._held_time(held):%I:%M %p} queued for {day}. The club only "
+            f"allows one round per member per day. Would you like to change the tee time to "
+            f"{request.requested_time:%I:%M %p} on {day}?"
+        )
+        if held.status == BookingStatus.SUCCESS:
+            text += (
+                " That one is already confirmed with the club, so changing it cancels it "
+                "there first; if the new time can't be booked you could end up with neither."
+            )
+        elif window_open:
+            text += (
+                " The booking window is open, so the new time is booked straight away "
+                "and the old one is cancelled."
+            )
+        return text + " Reply yes or no."
+
+    async def _handle_replace_reply(self, session: UserSession, message: str) -> str:
+        """Settle "change your tee time?" from a yes or no, without the LLM."""
+        normalized = _normalize_reply(message)
+        if normalized in AFFIRMATIVE_CONFIRMATIONS:
+            return await self._apply_replacement(session)
+        if normalized in NEGATIVE_CONFIRMATIONS:
+            await self._take_conflict(session)
+            return await self._after_replace_answer(
+                session, "Okay, I'll leave your existing booking as it is."
+            )
+
+        if session.replace_clarifications < 1:
+            session.replace_clarifications += 1
+            return (
+                "Sorry, I didn't catch that. Would you like to change your tee time? "
+                "Please reply yes or no."
+            )
+        await self._take_conflict(session)
+        return await self._after_replace_answer(
+            session,
+            "I didn't understand, so I've left your existing booking as it is. "
+            "Send your request again if you'd like to change it.",
+        )
+
+    async def _take_conflict(
+        self, session: UserSession
+    ) -> tuple[TeeTimeRequest, TeeTimeBooking | None] | None:
+        """Remove the request the open question is about; return it with the old booking."""
+        held = (
+            await database_service.get_booking(session.pending_replace_booking_id)
+            if session.pending_replace_booking_id
+            else None
+        )
+        self._clear_replace(session)
+        requests = self._pending(session)
+        target = next(
+            (r for r in requests if held and r.requested_date == held.request.requested_date),
+            requests[0] if requests else None,
+        )
+        if target is None:
+            return None
+        self._set_pending(session, [r for r in requests if r is not target])
+        return target, held
+
+    async def _after_replace_answer(self, session: UserSession, message: str) -> str:
+        """Carry on with whatever else was asked for in the same message."""
+        if self._pending(session):
+            return message + "\n\n" + await self._continue_slot_agreement(session)
+        self._clear_pending_proxy_target(session)
+        session.state = ConversationState.IDLE
+        return message
+
+    async def _apply_replacement(self, session: UserSession) -> str:
+        """Cancel the old booking and create the new one, validating before touching anything."""
+        attribution = await self._attribution_for(session)
+        taken = await self._take_conflict(session)
+        request, held = taken if taken is not None else (None, None)
+        if request is None or held is None or held.id is None:
+            return await self._after_replace_answer(
+                session, "That booking has changed, so I haven't changed anything."
+            )
+
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
+        if held.status not in (
+            BookingStatus.PENDING,
+            BookingStatus.SCHEDULED,
+            BookingStatus.SUCCESS,
+        ):
+            return await self._after_replace_answer(
+                session,
+                f"Your existing booking is now {held.status.value}, so I haven't changed anything.",
+            )
+        try:
+            await self._validate_booking_request(
+                attribution.phone_number, request, replacing=held.id
+            )
+        except ValueError as e:
+            return await self._after_replace_answer(
+                session, f"{e}\nI haven't changed your existing booking."
+            )
+
+        held_at = f"{self._held_time(held):%I:%M %p}"
+        if held.status == BookingStatus.SUCCESS:
+            cancelled = await self._cancel_confirmed_booking(held)
+        else:
+            cancelled = await database_service.cancel_pending_booking(held.id) is not None
+        if not cancelled:
+            return await self._after_replace_answer(
+                session,
+                f"I couldn't cancel your {held_at} booking (it may have just started), so "
+                "I haven't changed anything.",
+            )
+
+        try:
+            booking = await self.create_booking(
+                attribution.phone_number,
+                request,
+                attribution.origin_channel_id,
+                channel=attribution.channel,
+                requester_handle=attribution.requester_handle,
+                replacing=held.id,
+            )
+        except ValueError as e:
+            return await self._after_replace_answer(
+                session, f"I cancelled your {held_at} booking but couldn't book the new time: {e}"
+            )
+        return await self._after_replace_answer(
+            session,
+            f"Done - I cancelled your {held_at} booking. "
+            + self._booking_ack(booking, attribution),
+        )
 
     def _slot_question(
         self,
@@ -1166,6 +1462,9 @@ class BookingService:
         if not session.pending_request:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
+
         attribution = await self._attribution_for(session)
 
         try:
@@ -1186,6 +1485,11 @@ class BookingService:
         self._clear_pending_proxy_target(session)
         session.state = ConversationState.IDLE
 
+        return self._booking_ack(booking, attribution)
+
+    @staticmethod
+    def _booking_ack(booking: TeeTimeBooking, attribution: _BookingAttribution) -> str:
+        """What to tell the member right after their booking is created."""
         request = booking.request
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
@@ -1241,6 +1545,9 @@ class BookingService:
         """Handle confirmation of multiple booking requests."""
         if not session.pending_requests:
             return "There's nothing to confirm. Would you like to book a tee time?"
+
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
 
         successful_bookings: list[TeeTimeBooking] = []
         failed_requests: list[tuple[TeeTimeRequest, str]] = []
@@ -1715,56 +2022,14 @@ class BookingService:
             if provider is not None:
                 await self._release_provider(provider)
 
-    async def create_booking(
-        self,
-        phone_number: str,
-        request: TeeTimeRequest,
-        origin_channel_id: str | None = None,
-        defer_execution: bool = False,
-        channel: str | None = None,
-        requester_handle: str | None = None,
-    ) -> TeeTimeBooking:
-        """
-        Create a new booking record and schedule it for execution.
+    async def _validate_booking_request(
+        self, phone_number: str, request: TeeTimeRequest, replacing: str | None = None
+    ) -> None:
+        """Refuse a booking that could only fail later, while someone is reading.
 
-        This is the public API for creating bookings, used by both the SMS
-        conversation flow and the REST API.
-
-        If the calculated execution time is in the past (i.e., the booking window
-        has already opened), the attempt starts immediately in the background
-        rather than being scheduled for later. This call returns as soon as the
-        record is created, with the booking in IN_PROGRESS; the outcome is
-        reported to the user by execute_booking when the attempt finishes.
-
-        Multi-player bookings (2+ players) are rejected if the tee time is within
-        48 hours, because the Walden Golf website disables TBD guest placeholders
-        within that window.
-
-        Args:
-            phone_number: The phone number to associate with the booking.
-            request: The tee time request details.
-            origin_channel_id: Discord channel or Telegram chat this booking was
-                requested in, so the success/failure notification replies there.
-                None for SMS and REST API callers.
-            channel: Messaging channel this booking was requested over, so its
-                notification days later goes back over the same one. None for
-                REST API callers, which fall back to MESSAGING_CHANNEL.
-            requester_handle: Ready-to-prepend mention of who requested this
-                booking, so its result notification days later says who it
-                was for. None for a private conversation or a channel with no
-                addressing concept.
-            defer_execution: Create the record and mark it IN_PROGRESS, but do
-                not start the attempt. Callers creating several bookings at once
-                set this so they can run the whole set as one batch instead of
-                one concurrent attempt per booking; they then own both starting
-                the work and reporting the outcome.
-
-        Returns:
-            The created TeeTimeBooking record.
-
-        Raises:
-            ValueError: If multi-player booking is requested within 48 hours, or
-                if the booking is attributed to the proxy admin's own identity.
+        Raises ValueError with a message fit for the member. ``replacing`` is
+        the ID of a booking about to be cancelled in favour of this one, which
+        therefore does not count against the one-round-per-day rule.
         """
         # The proxy admin books as a friend or not at all (issue #185). Refused
         # here as well as in the credential lookup because this is the point
@@ -1821,8 +2086,8 @@ class BookingService:
         # friend whose login books it - the identity the club restricts.
         for existing in await database_service.get_bookings(phone_number=phone_number):
             if (
-                existing.status
-                in (BookingStatus.PENDING, BookingStatus.SCHEDULED, BookingStatus.IN_PROGRESS)
+                existing.id != replacing
+                and existing.status in LIVE_BOOKING_STATUSES
                 and existing.request.requested_date == request.requested_date
             ):
                 raise ValueError(
@@ -1831,6 +2096,63 @@ class BookingService:
                     "round per member per day, so I can't book a second. Cancel the "
                     "existing one first if you'd rather have a different time."
                 )
+
+    async def create_booking(
+        self,
+        phone_number: str,
+        request: TeeTimeRequest,
+        origin_channel_id: str | None = None,
+        defer_execution: bool = False,
+        channel: str | None = None,
+        requester_handle: str | None = None,
+        replacing: str | None = None,
+    ) -> TeeTimeBooking:
+        """
+        Create a new booking record and schedule it for execution.
+
+        This is the public API for creating bookings, used by both the SMS
+        conversation flow and the REST API.
+
+        If the calculated execution time is in the past (i.e., the booking window
+        has already opened), the attempt starts immediately in the background
+        rather than being scheduled for later. This call returns as soon as the
+        record is created, with the booking in IN_PROGRESS; the outcome is
+        reported to the user by execute_booking when the attempt finishes.
+
+        Multi-player bookings (2+ players) are rejected if the tee time is within
+        48 hours, because the Walden Golf website disables TBD guest placeholders
+        within that window.
+
+        Args:
+            phone_number: The phone number to associate with the booking.
+            request: The tee time request details.
+            origin_channel_id: Discord channel or Telegram chat this booking was
+                requested in, so the success/failure notification replies there.
+                None for SMS and REST API callers.
+            channel: Messaging channel this booking was requested over, so its
+                notification days later goes back over the same one. None for
+                REST API callers, which fall back to MESSAGING_CHANNEL.
+            requester_handle: Ready-to-prepend mention of who requested this
+                booking, so its result notification days later says who it
+                was for. None for a private conversation or a channel with no
+                addressing concept.
+            replacing: ID of a booking the caller has cancelled, or is about to,
+                in favour of this one. It is ignored by the one-round-per-day
+                check.
+            defer_execution: Create the record and mark it IN_PROGRESS, but do
+                not start the attempt. Callers creating several bookings at once
+                set this so they can run the whole set as one batch instead of
+                one concurrent attempt per booking; they then own both starting
+                the work and reporting the outcome.
+
+        Returns:
+            The created TeeTimeBooking record.
+
+        Raises:
+            ValueError: If multi-player booking is requested within 48 hours, or
+                if the booking is attributed to the proxy admin's own identity.
+        """
+        await self._validate_booking_request(phone_number, request, replacing)
 
         booking_id = str(uuid.uuid4())[:8]
 

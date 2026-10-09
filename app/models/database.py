@@ -118,6 +118,9 @@ class SessionRecord(Base):
             through the conversation. NULL when state is IDLE.
         pending_cancellation_id: Booking ID awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for confirmation.
+        pending_replace_booking_id: Booking the member was asked to replace
+            (issue #284). NULL when no such question is open.
+        replace_clarifications: Unrelated replies to that question so far.
         pending_proxy_target: The friend the proxy admin is booking for, as
             typed (issue #185). Held on the admin's own session row - the
             conversation is theirs; only the resulting booking is attributed to
@@ -140,6 +143,8 @@ class SessionRecord(Base):
     state: Column[Any] = Column(Enum(ConversationState), default=ConversationState.IDLE)
     pending_request_json = Column(Text, nullable=True)
     pending_cancellation_id = Column(String(50), nullable=True)
+    pending_replace_booking_id = Column(String(50), nullable=True)
+    replace_clarifications = Column(Integer, nullable=True)
     pending_proxy_target = Column(String(64), nullable=True)
     origin_channel_id = Column(String(32), nullable=True)
     channel = Column(String(16), nullable=True)
@@ -349,6 +354,8 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("walden_credentials", "invalid_since", "TIMESTAMP"),
     ("walden_credentials", "member_number_fallback", "TEXT"),
     ("walden_credentials", "password_fallback", "TEXT"),
+    ("sessions", "pending_replace_booking_id", "VARCHAR(50)"),
+    ("sessions", "replace_clarifications", "INTEGER"),
 ]
 
 

@@ -346,6 +346,18 @@ def no_tee_sheet_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(BookingService, "_sheet_grid_for", AsyncMock(return_value=None))
 
 
+@pytest.fixture(autouse=True)
+def no_same_day_conflicts_and_no_race_freeze(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about who a booking is for, not issue #284's same-day rule.
+
+    The conflict lookup reads bookings, which _FakeSessions does not store, and
+    the freeze reads the wall clock. Same-day behaviour is covered in
+    test_booking_service.py.
+    """
+    monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", AsyncMock(return_value=None))
+    monkeypatch.setattr(BookingService, "_in_race_freeze", staticmethod(lambda: False))
+
+
 class _FakeSessions:
     """A stand-in for database_service's session storage, keyed by identity."""
 

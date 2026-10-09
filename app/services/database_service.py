@@ -141,6 +141,8 @@ class DatabaseService:
             state=session.state,
             pending_request_json=pending_json,
             pending_cancellation_id=session.pending_cancellation_id,
+            pending_replace_booking_id=session.pending_replace_booking_id,
+            replace_clarifications=session.replace_clarifications,
             pending_proxy_target=session.pending_proxy_target,
             origin_channel_id=session.origin_channel_id,
             channel=session.channel,
@@ -171,6 +173,8 @@ class DatabaseService:
             pending_request=pending_request,
             pending_requests=pending_requests,
             pending_cancellation_id=record.pending_cancellation_id,  # type: ignore[arg-type]
+            pending_replace_booking_id=record.pending_replace_booking_id,  # type: ignore[arg-type]
+            replace_clarifications=record.replace_clarifications or 0,  # type: ignore[arg-type]
             pending_proxy_target=record.pending_proxy_target,  # type: ignore[arg-type]
             origin_channel_id=record.origin_channel_id,  # type: ignore[arg-type]
             channel=record.channel,  # type: ignore[arg-type]
@@ -310,6 +314,8 @@ class DatabaseService:
                 pending_json = session.pending_request.model_dump_json()
             record.pending_request_json = pending_json  # type: ignore[assignment]
             record.pending_cancellation_id = session.pending_cancellation_id  # type: ignore[assignment]
+            record.pending_replace_booking_id = session.pending_replace_booking_id  # type: ignore[assignment]
+            record.replace_clarifications = session.replace_clarifications  # type: ignore[assignment]
             record.pending_proxy_target = session.pending_proxy_target  # type: ignore[assignment]
             record.origin_channel_id = session.origin_channel_id  # type: ignore[assignment]
             record.channel = session.channel  # type: ignore[assignment]
