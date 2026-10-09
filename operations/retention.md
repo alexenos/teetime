@@ -21,7 +21,7 @@ change. Applying them deletes data (see Applying), so merge is the decision.
 | `walden/` in the debug-artifacts bucket | failure captures, race artifacts, observer snapshots | 90 days, then 7 days as a noncurrent version, then 7 days of soft delete; an overwritten object's old version goes at 90 days too, not sooner | bucket lifecycle rules, `debug_artifact_retention_days` |
 | `operations/` in the same bucket | Routine ledgers | **indefinitely** | no rule matches the prefix |
 | `billing_export` (BigQuery) | Cloud Billing export | **indefinitely** | none; it cannot be re-run for past days |
-| Cloud Logging | service and job logs | 30 days (`_Default`); 400 days locked (`_Required`) | Cloud Logging defaults, unchanged |
+| Cloud Logging | service and job logs | 30 days (`_Default`); audit-activity logs 400 days, locked (`_Required`) | Cloud Logging defaults, unchanged. Checked 2026-10-09: the project has only the two built-in sinks, no export |
 | Cloud SQL backups | automated backups, point-in-time logs | 7 daily backups and 7 days of transaction logs | Cloud SQL settings, unchanged |
 | `operations/` in git | race reports, scoreboard | indefinitely | git; the repository is public |
 
@@ -92,9 +92,6 @@ on that account. This command has not been run.
 
 ## What is not established
 
-- Cloud Logging retention was read from the bucket list (`_Default` 30 days) and
-  not from the sink configuration. A log-based export would change the answer;
-  none was looked for.
 - Secret Manager version retention. Old versions of a secret may persist after a
   rotation; this was not checked, and no rule here covers it.
 - Telegram's own copy of a conversation, and Gemini's handling of message text,
