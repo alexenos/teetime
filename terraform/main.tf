@@ -377,6 +377,42 @@ resource "google_storage_bucket" "debug_artifacts" {
     enabled = true
   }
 
+  # Retention (issue #269, operations/retention.md). Scoped to walden/ - the
+  # failure captures, race artifacts and observer snapshots, which hold copies
+  # of the club's tee sheet and can show members' names. operations/ is the
+  # Routines' append-only ledgers, which are measurements and are kept; no rule
+  # here may match that prefix.
+  #
+  # The bucket is versioned, so the first rule only turns the live object into a
+  # noncurrent version; the second is what removes it. The bucket's 7-day soft
+  # delete then holds it a week longer, for an undo.
+  lifecycle_rule {
+    condition {
+      age            = var.debug_artifact_retention_days
+      with_state     = "LIVE"
+      matches_prefix = ["walden/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  # Conditions in one rule are ANDed, rules are ORed. Without age here, a
+  # version superseded by an overwrite on day 1 would go on day 8, not day 90;
+  # without with_state, the rule above would also delete noncurrent versions on
+  # age alone, skipping the 7-day wait.
+  lifecycle_rule {
+    condition {
+      age                        = var.debug_artifact_retention_days
+      days_since_noncurrent_time = 7
+      with_state                 = "ARCHIVED"
+      matches_prefix             = ["walden/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
   depends_on = [google_project_service.apis]
 }
 
@@ -625,6 +661,35 @@ resource "google_cloud_scheduler_job" "execute_bookings" {
   http_target {
     http_method = "POST"
     uri         = "${local.cloud_run_url}/jobs/execute-due-bookings"
+
+    oidc_token {
+      service_account_email = google_service_account.scheduler.email
+      audience              = local.cloud_run_url
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+# Deletes data past its retention period (issue #269). Three hours before the
+# race, so it can never be holding a database lock when the racer claims its
+# bookings. The periods are settings in app/config.py, not terraform variables:
+# the endpoint is the only place they are read.
+resource "google_cloud_scheduler_job" "purge_expired" {
+  name             = "${local.service_name}-purge-expired"
+  description      = "Delete data past its retention period (issue #269)"
+  schedule         = "15 3 * * *"
+  time_zone        = var.timezone
+  attempt_deadline = "120s"
+
+  # Deleting twice is harmless, so a retry after a lost acknowledgement is fine.
+  retry_config {
+    retry_count = 1
+  }
+
+  http_target {
+    http_method = "POST"
+    uri         = "${local.cloud_run_url}/jobs/purge-expired"
 
     oidc_token {
       service_account_email = google_service_account.scheduler.email

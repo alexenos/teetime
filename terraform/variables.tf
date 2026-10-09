@@ -974,3 +974,16 @@ variable "racer_memory" {
     error_message = "racer_memory must be at least 2Gi (or 2048Mi), formatted like \"2Gi\" or \"2048Mi\". Headless Chrome OOM-killed the container at 1Gi, losing the booking result."
   }
 }
+
+variable "debug_artifact_retention_days" {
+  description = <<-EOT
+    How long objects under walden/ in the debug-artifacts bucket are kept (issue
+    #269, operations/retention.md). They are copies of the club's tee sheet and
+    can show members' names, and a morning is diagnosed within days. operations/
+    is not affected: no lifecycle rule matches it.
+
+    Applying this deletes every walden/ object already older than the value.
+  EOT
+  type        = number
+  default     = 90
+}

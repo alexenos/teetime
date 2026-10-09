@@ -16,6 +16,7 @@ from datetime import date, datetime, time
 from enum import Enum
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -24,6 +25,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.models.schemas import TeeTimeBooking
 from app.services.booking_service import booking_service
+from app.services.retention import purge_expired
 from app.services.sms_service import sms_service
 from app.utils.timezone import CTDateTime
 
@@ -222,6 +224,33 @@ async def execute_due_bookings(
         execute_at=CTDateTime.to_naive_ct(booking_open_time),
         executed_at=now,
     )
+
+
+class PurgeResponse(BaseModel):
+    dry_run: bool
+    deleted: dict[str, int]
+    errors: dict[str, str]
+
+
+@router.post("/purge-expired", response_model=PurgeResponse)
+async def purge_expired_data(
+    dry_run: bool = False,
+    _: None = Depends(verify_scheduler_auth),
+) -> PurgeResponse | JSONResponse:
+    """Delete rows that have outlived their retention period (issue #269).
+
+    Called daily by Cloud Scheduler, hours before the booking race. Periods are
+    in settings (retention_*_days); see operations/retention.md for the reasons.
+    `?dry_run=true` counts what would go and deletes nothing.
+    """
+    result = await purge_expired(dry_run=dry_run)
+    body = PurgeResponse(dry_run=result.dry_run, deleted=result.deleted, errors=result.errors)
+    if result.errors:
+        # A 2xx is an acknowledgement to Cloud Scheduler, which would then skip
+        # its retry and leave the failed rule for tomorrow. The rules that did
+        # run are in the body either way.
+        return JSONResponse(status_code=500, content=body.model_dump())
+    return body
 
 
 async def run_bookings_and_report(

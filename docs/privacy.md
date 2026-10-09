@@ -6,7 +6,7 @@ permalink: /privacy/
 
 # Privacy Policy
 
-**Last updated: October 3, 2026**
+**Last updated: October 5, 2026**
 
 TeeTime Bot is a private, invitation-only Telegram bot that books golf tee times
 at Northgate Country Club for members of a small group, each under their own
@@ -75,13 +75,20 @@ checked automatically for names before it is published.
 
 ## How long things are kept
 
-- **Your Walden login:** until you delete it or leave the group.
-- **Booking records:** kept, so the bot can tell you what it booked and so
-  problems can be diagnosed.
+- **Your Walden login:** until you delete it or leave the group. If Walden
+  rejects it and you do not save a new one, it is deleted after 90 days.
+- **Booking records:** kept, with no automatic deletion. They let the bot tell
+  you what it booked, let problems be diagnosed, and let the group's booking
+  patterns be studied over the years.
+- **Conversation state:** deleted after 90 days without a message from you.
+- **Your label** (such as "Member C"): kept, so an old public race report never
+  comes to mean someone else.
 - **Service logs:** 30 days.
 - **Copies of the club's tee-sheet pages** taken during bookings, which can show
-  members' names: kept for diagnosing booking problems, with no automatic
-  deletion at present.
+  members' names: about 90 days, then up to two more weeks in a recovery
+  window before they are gone for good.
+- **Backups** of the database are kept for a short rolling period, so a row
+  deleted from the database can remain in a backup for up to about a week.
 
 ## Deleting your information
 

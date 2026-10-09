@@ -651,6 +651,35 @@ class Settings(BaseSettings):
     # logs how many Northgate rows it rendered.
     observer_horizon_days: int = 7
 
+    # How long data is kept before POST /jobs/purge-expired deletes it (issue
+    # #269). Reasons per period: operations/retention.md. These live here and
+    # nowhere in terraform, so there is one default to keep honest.
+    #
+    # Conversation sessions, by last message.
+    retention_session_days: int = 90
+    # Observer readings of the slot grid, by when they were read.
+    retention_tee_sheet_grid_days: int = 90
+    # A stored login Walden rejected and nobody has replaced, by when it was
+    # rejected.
+    retention_invalid_login_days: int = 90
+
+    @field_validator(
+        "retention_session_days",
+        "retention_tee_sheet_grid_days",
+        "retention_invalid_login_days",
+    )
+    @classmethod
+    def _validate_retention_days(cls, v: int, info: ValidationInfo) -> int:
+        """Reject a period below one day.
+
+        The period is subtracted from now to get a cutoff, so a negative value
+        puts the cutoff in the future and the next purge deletes rows made
+        today. Zero deletes everything that is not from this instant.
+        """
+        if v < 1:
+            raise ValueError(f"{info.field_name} must be at least 1 day, got {v}")
+        return v
+
     @field_validator("observer_horizon_days")
     @classmethod
     def _validate_observer_horizon(cls, v: int) -> int:
