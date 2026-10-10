@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import subprocess
 import sys
 from collections.abc import Callable
@@ -131,12 +132,15 @@ def validate_cost(row: Row, where: str) -> None:
     if row.get("ok") is False:
         return
     try:
-        dt.datetime.strptime(row["month"], "%Y-%m")
+        month = row["month"]
+        # strptime accepts "2026-9"; the round trip insists on the stored form.
+        if dt.datetime.strptime(month, "%Y-%m").strftime("%Y-%m") != month:
+            raise ValueError
     except (KeyError, ValueError, TypeError):
         raise ValueError(f"{where}: month must be YYYY-MM") from None
     usd = row.get("usd_gcp")
-    if isinstance(usd, bool) or not isinstance(usd, int | float):
-        raise ValueError(f"{where}: usd_gcp must be a number on a successful cost row")
+    if isinstance(usd, bool) or not isinstance(usd, int | float) or not math.isfinite(usd):
+        raise ValueError(f"{where}: usd_gcp must be a finite number on a successful cost row")
     if not row.get("scope"):
         raise ValueError(f"{where}: a cost figure with no stated scope")
 

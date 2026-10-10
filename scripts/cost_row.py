@@ -33,6 +33,10 @@ PROJECT = "gen-lang-client-0822973627"
 SQL = Path(__file__).resolve().parents[1] / "operations" / "routines" / "cost.sql"
 CT = ZoneInfo("America/Chicago")
 SCOPE = "gcp_only"
+# jobs.query returns jobComplete:false after 10 s by default while the query keeps
+# running; wait longer, then poll the job rather than record a failed month.
+QUERY_WAIT_MS = 60_000
+POLL_ATTEMPTS = 5
 
 Row = dict[str, Any]
 
@@ -76,6 +80,7 @@ def query(month: str) -> list[dict[str, Any]]:
         "query": SQL.read_text(encoding="utf-8"),
         "useLegacySql": False,
         "location": "US",
+        "timeoutMs": QUERY_WAIT_MS,
         "parameterMode": "NAMED",
         "queryParameters": [
             {
@@ -92,8 +97,19 @@ def query(month: str) -> list[dict[str, Any]]:
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         result = json.load(resp)
+    job = result.get("jobReference", {})
+    for _ in range(POLL_ATTEMPTS):
+        if result.get("jobComplete"):
+            break
+        poll = urllib.request.Request(
+            f"https://bigquery.googleapis.com/bigquery/v2/projects/{PROJECT}/queries/"
+            f"{job['jobId']}?location={job.get('location', 'US')}&timeoutMs={QUERY_WAIT_MS}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(poll, timeout=120) as resp:
+            result = json.load(resp)
     if not result.get("jobComplete"):
-        raise RuntimeError("query did not complete within the request timeout")
+        raise RuntimeError("query still running after the bounded wait")
     return [
         {
             "service": f[0]["v"],
@@ -112,7 +128,12 @@ def main() -> None:
     parser.add_argument("--seed", action="store_true", help="mark as a manual backfill row")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    dt.datetime.strptime(args.month, "%Y-%m")
+    try:
+        # strptime accepts "2026-9"; the round trip insists on YYYY-MM.
+        if dt.datetime.strptime(args.month, "%Y-%m").strftime("%Y-%m") != args.month:
+            raise ValueError
+    except ValueError:
+        parser.error(f"--month must be YYYY-MM, got {args.month!r}")
 
     try:
         row = build_row(args.month, today, query(args.month), seed=args.seed)

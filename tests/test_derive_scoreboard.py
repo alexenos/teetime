@@ -378,3 +378,12 @@ def test_two_seed_rows_written_on_one_date_are_not_duplicates() -> None:
     assert (cost["month"], cost["prior_month"], cost["prior_usd"]) == ("2026-09", "2026-08", 71.18)
     with pytest.raises(ValueError, match="share a Routine and date"):
         _board(rows + [_seed("2026-09", 1.0)], NOW)
+
+
+def test_a_cost_month_must_be_zero_padded_and_the_amount_finite() -> None:
+    with pytest.raises(ValueError, match="month"):
+        ds.validate(_cost("2026-9", date="2026-10-09"))
+    with pytest.raises(ValueError, match="finite"):
+        ds.validate(_cost("2026-09", usd=float("inf")))
+    with pytest.raises(ValueError, match="finite"):
+        ds.validate(_cost("2026-09", usd=float("nan")))

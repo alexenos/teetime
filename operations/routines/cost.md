@@ -101,7 +101,10 @@ settled by the 9th. Run `cost.sql` for October on 2026-11-01 as well as on the
 
 This Routine fires before the scoreboard Routine on the same morning, so the new
 month reaches the page that day. The ordering is deliberate (maintainer,
-2026-10-09): the scoreboard run then reads the row it was waiting for.
+2026-10-09). **It holds only once the scoreboard cron has moved** from `30 12` to
+`30 13` UTC on 2026-11-01 (`operations/routines/scoreboard.md`, Shares the DST
+defect): left at `30 12`, it fires at 06:30 CST on the 5th and stops at its own
+hour gate before 07:00, so the new month would not reach the page that morning.
 
 ## Deploying it
 
