@@ -139,6 +139,10 @@ RACE_FREEZE_MESSAGE = (
     "booking race is running. Please try again after 6:35."
 )
 
+# How long a "change your tee time?" question stays answerable. A "yes" days
+# later, meant for something else, would cancel a booking.
+REPLACE_QUESTION_TTL = timedelta(minutes=30)
+
 # Statuses that hold, or are about to hold, a member's one round for the day.
 LIVE_BOOKING_STATUSES = (
     BookingStatus.PENDING,
@@ -287,6 +291,13 @@ class BookingService:
         # Chrome came up, and the first hung until chromedriver stopped
         # answering. Queueing is slower than failing and is the point.
         self._browser_slot = asyncio.Semaphore(1)
+        # One booking creation at a time per member. The one-round-per-day check
+        # reads the member's bookings and the insert comes later; two messages
+        # arriving together (a group-chat double send, a retry) would both pass
+        # the read. One process serves every conversation (max instances is 1),
+        # so a process lock closes that. Not held across a replacement's
+        # cancel-then-create, which is a conversation turn, not a double send.
+        self._member_locks: dict[str, asyncio.Lock] = {}
         # When this instance came up, in the same naive-UTC space the database
         # stamps onto updated_at. Startup reconciliation uses it to tell rows
         # orphaned by a previous process from attempts running right now.
@@ -467,6 +478,19 @@ class BookingService:
         if requester_handle is not None:
             session.requester_handle = requester_handle or None
 
+        expired = ""
+        if session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION and (
+            datetime.now(UTC).replace(tzinfo=None) - session.last_interaction > REPLACE_QUESTION_TTL
+        ):
+            self._set_pending(session, [])
+            self._clear_pending_proxy_target(session)
+            self._clear_replace(session)
+            session.state = ConversationState.IDLE
+            expired = (
+                "Your earlier question about changing your tee time timed out, so I left "
+                "your booking as it is.\n\n"
+            )
+
         # Resolve who this message is on behalf of before anything reads it.
         # Only the single configured admin ID can be booking for someone else;
         # for everyone else this is a no-op and the message is untouched.
@@ -474,7 +498,7 @@ class BookingService:
             early_response, message = await self._prepare_proxy_turn(session, message)
             if early_response is not None:
                 await self.update_session(session)
-                return early_response
+                return expired + early_response
 
         # "2" or "8:08" in answer to "which one?" needs no language model to
         # read, for the same reason a bare "yes" doesn't. Anything that is not
@@ -508,7 +532,7 @@ class BookingService:
 
         await self.update_session(session)
 
-        return response
+        return expired + response
 
     async def _prepare_proxy_turn(
         self, session: UserSession, message: str
@@ -886,6 +910,18 @@ class BookingService:
         return check
 
     async def _continue_slot_agreement(self, session: UserSession) -> str:
+        """Answer repeats of a held booking, then agree times and ask for the yes.
+
+        A request for the time the member already holds is answered first, from
+        what they asked for. The sheet shows that time as taken - by them - so
+        checking it would send them to pick a different one (issue #284).
+        """
+        notes, finished = await self._answer_repeat_requests(session)
+        if finished:
+            return notes
+        return (notes + "\n\n" if notes else "") + await self._agree_and_confirm(session)
+
+    async def _agree_and_confirm(self, session: UserSession) -> str:
         """Agree each pending request's tee time, then ask for the usual yes.
 
         Walks the pending requests in order. The first whose time is not an
@@ -945,14 +981,17 @@ class BookingService:
         exec_ct = CTDateTime.normalize_to_ct(self._calculate_execution_time(target_date))
         return exec_ct <= CTDateTime.now()
 
-    async def _resolve_same_day_conflicts(self, session: UserSession) -> str | None:
-        """Deal with requests on a date where the member already has a booking.
+    async def _triage_same_day(
+        self, session: UserSession, *, final: bool
+    ) -> tuple[list[str], list[TeeTimeRequest], tuple[TeeTimeRequest, TeeTimeBooking] | None, str]:
+        """Sort the pending requests against the member's live bookings.
 
-        The club allows one Northgate round per member per day (issue #284), so
-        a second request can only fail at 6:30. The same time and party is
-        answered and dropped; a booking already being attempted is left alone;
-        anything else asks whether to replace the existing booking, one request
-        at a time. Returns the reply, or None when no request conflicts.
+        Returns ``(notes, keep, conflict, subject)``: what to tell the member
+        about requests dropped as repeats or left alone, the requests still
+        pending, the first one that needs a replace question, and how to refer
+        to the member. ``final`` is False before times are agreed with the
+        sheet, when only repeats can be recognised: whether a new time is known
+        to be open is not yet known.
         """
         attribution = await self._attribution_for(session)
         live = [
@@ -990,7 +1029,11 @@ class BookingService:
                     f"{subject} {held_at} on {day}, and it is being booked right now, so I "
                     "can't change it. Try again in a few minutes."
                 )
-            elif self._window_open(request.requested_date) and request.slot_confirmed is not True:
+            elif (
+                final
+                and self._window_open(request.requested_date)
+                and request.slot_confirmed is not True
+            ):
                 # The window is open, so the new time books at once. It has to
                 # be known open before anything existing is touched.
                 notes.append(
@@ -1001,7 +1044,31 @@ class BookingService:
                 keep.append(request)
                 if conflict is None:
                     conflict = (request, held)
+        return notes, keep, conflict, subject
 
+    async def _answer_repeat_requests(self, session: UserSession) -> tuple[str, bool]:
+        """Drop requests that repeat a held booking; return the notes and whether done."""
+        notes, keep, _conflict, _subject = await self._triage_same_day(session, final=False)
+        if not notes:
+            return "", False
+        self._set_pending(session, keep)
+        text = "\n".join(notes)
+        if keep:
+            return text, False
+        self._clear_pending_proxy_target(session)
+        session.state = ConversationState.IDLE
+        return text, True
+
+    async def _resolve_same_day_conflicts(self, session: UserSession) -> str | None:
+        """Deal with requests on a date where the member already has a booking.
+
+        The club allows one Northgate round per member per day (issue #284), so
+        a second request can only fail at 6:30. The same time and party is
+        answered and dropped; a booking already being attempted is left alone;
+        anything else asks whether to replace the existing booking, one request
+        at a time. Returns the reply, or None when no request conflicts.
+        """
+        notes, keep, conflict, subject = await self._triage_same_day(session, final=True)
         if not notes and conflict is None:
             return None
         prefix = "\n".join(notes) + ("\n\n" if notes and keep else "")
@@ -2192,24 +2259,26 @@ class BookingService:
             ValueError: If multi-player booking is requested within 48 hours, or
                 if the booking is attributed to the proxy admin's own identity.
         """
-        await self._validate_booking_request(phone_number, request, replacing)
+        lock = self._member_locks.setdefault(phone_number, asyncio.Lock())
+        async with lock:
+            await self._validate_booking_request(phone_number, request, replacing)
 
-        booking_id = str(uuid.uuid4())[:8]
+            booking_id = str(uuid.uuid4())[:8]
 
-        execution_time = self._calculate_execution_time(request.requested_date)
+            execution_time = self._calculate_execution_time(request.requested_date)
 
-        booking = TeeTimeBooking(
-            id=booking_id,
-            phone_number=phone_number,
-            request=request,
-            status=BookingStatus.SCHEDULED,
-            scheduled_execution_time=execution_time,
-            origin_channel_id=origin_channel_id,
-            channel=channel,
-            requester_handle=requester_handle,
-        )
+            booking = TeeTimeBooking(
+                id=booking_id,
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=execution_time,
+                origin_channel_id=origin_channel_id,
+                channel=channel,
+                requester_handle=requester_handle,
+            )
 
-        created_booking = await database_service.create_booking(booking)
+            created_booking = await database_service.create_booking(booking)
 
         # Compare in timezone-aware space for robustness.
         # execution_time is naive (CT wall-clock), so we localize it.

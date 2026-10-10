@@ -355,6 +355,9 @@ def no_same_day_conflicts_and_no_race_freeze(monkeypatch: pytest.MonkeyPatch) ->
     test_booking_service.py.
     """
     monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        BookingService, "_answer_repeat_requests", AsyncMock(return_value=("", False))
+    )
     monkeypatch.setattr(BookingService, "_in_race_freeze", staticmethod(lambda: False))
 
 
