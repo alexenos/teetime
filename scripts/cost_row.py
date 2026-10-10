@@ -3,7 +3,7 @@
     python scripts/cost_row.py [--month YYYY-MM] [--seed] [--out cost-row.json]
 
 The month defaults to the one before the current CT month, which is what the cost
-Routine reports on the 1st. Stdlib only: the local `bq` is unreliable and the
+Routine reports on the 5th. Stdlib only: the local `bq` is unreliable and the
 Routine sandbox has gcloud and nothing else, so this calls the BigQuery REST API
 with `gcloud auth print-access-token`.
 

@@ -62,10 +62,10 @@ SCHEDULES = {
     "race-report": Schedule(fires=dt.time(6, 40), start=dt.date(2026, 10, 1)),
     "scoreboard": Schedule(fires=dt.time(7, 30), start=None),
     # Monthly, reporting the month just ended. The first scheduled run is
-    # 2026-11-01; the September row before it is a manual seed carrying a
-    # backfill object, so it is outside the walk. If the trigger moves to the
-    # 5th (operations/routines/cost.md, When to run it), change day with it.
-    "cost": Schedule(fires=dt.time(8, 0), start=dt.date(2026, 11, 1), day=1),
+    # 2026-11-05 (the 5th, to let the invoice settle; operations/routines/cost.md,
+    # When to run it). The August and September rows before it are manual seeds
+    # carrying a backfill object, so they are outside the walk.
+    "cost": Schedule(fires=dt.time(8, 0), start=dt.date(2026, 11, 5), day=5),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8
@@ -329,7 +329,9 @@ def walk(rows: list[Row], now: dt.datetime, corrections: Corrections) -> Row:
 def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_corrections) -> Row:
     for row in rows:
         validate(row)
-    keys = [(r["routine"], r["date"]) for r in rows]
+    # A cost row also names the month it reports, because the seed rows for two
+    # months were written on one date.
+    keys = [(r["routine"], r["date"], r.get("month")) for r in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("two rows share a Routine and date; the ledger holds one object per run")
 

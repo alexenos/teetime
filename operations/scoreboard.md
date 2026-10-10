@@ -154,15 +154,16 @@ backfill: a missing row is detectable, an inferred row presented as read is not.
 |---|---|
 | Headline | the latest completed month's spend (a monthly Routine cannot report a month still running) |
 | Also | $/booking |
-| **Trend** | that month against the one before it, shown only when the earlier month has a row. The export has no complete August, so September has no trend. |
+| **Trend** | that month against the one before it, shown only when the earlier month has a row. August comes from the Console, because the export has no complete August. |
 
 $/booking is the input to the Cloud SQL retention decision open since #41 and #168
 (~$9.50/month). Its divisor is `exact + fallback` from `race-report.jsonl` and
 needs no new source.
 
 **Source:** the newest successful `cost` row in GCS (`operations/cost/`), written by
-the cost Routine. September 2026 is a manual seed, checked against the Console on
-2026-10-09. The figure is net of credits and **includes tax** (the `Invoice` line),
+the cost Routine. August and September 2026 are manual seeds. September was checked against the
+Console on 2026-10-09; August is the Console's September figure plus its stated
+$34.01 month-on-month fall, not a figure read off August itself. The figure is net of credits and **includes tax** (the `Invoice` line),
 so it is the Console's number. $/booking is derived here, not stored: the month's
 spend over `exact + fallback` for that month in `race-report` rows. #227 covers
 why BigQuery is the only path, and `operations/routines/cost.md` the Routine.
@@ -220,4 +221,4 @@ transcribed from the race reports (2026-08-13 to 2026-09-27), derived by
 `operations/ledger/derive_scoreboard.py` and flagged as backfilled on the page.
 The streak has a value from 2026-10-01, the race report Routine's first row, and
 every run in it is self-reported (§2). Cost has a value for September 2026 ($37.17, GCP only), seeded by hand; the
-cost Routine's first scheduled run is 2026-11-01.
+cost Routine's first scheduled run is 2026-11-05.

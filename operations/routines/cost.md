@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Trigger** | monthly, proposed — `0 14 1 * *` UTC (08:00 CT on the 1st), reporting the month just ended |
+| **Trigger** | monthly, proposed — `0 14 5 * *` UTC (08:00 CT on the 5th), reporting the month just ended |
 | **Authorization** | queries BigQuery, writes one new object to GCS. Commits nothing. |
 | **Emits** | one object per run at `operations/cost/<YYYY-MM>.json` in GCS |
 | **Owns** | the cost metric |
@@ -79,7 +79,7 @@ invites $/booking comparisons against a denominator that does not match.
 
 ## Shares the DST defect
 
-A cron pinned to UTC drifts against CT twice a year: `0 14 1 * *` is 09:00 CDT and
+A cron pinned to UTC drifts against CT twice a year: `0 14 5 * *` is 09:00 CDT and
 08:00 CST. At monthly granularity the consequence is an hour, not a missed run, so
 this one is cosmetic rather than load-bearing — unlike the race report, where 05:40
 CT lands before the race it reports on. Recorded so the set of crons needing the
@@ -87,12 +87,19 @@ CT lands before the race it reports on. Recorded so the set of crons needing the
 
 ## When to run it
 
-**Not verified:** Google documents that export rows can arrive with a delay, and
-`invoice.month` attributes late adjustments to the month they bill in. A run at
-08:00 CT on the 1st may read a month whose last day is incomplete. Check this
-against the first real month before choosing the trigger: run `cost.sql` for the
-same month on the 1st and again on the 5th, and compare. If they differ, move the
-trigger to the 5th.
+**The 5th, chosen 2026-10-09 by the maintainer.** The reasoning is a hypothesis,
+not a measurement: export rows can arrive late, `invoice.month` attributes late
+adjustments (credits, tax) to the month they bill in, and the invoice settles a
+few days after month end, so a run on the 1st may read a month that is not final.
+A delay costs nothing here, since the figure is a monthly headline.
+
+**Not verified:** how much September's figure moved between the 1st and the 5th.
+It was read on 2026-10-09 and matched the Console, which says only that it had
+settled by the 9th. Run `cost.sql` for October on 2026-11-01 as well as on the
+5th and compare; if the figure never moves, the trigger could go earlier.
+
+The scoreboard Routine fires at 07:30 CT, before this one at 08:00, so the new
+month reaches the page the following morning.
 
 ## Deploying it
 
@@ -107,6 +114,6 @@ trigger to the 5th.
 
 The scoreboard shows the seeded September figure once the scoreboard Routine's
 prompt reads `operations/cost` (see `operations/routines/scoreboard.md`, Step 2).
-The cost Routine's first scheduled run is 2026-11-01 for October; until then the
+The cost Routine's first scheduled run is 2026-11-05 for October; until then the
 seed is the newest row, and `derive_scoreboard.py` expects that run on that date
 and counts its absence as a break in the streak.

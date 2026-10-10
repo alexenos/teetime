@@ -336,7 +336,7 @@ def test_cost_shows_the_prior_month_when_it_has_a_row() -> None:
 
 
 def test_a_failed_cost_row_does_not_replace_the_last_good_figure() -> None:
-    failed = _cost("2026-10", date="2026-11-01", ok=False, note="query returned no rows")
+    failed = _cost("2026-10", date="2026-11-05", ok=False, note="query returned no rows")
     cost = _board([_raced(RACE_START), _seed(), failed], _ct(dt.date(2026, 11, 2), 9, 0))["cost"]
     assert (cost["available"], cost["month"]) == (True, "2026-09")
 
@@ -350,17 +350,17 @@ def test_a_seed_row_stays_outside_the_streak() -> None:
 
 
 def test_a_missing_monthly_cost_run_breaks_the_streak() -> None:
-    start = dt.date(2026, 11, 1)
+    start = dt.date(2026, 11, 5)
     rows = [_quiet(d) for d in _days(40)]
     now = _ct(start, 9, 0)
-    assert _board(rows, now)["streak"]["last_failure"] == "2026-11-01"
-    ok = _cost("2026-10", date="2026-11-01")
+    assert _board(rows, now)["streak"]["last_failure"] == "2026-11-05"
+    ok = _cost("2026-10", date="2026-11-05")
     assert _board(rows + [ok], now)["streak"]["by_routine"]["cost"] == 1
 
 
 def test_monthly_cost_dates_step_by_month() -> None:
-    dates = ds.scheduled_dates("cost", [], _ct(dt.date(2027, 1, 2), 9, 0))
-    assert dates == [dt.date(2026, 11, 1), dt.date(2026, 12, 1), dt.date(2027, 1, 1)]
+    dates = ds.scheduled_dates("cost", [], _ct(dt.date(2027, 1, 6), 9, 0))
+    assert dates == [dt.date(2026, 11, 5), dt.date(2026, 12, 5), dt.date(2027, 1, 5)]
 
 
 def test_a_cost_figure_without_scope_or_month_is_refused() -> None:
@@ -370,3 +370,11 @@ def test_a_cost_figure_without_scope_or_month_is_refused() -> None:
         ds.validate(_cost("September", date="2026-09-28"))
     with pytest.raises(ValueError, match="usd_gcp"):
         ds.validate(_cost("2026-09", usd=None))
+
+
+def test_two_seed_rows_written_on_one_date_are_not_duplicates() -> None:
+    rows = [_raced(RACE_START), _seed("2026-08", 71.18), _seed("2026-09", 37.17)]
+    cost = _board(rows, NOW)["cost"]
+    assert (cost["month"], cost["prior_month"], cost["prior_usd"]) == ("2026-09", "2026-08", 71.18)
+    with pytest.raises(ValueError, match="share a Routine and date"):
+        _board(rows + [_seed("2026-09", 1.0)], NOW)
