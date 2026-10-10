@@ -55,6 +55,8 @@ class Schedule:
     start: dt.date | None
     # None for a daily Routine; otherwise the day of the month it fires on.
     day: int | None = None
+    # Days between runs for a Routine that is neither daily nor monthly.
+    every_days: int = 1
 
 
 SCHEDULES = {
@@ -68,6 +70,10 @@ SCHEDULES = {
     # September rows before it are manual seeds carrying a backfill object, so
     # they are outside the walk.
     "cost": Schedule(fires=dt.time(5, 0), start=dt.date(2026, 11, 5), day=5),
+    # Weekly, Saturday 04:00 CDT (`0 9 * * 6` UTC; operations/routines/tech-debt.md).
+    # Its first scheduled fire was 2026-10-10. The cron is UTC, so it needs
+    # moving to `0 10 * * 6` at the 2026-11-01 DST change to stay at 04:00 CT.
+    "tech-debt": Schedule(fires=dt.time(4, 0), start=dt.date(2026, 10, 10), every_days=7),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8
@@ -246,7 +252,7 @@ def scheduled_dates(name: str, rows: list[Row], now: dt.datetime) -> list[dt.dat
     while dt.datetime.combine(day, schedule.fires, CT) + COMPLETION_ALLOWANCE <= now:
         dates.append(day)
         if schedule.day is None:
-            day += dt.timedelta(days=1)
+            day += dt.timedelta(days=schedule.every_days)
         else:
             day = (day.replace(day=1) + dt.timedelta(days=32)).replace(day=schedule.day)
     return dates
