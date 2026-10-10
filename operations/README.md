@@ -58,10 +58,11 @@ diagnosis; it applies equally to operating material.
 | | |
 |---|---|
 | Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
-| Scoreboard Routine | specified, not deployed. `docs/**` is now declared in the deploy filter, but the apply is unverified — confirm the live trigger first |
+| Scoreboard Routine | deployed 2026-10-04 (`routines/scoreboard.md`); `docs/**` has been in the deploy filter since the 2026-09-27 apply (CLAUDE.md) |
+| Tech debt Routine | deployed; Saturdays at `0 9 * * 6` UTC (`routines/tech-debt.md`); never merges, files issues and opens a PR |
 | Cost Routine | specified, not deployed; blocked on a billing export outside this repository |
 | Scoreboard page | written, at `https://alexenos.github.io/teetime/scoreboard.html`, showing the outcome split **backfilled** from the race reports, flagged on the page itself; streak and cost unavailable |
-| Ledgers | one per Routine; schemas written. 23 race-report rows backfilled from the reports (`ledger/backfill/`); no Routine writes rows yet |
+| Ledgers | one per Routine; schemas written. 23 race-report rows backfilled from the reports (`ledger/backfill/`); the race report Routine has written its rows to GCS since 2026-10-01 (CLAUDE.md), and the scoreboard and tech-debt Routines write theirs under `operations/` in the artifacts bucket. The `*.jsonl` files here are not the live ledger |
 
 The two known defects in the deployed race report prompt — the DST cron and the
 Step 3 timeout constant — are recorded in `routines/race-report.md`. Both require
