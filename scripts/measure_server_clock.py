@@ -59,7 +59,7 @@ def measure(host: str, samples: int, poll_interval: float) -> None:
     # Warm up the connection (TLS handshake) so RTT samples reflect steady state.
     try:
         sample_date_header(conn)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"HEAD request failed ({exc}); retrying with a fresh connection")
         conn = http.client.HTTPSConnection(host, timeout=10, context=ctx)
         sample_date_header(conn)

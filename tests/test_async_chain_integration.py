@@ -98,7 +98,7 @@ def _make_headless_driver():  # type: ignore[no-untyped-def]
 def driver():  # type: ignore[no-untyped-def]
     try:
         drv = _make_headless_driver()
-    except Exception as exc:  # noqa: BLE001 - any driver startup issue
+    except Exception as exc:  # any driver startup issue
         if _browser_required():
             pytest.fail(
                 f"Chrome is required here but could not start: {exc}. "

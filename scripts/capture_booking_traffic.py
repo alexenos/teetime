@@ -86,7 +86,7 @@ def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> None:
                     "Network.getRequestPostData", {"requestId": request_id}
                 )
                 req["postData"] = body.get("postData")
-            except Exception:  # noqa: BLE001 - body may be gone; fine
+            except Exception:  # body may be gone; fine
                 pass
 
 
@@ -131,7 +131,7 @@ def main() -> None:
     driver = build_driver()
     try:
         print("Logging in ...")
-        if not provider._perform_login(driver):  # noqa: SLF001 - reuse the battle-tested login flow
+        if not provider._perform_login(driver):  # reuse the battle-tested login flow
             raise SystemExit("Login failed - check credentials.")
         drain_performance_log(driver, events)
         print("Navigating to tee time page ...")

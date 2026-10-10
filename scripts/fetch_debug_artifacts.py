@@ -103,7 +103,7 @@ def access_token() -> str:
     try:
         credentials, _ = google.auth.default(scopes=SCOPES)
         credentials.refresh(GoogleAuthRequest())
-    except Exception as exc:  # noqa: BLE001 - the message matters more than the type
+    except Exception as exc:  # the message matters more than the type
         sys.exit(
             f"Could not obtain credentials: {exc}\n"
             "Set GOOGLE_APPLICATION_CREDENTIALS to a service-account key, or paste a token:\n"
