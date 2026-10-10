@@ -117,7 +117,9 @@ skip the scoreboard run whatever the cost row says.
    2026-10-09: $37.17 both. The seed row is written by `scripts/cost_row.py --seed`
    to `operations/cost/2026-09.json`; it carries a `backfill` object, so it is
    outside the streak.
-4. Create the Routine, record its trigger ID here, and change **Status**.
+4. Create the Routine from The prompt below (trigger `0 11 5 * *` UTC, model
+   `claude-sonnet-5-5`), record its trigger ID here, and change **Status**. Merge
+   the PR that adds `scripts/cost_row.py` first: the prompt runs it from `main`.
 5. Resolve #228 and record the scope decision here.
 
 The scoreboard shows the seeded September figure once the scoreboard Routine's
@@ -125,3 +127,42 @@ prompt reads `operations/cost` (see `operations/routines/scoreboard.md`, Step 2)
 The cost Routine's first scheduled run is 2026-11-05 for October; until then the
 seed is the newest row, and `derive_scoreboard.py` expects that run on that date
 and counts its absence as a break in the streak.
+
+## The prompt
+
+Paste everything below the line. Like the scoreboard prompt it avoids paired `*`,
+which the routines UI would read as markdown; compare the live text after pasting.
+
+---
+
+You are running the monthly cost report for the TeeTime booking bot. You start with zero context; everything you need is in this repo. This session starts at 05:00 CT on the 5th of the month and reports the invoice month that just ended.
+
+This run reads GCP spend from the BigQuery billing export and records one row in GCS. It authorizes exactly that, and nothing in the repository: never commit, never open a PR, never edit any file to make a run pass. It is not a repository write of any kind.
+
+The figure covers GCP only. Anthropic agent and token spend is not included, and the row says so in its scope field. Never add, estimate or mention a figure for it.
+
+Rule that applies to every path through this prompt: always write a ledger row
+Before you finish, record this run as one new object, never an edit of an existing one:
+
+gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/cost/<YYYY-MM>.json
+
+named for the month the row reports, which is the month field in the row and is the month before this run's date. Write it with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them. If the object already exists, say so in the final message rather than forcing it. A month with no object is indistinguishable from a month that was never checked, so a failed run writes a row too. The schema is in operations/ledger/README.md under cost.jsonl.
+
+Step 1 - set up
+Establish today's date and time in Central Time: TZ=America/Chicago date '+%F %H:%M'. If mcp__Claude_Code_Remote__set_session_title is available, name the session MM/DD Cost with it; if not, skip this. This Routine is expected on the 5th. If today is not the 5th, say so in your final message and carry on: it is a manual run.
+
+Run bash scripts/setup_remote_env.sh. Its last line is the answer. This run needs the gcloud CLI and git; it does not use the venv, so PARTIAL with only the venv failing is fine. If gcloud does not work, nothing below can work: say so as your final message and stop.
+
+Then git checkout main && git pull --ff-only.
+
+Step 2 - query and build the row
+Run: python scripts/cost_row.py --out cost-row.json
+It runs operations/routines/cost.sql against the billing export and writes the row to cost-row.json. It also exits non-zero when it wrote a row with ok false, because the query failed, returned no rows, or returned a currency other than USD. That is a failed run, not a script error: the row is still written, and Step 3 still happens. Do not edit the script or the query, do not substitute a figure from anywhere else, and do not retry more than once. If the script cannot start at all and wrote no cost-row.json, write {"date":"<run date CT>","routine":"cost","ok":false,"month":"<previous month, YYYY-MM>","scope":"gcp_only","note":"<what failed>"} yourself.
+
+Step 3 - write the ledger row
+Read the month field from cost-row.json and write it:
+
+gcloud storage cp --no-clobber cost-row.json gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/cost/<YYYY-MM>.json
+
+Step 4 - finish
+End the session with one line as your final message, written for a phone screen, verdict first, no markdown. On success: Cost - 2026-10: $41.20 GCP only, ledger row written. On a failed run: Cost could not run - <the note from the row>. If the ledger write failed or the object already existed, say that instead. Do not print the service breakdown, and put no name, handle or phone number in it.
