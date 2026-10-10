@@ -1167,7 +1167,8 @@ class BookingService:
                 return await self._after_replace_answer(
                     session, f"{why}, so I've left your {held_at} booking as it is."
                 )
-        if held.status == BookingStatus.SUCCESS:
+        released_confirmed = held.status == BookingStatus.SUCCESS
+        if released_confirmed:
             cancelled = await self._cancel_confirmed_booking(held)
         else:
             cancelled = await database_service.cancel_pending_booking(held.id) is not None
@@ -1194,7 +1195,12 @@ class BookingService:
         return await self._after_replace_answer(
             session,
             f"Done - I cancelled your {held_at} booking. "
-            + self._booking_ack(booking, attribution),
+            + self._booking_ack(booking, attribution)
+            + (
+                " Your old tee time is released and the new one is not secured yet."
+                if released_confirmed and booking.status != BookingStatus.SUCCESS
+                else ""
+            ),
         )
 
     def _slot_question(

@@ -4613,3 +4613,22 @@ class TestMemberFacingFailure:
             attempted_time=time(9, 23),
         )
         assert message == self.RESTRICTION
+
+    def test_a_failure_without_a_restriction_does_not_claim_a_refusal(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        message = provider._member_facing_failure(
+            site_message=None,
+            technical="Fast booking failed at reserve: timeout",
+            unchecked=False,
+            requested_time=time(9, 23),
+            attempted_time=time(9, 15),
+        )
+        assert message.startswith("I tried 09:15 AM, a fallback for your 09:23 AM")
+        assert "refused" not in message
+
+    def test_last_attempted_time_prefers_the_final_attempt(self) -> None:
+        chain = {"attemptedTimes": [time(9, 23), time(9, 15)]}
+        assert WaldenGolfProvider._last_attempted_time(chain, time(9, 23)) == time(9, 15)
+        assert WaldenGolfProvider._last_attempted_time({}, time(9, 23)) == time(9, 23)
+        assert WaldenGolfProvider._last_attempted_time({"attemptedTimes": []}, None) is None

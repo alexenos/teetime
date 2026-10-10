@@ -4896,6 +4896,7 @@ class TestSameDayReplacement:
         cancel.assert_awaited_once()
         db.create_booking.assert_awaited_once()
         assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+        assert reply.endswith("Your old tee time is released and the new one is not secured yet.")
 
     @pytest.mark.asyncio
     async def test_yes_cancels_the_old_booking_and_books_the_new_time(
