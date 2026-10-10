@@ -99,12 +99,15 @@ It was read on 2026-10-09 and matched the Console, which says only that it had
 settled by the 9th. Run `cost.sql` for October on 2026-11-01 as well as on the
 5th and compare; if the figure never moves, the trigger could go earlier.
 
-This Routine fires before the scoreboard Routine on the same morning, so the new
-month reaches the page that day. The ordering is deliberate (maintainer,
-2026-10-09). **It holds only once the scoreboard cron has moved** from `30 12` to
-`30 13` UTC on 2026-11-01 (`operations/routines/scoreboard.md`, Shares the DST
-defect): left at `30 12`, it fires at 06:30 CST on the 5th and stops at its own
-hour gate before 07:00, so the new month would not reach the page that morning.
+This Routine fires before the scoreboard Routine on the same morning, in every
+month and whichever way DST falls: `0 11 5 * *` is 05:00 CST or 06:00 CDT, and the
+scoreboard is at 06:30 CST or 07:30 CDT. The ordering is deliberate (maintainer,
+2026-10-09), and this cron needs no change at either DST boundary.
+
+Separate defect, not this Routine's: until the scoreboard cron moves from `30 12`
+to `30 13` UTC on 2026-11-01 (`operations/routines/scoreboard.md`, Shares the DST
+defect), its own hour gate stops it before 07:00 CT. On 2026-11-05 that would
+skip the scoreboard run whatever the cost row says.
 
 ## Deploying it
 
