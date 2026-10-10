@@ -152,19 +152,21 @@ backfill: a missing row is detectable, an inferred row presented as read is not.
 
 | Figure | |
 |---|---|
-| Headline | this month's spend |
+| Headline | the latest completed month's spend (a monthly Routine cannot report a month still running) |
 | Also | $/booking |
-| **Trend** | this month against last month |
+| **Trend** | that month against the one before it, shown only when the earlier month has a row. August comes from the Console, because the export has no complete August. |
 
 $/booking is the input to the Cloud SQL retention decision open since #41 and #168
 (~$9.50/month). Its divisor is `exact + fallback` from `race-report.jsonl` and
 needs no new source.
 
-**Source:** `cost.jsonl`, written by the cost Routine. **Not yet available.** The
-billing export is not enabled. `terraform/cost.tf` creates the dataset it writes
-to and grants the Routine read access; turning the export on is a Console step on
-the billing account. #227 covers why BigQuery is the only path to the figure, and
-`operations/routines/cost.md` the remaining steps.
+**Source:** the newest successful `cost` row in GCS (`operations/cost/`), written by
+the cost Routine. August and September 2026 are manual seeds. September was checked against the
+Console on 2026-10-09; August is the Console's September figure plus its stated
+$34.01 month-on-month fall, not a figure read off August itself. The figure is net of credits and **includes tax** (the `Invoice` line),
+so it is the Console's number. $/booking is derived here, not stored: the month's
+spend over `exact + fallback` for that month in `race-report` rows. #227 covers
+why BigQuery is the only path, and `operations/routines/cost.md` the Routine.
 
 **Scope is GCP only, and the page must say so.** Whether Anthropic agent and token
 spend can be measured is open in #228. For a project developed agentically against
@@ -210,7 +212,7 @@ appended ledger line, so what changed is visible in the diff rather than buried 
 a re-rendered page.
 
 Specified in `operations/routines/scoreboard.md` and
-`operations/routines/cost.md`. Neither is deployed.
+`operations/routines/cost.md`. The scoreboard is deployed; the cost Routine is not.
 
 ## Current state
 
@@ -218,4 +220,5 @@ Specified in `operations/routines/scoreboard.md` and
 transcribed from the race reports (2026-08-13 to 2026-09-27), derived by
 `operations/ledger/derive_scoreboard.py` and flagged as backfilled on the page.
 The streak has a value from 2026-10-01, the race report Routine's first row, and
-every run in it is self-reported (§2). Cost has no source at all.
+every run in it is self-reported (§2). Cost has a value for September 2026 ($37.17, GCP only), seeded by hand; the
+cost Routine's first scheduled run is 2026-11-05.

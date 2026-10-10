@@ -10,8 +10,8 @@ ROWS is any mix of .jsonl files, .json files (one row each, the GCS layout) and
 directories of either. Every row is validated before anything is derived.
 
 It derives the outcome split from race-report rows and the automation streak
-from every Routine's rows. Cost is published as unavailable: no billing export
-exists (#227). With --out, it also reports on stderr whether a source metric
+from every Routine's rows. Cost is the newest successful cost row (GCP spend for
+a completed month, #227), or unavailable when there is none. With --out, it also reports on stderr whether a source metric
 changed against the file it is about to overwrite; that line is what the
 scoreboard Routine's notify-on-change rule reads.
 
@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import subprocess
 import sys
 from collections.abc import Callable
@@ -52,6 +53,8 @@ class Schedule:
 
     fires: dt.time
     start: dt.date | None
+    # None for a daily Routine; otherwise the day of the month it fires on.
+    day: int | None = None
 
 
 SCHEDULES = {
@@ -59,6 +62,12 @@ SCHEDULES = {
     # its first row. Earlier mornings are covered by backfill or not at all.
     "race-report": Schedule(fires=dt.time(6, 40), start=dt.date(2026, 10, 1)),
     "scoreboard": Schedule(fires=dt.time(7, 30), start=None),
+    # Monthly, reporting the month just ended. The first scheduled run is
+    # 2026-11-05 at 05:00 CT: the 5th to let the invoice settle, and ahead of the
+    # scoreboard run (operations/routines/cost.md, When to run it). The August and
+    # September rows before it are manual seeds carrying a backfill object, so
+    # they are outside the walk.
+    "cost": Schedule(fires=dt.time(5, 0), start=dt.date(2026, 11, 5), day=5),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8
@@ -98,6 +107,9 @@ def validate(row: Row) -> None:
         raise ValueError(f"{where}: ok must be true or false on a Routine row")
     if row.get("ok") is False and not row.get("note"):
         raise ValueError(f"{where}: ok is false with no note")
+    if row["routine"] == "cost":
+        validate_cost(row, where)
+        return
     if row["routine"] != "race-report" or not row["raced"]:
         return
     rollup = dict.fromkeys(OUTCOMES, 0)
@@ -113,6 +125,68 @@ def validate(row: Row) -> None:
         rollup[r["outcome"]] += 1
     if rollup != row["outcome"]:
         raise ValueError(f"{where}: outcome {row['outcome']} != rollup {rollup}")
+
+
+def validate_cost(row: Row, where: str) -> None:
+    """A cost row either carries a GCP figure for a stated month, or says why not."""
+    if row.get("ok") is False:
+        return
+    try:
+        month = row["month"]
+        # strptime accepts "2026-9"; the round trip insists on the stored form.
+        if dt.datetime.strptime(month, "%Y-%m").strftime("%Y-%m") != month:
+            raise ValueError
+    except (KeyError, ValueError, TypeError):
+        raise ValueError(f"{where}: month must be YYYY-MM") from None
+    usd = row.get("usd_gcp")
+    if isinstance(usd, bool) or not isinstance(usd, int | float) or not math.isfinite(usd):
+        raise ValueError(f"{where}: usd_gcp must be a finite number on a successful cost row")
+    if not row.get("scope"):
+        raise ValueError(f"{where}: a cost figure with no stated scope")
+
+
+def cost_board(rows: list[Row], races: list[Row]) -> Row:
+    """Cost from the newest successful cost row; unavailable when there is none.
+
+    The month is the row's, not the clock's: a monthly Routine can only report a
+    month that has ended. $/booking divides by exact + fallback for that month from
+    the race-report rows, so it needs no figure the cost row could get wrong.
+    """
+    good = [r for r in rows if r["routine"] == "cost" and r.get("ok") is not False]
+    if not good:
+        return {
+            "month": None,
+            "usd": None,
+            "usd_per_booking": None,
+            "scope": "gcp_only",
+            "available": False,
+            "reason": "No cost figure has been recorded yet.",
+        }
+    latest = max(good, key=lambda r: (r["month"], r["date"]))
+
+    def booked(month: str) -> int:
+        return sum(
+            r["outcome"]["exact"] + r["outcome"]["fallback"]
+            for r in races
+            if r["raced"] and r["date"].startswith(month)
+        )
+
+    n = booked(latest["month"])
+    prior = (dt.date.fromisoformat(latest["month"] + "-01") - dt.timedelta(days=1)).strftime(
+        "%Y-%m"
+    )
+    before = [r for r in good if r["month"] == prior]
+    return {
+        "month": latest["month"],
+        "usd": round(latest["usd_gcp"], 2),
+        "usd_per_booking": round(latest["usd_gcp"] / n, 2) if n else None,
+        "bookings": n,
+        "scope": latest["scope"],
+        "available": True,
+        "reason": None,
+        "prior_month": prior if before else None,
+        "prior_usd": round(before[-1]["usd_gcp"], 2) if before else None,
+    }
 
 
 def split(rows: list[Row]) -> Row:
@@ -171,7 +245,10 @@ def scheduled_dates(name: str, rows: list[Row], now: dt.datetime) -> list[dt.dat
     day = start
     while dt.datetime.combine(day, schedule.fires, CT) + COMPLETION_ALLOWANCE <= now:
         dates.append(day)
-        day += dt.timedelta(days=1)
+        if schedule.day is None:
+            day += dt.timedelta(days=1)
+        else:
+            day = (day.replace(day=1) + dt.timedelta(days=32)).replace(day=schedule.day)
     return dates
 
 
@@ -257,7 +334,9 @@ def walk(rows: list[Row], now: dt.datetime, corrections: Corrections) -> Row:
 def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_corrections) -> Row:
     for row in rows:
         validate(row)
-    keys = [(r["routine"], r["date"]) for r in rows]
+    # A cost row also names the month it reports, because the seed rows for two
+    # months were written on one date.
+    keys = [(r["routine"], r["date"], r.get("month")) for r in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("two rows share a Routine and date; the ledger holds one object per run")
 
@@ -300,14 +379,7 @@ def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_cor
             "prior_4wk": split(within(prior_start, last_start)),
         },
         "streak": walk(rows, now, corrections),
-        "cost": {
-            "month": as_of.strftime("%Y-%m"),
-            "usd": None,
-            "usd_per_booking": None,
-            "scope": "gcp_only",
-            "available": False,
-            "reason": "No billing export exists yet.",
-        },
+        "cost": cost_board(rows, races),
     }
 
 
@@ -341,6 +413,7 @@ def ledger_row(board: Row, published: str) -> Row:
             "usd_total": c["usd"],
             "usd_per_booking": c["usd_per_booking"],
             "source": "unavailable" if not c["available"] else "cost",
+            "scope": c["scope"],
         },
     }
 
@@ -349,7 +422,7 @@ def changed_sources(old: Row, new: Row) -> list[str]:
     """Source metrics that moved, for the notify-on-change rule.
 
     Excluded because they move without news: the streak (every run extends
-    it), the 4-week windows (they slide daily) and the cost month label.
+    it) and the 4-week windows (they slide daily).
     """
 
     def source(board: Row) -> Row:

@@ -184,8 +184,8 @@ One row per cost run. Monthly, so most days have no row.
 
 ```json
 {"date":"2026-10-01","routine":"cost","ok":true,
- "month":"2026-09","usd_gcp":null,"scope":"gcp_only",
- "source":"bigquery:<dataset>"}
+ "month":"2026-09","usd_gcp":37.17,"usd_gcp_gross":42.39,"scope":"gcp_only",
+ "source":"bigquery:billing_export","services":{"Cloud Run":18.65,"Cloud SQL":9.26}}
 ```
 
 `scope` states what the figure covers, because it does not cover everything. GCP

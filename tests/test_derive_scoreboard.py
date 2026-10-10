@@ -167,7 +167,7 @@ def test_a_routine_row_before_the_schedule_start_is_refused() -> None:
 
 def test_a_row_for_an_unscheduled_routine_is_refused() -> None:
     with pytest.raises(ValueError, match="no schedule"):
-        _streak([_quiet(RACE_START, routine="cost")], _ct(RACE_START, 7, 30))
+        _streak([_quiet(RACE_START, routine="bogus")], _ct(RACE_START, 7, 30))
 
 
 def test_the_same_date_may_hold_one_row_per_routine() -> None:
@@ -275,3 +275,115 @@ def test_backfill_banner_condition_counts_only_routine_races() -> None:
         [_raced(before, backfill=True), _quiet(RACE_START)], _ct(RACE_START, 7, 30), _no_corrections
     )
     assert quiet["backfill"]["routine_raced"] == 0
+
+
+def _cost(month: str, usd: float = 37.17, date: str | None = None, **kw: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "date": date or f"{month}-28",
+        "routine": "cost",
+        "ok": True,
+        "month": month,
+        "usd_gcp": usd,
+        "scope": "gcp_only",
+    }
+    row.update(kw)
+    return row
+
+
+def _seed(month: str = "2026-09", usd: float = 37.17) -> dict[str, Any]:
+    return _cost(month, usd, date="2026-10-09", ok=None, backfill={"basis": "manual cost.sql run"})
+
+
+def _board(rows: list[dict[str, Any]], now: dt.datetime) -> dict[str, Any]:
+    result: dict[str, Any] = ds.derive(rows, now, _no_corrections)
+    return result
+
+
+NOW = _ct(dt.date(2026, 10, 10), 7, 30)
+
+
+def test_cost_is_unavailable_without_a_row_not_zero() -> None:
+    cost = _board([_raced(RACE_START)], NOW)["cost"]
+    assert cost["available"] is False
+    assert cost["usd"] is None and cost["usd_per_booking"] is None
+
+
+def test_cost_reports_the_newest_month_with_dollars_per_booking() -> None:
+    sept = dt.date(2026, 9, 3)
+    rows = [
+        _raced(sept, backfill=True),
+        _raced(sept + dt.timedelta(days=1), "fallback", backfill=True),
+    ]
+    rows += [_raced(sept + dt.timedelta(days=2), "miss", backfill=True), _seed(usd=40.0)]
+    cost = _board(rows, NOW)["cost"]
+    assert cost["available"] is True
+    assert (cost["month"], cost["usd"], cost["bookings"]) == ("2026-09", 40.0, 2)
+    assert cost["usd_per_booking"] == 20.0
+    assert cost["scope"] == "gcp_only"
+    assert cost["prior_usd"] is None
+
+
+def test_cost_with_no_bookings_has_no_per_booking_figure() -> None:
+    cost = _board([_raced(RACE_START), _seed()], NOW)["cost"]
+    assert cost["usd"] == 37.17 and cost["usd_per_booking"] is None
+
+
+def test_cost_shows_the_prior_month_when_it_has_a_row() -> None:
+    rows = [_raced(RACE_START), _seed("2026-09", 37.17), _seed("2026-10", 40.0)]
+    rows[2]["date"] = "2026-10-10"
+    cost = _board(rows, _ct(dt.date(2026, 11, 2), 9, 0))["cost"]
+    assert (cost["month"], cost["prior_month"], cost["prior_usd"]) == ("2026-10", "2026-09", 37.17)
+
+
+def test_a_failed_cost_row_does_not_replace_the_last_good_figure() -> None:
+    failed = _cost("2026-10", date="2026-11-05", ok=False, note="query returned no rows")
+    cost = _board([_raced(RACE_START), _seed(), failed], _ct(dt.date(2026, 11, 2), 9, 0))["cost"]
+    assert (cost["available"], cost["month"]) == (True, "2026-09")
+
+
+def test_a_seed_row_stays_outside_the_streak() -> None:
+    days = _days(2)
+    now = _ct(days[1], 7, 30)
+    with_seed = _board([_quiet(d) for d in days] + [_seed()], now)["streak"]
+    assert with_seed["consecutive"] == 2
+    assert "cost" not in with_seed["by_routine"]
+
+
+def test_a_missing_monthly_cost_run_breaks_the_streak() -> None:
+    start = dt.date(2026, 11, 5)
+    rows = [_quiet(d) for d in _days(40)]
+    now = _ct(start, 9, 0)
+    assert _board(rows, now)["streak"]["last_failure"] == "2026-11-05"
+    ok = _cost("2026-10", date="2026-11-05")
+    assert _board(rows + [ok], now)["streak"]["by_routine"]["cost"] == 1
+
+
+def test_monthly_cost_dates_step_by_month() -> None:
+    dates = ds.scheduled_dates("cost", [], _ct(dt.date(2027, 1, 6), 9, 0))
+    assert dates == [dt.date(2026, 11, 5), dt.date(2026, 12, 5), dt.date(2027, 1, 5)]
+
+
+def test_a_cost_figure_without_scope_or_month_is_refused() -> None:
+    with pytest.raises(ValueError, match="scope"):
+        ds.validate(_cost("2026-09", scope=""))
+    with pytest.raises(ValueError, match="month"):
+        ds.validate(_cost("September", date="2026-09-28"))
+    with pytest.raises(ValueError, match="usd_gcp"):
+        ds.validate(_cost("2026-09", usd=None))
+
+
+def test_two_seed_rows_written_on_one_date_are_not_duplicates() -> None:
+    rows = [_raced(RACE_START), _seed("2026-08", 71.18), _seed("2026-09", 37.17)]
+    cost = _board(rows, NOW)["cost"]
+    assert (cost["month"], cost["prior_month"], cost["prior_usd"]) == ("2026-09", "2026-08", 71.18)
+    with pytest.raises(ValueError, match="share a Routine and date"):
+        _board(rows + [_seed("2026-09", 1.0)], NOW)
+
+
+def test_a_cost_month_must_be_zero_padded_and_the_amount_finite() -> None:
+    with pytest.raises(ValueError, match="month"):
+        ds.validate(_cost("2026-9", date="2026-10-09"))
+    with pytest.raises(ValueError, match="finite"):
+        ds.validate(_cost("2026-09", usd=float("inf")))
+    with pytest.raises(ValueError, match="finite"):
+        ds.validate(_cost("2026-09", usd=float("nan")))

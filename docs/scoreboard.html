@@ -337,11 +337,12 @@
         + ' for what it needs. Scope when it lands: ' + c.scope + '.';
       rows.push(["Cost", "not available"]);
     } else {
-      $("cost-val").textContent = "$" + c.usd;
+      $("cost-val").textContent = "$" + c.usd.toFixed(2);
       $("cost-sub").textContent = c.month + " · "
-        + (c.usd_per_booking === null ? "" : "$" + c.usd_per_booking + " per booking · ")
+        + (c.usd_per_booking === null ? "" : "$" + c.usd_per_booking.toFixed(2) + " per booking · ")
+        + (c.prior_usd == null ? "" : "vs $" + c.prior_usd.toFixed(2) + " in " + c.prior_month + " · ")
         + "scope: " + c.scope;
-      rows.push(["Cost, " + c.month, "$" + c.usd]);
+      rows.push(["Cost, " + c.month, "$" + c.usd.toFixed(2)]);
     }
 
     // ---- table view (required: the light-mode palette carries a contrast WARN) ----

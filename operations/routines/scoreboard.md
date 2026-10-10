@@ -266,17 +266,19 @@ Gate - right hour? The cron is UTC and pinned to 12:30, which is 07:30 CT only d
 
 Step 2 - read every ledger
 
-mkdir -p ledger/race-report ledger/scoreboard
+mkdir -p ledger/race-report ledger/scoreboard ledger/cost
 
 gcloud storage rsync gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/race-report ledger/race-report
 
 gcloud storage rsync gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard ledger/scoreboard
 
-Run those as three separate commands. rsync copies a whole prefix and needs no wildcard. One directory per Routine, because every Routine names its objects by date and two Routines' rows for the same day would collide in one. The race-report prefix holds the backfill rows beside the Routine's own, so it is never empty: if that rsync fails for any reason, it is a failed run - ok:false with the error as the note, notify, stop. The scoreboard rsync may fail on its first run only, and only with "Did not find existing container"; any other error from it is also a failed run. The script refuses a run with no race-report rows as a second guard. Do not read operations/ledger/ in the checkout: its .jsonl files are empty by design. Read only these two prefixes - an object directly under operations/ (a grant probe) is not a ledger row, and a Routine the script has no schedule for makes it refuse. When the cost Routine is deployed it is added here and to SCHEDULES together.
+gcloud storage rsync gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/cost ledger/cost
+
+Run those as three separate commands. rsync copies a whole prefix and needs no wildcard. One directory per Routine, because every Routine names its objects by date and two Routines' rows for the same day would collide in one. The race-report prefix holds the backfill rows beside the Routine's own, so it is never empty: if that rsync fails for any reason, it is a failed run - ok:false with the error as the note, notify, stop. The scoreboard rsync may fail on its first run only, and only with "Did not find existing container"; any other error from it is also a failed run. The cost rsync is a failed run on any error: its prefix holds the seeded 2026-09 row, so it is never empty, and without it cost publishes as unavailable with no sign anything went wrong. The script refuses a run with no race-report rows as a second guard. Do not read operations/ledger/ in the checkout: its .jsonl files are empty by design. Read only these three prefixes - an object directly under operations/ (a grant probe) is not a ledger row, and a Routine the script has no schedule for makes it refuse. The cost Routine is in SCHEDULES (monthly, from 2026-11-05), so a missing monthly row breaks the streak.
 
 Step 3 - derive
 
-python operations/ledger/derive_scoreboard.py ledger/race-report ledger/scoreboard --out docs/scoreboard.json --row scoreboard-row.json
+python operations/ledger/derive_scoreboard.py ledger/race-report ledger/scoreboard ledger/cost --out docs/scoreboard.json --row scoreboard-row.json
 
 Do not pass --now or --as-of; the script reads the clock. It validates every row before deriving anything. If it exits non-zero, publish nothing: do not hand-edit the JSON, do not edit the script, and do not drop the row it names. Write the ok:false ledger row with its message as the note, notify, and stop. A refusal is the script working - it is what stops a malformed row or a shallow clone from becoming a published number.
 
