@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Trigger** | monthly, proposed — `0 14 5 * *` UTC (08:00 CT on the 5th), reporting the month just ended |
+| **Trigger** | monthly, proposed — `0 11 5 * *` UTC (05:00 CST on the 5th, the maintainer's choice 2026-10-09), reporting the month just ended |
 | **Authorization** | queries BigQuery, writes one new object to GCS. Commits nothing. |
 | **Emits** | one object per run at `operations/cost/<YYYY-MM>.json` in GCS |
 | **Owns** | the cost metric |
@@ -79,8 +79,9 @@ invites $/booking comparisons against a denominator that does not match.
 
 ## Shares the DST defect
 
-A cron pinned to UTC drifts against CT twice a year: `0 14 5 * *` is 09:00 CDT and
-08:00 CST. At monthly granularity the consequence is an hour, not a missed run, so
+A cron pinned to UTC drifts against CT twice a year: `0 11 5 * *` is 06:00 CDT and
+05:00 CST. At monthly granularity the consequence is an hour, and either hour is
+before the scoreboard Routine's 07:30 CT (06:30 CST until its own cron moves), so
 this one is cosmetic rather than load-bearing — unlike the race report, where 05:40
 CT lands before the race it reports on. Recorded so the set of crons needing the
 2026-11-01 review is complete, even where the answer is "leave it".
@@ -98,8 +99,9 @@ It was read on 2026-10-09 and matched the Console, which says only that it had
 settled by the 9th. Run `cost.sql` for October on 2026-11-01 as well as on the
 5th and compare; if the figure never moves, the trigger could go earlier.
 
-The scoreboard Routine fires at 07:30 CT, before this one at 08:00, so the new
-month reaches the page the following morning.
+This Routine fires before the scoreboard Routine on the same morning, so the new
+month reaches the page that day. The ordering is deliberate (maintainer,
+2026-10-09): the scoreboard run then reads the row it was waiting for.
 
 ## Deploying it
 

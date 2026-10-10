@@ -62,10 +62,11 @@ SCHEDULES = {
     "race-report": Schedule(fires=dt.time(6, 40), start=dt.date(2026, 10, 1)),
     "scoreboard": Schedule(fires=dt.time(7, 30), start=None),
     # Monthly, reporting the month just ended. The first scheduled run is
-    # 2026-11-05 (the 5th, to let the invoice settle; operations/routines/cost.md,
-    # When to run it). The August and September rows before it are manual seeds
-    # carrying a backfill object, so they are outside the walk.
-    "cost": Schedule(fires=dt.time(8, 0), start=dt.date(2026, 11, 5), day=5),
+    # 2026-11-05 at 05:00 CT: the 5th to let the invoice settle, and ahead of the
+    # scoreboard run (operations/routines/cost.md, When to run it). The August and
+    # September rows before it are manual seeds carrying a backfill object, so
+    # they are outside the walk.
+    "cost": Schedule(fires=dt.time(5, 0), start=dt.date(2026, 11, 5), day=5),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8
