@@ -208,7 +208,7 @@ the meaning of `ok` are in `operations/routines/tech-debt.md`.
 {"date":"2026-10-10","routine":"tech-debt","ok":true,
  "scan":{"categories":{"todo":{"ran":true,"files_covered":84,"found":9,"filed":1},
                        "legacy-feature":{"ran":false,"reason":"no_manifest"}},
-         "filed_total":1,"open_backlog":14,"digest_comment":"<url>"},
+         "filed_total":1,"open_backlog":14},
  "fix":{"issue":null,"pr":null,"skipped":"no_candidate"},
  "review":{"requested":false,"outcome":"not_run"},
  "prior_prs":{"merged":0,"closed_unmerged":0,"open":0}}

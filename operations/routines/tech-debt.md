@@ -49,9 +49,7 @@ link the earlier issue.
 `td:lint-suppression`, `td:todo`, `td:test-health`, `td:dead-code`,
 `td:docs-drift`, `td:duplication`, `td:legacy-feature`, `td:code-quality`.
 `td:blocked` for an issue the fix step should skip until the maintainer removes
-it. `td:digest` for the one standing digest issue (below), which carries
-`td:digest` and **not** `tech-debt`, so it is never in the dedup set or the fix
-pool. The existing `wontfix` label means "decided
+it. The existing `wontfix` label means "decided
 against".
 
 ## Categories
@@ -119,7 +117,7 @@ checks ran and covered files:
 - scanned honestly, found nothing new: `ok: true`
 - scanned, nothing new, but open issues exist: it still fixes one
 - scanned, nothing new, no open issues to fix: `ok: true`, `fix.skipped:
-  "no_candidate"`, a short digest comment saying so, a notification, and nothing
+  "no_candidate"`, a session summary saying so, a notification, and nothing
   else. It does not invent work, lower its bar, or open a PR to have something to
   show.
 
@@ -171,7 +169,7 @@ backed-up maintainer is not buried; it is a count, not a quality judgment.
 | Can | Cannot |
 |---|---|
 | read the repository, GitHub, and the ledgers | merge any PR, by any route, including its own |
-| create and edit issues and labels, comment on issues, and keep the one digest issue | close an issue itself, or reopen one the maintainer closed `wontfix`. A fix PR's `Closes #<n>` closes the issue only when the maintainer merges it. |
+| create and edit issues and labels, and comment on issues | close an issue itself, or reopen one the maintainer closed `wontfix`. A fix PR's `Closes #<n>` closes the issue only when the maintainer merges it. |
 | push one branch and open one non-draft PR per run, and push further commits to that branch in response to review | push to `main`, or to a branch that is not its own |
 | trigger CodeRabbit on its own PR, and reply to its findings there | trigger or reply on any other PR |
 | write one object to the `operations/tech-debt/` prefix in GCS | edit another Routine's file or ledger |
@@ -277,16 +275,16 @@ cannot exercise booking says nothing about booking: this project has no local wa
 to exercise it (testing means deploying). The PR names what the tests do and do
 not cover for the changed code, and what remains a hypothesis.
 
-## The digest: the list to review
+## The summary: reported in the session
 
-Reviewing the week should not mean opening every issue. The Routine keeps **one
-standing issue** labelled `td:digest` (created on the first run, titled
-`Tech debt digest`) and adds **one comment per run**. Subscribing to that issue
-is the review queue. The digest is a pointer; the findings themselves stay in
-their own issues, which remain the source of truth.
+The review list is the **session's final message**, not anything on GitHub. When
+the Routine finishes it prints one summary in the session, so the maintainer can
+read the week in one place without opening every issue. Nothing about it is
+posted to the repository; the findings themselves live in their own issues, which
+stay the source of truth, and the ledger holds counts only.
 
-The comment lists every issue the run created or found, each as the title
-linked to the issue, then one sentence saying what it is:
+Every issue the run created or found is one line: the title as a link to the
+issue, a dash, and one sentence saying what it is.
 
 ```markdown
 Tech debt scan 2026-10-10
@@ -298,15 +296,15 @@ New this week (2)
 Found again, still open (1)
 - [Duplicate login retry in racer and observer](https://github.com/OWNER/REPO/issues/3) - The same retry loop is copied in two modules.
 
-Fix this week: [PR](https://github.com/OWNER/REPO/pull/4) for issue 3, risk low, merge does not redeploy.
+Fix this week: [PR](https://github.com/OWNER/REPO/pull/4) for issue 3, risk low, merge does not redeploy, CodeRabbit reviewed it.
+Skipped checks: legacy-feature (no manifest).
 ```
 
-The URLs above are placeholders. Rules: a sentence is a sentence, not a
-paragraph; one line per issue; "found again" means the scan re-detected a finding
-whose issue is already open; a week with nothing says `Nothing new, nothing
-open to fix.` rather than posting nothing, because a missing comment would be
-indistinguishable from a missed run. The comment passes the name check like
-everything else public.
+The URLs are placeholders. One line per issue; one sentence, not a paragraph.
+"Found again" means the scan re-detected a finding whose issue is already open. A
+week with nothing says `Nothing new, nothing open to fix.` rather than printing
+nothing. The summary uses labels, never names, even though it is not public: it
+is still written into a transcript.
 
 ## The member-name check
 
@@ -361,9 +359,9 @@ established; check how `--artifacts` reads a directory before relying on it.
 6. **Review.** Trigger CodeRabbit on the PR, within the budget above. Judge and
    answer each finding, push fixes, and re-trigger if quota allows. Update the PR
    body's Review section to match the final state.
-7. **Digest.** Post the run's comment on the digest issue: new, found again, and
-   the fix PR with its risk line.
-8. **Ledger row, then notify.** In that order, on every path.
+7. **Ledger row, then notify, then summarize.** The ledger row and the
+   notification first, in that order, on every path; then the summary above as the
+   session's final message.
 
 ## The ledger row
 
@@ -383,8 +381,7 @@ not real runs.
      "lint-suppression":{"ran":true,"files_covered":84,"found":6,"filed":2},
      "todo":{"ran":true,"files_covered":84,"found":9,"filed":1},
      "legacy-feature":{"ran":false,"reason":"no_manifest"}},
-   "filed_total":3,"open_backlog":14,
-   "digest_comment":"<url>"},
+   "filed_total":3,"open_backlog":14},
  "fix":{"issue":301,"pr":302,"skipped":null,
         "sensitive_area":false,"open_prs_at_start":1},
  "review":{"requested":true,"rounds":1,"outcome":"reviewed",
@@ -456,7 +453,7 @@ One or two sentences, no markdown, labels not names. For example:
 ## The prompt
 
 ```
-You are running the weekly tech-debt Routine for the TeeTime booking bot. You start with zero context; everything you need is in this repo. Read operations/routines/tech-debt.md first: it is the specification, and it governs where this prompt is silent.
+You are running the weekly tech-debt Routine for the TeeTime booking bot. You start with zero context; everything you need is in this repo. Read operations/routines/tech-debt.md first: it is the specification, and it governs where this prompt is silent. If that file does not exist, write the ledger row with ok false and the note spec missing, notify, and stop.
 
 You find tech debt, record each finding as a GitHub issue, and fix one open issue per week by opening a pull request. You never merge anything, ever. The maintainer reviews and merges. You are not authorized to push to main, to merge your own PR, or to close an issue you did not file.
 
@@ -466,7 +463,7 @@ Rule that applies to every path through this prompt: always write your ledger ro
 
 Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating or editing any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as .claude/skills/race-report/SKILL.md section 8a describes. Exit 0 is the only pass. Exit 1 means replace the named lines with labels and recheck. Exit 2 means it could not check; that is not a pass, so do not create it, record ok false with a note, and say so in the notification. If a finding is itself an identifier committed to the repo, give the file, line and kind of identifier and never the string.
 
-Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Then make sure these labels exist and create any that are missing: tech-debt, td:blocked, td:digest, td:lint-suppression, td:todo, td:test-health, td:dead-code, td:docs-drift, td:duplication, td:legacy-feature, td:code-quality. If you cannot create a label, that is a failed run: record ok false, notify, and stop.
+Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Then make sure these labels exist and create any that are missing: tech-debt, td:blocked, td:lint-suppression, td:todo, td:test-health, td:dead-code, td:docs-drift, td:duplication, td:legacy-feature, td:code-quality. If you cannot create a label, that is a failed run: record ok false, notify, and stop.
 
 Step 2 - read the backlog. List every issue labelled tech-debt, open and closed, with bodies, and extract the fingerprint from each body. Use no date window: a wontfix closed long ago must still suppress a refile. This is your dedup set and your fix pool. Then list PRs labelled tech-debt and count, cumulatively, how many are merged, closed without merging, or open.
 
@@ -486,28 +483,34 @@ If it reviews, judge each finding on its reasoning, not its severity label, and 
 
 Run the full pre-push command before every push. After pushing fixes, re-trigger once, naming the new sha, only if you can schedule a wake-up for a time after the quota hour has reset; this session just used that hour. Otherwise do not, and say in the PR exactly which commits CodeRabbit reviewed and which it did not. At most two rounds. Update the Review section of the PR body to the final state: the sha reviewed, the sha of the head, each finding and what you did with it. A clean review, or a green CodeRabbit check, is not approval and you must not describe it as one.
 
-Step 5 - digest. Find the issue labelled td:digest, or create it, titled Tech debt digest, with only that label. Post one comment for this run: a heading with the date, then New this week and Found again, still open, each issue on one line as the title linked to the issue followed by a dash and one sentence saying what it is, then one line for the fix PR with its risk, or why there is none. If there is nothing, say Nothing new, nothing open to fix. Never post nothing. Run the name check over the comment first. Record the comment URL in the ledger.
+Step 5 - ledger row, then notification, then summary.
 
-Step 6 - ledger row, then notification. The schema is in the spec. ok describes the run: a run that scanned honestly and found nothing is ok true; a failed check, a name check that could not run, or any problem is ok false with a note. Then push a notification of one or two sentences, no markdown, using labels not names: how many issues were filed, how many are open, that the digest is posted, and either the fix PR number with whether merging redeploys and whether CodeRabbit reviewed it, or why nothing was fixed.
+ The schema is in the spec. ok describes the run: a run that scanned honestly and found nothing is ok true; a failed check, a name check that could not run, or any problem is ok false with a note. Then push a notification of one or two sentences, no markdown, using labels not names: how many issues were filed, how many are open, and either the fix PR number with whether merging redeploys and whether CodeRabbit reviewed it, or why nothing was fixed.
+
+Last, as the final message of this session, print the summary: a heading with the date, then New this week and Found again, still open, each issue on one line as the title linked to the issue followed by a dash and one sentence saying what it is, then one line for the fix PR with its risk, or why there is none, then any category that was skipped and why. If there is nothing, print Nothing new, nothing open to fix. Do not post the summary to GitHub. Use labels, never names.
 ```
 
 ## Deploying it
 
-Who does each step. **You** means a manual step that only the maintainer can do;
+Who does each step. **You** means a manual step only the maintainer can do;
 **merge** means it happens when this PR merges; **Claude** means a session can do
 it when asked.
 
+The Routine is created **before** this PR merges, so that recording its trigger ID
+lands in this same PR. One consequence: the prompt reads
+`operations/routines/tech-debt.md` from the default branch, and until this merges
+that file is not there. The prompt stops with `ok: false` if it is missing. **Merge
+before the first scheduled fire, Saturday 2026-10-10 04:00 CDT (09:00Z).**
+
 | # | Step | Who |
 |---|---|---|
-| 1 | Merge this PR. Touches only `operations/`, so no build and no deploy. | **You** |
-| 2 | The ledger prefix row and schema in `operations/ledger/README.md`, and the empty `tech-debt.jsonl` | Done in this PR (**merge**) |
-| 3 | Create the labels: `tech-debt`, `td:blocked`, `td:digest`, and the eight `td:` categories | **Automatic**: the Routine creates any missing label at the start of each run. Optional to do it yourself first |
-| 4 | Write `operations/features.md` (the feature manifest). Without it `td:legacy-feature` is skipped, which is allowed, so this is not a blocker for deploying | **You** decide each status. Claude can draft the table from the code for you to correct |
-| 5 | Confirm the Routine can write the ledger. `teetime-artifact-reader` holds `objectCreator` on the `operations/` prefix (`terraform/main.tf`, `routine_ledger_writer`), which covers `operations/tech-debt/`. **Not confirmed:** that the Routine runs as that account | **You**, in the Routine's environment |
-| 6 | Confirm the Routine's account can read `MEMBER_PSEUDONYM_LABELS`. `terraform/` grants Secret Manager access to the Cloud Run account, and **nothing found grants it to `teetime-artifact-reader`**; the race report Routine reads the same secret, so it probably works, but this is unverified | **You** check; add a terraform grant if it fails |
-| 7 | Confirm the Routine's GitHub access can create issues and labels, push branches and open PRs. The race report only needs to push and open PRs | **You**, in the Routine's repository and connector settings |
-| 8 | Create the Routine in the routines UI: name, cron `0 9 * * 6`, model, repository, environment, and paste the prompt below | **You**. An agent cannot create it; the existing triggers say so |
-| 9 | After pasting, compare the live text with this file (a pasted prompt is read as markdown and loses paired asterisks; this one has none) | **You** |
-| 10 | Record the trigger ID in this file, change **Status**, and add the Routine to `CLAUDE.md`'s list | Claude, in a small PR once you have the ID. The commit touches only ignored paths |
-| 11 | Optional: run the category checks once by hand to see how many findings the first scan files | Claude, on request |
-| 12 | Watch the first run, Saturday 2026-10-10 at 04:00 CDT. It is the first test of: label use, the 15-issue cap, the digest, the name check, and whether a Routine session can schedule a wake-up for a CodeRabbit retry | **You** (Claude can review the result) |
+| 1 | Create the Routine in the routines UI: name, cron `0 9 * * 6`, model `claude-sonnet-5-5`, this repository, the same environment and service-account access as the race report Routine, and paste the prompt below | **You** |
+| 2 | After pasting, compare the live text with this file (a pasted prompt is read as markdown and loses paired asterisks; this one has none) | **You** |
+| 3 | Give Claude the trigger ID. It records it here, changes **Status**, and adds the Routine to `CLAUDE.md`'s list, in this PR | Claude |
+| 4 | Merge this PR. Touches only `operations/` and `CLAUDE.md`, so no build and no deploy | **You** |
+| 5 | Ledger access: the Routine writes `operations/tech-debt/` as the race report and scoreboard Routines write theirs. `terraform/main.tf` (`routine_ledger_writer`) grants `objectCreator` on the whole `operations/` prefix to `teetime-artifact-reader`, and its comment says Routine sessions run as that account. Nothing further to do if the new Routine uses the same environment | Established from terraform; **you** confirm only if the environment differs |
+| 6 | Read access to `MEMBER_PSEUDONYM_LABELS` from the Routine's environment | **You** (confirmed by you) |
+| 7 | The Routine's GitHub access must be able to create issues and labels, push branches and open PRs. The race report only needs to push and open PRs, so this is the one permission it may not already have | **You** |
+| 8 | Labels | Automatic: the Routine creates any that are missing at the start of each run |
+| 9 | `operations/features.md`, the feature manifest. Without it `td:legacy-feature` is skipped, which is allowed, so this does not block deploying | **You** decide each status. Claude can draft the table for you to correct |
+| 10 | Watch the first run, Saturday 2026-10-10 at 04:00 CDT. It is the first test of: GitHub write access, the 15-issue cap, the name check, the session summary, and whether a Routine session can schedule a wake-up for a CodeRabbit retry | **You** (Claude can review the result) |
