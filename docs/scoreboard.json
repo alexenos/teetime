@@ -1,12 +1,12 @@
 {
   "sample": false,
-  "generated": "2026-10-09T12:46:06Z",
+  "generated": "2026-10-10T12:45:24Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
     "first": "2026-08-13",
     "last": "2026-09-27",
-    "routine_rows": 9,
+    "routine_rows": 10,
     "routine_raced": 3,
     "source": "operations/ledger/backfill/race-report.jsonl"
   },
@@ -36,14 +36,14 @@
   "streak": {
     "available": true,
     "reason": null,
-    "consecutive": 1,
-    "unverified": 1,
-    "total_ok": 12,
-    "last_failure": "2026-10-08",
-    "last_failure_reason": "scoreboard: failed",
+    "consecutive": 2,
+    "unverified": 2,
+    "total_ok": 13,
+    "last_failure": "2026-10-09",
+    "last_failure_reason": "race-report: failed",
     "by_routine": {
-      "race-report": 5,
-      "scoreboard": 0
+      "race-report": 1,
+      "scoreboard": 1
     },
     "history": [
       3,
@@ -51,15 +51,18 @@
     ],
     "window": {
       "first": "2026-10-01",
-      "last": "2026-10-09"
+      "last": "2026-10-10"
     }
   },
   "cost": {
-    "month": "2026-10",
-    "usd": null,
-    "usd_per_booking": null,
+    "month": "2026-09",
+    "usd": 37.17,
+    "usd_per_booking": 1.96,
+    "bookings": 19,
     "scope": "gcp_only",
-    "available": false,
-    "reason": "No billing export exists yet."
+    "available": true,
+    "reason": null,
+    "prior_month": "2026-08",
+    "prior_usd": 71.18
   }
 }
