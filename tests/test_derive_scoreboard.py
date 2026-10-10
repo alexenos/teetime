@@ -387,3 +387,17 @@ def test_a_cost_month_must_be_zero_padded_and_the_amount_finite() -> None:
         ds.validate(_cost("2026-09", usd=float("inf")))
     with pytest.raises(ValueError, match="finite"):
         ds.validate(_cost("2026-09", usd=float("nan")))
+
+
+def test_weekly_tech_debt_dates_step_by_seven_days() -> None:
+    dates = ds.scheduled_dates("tech-debt", [], _ct(dt.date(2026, 10, 24), 9, 0))
+    assert dates == [dt.date(2026, 10, 10), dt.date(2026, 10, 17), dt.date(2026, 10, 24)]
+
+
+def test_a_missing_weekly_tech_debt_run_breaks_the_streak() -> None:
+    rows = [_quiet(RACE_START)]
+    now = _ct(dt.date(2026, 10, 10), 9, 0)
+    streak = _board(rows, now)["streak"]
+    assert streak["last_failure"] == "2026-10-10"
+    ok = _quiet(dt.date(2026, 10, 10), routine="tech-debt")
+    assert _board(rows + [ok], now)["streak"]["by_routine"]["tech-debt"] == 1
