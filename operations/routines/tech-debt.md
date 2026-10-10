@@ -1,14 +1,16 @@
 # Routine: tech debt
 
-**Status: proposed. Not deployed.** This file is the specification and the source
-of the prompt. Deploying it is the steps under "Deploying it", none of which has
-happened.
+**Status: created 2026-10-09 (21:31 CDT), enabled, first scheduled fire Saturday
+2026-10-10 at 04:00 CDT.** This file is the specification and the source of the
+prompt. It must be on `main` before that fire, because the prompt reads it from
+there; if it is missing the run stops and records `ok: false`.
 
 | | |
 |---|---|
-| **Trigger** | weekly, Saturday, `0 9 * * 6` UTC (04:00 CDT, 03:00 CST), proposed |
+| **Trigger** | weekly, Saturday, `0 9 * * 6` UTC (04:00 CDT, 03:00 CST) |
+| **Deployed as** | a Routine (scheduled trigger), "🧹 TeeTime Tech Debt", `trig_017T2ZQXKLuhXg1dJjhGgh73`, in the same environment as the scoreboard Routine (`env_01MDpUqqDJRTVhqkh1hnrxgK`) |
 | **Runs as** | a new Claude Code session per firing, with no prior context |
-| **Model** | `claude-sonnet-5-5`, proposed |
+| **Model** | not set on the trigger, so the account default applies. The scoreboard trigger pins `claude-sonnet-5`; this one does not |
 | **Authorization** | reads the repository and GitHub. Creates and edits issues and labels. Pushes one branch and opens one PR, triggers CodeRabbit on it and answers its findings. Writes one ledger object to GCS. **Never merges.** |
 | **Emits** | GitHub issues (the findings), at most one PR per run, and one ledger object per run at `operations/tech-debt/<YYYY-MM-DD>.json` in GCS |
 | **Owns** | the tech-debt backlog (as GitHub issues) and its own run metadata |
@@ -504,11 +506,11 @@ before the first scheduled fire, Saturday 2026-10-10 04:00 CDT (09:00Z).**
 
 | # | Step | Who |
 |---|---|---|
-| 1 | Create the Routine in the routines UI: name, cron `0 9 * * 6`, model `claude-sonnet-5-5`, this repository, the same environment and service-account access as the race report Routine, and paste the prompt below | **You** |
-| 2 | After pasting, compare the live text with this file (a pasted prompt is read as markdown and loses paired asterisks; this one has none) | **You** |
-| 3 | Give Claude the trigger ID. It records it here, changes **Status**, and adds the Routine to `CLAUDE.md`'s list, in this PR | Claude |
+| 1 | Create the Routine in the routines UI | **Done 2026-10-09.** Cron `0 9 * * 6`, repository `alexenos/teetime`, environment shared with the scoreboard Routine |
+| 2 | Compare the live text with this file | **Done 2026-10-10 by Claude**, via the triggers API: identical to the prompt below once whitespace is ignored |
+| 3 | Record the trigger ID, change **Status**, add the Routine to `CLAUDE.md`'s list | **Done in this PR** |
 | 4 | Merge this PR. Touches only `operations/` and `CLAUDE.md`, so no build and no deploy | **You** |
-| 5 | Ledger access: the Routine writes `operations/tech-debt/` as the race report and scoreboard Routines write theirs. `terraform/main.tf` (`routine_ledger_writer`) grants `objectCreator` on the whole `operations/` prefix to `teetime-artifact-reader`, and its comment says Routine sessions run as that account. Nothing further to do if the new Routine uses the same environment | Established from terraform; **you** confirm only if the environment differs |
+| 5 | Ledger access: the Routine writes `operations/tech-debt/` as the scoreboard Routine writes its own, and the two triggers share one environment id. `terraform/main.tf` (`routine_ledger_writer`) grants `objectCreator` on the whole `operations/` prefix to `teetime-artifact-reader`, and its comment says Routine sessions run as that account. Nothing further to do if the new Routine uses the same environment | Established from terraform; **you** confirm only if the environment differs |
 | 6 | Read access to `MEMBER_PSEUDONYM_LABELS` from the Routine's environment | **You** (confirmed by you) |
 | 7 | The Routine's GitHub access must be able to create issues and labels, push branches and open PRs. The race report only needs to push and open PRs, so this is the one permission it may not already have | **You** |
 | 8 | Labels | Automatic: the Routine creates any that are missing at the start of each run |
