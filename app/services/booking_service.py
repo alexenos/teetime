@@ -1040,8 +1040,8 @@ class BookingService:
         )
         if held.status == BookingStatus.SUCCESS:
             text += (
-                " That one is already confirmed with the club, so changing it cancels it "
-                "there first; if the new time can't be booked you could end up with neither."
+                " That one is already confirmed with the club. I'll check the new time is "
+                "open before cancelling it, and leave it alone if it isn't."
             )
         elif window_open:
             text += (
@@ -1102,6 +1102,26 @@ class BookingService:
         session.state = ConversationState.IDLE
         return message
 
+    async def _live_open_times(
+        self, phone_number: str, request: TeeTimeRequest
+    ) -> list[dtime] | None:
+        """The tee times open on the club's site right now, or None if unreadable."""
+        provider: ReservationProvider | None = None
+        try:
+            provider = await self._provider_for(phone_number)
+            if provider is None:
+                return None
+            async with self._browser_slot_held(f"availability {request.requested_date}"):
+                return await provider.get_available_times(request.requested_date)
+        except Exception:
+            logger.exception(
+                "REPLACE: could not read the live sheet for %s", request.requested_date
+            )
+            return None
+        finally:
+            if provider is not None:
+                await self._release_provider(provider)
+
     async def _apply_replacement(self, session: UserSession) -> str:
         """Cancel the old booking and create the new one, validating before touching anything."""
         attribution = await self._attribution_for(session)
@@ -1133,6 +1153,20 @@ class BookingService:
             )
 
         held_at = f"{self._held_time(held):%I:%M %p}"
+        # Nothing is cancelled until the club's own sheet shows the new time
+        # open. The sheet snapshot the question was asked from can be stale, and
+        # a won booking cannot be got back.
+        if held.status == BookingStatus.SUCCESS or self._window_open(request.requested_date):
+            open_times = await self._live_open_times(attribution.phone_number, request)
+            if open_times is None or request.requested_time not in open_times:
+                why = (
+                    "I couldn't check the club's sheet just now"
+                    if open_times is None
+                    else f"{request.requested_time:%I:%M %p} is no longer open"
+                )
+                return await self._after_replace_answer(
+                    session, f"{why}, so I've left your {held_at} booking as it is."
+                )
         if held.status == BookingStatus.SUCCESS:
             cancelled = await self._cancel_confirmed_booking(held)
         else:

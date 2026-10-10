@@ -4845,6 +4845,59 @@ class TestSameDayReplacement:
         assert session.state == ConversationState.IDLE
 
     @pytest.mark.asyncio
+    async def test_a_won_booking_is_kept_when_the_new_time_is_not_open(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=[time(8, 8)])),
+            patch.object(BookingService, "_cancel_confirmed_booking", AsyncMock()) as cancel,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "08:00 AM is no longer open" in reply
+        assert "left your 09:23 AM booking as it is" in reply
+        cancel.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_won_booking_is_kept_when_the_sheet_cannot_be_read(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=None)),
+            patch.object(BookingService, "_cancel_confirmed_booking", AsyncMock()) as cancel,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "couldn't check the club's sheet" in reply
+        cancel.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_won_booking_is_replaced_once_the_new_time_is_confirmed_open(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=[time(8, 0)])),
+            patch.object(
+                BookingService, "_cancel_confirmed_booking", AsyncMock(return_value=True)
+            ) as cancel,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        cancel.assert_awaited_once()
+        db.create_booking.assert_awaited_once()
+        assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+
+    @pytest.mark.asyncio
     async def test_yes_cancels_the_old_booking_and_books_the_new_time(
         self, booking_service: BookingService, db: MagicMock
     ) -> None:
