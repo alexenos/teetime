@@ -7,7 +7,7 @@ there; if it is missing the run stops and records `ok: false`.
 
 | | |
 |---|---|
-| **Trigger** | weekly, Saturday, `0 9 * * 6` UTC (04:00 CDT, 03:00 CST) |
+| **Trigger** | weekly, Saturday, `0 9 * * 6` UTC (04:00 CDT) |
 | **Deployed as** | a Routine (scheduled trigger), "🧹 TeeTime Tech Debt", `trig_017T2ZQXKLuhXg1dJjhGgh73`, in the same environment as the scoreboard Routine (`env_01MDpUqqDJRTVhqkh1hnrxgK`) |
 | **Runs as** | a new Claude Code session per firing, with no prior context |
 | **Model** | not set on the trigger, so the account default applies. The scoreboard trigger pins `claude-sonnet-5`; this one does not |
@@ -426,10 +426,6 @@ One or two sentences, no markdown, labels not names. For example:
 
 ## Open items
 
-- **DST.** `0 9 * * 6` is 04:00 CDT and 03:00 CST from 2026-11-01. Cosmetic: 03:00
-  is still hours before the 06:28 race and nothing here races a clock. It joins the
-  2026-11-01 review as "leave it", unless 04:00 is wanted year-round, in which case
-  it moves to `0 10 * * 6` that day.
 - **Saturday 04:00 CT** is well clear of the 06:28 CT job, so a quota hour should
   be free. The Routine runs in a cloud session, not in the Cloud Run service, so it
   cannot compete for the single Chrome. Neither the quota nor a Saturday race has
