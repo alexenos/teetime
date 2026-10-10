@@ -8,6 +8,7 @@ did that run succeed, and what did it measure.
 | `operations/race-report/` | race report | the day's outcome split |
 | `operations/scoreboard/` | scoreboard | the derived metrics, as published |
 | `operations/cost/` | cost | the month's spend |
+| `operations/tech-debt/` | tech debt | the week's scan coverage, fix attempt and review outcome |
 
 The `.jsonl` files in this directory are empty and exist to make the set visible
 in the repository. The data is in GCS, one object per run. `backfill/` is the
@@ -196,6 +197,26 @@ A cost number whose scope is unstated is worse than no number, because it invite
 $/booking comparisons against a denominator that does not match it.
 
 ---
+
+## `tech-debt.jsonl`
+
+One row per weekly run. **GitHub issues are the source of truth for findings;
+this ledger holds run metadata only** and never a finding. The full schema and
+the meaning of `ok` are in `operations/routines/tech-debt.md`.
+
+```json
+{"date":"2026-10-10","routine":"tech-debt","ok":true,
+ "scan":{"categories":{"todo":{"ran":true,"files_covered":84,"found":9,"filed":1},
+                       "legacy-feature":{"ran":false,"reason":"no_manifest"}},
+         "filed_total":1,"open_backlog":14},
+ "fix":{"issue":null,"pr":null,"skipped":"no_candidate"},
+ "review":{"requested":false,"outcome":"not_run"},
+ "prior_prs":{"merged":0,"closed_unmerged":0,"open":0}}
+```
+
+The values are invented to show the shape. `ran: false` with `reason:
+"no_manifest"` is a skipped category, not a failed one. A run that finds
+nothing and fixes nothing is `ok: true`.
 
 ## Write path
 

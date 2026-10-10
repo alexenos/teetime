@@ -122,9 +122,11 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 - `operations/credential-encryption.md` — the Cloud KMS key, who has read a
   login, and the migration off the hand-made Fernet key
 
-Two Routines are deployed: the race report, daily at `40 11 * * *` UTC, and the
-scoreboard, daily at `30 12 * * *` UTC. The cost Routine is specified and not
-deployed. Both crons move an hour on 2026-11-01. A prompt pasted into the
+Three Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
+scoreboard, daily at `30 12 * * *` UTC, and tech debt, Saturdays at `0 9 * * 6`
+UTC (`operations/routines/tech-debt.md`). Tech debt never merges; it files issues
+and opens a PR you merge. The cost Routine is specified and not deployed. The
+race report and scoreboard crons move an hour on 2026-11-01. A prompt pasted into the
 routines UI is read as markdown and loses paired `*`; compare the live text
 after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
 the PR check-ins are not Routines; they are maintainer-invoked and push only to
