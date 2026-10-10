@@ -244,8 +244,9 @@ does not widen it; committing rows would.
 
 **The race report Routine writes a row every run, from 2026-10-01.** Those sit
 beside the 23 backfill rows under `operations/race-report/`. The scoreboard
-Routine is specified and not yet deployed (#234); until it is,
-`derive_scoreboard.py` run by hand is the only reader.
+Routine is documented as deployed on 2026-10-04 (`routines/scoreboard.md`,
+CLAUDE.md; the live trigger was not checked when this line was changed), so
+`derive_scoreboard.py` is no longer the only reader.
 
 ## Backfill
 
