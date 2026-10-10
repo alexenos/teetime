@@ -4583,9 +4583,24 @@ class TestMemberFacingFailure:
 
     def test_restriction_sent_without_stale_alert(self, provider: WaldenGolfProvider) -> None:
         message = provider._member_facing_failure(
-            site_message=f"{self.STALE}; {self.RESTRICTION}", technical="x", unchecked=False
+            site_message=f"{self.STALE}; {self.RESTRICTION}",
+            technical="x",
+            unchecked=False,
+            site_messages=[self.STALE, self.RESTRICTION],
         )
         assert message == self.RESTRICTION
+
+    def test_a_restriction_containing_a_semicolon_is_kept_whole(
+        self, provider: WaldenGolfProvider
+    ) -> None:
+        restriction = "Restriction: one round per day; ask the pro shop"
+        message = provider._member_facing_failure(
+            site_message=f"{self.STALE}; {restriction}",
+            technical="x",
+            unchecked=False,
+            site_messages=[self.STALE, restriction],
+        )
+        assert message == restriction
 
     def test_message_without_restriction_is_untouched(self, provider: WaldenGolfProvider) -> None:
         message = provider._member_facing_failure(

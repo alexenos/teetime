@@ -994,11 +994,9 @@ class BookingService:
         to be open is not yet known.
         """
         attribution = await self._attribution_for(session)
-        live = [
-            b
-            for b in await database_service.get_bookings(phone_number=attribution.phone_number)
-            if b.status in LIVE_BOOKING_STATUSES
-        ]
+        live = await database_service.get_live_bookings_on(
+            attribution.phone_number, sorted({r.requested_date for r in self._pending(session)})
+        )
         subject = (
             f"{attribution.display_name} already has"
             if attribution.is_proxy
@@ -1128,6 +1126,23 @@ class BookingService:
                 session, "Okay, I'll leave your existing booking as it is."
             )
 
+        parsed = await self._parse_quietly(message)
+        if parsed is not None and (
+            parsed.intent in ("cancel", "status", "help")
+            or (parsed.intent == "book" and (parsed.tee_time_request or parsed.tee_time_requests))
+        ):
+            # Not an answer but a new command: the question is dropped, as a no
+            # would drop it, and the command is carried out.
+            self._set_pending(session, [])
+            self._clear_replace(session)
+            session.state = ConversationState.IDLE
+            if parsed.intent == "book":
+                self._clear_pending_proxy_target(session)
+            return (
+                "Okay, I'll leave your existing booking as it is.\n\n"
+                + await self._process_intent(session, parsed)
+            )
+
         if session.replace_clarifications < 1:
             session.replace_clarifications += 1
             return (
@@ -1140,6 +1155,14 @@ class BookingService:
             "I didn't understand, so I've left your existing booking as it is. "
             "Send your request again if you'd like to change it.",
         )
+
+    async def _parse_quietly(self, message: str) -> ParsedIntent | None:
+        """Parse a message, or None if the parser fails: an unreadable reply is unrelated."""
+        try:
+            return await gemini_service.parse_message(message, None)
+        except Exception:
+            logger.exception("REPLACE: could not parse a reply to the replace question")
+            return None
 
     async def _take_conflict(
         self, session: UserSession
@@ -1179,7 +1202,11 @@ class BookingService:
             if provider is None:
                 return None
             async with self._browser_slot_held(f"availability {request.requested_date}"):
-                return await provider.get_available_times(request.requested_date)
+                times = await provider.get_available_times(request.requested_date)
+            # The provider returns [] for a failed login or date selection as
+            # well as for a full sheet. A sheet the window has opened on is never
+            # empty, so [] means it could not be read.
+            return times or None
         except Exception:
             logger.exception(
                 "REPLACE: could not read the live sheet for %s", request.requested_date
@@ -1253,7 +1280,6 @@ class BookingService:
                 attribution.origin_channel_id,
                 channel=attribution.channel,
                 requester_handle=attribution.requester_handle,
-                replacing=held.id,
             )
         except ValueError as e:
             return await self._after_replace_answer(
@@ -2191,12 +2217,10 @@ class BookingService:
         # request for the same date can only fail at 6:30 (issue #284). Keyed
         # on the booking's phone_number, which for a proxy booking is the
         # friend whose login books it - the identity the club restricts.
-        for existing in await database_service.get_bookings(phone_number=phone_number):
-            if (
-                existing.id != replacing
-                and existing.status in LIVE_BOOKING_STATUSES
-                and existing.request.requested_date == request.requested_date
-            ):
+        for existing in await database_service.get_live_bookings_on(
+            phone_number, [request.requested_date]
+        ):
+            if existing.id != replacing:
                 raise ValueError(
                     f"You already have {existing.request.requested_time:%I:%M %p} on "
                     f"{request.requested_date:%a %b %d} queued. The club allows one Northgate "
@@ -2212,7 +2236,6 @@ class BookingService:
         defer_execution: bool = False,
         channel: str | None = None,
         requester_handle: str | None = None,
-        replacing: str | None = None,
     ) -> TeeTimeBooking:
         """
         Create a new booking record and schedule it for execution.
@@ -2243,9 +2266,6 @@ class BookingService:
                 booking, so its result notification days later says who it
                 was for. None for a private conversation or a channel with no
                 addressing concept.
-            replacing: ID of a booking the caller has cancelled, or is about to,
-                in favour of this one. It is ignored by the one-round-per-day
-                check.
             defer_execution: Create the record and mark it IN_PROGRESS, but do
                 not start the attempt. Callers creating several bookings at once
                 set this so they can run the whole set as one batch instead of
@@ -2261,7 +2281,7 @@ class BookingService:
         """
         lock = self._member_locks.setdefault(phone_number, asyncio.Lock())
         async with lock:
-            await self._validate_booking_request(phone_number, request, replacing)
+            await self._validate_booking_request(phone_number, request)
 
             booking_id = str(uuid.uuid4())[:8]
 

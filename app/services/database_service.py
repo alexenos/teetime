@@ -218,6 +218,33 @@ class DatabaseService:
             records = result.scalars().all()
             return [self._record_to_booking(r) for r in records]
 
+    async def get_live_bookings_on(
+        self, phone_number: str, dates: list[date]
+    ) -> list[TeeTimeBooking]:
+        """A member's bookings on ``dates`` that hold, or are about to hold, their round.
+
+        Pending, scheduled, in progress or won; filtered in the query, so the
+        same-day check (issue #284) does not read a member's whole history.
+        """
+        if not dates:
+            return []
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BookingRecord).where(
+                    BookingRecord.phone_number == phone_number,
+                    BookingRecord.requested_date.in_(dates),
+                    BookingRecord.status.in_(
+                        [
+                            BookingStatus.PENDING,
+                            BookingStatus.SCHEDULED,
+                            BookingStatus.IN_PROGRESS,
+                            BookingStatus.SUCCESS,
+                        ]
+                    ),
+                )
+            )
+            return [self._record_to_booking(r) for r in result.scalars().all()]
+
     async def update_booking(self, booking: TeeTimeBooking) -> TeeTimeBooking:
         """Update an existing booking record."""
         async with AsyncSessionLocal() as db:

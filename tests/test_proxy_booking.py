@@ -346,6 +346,12 @@ def no_tee_sheet_on_file(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(BookingService, "_sheet_grid_for", AsyncMock(return_value=None))
 
 
+# Captured at import, before the fixture below replaces them, for the class that
+# needs the real same-day logic.
+_REAL_RESOLVE_CONFLICTS = BookingService._resolve_same_day_conflicts
+_REAL_ANSWER_REPEATS = BookingService._answer_repeat_requests
+
+
 @pytest.fixture(autouse=True)
 def no_same_day_conflicts_and_no_race_freeze(monkeypatch: pytest.MonkeyPatch) -> None:
     """These tests are about who a booking is for, not issue #284's same-day rule.
@@ -1066,3 +1072,99 @@ class TestProxyBookingFlow:
         # falls back to his private chat rather than the group Dax typed in.
         assert create.await_args.args[2] is None
         assert create.await_args.kwargs["requester_handle"] == "@alex_test "
+
+
+class TestProxyReplacesFriendsBooking:
+    """The same-day replace question for a booking made on a friend's behalf (#284)."""
+
+    DAY = date(2099, 1, 15)
+
+    @pytest.fixture(autouse=True)
+    def real_same_day_logic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", _REAL_RESOLVE_CONFLICTS)
+        monkeypatch.setattr(BookingService, "_answer_repeat_requests", _REAL_ANSWER_REPEATS)
+
+    @pytest.mark.asyncio
+    async def test_the_question_names_the_friend_and_yes_replaces_under_their_identity(
+        self, admin_configured: None
+    ) -> None:
+        from app.models.schemas import BookingStatus, TeeTimeBooking
+
+        service = BookingService()
+        held = TeeTimeBooking(
+            id="held0001",
+            phone_number=ALEX_ID,
+            request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(9, 23), num_players=4
+            ),
+            status=BookingStatus.SCHEDULED,
+        )
+        live = [held]
+
+        class _Db(_FakeSessions):
+            async def get_live_bookings_on(self, phone_number: str, dates: list[date]):  # type: ignore[no-untyped-def]
+                return [b for b in live if b.phone_number == phone_number]
+
+            async def get_booking(self, booking_id: str):  # type: ignore[no-untyped-def]
+                return held
+
+            async def cancel_pending_booking(self, booking_id: str):  # type: ignore[no-untyped-def]
+                live.clear()
+                return held
+
+            async def create_booking(self, booking):  # type: ignore[no-untyped-def]
+                return booking
+
+            async def update_booking(self, booking):  # type: ignore[no-untyped-def]
+                return booking
+
+        admin = UserSession(phone_number=ADMIN_ID, channel="telegram", origin_channel_id="-100")
+        sessions = _Db(admin, UserSession(phone_number=ALEX_ID))
+        creds = AsyncMock()
+        creds.find_by_name_or_telegram_username = AsyncMock(
+            return_value=[
+                CredentialOwner(phone_number=ALEX_ID, name="Alex", telegram_username="alex_test")
+            ]
+        )
+        creds.get_owner = AsyncMock(
+            return_value=CredentialOwner(
+                phone_number=ALEX_ID, name="Alex", telegram_username="alex_test"
+            )
+        )
+        creds.get_dedicated_credentials = AsyncMock(
+            return_value=WaldenCredentials(member_number="m-alex", password="pw")
+        )
+        intent = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+            ),
+        )
+        with (
+            patch("app.services.booking_service.database_service", sessions),
+            patch("app.services.booking_service.credential_service", creds),
+            patch("app.services.booking_service.gemini_service") as gemini,
+        ):
+            gemini.parse_message = AsyncMock(return_value=intent)
+            question = await service.handle_incoming_message(
+                ADMIN_ID, "for @alex book 1/15 at 8a", channel="telegram"
+            )
+            assert "Alex already has 09:23 AM queued" in question
+            assert admin.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+            assert admin.pending_proxy_target == ALEX_ID
+
+            created: list = []
+            original = sessions.create_booking
+
+            async def record(booking):  # type: ignore[no-untyped-def]
+                created.append(booking)
+                return await original(booking)
+
+            sessions.create_booking = record  # type: ignore[method-assign]
+            reply = await service.handle_incoming_message(ADMIN_ID, "yes", channel="telegram")
+
+        assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+        assert [b.phone_number for b in created] == [ALEX_ID]
+        assert created[0].request.requested_time == time(8, 0)
+        assert live == []
+        assert admin.pending_proxy_target is None

@@ -199,7 +199,9 @@ class TestBookingServiceBookings:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -455,6 +457,7 @@ class TestBookingServiceImmediateExecution:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(return_value=created_booking)
             mock_db.get_booking = AsyncMock(return_value=executed_booking)
 
@@ -532,6 +535,7 @@ class TestBookingServiceImmediateExecution:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             mock_provider = MagicMock()
@@ -582,6 +586,7 @@ class TestBookingServiceImmediateExecution:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(return_value=created_booking)
             mock_db.get_booking = AsyncMock(return_value=executed_booking)
 
@@ -797,6 +802,7 @@ class TestBookingServiceIntentHandling:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -825,6 +831,7 @@ class TestBookingServiceIntentHandling:
         """Test handling a status intent with no bookings."""
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             response = await booking_service._handle_status_intent(sample_session)
             assert "don't have any" in response.lower()
 
@@ -862,6 +869,7 @@ class TestBookingServiceIntentHandling:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             response = await booking_service._handle_cancel_intent(sample_session, parsed)
             assert "don't have any bookings to cancel" in response.lower()
 
@@ -1131,6 +1139,7 @@ class TestBookingServiceProcessIntent:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             response = await booking_service._process_intent(sample_session, parsed)
             assert "don't have any" in response.lower() or "bookings" in response.lower()
 
@@ -1792,6 +1801,7 @@ class TestBookingService48HourRestriction:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
             mock_db.get_booking = AsyncMock(return_value=None)  # For execute path
             mock_db.update_booking = AsyncMock(side_effect=create_booking_side_effect)
@@ -1834,6 +1844,7 @@ class TestBookingService48HourRestriction:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -2232,6 +2243,7 @@ class TestOriginChannelRouting:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             future_request = TeeTimeRequest(
@@ -2547,6 +2559,7 @@ class TestImmediateMultiBookingRunsAsOneBatch:
             return found.model_copy(deep=True) if found is not None else None
 
         mock_db.get_bookings = AsyncMock(return_value=[])
+        mock_db.get_live_bookings_on = AsyncMock(return_value=[])
         mock_db.create_booking = AsyncMock(side_effect=save)
         mock_db.update_booking = AsyncMock(side_effect=save)
         mock_db.get_booking = AsyncMock(side_effect=load)
@@ -2986,6 +2999,7 @@ class TestReconcileInterruptedBookings:
         """With nothing stuck, reconciliation does nothing and sends nothing."""
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.update_booking = AsyncMock()
 
             with patch("app.services.booking_service.sms_service") as mock_sms:
@@ -3142,6 +3156,7 @@ class TestImmediateBookingDoesNotBlockReply:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.get_booking = AsyncMock(
@@ -3755,6 +3770,7 @@ class TestCredentialIsRequired:
         """A row would look scheduled to the user and fail a week later."""
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock()
 
             with pytest.raises(ValueError):
@@ -3777,6 +3793,7 @@ class TestCredentialIsRequired:
             mock_db.get_or_create_session = AsyncMock(return_value=session)
             mock_db.update_session = AsyncMock(return_value=session)
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock()
 
             response = await booking_service.handle_incoming_message("+15551234567", "yes")
@@ -4579,6 +4596,7 @@ class TestSlotAgreement:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda booking: booking)
             with patch.object(CTDateTime, "now") as mock_now:
                 mock_now.return_value = pytz.timezone("America/Chicago").localize(
@@ -4690,45 +4708,38 @@ async def test_a_changed_party_size_is_a_new_request_not_a_pick(
 
 
 class TestSameDayDuplicateRefusal:
-    """One Northgate round per member per day: refuse the second request (#284)."""
+    """One Northgate round per member per day: refuse the second request (#284).
 
-    @staticmethod
-    def _existing(status: BookingStatus, day: date = date(2025, 12, 30)) -> TeeTimeBooking:
-        return TeeTimeBooking(
-            id="aaaa1111",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(requested_date=day, requested_time=time(9, 23), num_players=4),
-            status=status,
-        )
+    Which bookings count (live statuses, the one date) is decided by the query;
+    see TestLiveBookingsOn in test_database_service.py.
+    """
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "status", [BookingStatus.PENDING, BookingStatus.SCHEDULED, BookingStatus.IN_PROGRESS]
-    )
-    async def test_second_request_same_date_refused(
-        self, booking_service: BookingService, status: BookingStatus
-    ) -> None:
+    async def test_second_request_same_date_refused(self, booking_service: BookingService) -> None:
+        existing = TeeTimeBooking(
+            id="aaaa1111",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 30), requested_time=time(9, 23), num_players=4
+            ),
+            status=BookingStatus.SCHEDULED,
+        )
         request = TeeTimeRequest(
             requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=1
         )
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = AsyncMock(return_value=[self._existing(status)])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[existing])
             mock_db.create_booking = AsyncMock()
             with pytest.raises(ValueError, match=r"already have 09:23 AM on Tue Dec 30"):
                 await booking_service.create_booking("+15551234567", request)
+            mock_db.get_live_bookings_on.assert_awaited_once_with(
+                "+15551234567", [date(2025, 12, 30)]
+            )
             mock_db.create_booking.assert_not_called()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "existing",
-        [
-            (BookingStatus.FAILED, date(2025, 12, 30)),
-            (BookingStatus.CANCELLED, date(2025, 12, 30)),
-            (BookingStatus.SCHEDULED, date(2025, 12, 31)),
-        ],
-    )
-    async def test_settled_or_other_date_bookings_do_not_block(
-        self, booking_service: BookingService, existing: tuple[BookingStatus, date]
+    async def test_no_live_booking_lets_the_request_through(
+        self, booking_service: BookingService
     ) -> None:
         import pytz
 
@@ -4736,7 +4747,7 @@ class TestSameDayDuplicateRefusal:
             requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=1
         )
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = AsyncMock(return_value=[self._existing(*existing)])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
             with patch.object(CTDateTime, "now") as mock_ct_now:
                 mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
@@ -4789,12 +4800,26 @@ class TestSameDayReplacement:
             ),
         )
 
+    @pytest.fixture(autouse=True)
+    def parser(self):  # type: ignore[no-untyped-def]
+        """The replace question's non-yes/no replies are parsed; default: unclear."""
+        with patch("app.services.booking_service.gemini_service") as gemini:
+            gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="unclear"))
+            yield gemini
+
     @pytest.fixture
     def db(self):  # type: ignore[no-untyped-def]
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = AsyncMock(return_value=[self._held()])
+            live = [self._held()]
+            mock_db.live = live  # what the live query returns; cancelling empties it
+
+            async def cancel(_booking_id: str) -> TeeTimeBooking:
+                live.clear()
+                return self._held()
+
+            mock_db.get_live_bookings_on = AsyncMock(side_effect=lambda *a: list(live))
             mock_db.get_booking = AsyncMock(return_value=self._held())
-            mock_db.cancel_pending_booking = AsyncMock(return_value=self._held())
+            mock_db.cancel_pending_booking = AsyncMock(side_effect=cancel)
             mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
             yield mock_db
@@ -4829,7 +4854,7 @@ class TestSameDayReplacement:
     async def test_a_booking_being_attempted_is_left_alone(
         self, booking_service: BookingService, db: MagicMock
     ) -> None:
-        db.get_bookings.return_value = [self._held(BookingStatus.IN_PROGRESS)]
+        db.live[:] = [self._held(BookingStatus.IN_PROGRESS)]
         session = self._session(time(8, 0))
         with self._now():
             reply = await booking_service._continue_slot_agreement(session)
@@ -4894,7 +4919,9 @@ class TestSameDayReplacement:
             self._now(),
             patch.object(BookingService, "_live_open_times", AsyncMock(return_value=[time(8, 0)])),
             patch.object(
-                BookingService, "_cancel_confirmed_booking", AsyncMock(return_value=True)
+                BookingService,
+                "_cancel_confirmed_booking",
+                AsyncMock(side_effect=lambda _b: db.live.clear() or True),
             ) as cancel,
         ):
             reply = await booking_service._handle_replace_reply(session, "yes")
@@ -4922,6 +4949,7 @@ class TestSameDayReplacement:
     async def test_yes_changes_nothing_if_the_old_booking_cannot_be_cancelled(
         self, booking_service: BookingService, db: MagicMock
     ) -> None:
+        db.cancel_pending_booking.side_effect = None
         db.cancel_pending_booking.return_value = None  # the racer claimed it first
         session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
         session.pending_replace_booking_id = "held0001"
@@ -5040,7 +5068,7 @@ class TestReviewFixesForSameDayFlow:
                 BookingService, "_check_slot", AsyncMock(side_effect=AssertionError("sheet read"))
             ),
         ):
-            mock_db.get_bookings = AsyncMock(return_value=[held])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[held])
             reply = await booking_service._continue_slot_agreement(session)
         assert reply == "You already have 09:23 AM booked for Tuesday, December 30."
         assert session.state == ConversationState.IDLE
@@ -5080,9 +5108,11 @@ class TestReviewFixesForSameDayFlow:
     ) -> None:
         stored: list[TeeTimeBooking] = []
 
-        async def get_bookings(phone_number: str | None = None) -> list[TeeTimeBooking]:
+        async def get_live_bookings_on(
+            phone_number: str, dates: list[date]
+        ) -> list[TeeTimeBooking]:
             await asyncio.sleep(0)
-            return list(stored)
+            return [b for b in stored if b.request.requested_date in dates]
 
         async def create(booking: TeeTimeBooking) -> TeeTimeBooking:
             await asyncio.sleep(0)
@@ -5093,7 +5123,7 @@ class TestReviewFixesForSameDayFlow:
             return TeeTimeRequest(requested_date=self.DAY, requested_time=at, num_players=1)
 
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = get_bookings
+            mock_db.get_live_bookings_on = get_live_bookings_on
             mock_db.create_booking = create
             mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
             results = await asyncio.gather(
@@ -5103,3 +5133,150 @@ class TestReviewFixesForSameDayFlow:
             )
         assert len(stored) == 1
         assert sum(isinstance(r, ValueError) for r in results) == 1
+
+
+class TestReplaceQuestionReplies:
+    """A reply that is a command, not an answer, is carried out (issue #284)."""
+
+    PHONE = "+15551234567"
+    DAY = date(2025, 12, 30)
+
+    @pytest.fixture(autouse=True)
+    def real_conflict_logic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", _REAL_RESOLVE_CONFLICTS)
+
+    def _session(self) -> UserSession:
+        return UserSession(
+            phone_number=self.PHONE,
+            state=ConversationState.AWAITING_REPLACE_CONFIRMATION,
+            pending_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+            ),
+            pending_replace_booking_id="held0001",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("intent", ["cancel", "status", "help"])
+    async def test_a_command_drops_the_question_and_runs(
+        self, booking_service: BookingService, intent: str
+    ) -> None:
+        session = self._session()
+        with (
+            patch("app.services.booking_service.gemini_service") as gemini,
+            patch.object(
+                BookingService, "_process_intent", AsyncMock(return_value="ran the command")
+            ) as process,
+        ):
+            gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent=intent))
+            reply = await booking_service._handle_replace_reply(session, "whatever")
+        assert reply.startswith("Okay, I'll leave your existing booking as it is.")
+        assert reply.endswith("ran the command")
+        process.assert_awaited_once()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_replace_booking_id is None
+        assert session.pending_request is None
+
+    @pytest.mark.asyncio
+    async def test_a_new_booking_request_drops_the_question_and_is_handled(
+        self, booking_service: BookingService
+    ) -> None:
+        session = self._session()
+        new = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=date(2025, 12, 31), requested_time=time(7, 0), num_players=2
+            ),
+        )
+        with (
+            patch("app.services.booking_service.gemini_service") as gemini,
+            patch.object(
+                BookingService, "_process_intent", AsyncMock(return_value="asked to confirm")
+            ) as process,
+        ):
+            gemini.parse_message = AsyncMock(return_value=new)
+            reply = await booking_service._handle_replace_reply(session, "book dec 31 at 7")
+        assert reply.endswith("asked to confirm")
+        process.assert_awaited_once()
+        assert session.pending_replace_booking_id is None
+
+    @pytest.mark.asyncio
+    async def test_a_parser_failure_counts_as_an_unrelated_reply(
+        self, booking_service: BookingService
+    ) -> None:
+        session = self._session()
+        with patch("app.services.booking_service.gemini_service") as gemini:
+            gemini.parse_message = AsyncMock(side_effect=RuntimeError("boom"))
+            reply = await booking_service._handle_replace_reply(session, "hmm")
+        assert "reply yes or no" in reply
+        assert session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+
+    @pytest.mark.asyncio
+    async def test_an_empty_live_sheet_is_unreadable_not_closed(
+        self, booking_service: BookingService
+    ) -> None:
+        provider = MagicMock()
+        provider.get_available_times = AsyncMock(return_value=[])
+        request = TeeTimeRequest(requested_date=self.DAY, requested_time=time(8, 0), num_players=4)
+        with (
+            patch.object(booking_service, "_provider_for", AsyncMock(return_value=provider)),
+            patch.object(booking_service, "_release_provider", AsyncMock()),
+        ):
+            assert await booking_service._live_open_times(self.PHONE, request) is None
+
+    @pytest.mark.asyncio
+    async def test_a_multi_request_message_asks_about_the_conflict_then_carries_on(
+        self, booking_service: BookingService
+    ) -> None:
+        """Two dates, one conflicting: ask about it, and the other proceeds after."""
+        held = TeeTimeBooking(
+            id="held0001",
+            phone_number=self.PHONE,
+            request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(9, 23), num_players=4
+            ),
+            status=BookingStatus.SCHEDULED,
+        )
+        conflicting = TeeTimeRequest(
+            requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+        )
+        other = TeeTimeRequest(
+            requested_date=date(2025, 12, 31), requested_time=time(7, 0), num_players=4
+        )
+        session = UserSession(phone_number=self.PHONE, pending_requests=[conflicting, other])
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch.object(
+                booking_service, "_answer_repeat_requests", AsyncMock(return_value=("", False))
+            ),
+        ):
+            live = [held]
+
+            async def cancel(_booking_id: str) -> TeeTimeBooking:
+                live.clear()
+                return held
+
+            mock_db.get_live_bookings_on = AsyncMock(side_effect=lambda *a: list(live))
+            mock_db.get_booking = AsyncMock(return_value=held)
+            mock_db.cancel_pending_booking = AsyncMock(side_effect=cancel)
+            mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+            with patch.object(CTDateTime, "now") as now:
+                import pytz
+
+                now.return_value = pytz.timezone("America/Chicago").localize(
+                    datetime(2025, 12, 22, 10, 0)
+                )
+                question = await booking_service._agree_and_confirm(session)
+                assert "change the tee time to 08:00 AM" in question
+                assert session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+                # Both requests are still held while the question is open.
+                assert session.pending_requests == [conflicting, other]
+
+                reply = await booking_service._handle_replace_reply(session, "yes")
+        assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+        # The replaced request is booked; the other is now up for its usual yes.
+        mock_db.cancel_pending_booking.assert_awaited_once_with("held0001")
+        assert mock_db.create_booking.await_args.args[0].request.requested_time == time(8, 0)
+        assert session.state == ConversationState.AWAITING_CONFIRMATION
+        assert session.pending_request == other
+        assert "07:00 AM" in reply

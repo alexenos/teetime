@@ -3008,6 +3008,7 @@ class WaldenGolfProvider(ReservationProvider):
 
                 technical = f"Fast booking failed at {phase}: {error}"
                 site_message = chain_result.get("responseMessage")
+                site_messages = chain_result.get("responseMessages")
                 last_attempted = self._last_attempted_time(chain_result, booked_time)
                 # "Could not check" is not "not booked". Saying so keeps this
                 # message honest in the same way the verification branch below is.
@@ -3025,6 +3026,7 @@ class WaldenGolfProvider(ReservationProvider):
                         unchecked=unchecked,
                         requested_time=target_time,
                         attempted_time=last_attempted,
+                        site_messages=site_messages,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -3104,6 +3106,7 @@ class WaldenGolfProvider(ReservationProvider):
                 # The response's own message containers are the only place a
                 # refusal we have no phrase for can still be read from.
                 site_message = chain_result.get("responseMessage")
+                site_messages = chain_result.get("responseMessages")
                 last_attempted = self._last_attempted_time(chain_result, booked_time)
                 self._flush_pre_window_sheet("unverified")
                 return BookingResult(
@@ -3114,6 +3117,7 @@ class WaldenGolfProvider(ReservationProvider):
                         unchecked=held is None,
                         requested_time=target_time,
                         attempted_time=last_attempted,
+                        site_messages=site_messages,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -6072,6 +6076,7 @@ class WaldenGolfProvider(ReservationProvider):
         unchecked: bool,
         requested_time: time | None = None,
         attempted_time: time | None = None,
+        site_messages: list[str] | None = None,
     ) -> str:
         """Phrase a failed direct-HTTP booking for the member who asked for it.
 
@@ -6093,7 +6098,7 @@ class WaldenGolfProvider(ReservationProvider):
         """
         if site_message:
             logger.error("DIRECT_HTTP: %s; the site said: %s", technical, site_message)
-            site_message = self._lead_with_restriction(site_message)
+            site_message = self._lead_with_restriction(site_message, site_messages)
         message = site_message or technical
         if (
             requested_time is not None
@@ -6125,16 +6130,17 @@ class WaldenGolfProvider(ReservationProvider):
         return attempted[-1] if attempted else fallback
 
     @staticmethod
-    def _lead_with_restriction(site_message: str) -> str:
+    def _lead_with_restriction(site_message: str, site_messages: list[str] | None = None) -> str:
         """Keep only the club's restriction when the message carries one.
 
         A restriction (e.g. one round per day) is the whole reason for the
         refusal. Any "slot is blocked by another user" alert beside it is
         stale - the booker has already discounted it - and sending both
         misled a member into thinking a rival took the slot (issue #284).
+        Works on the message containers, so a restriction that itself contains
+        a semicolon is not cut short.
         """
-        parts = [p.strip() for p in site_message.split(";")]
-        restrictions = [p for p in parts if p.startswith("Restriction:")]
+        restrictions = [m for m in site_messages or [] if m.startswith("Restriction:")]
         return "; ".join(restrictions) if restrictions else site_message
 
     def _booking_text_verdict(self, text: str, context: str) -> tuple[bool | None, str]:

@@ -110,6 +110,7 @@ class TestBookingsEndpoints:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             response = test_client.post("/bookings/", json=request_data)
@@ -139,6 +140,7 @@ class TestBookingsEndpoints:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             response = test_client.post("/bookings/", json=request_data)
@@ -151,6 +153,7 @@ class TestBookingsEndpoints:
         """Test listing bookings when none exist."""
         with patch("app.api.bookings.booking_service") as mock_service:
             mock_service.get_bookings = AsyncMock(return_value=[])
+            mock_service.get_live_bookings_on = AsyncMock(return_value=[])
 
             response = test_client.get("/bookings/")
 
@@ -477,6 +480,7 @@ class TestBookingsEndpointsIntegration:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             create_response = test_client.post("/bookings/", json=request_data)
@@ -512,6 +516,7 @@ class TestBookingsEndpointsIntegration:
                 return booking
 
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             create_response = test_client.post("/bookings/", json=request_data)
