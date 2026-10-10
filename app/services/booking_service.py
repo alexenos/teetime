@@ -129,6 +129,28 @@ def _member_safe_error(error: str | None) -> str:
 # outlived the container that claimed it.
 INTERRUPTED_MIN_AGE = timedelta(minutes=30)
 
+# Booking requests and changes are declined while the 6:30 race runs (issue
+# #284): the racer is driving the club's site and a cancel or a new request
+# racing it can lose a tee time. CT wall clock, every day.
+RACE_FREEZE_START = dtime(6, 28)
+RACE_FREEZE_END = dtime(6, 35)
+RACE_FREEZE_MESSAGE = (
+    "Sorry, I can't take new bookings or changes between 6:28 and 6:35 AM CT while the "
+    "booking race is running. Please try again after 6:35."
+)
+
+# How long a "change your tee time?" question stays answerable. A "yes" days
+# later, meant for something else, would cancel a booking.
+REPLACE_QUESTION_TTL = timedelta(minutes=30)
+
+# Statuses that hold, or are about to hold, a member's one round for the day.
+LIVE_BOOKING_STATUSES = (
+    BookingStatus.PENDING,
+    BookingStatus.SCHEDULED,
+    BookingStatus.IN_PROGRESS,
+    BookingStatus.SUCCESS,
+)
+
 # Replies that settle a pending booking confirmation without asking the LLM
 # what they mean. The bot just printed the bookings and said "Reply 'yes' to
 # confirm", so a bare "yes" needs no interpretation - and sending it to Gemini
@@ -269,6 +291,13 @@ class BookingService:
         # Chrome came up, and the first hung until chromedriver stopped
         # answering. Queueing is slower than failing and is the point.
         self._browser_slot = asyncio.Semaphore(1)
+        # One booking creation at a time per member. The one-round-per-day check
+        # reads the member's bookings and the insert comes later; two messages
+        # arriving together (a group-chat double send, a retry) would both pass
+        # the read. One process serves every conversation (max instances is 1),
+        # so a process lock closes that. Not held across a replacement's
+        # cancel-then-create, which is a conversation turn, not a double send.
+        self._member_locks: dict[str, asyncio.Lock] = {}
         # When this instance came up, in the same naive-UTC space the database
         # stamps onto updated_at. Startup reconciliation uses it to tell rows
         # orphaned by a previous process from attempts running right now.
@@ -449,6 +478,19 @@ class BookingService:
         if requester_handle is not None:
             session.requester_handle = requester_handle or None
 
+        expired = ""
+        if session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION and (
+            datetime.now(UTC).replace(tzinfo=None) - session.last_interaction > REPLACE_QUESTION_TTL
+        ):
+            self._set_pending(session, [])
+            self._clear_pending_proxy_target(session)
+            self._clear_replace(session)
+            session.state = ConversationState.IDLE
+            expired = (
+                "Your earlier question about changing your tee time timed out, so I left "
+                "your booking as it is.\n\n"
+            )
+
         # Resolve who this message is on behalf of before anything reads it.
         # Only the single configured admin ID can be booking for someone else;
         # for everyone else this is a no-op and the message is untouched.
@@ -456,7 +498,7 @@ class BookingService:
             early_response, message = await self._prepare_proxy_turn(session, message)
             if early_response is not None:
                 await self.update_session(session)
-                return early_response
+                return expired + early_response
 
         # "2" or "8:08" in answer to "which one?" needs no language model to
         # read, for the same reason a bare "yes" doesn't. Anything that is not
@@ -466,6 +508,11 @@ class BookingService:
             if picked is not None:
                 await self.update_session(session)
                 return picked
+
+        if session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION:
+            response = await self._handle_replace_reply(session, message)
+            await self.update_session(session)
+            return response
 
         affirmative = self._confirmation_shortcut(session, message)
         if affirmative is not None:
@@ -485,7 +532,7 @@ class BookingService:
 
         await self.update_session(session)
 
-        return response
+        return expired + response
 
     async def _prepare_proxy_turn(
         self, session: UserSession, message: str
@@ -751,6 +798,23 @@ class BookingService:
             )
 
     async def _handle_book_intent(self, session: UserSession, parsed: ParsedIntent) -> str:
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
+
+        named = parsed.tee_time_requests or (
+            [parsed.tee_time_request] if parsed.tee_time_request else []
+        )
+        dates = [r.requested_date for r in named]
+        if len(dates) > 1 and len(set(dates)) < len(dates):
+            repeated = next(d for d in dates if dates.count(d) > 1)
+            self._set_pending(session, [])
+            self._clear_pending_proxy_target(session)
+            session.state = ConversationState.IDLE
+            return (
+                "The club only allows one round per member per day, so I can't book more "
+                f"than one tee time on {repeated:%A, %B %d}. Tell me which time you'd like."
+            )
+
         if parsed.tee_time_requests and len(parsed.tee_time_requests) > 1:
             session.pending_requests = parsed.tee_time_requests
             session.pending_request = None
@@ -846,6 +910,18 @@ class BookingService:
         return check
 
     async def _continue_slot_agreement(self, session: UserSession) -> str:
+        """Answer repeats of a held booking, then agree times and ask for the yes.
+
+        A request for the time the member already holds is answered first, from
+        what they asked for. The sheet shows that time as taken - by them - so
+        checking it would send them to pick a different one (issue #284).
+        """
+        notes, finished = await self._answer_repeat_requests(session)
+        if finished:
+            return notes
+        return (notes + "\n\n" if notes else "") + await self._agree_and_confirm(session)
+
+    async def _agree_and_confirm(self, session: UserSession) -> str:
         """Agree each pending request's tee time, then ask for the usual yes.
 
         Walks the pending requests in order. The first whose time is not an
@@ -864,8 +940,361 @@ class BookingService:
                 session.state = ConversationState.AWAITING_SLOT_CHOICE
                 return self._slot_question(request, position, len(requests), check)
 
+        conflict_reply = await self._resolve_same_day_conflicts(session)
+        if conflict_reply is not None:
+            return conflict_reply
+
         session.state = ConversationState.AWAITING_CONFIRMATION
         return await self._confirmation_prompt(session)
+
+    @staticmethod
+    def _in_race_freeze() -> bool:
+        """True from 6:28 to 6:35 CT, while the booking race is running."""
+        now = CTDateTime.now().time().replace(tzinfo=None)
+        return RACE_FREEZE_START <= now < RACE_FREEZE_END
+
+    def _decline_during_race(self, session: UserSession) -> str:
+        session.pending_request = None
+        session.pending_requests = None
+        self._clear_pending_proxy_target(session)
+        self._clear_replace(session)
+        session.state = ConversationState.IDLE
+        return RACE_FREEZE_MESSAGE
+
+    @staticmethod
+    def _clear_replace(session: UserSession) -> None:
+        session.pending_replace_booking_id = None
+        session.replace_clarifications = 0
+
+    @staticmethod
+    def _set_pending(session: UserSession, requests: list[TeeTimeRequest]) -> None:
+        """Store ``requests`` the way a conversation holds one or several."""
+        session.pending_request = requests[0] if len(requests) == 1 else None
+        session.pending_requests = requests if len(requests) > 1 else None
+
+    @staticmethod
+    def _held_time(booking: TeeTimeBooking) -> dtime:
+        return booking.actual_booked_time or booking.request.requested_time
+
+    def _window_open(self, target_date: date) -> bool:
+        """True when the booking window for ``target_date`` has already opened."""
+        exec_ct = CTDateTime.normalize_to_ct(self._calculate_execution_time(target_date))
+        return exec_ct <= CTDateTime.now()
+
+    async def _triage_same_day(
+        self, session: UserSession, *, final: bool
+    ) -> tuple[list[str], list[TeeTimeRequest], tuple[TeeTimeRequest, TeeTimeBooking] | None, str]:
+        """Sort the pending requests against the member's live bookings.
+
+        Returns ``(notes, keep, conflict, subject)``: what to tell the member
+        about requests dropped as repeats or left alone, the requests still
+        pending, the first one that needs a replace question, and how to refer
+        to the member. ``final`` is False before times are agreed with the
+        sheet, when only repeats can be recognised: whether a new time is known
+        to be open is not yet known.
+        """
+        attribution = await self._attribution_for(session)
+        live = await database_service.get_live_bookings_on(
+            attribution.phone_number, sorted({r.requested_date for r in self._pending(session)})
+        )
+        subject = (
+            f"{attribution.display_name} already has"
+            if attribution.is_proxy
+            else "You already have"
+        )
+
+        notes: list[str] = []
+        keep: list[TeeTimeRequest] = []
+        conflict: tuple[TeeTimeRequest, TeeTimeBooking] | None = None
+        for request in self._pending(session):
+            held = next(
+                (b for b in live if b.request.requested_date == request.requested_date), None
+            )
+            if held is None:
+                keep.append(request)
+                continue
+            day = f"{request.requested_date:%A, %B %d}"
+            held_at = f"{self._held_time(held):%I:%M %p}"
+            if (
+                self._held_time(held) == request.requested_time
+                and held.request.num_players == request.num_players
+                and held.request.fallback_window_minutes == request.fallback_window_minutes
+            ):
+                verb = "booked" if held.status == BookingStatus.SUCCESS else "queued"
+                notes.append(f"{subject} {held_at} {verb} for {day}.")
+            elif held.status == BookingStatus.IN_PROGRESS:
+                notes.append(
+                    f"{subject} {held_at} on {day}, and it is being booked right now, so I "
+                    "can't change it. Try again in a few minutes."
+                )
+            elif (
+                final
+                and self._window_open(request.requested_date)
+                and request.slot_confirmed is not True
+            ):
+                # The window is open, so the new time books at once. It has to
+                # be known open before anything existing is touched.
+                notes.append(
+                    f"I can't confirm {request.requested_time:%I:%M %p} is open on {day}, "
+                    f"so I've left your {held_at} booking as it is."
+                )
+            else:
+                keep.append(request)
+                if conflict is None:
+                    conflict = (request, held)
+        return notes, keep, conflict, subject
+
+    async def _answer_repeat_requests(self, session: UserSession) -> tuple[str, bool]:
+        """Drop requests that repeat a held booking; return the notes and whether done."""
+        notes, keep, _conflict, _subject = await self._triage_same_day(session, final=False)
+        if not notes:
+            return "", False
+        self._set_pending(session, keep)
+        text = "\n".join(notes)
+        if keep:
+            return text, False
+        self._clear_pending_proxy_target(session)
+        session.state = ConversationState.IDLE
+        return text, True
+
+    async def _resolve_same_day_conflicts(self, session: UserSession) -> str | None:
+        """Deal with requests on a date where the member already has a booking.
+
+        The club allows one Northgate round per member per day (issue #284), so
+        a second request can only fail at 6:30. The same time and party is
+        answered and dropped; a booking already being attempted is left alone;
+        anything else asks whether to replace the existing booking, one request
+        at a time. Returns the reply, or None when no request conflicts.
+        """
+        notes, keep, conflict, subject = await self._triage_same_day(session, final=True)
+        if not notes and conflict is None:
+            return None
+        prefix = "\n".join(notes) + ("\n\n" if notes and keep else "")
+
+        if conflict is not None:
+            request, held = conflict
+            self._set_pending(session, keep)
+            session.state = ConversationState.AWAITING_REPLACE_CONFIRMATION
+            session.pending_replace_booking_id = held.id
+            session.replace_clarifications = 0
+            return prefix + self._replace_question(
+                request, held, subject, self._window_open(request.requested_date)
+            )
+
+        if not keep:
+            self._set_pending(session, [])
+            self._clear_pending_proxy_target(session)
+            session.state = ConversationState.IDLE
+            return prefix.strip()
+        self._set_pending(session, keep)
+        session.state = ConversationState.AWAITING_CONFIRMATION
+        return prefix + await self._confirmation_prompt(session)
+
+    def _replace_question(
+        self,
+        request: TeeTimeRequest,
+        held: TeeTimeBooking,
+        subject: str,
+        window_open: bool,
+    ) -> str:
+        day = f"{request.requested_date:%A, %B %d}"
+        text = (
+            f"{subject} {self._held_time(held):%I:%M %p} queued for {day}. The club only "
+            f"allows one round per member per day. Would you like to change the tee time to "
+            f"{request.requested_time:%I:%M %p} on {day}?"
+        )
+        if held.status == BookingStatus.SUCCESS:
+            text += (
+                " That one is already confirmed with the club. I'll check the new time is "
+                "open before cancelling it, and leave it alone if it isn't."
+            )
+        elif window_open:
+            text += (
+                " The booking window is open, so the new time is booked straight away "
+                "and the old one is cancelled."
+            )
+        return text + " Reply yes or no."
+
+    async def _handle_replace_reply(self, session: UserSession, message: str) -> str:
+        """Settle "change your tee time?" from a yes or no, without the LLM."""
+        normalized = _normalize_reply(message)
+        if normalized in AFFIRMATIVE_CONFIRMATIONS:
+            return await self._apply_replacement(session)
+        if normalized in NEGATIVE_CONFIRMATIONS:
+            await self._take_conflict(session)
+            return await self._after_replace_answer(
+                session, "Okay, I'll leave your existing booking as it is."
+            )
+
+        parsed = await self._parse_quietly(message)
+        if parsed is not None and (
+            parsed.intent in ("cancel", "status", "help")
+            or (parsed.intent == "book" and (parsed.tee_time_request or parsed.tee_time_requests))
+        ):
+            # Not an answer but a new command: the question is dropped, as a no
+            # would drop it, and the command is carried out.
+            self._set_pending(session, [])
+            self._clear_replace(session)
+            session.state = ConversationState.IDLE
+            if parsed.intent == "book":
+                self._clear_pending_proxy_target(session)
+            return (
+                "Okay, I'll leave your existing booking as it is.\n\n"
+                + await self._process_intent(session, parsed)
+            )
+
+        if session.replace_clarifications < 1:
+            session.replace_clarifications += 1
+            return (
+                "Sorry, I didn't catch that. Would you like to change your tee time? "
+                "Please reply yes or no."
+            )
+        await self._take_conflict(session)
+        return await self._after_replace_answer(
+            session,
+            "I didn't understand, so I've left your existing booking as it is. "
+            "Send your request again if you'd like to change it.",
+        )
+
+    async def _parse_quietly(self, message: str) -> ParsedIntent | None:
+        """Parse a message, or None if the parser fails: an unreadable reply is unrelated."""
+        try:
+            return await gemini_service.parse_message(message, None)
+        except Exception:
+            logger.exception("REPLACE: could not parse a reply to the replace question")
+            return None
+
+    async def _take_conflict(
+        self, session: UserSession
+    ) -> tuple[TeeTimeRequest, TeeTimeBooking | None] | None:
+        """Remove the request the open question is about; return it with the old booking."""
+        held = (
+            await database_service.get_booking(session.pending_replace_booking_id)
+            if session.pending_replace_booking_id
+            else None
+        )
+        self._clear_replace(session)
+        requests = self._pending(session)
+        target = next(
+            (r for r in requests if held and r.requested_date == held.request.requested_date),
+            requests[0] if requests else None,
+        )
+        if target is None:
+            return None
+        self._set_pending(session, [r for r in requests if r is not target])
+        return target, held
+
+    async def _after_replace_answer(self, session: UserSession, message: str) -> str:
+        """Carry on with whatever else was asked for in the same message."""
+        if self._pending(session):
+            return message + "\n\n" + await self._continue_slot_agreement(session)
+        self._clear_pending_proxy_target(session)
+        session.state = ConversationState.IDLE
+        return message
+
+    async def _live_open_times(
+        self, phone_number: str, request: TeeTimeRequest
+    ) -> list[dtime] | None:
+        """The tee times open on the club's site right now, or None if unreadable."""
+        provider: ReservationProvider | None = None
+        try:
+            provider = await self._provider_for(phone_number)
+            if provider is None:
+                return None
+            async with self._browser_slot_held(f"availability {request.requested_date}"):
+                times = await provider.get_available_times(request.requested_date)
+            # The provider returns [] for a failed login or date selection as
+            # well as for a full sheet. A sheet the window has opened on is never
+            # empty, so [] means it could not be read.
+            return times or None
+        except Exception:
+            logger.exception(
+                "REPLACE: could not read the live sheet for %s", request.requested_date
+            )
+            return None
+        finally:
+            if provider is not None:
+                await self._release_provider(provider)
+
+    async def _apply_replacement(self, session: UserSession) -> str:
+        """Cancel the old booking and create the new one, validating before touching anything."""
+        attribution = await self._attribution_for(session)
+        taken = await self._take_conflict(session)
+        request, held = taken if taken is not None else (None, None)
+        if request is None or held is None or held.id is None:
+            return await self._after_replace_answer(
+                session, "That booking has changed, so I haven't changed anything."
+            )
+
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
+        if held.status not in (
+            BookingStatus.PENDING,
+            BookingStatus.SCHEDULED,
+            BookingStatus.SUCCESS,
+        ):
+            return await self._after_replace_answer(
+                session,
+                f"Your existing booking is now {held.status.value}, so I haven't changed anything.",
+            )
+        try:
+            await self._validate_booking_request(
+                attribution.phone_number, request, replacing=held.id
+            )
+        except ValueError as e:
+            return await self._after_replace_answer(
+                session, f"{e}\nI haven't changed your existing booking."
+            )
+
+        held_at = f"{self._held_time(held):%I:%M %p}"
+        # Nothing is cancelled until the club's own sheet shows the new time
+        # open. The sheet snapshot the question was asked from can be stale, and
+        # a won booking cannot be got back.
+        if held.status == BookingStatus.SUCCESS or self._window_open(request.requested_date):
+            open_times = await self._live_open_times(attribution.phone_number, request)
+            if open_times is None or request.requested_time not in open_times:
+                why = (
+                    "I couldn't check the club's sheet just now"
+                    if open_times is None
+                    else f"{request.requested_time:%I:%M %p} is no longer open"
+                )
+                return await self._after_replace_answer(
+                    session, f"{why}, so I've left your {held_at} booking as it is."
+                )
+        released_confirmed = held.status == BookingStatus.SUCCESS
+        if released_confirmed:
+            cancelled = await self._cancel_confirmed_booking(held)
+        else:
+            cancelled = await database_service.cancel_pending_booking(held.id) is not None
+        if not cancelled:
+            return await self._after_replace_answer(
+                session,
+                f"I couldn't cancel your {held_at} booking (it may have just started), so "
+                "I haven't changed anything.",
+            )
+
+        try:
+            booking = await self.create_booking(
+                attribution.phone_number,
+                request,
+                attribution.origin_channel_id,
+                channel=attribution.channel,
+                requester_handle=attribution.requester_handle,
+            )
+        except ValueError as e:
+            return await self._after_replace_answer(
+                session, f"I cancelled your {held_at} booking but couldn't book the new time: {e}"
+            )
+        return await self._after_replace_answer(
+            session,
+            f"Done - I cancelled your {held_at} booking. "
+            + self._booking_ack(booking, attribution)
+            + (
+                " Your old tee time is released and the new one is not secured yet."
+                if released_confirmed and booking.status != BookingStatus.SUCCESS
+                else ""
+            ),
+        )
 
     def _slot_question(
         self,
@@ -1166,6 +1595,9 @@ class BookingService:
         if not session.pending_request:
             return "There's nothing to confirm. Would you like to book a tee time?"
 
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
+
         attribution = await self._attribution_for(session)
 
         try:
@@ -1186,6 +1618,11 @@ class BookingService:
         self._clear_pending_proxy_target(session)
         session.state = ConversationState.IDLE
 
+        return self._booking_ack(booking, attribution)
+
+    @staticmethod
+    def _booking_ack(booking: TeeTimeBooking, attribution: _BookingAttribution) -> str:
+        """What to tell the member right after their booking is created."""
         request = booking.request
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
@@ -1241,6 +1678,9 @@ class BookingService:
         """Handle confirmation of multiple booking requests."""
         if not session.pending_requests:
             return "There's nothing to confirm. Would you like to book a tee time?"
+
+        if self._in_race_freeze():
+            return self._decline_during_race(session)
 
         successful_bookings: list[TeeTimeBooking] = []
         failed_requests: list[tuple[TeeTimeRequest, str]] = []
@@ -1715,6 +2155,79 @@ class BookingService:
             if provider is not None:
                 await self._release_provider(provider)
 
+    async def _validate_booking_request(
+        self, phone_number: str, request: TeeTimeRequest, replacing: str | None = None
+    ) -> None:
+        """Refuse a booking that could only fail later, while someone is reading.
+
+        Raises ValueError with a message fit for the member. ``replacing`` is
+        the ID of a booking about to be cancelled in favour of this one, which
+        therefore does not count against the one-round-per-day rule.
+        """
+        # The proxy admin books as a friend or not at all (issue #185). Refused
+        # here as well as in the credential lookup because this is the point
+        # where it is still a conversation: the admin gets told why, instead of
+        # a booking record being written that can only fail hours later, at 6:30.
+        if is_proxy_admin(phone_number):
+            raise ValueError(
+                "This admin account has no Walden login of its own, so it can only book "
+                "on a friend's behalf. Say who it's for, e.g. \"for @alex book 9/12 at 8a\"."
+            )
+
+        # Everyone else needs a login of their own, for the same reason and at
+        # the same point. _provider_for refuses this too, but that happens when
+        # the attempt runs - which for a scheduled booking is 6:30 a week later,
+        # long after the user was told it was booked. Asked and answered here
+        # instead, while there is still someone reading the reply.
+        stored_login = await credential_service.get_dedicated_credentials(phone_number)
+        if stored_login is None:
+            raise ValueError(
+                "Your account isn't set up for booking yet - I don't have a Walden "
+                "login on file for you, and I won't book under anyone else's. Send /start "
+                "to me in a private chat to connect yours, then try again."
+            )
+        # A login Walden has already rejected would fail at 6:30 a week from now,
+        # so say so while someone is reading (#244).
+        if stored_login.invalid_since is not None:
+            raise ValueError(
+                f"Walden rejected the saved login for this account on "
+                f"{stored_login.invalid_since:%B %d}, so I can't book with it. Send /login to "
+                "me in a private chat to update it, then try again."
+            )
+
+        # Check 48-hour restriction for multi-player bookings
+        if request.num_players > 1:
+            now_ct = CTDateTime.now()
+
+            # Combine requested date and time into a timezone-aware CT datetime
+            tee_time_naive = datetime.combine(request.requested_date, request.requested_time)
+            tee_time_ct = CTDateTime.from_naive_ct(tee_time_naive)
+
+            hours_until_tee_time = (tee_time_ct - now_ct).total_seconds() / 3600
+
+            if hours_until_tee_time < 48:
+                raise ValueError(
+                    f"Multi-player bookings ({request.num_players} players) cannot be made "
+                    f"within 48 hours of the tee time. The Walden Golf website disables "
+                    f"TBD guest placeholders within this window. "
+                    f"You can still book for 1 player, or choose a tee time more than 48 hours away."
+                )
+
+        # The club allows one Northgate round per member per day, so a second
+        # request for the same date can only fail at 6:30 (issue #284). Keyed
+        # on the booking's phone_number, which for a proxy booking is the
+        # friend whose login books it - the identity the club restricts.
+        for existing in await database_service.get_live_bookings_on(
+            phone_number, [request.requested_date]
+        ):
+            if existing.id != replacing:
+                raise ValueError(
+                    f"You already have {existing.request.requested_time:%I:%M %p} on "
+                    f"{request.requested_date:%a %b %d} queued. The club allows one Northgate "
+                    "round per member per day, so I can't book a second. Cancel the "
+                    "existing one first if you'd rather have a different time."
+                )
+
     async def create_booking(
         self,
         phone_number: str,
@@ -1766,71 +2279,26 @@ class BookingService:
             ValueError: If multi-player booking is requested within 48 hours, or
                 if the booking is attributed to the proxy admin's own identity.
         """
-        # The proxy admin books as a friend or not at all (issue #185). Refused
-        # here as well as in the credential lookup because this is the point
-        # where it is still a conversation: the admin gets told why, instead of
-        # a booking record being written that can only fail hours later, at 6:30.
-        if is_proxy_admin(phone_number):
-            raise ValueError(
-                "This admin account has no Walden login of its own, so it can only book "
-                "on a friend's behalf. Say who it's for, e.g. \"for @alex book 9/12 at 8a\"."
+        lock = self._member_locks.setdefault(phone_number, asyncio.Lock())
+        async with lock:
+            await self._validate_booking_request(phone_number, request)
+
+            booking_id = str(uuid.uuid4())[:8]
+
+            execution_time = self._calculate_execution_time(request.requested_date)
+
+            booking = TeeTimeBooking(
+                id=booking_id,
+                phone_number=phone_number,
+                request=request,
+                status=BookingStatus.SCHEDULED,
+                scheduled_execution_time=execution_time,
+                origin_channel_id=origin_channel_id,
+                channel=channel,
+                requester_handle=requester_handle,
             )
 
-        # Everyone else needs a login of their own, for the same reason and at
-        # the same point. _provider_for refuses this too, but that happens when
-        # the attempt runs - which for a scheduled booking is 6:30 a week later,
-        # long after the user was told it was booked. Asked and answered here
-        # instead, while there is still someone reading the reply.
-        stored_login = await credential_service.get_dedicated_credentials(phone_number)
-        if stored_login is None:
-            raise ValueError(
-                "Your account isn't set up for booking yet - I don't have a Walden "
-                "login on file for you, and I won't book under anyone else's. Send /start "
-                "to me in a private chat to connect yours, then try again."
-            )
-        # A login Walden has already rejected would fail at 6:30 a week from now,
-        # so say so while someone is reading (#244).
-        if stored_login.invalid_since is not None:
-            raise ValueError(
-                f"Walden rejected the saved login for this account on "
-                f"{stored_login.invalid_since:%B %d}, so I can't book with it. Send /login to "
-                "me in a private chat to update it, then try again."
-            )
-
-        # Check 48-hour restriction for multi-player bookings
-        if request.num_players > 1:
-            now_ct = CTDateTime.now()
-
-            # Combine requested date and time into a timezone-aware CT datetime
-            tee_time_naive = datetime.combine(request.requested_date, request.requested_time)
-            tee_time_ct = CTDateTime.from_naive_ct(tee_time_naive)
-
-            hours_until_tee_time = (tee_time_ct - now_ct).total_seconds() / 3600
-
-            if hours_until_tee_time < 48:
-                raise ValueError(
-                    f"Multi-player bookings ({request.num_players} players) cannot be made "
-                    f"within 48 hours of the tee time. The Walden Golf website disables "
-                    f"TBD guest placeholders within this window. "
-                    f"You can still book for 1 player, or choose a tee time more than 48 hours away."
-                )
-
-        booking_id = str(uuid.uuid4())[:8]
-
-        execution_time = self._calculate_execution_time(request.requested_date)
-
-        booking = TeeTimeBooking(
-            id=booking_id,
-            phone_number=phone_number,
-            request=request,
-            status=BookingStatus.SCHEDULED,
-            scheduled_execution_time=execution_time,
-            origin_channel_id=origin_channel_id,
-            channel=channel,
-            requester_handle=requester_handle,
-        )
-
-        created_booking = await database_service.create_booking(booking)
+            created_booking = await database_service.create_booking(booking)
 
         # Compare in timezone-aware space for robustness.
         # execution_time is naive (CT wall-clock), so we localize it.

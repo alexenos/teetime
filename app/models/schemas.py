@@ -177,6 +177,9 @@ class ConversationState(str, Enum):
         AWAITING_PROXY_TARGET: The proxy admin asked to book without naming who
             for, and we asked "for which user?". Waiting for them to name the
             friend. Only ever reached by the single admin ID (issue #185).
+        AWAITING_REPLACE_CONFIRMATION: The member already has a booking on the
+            requested date, and we asked whether to replace it with the new
+            time (issue #284). Waiting for a yes or no.
         AWAITING_SLOT_CHOICE: A requested time is not an open tee time on its
             date's sheet, and we offered the nearest ones and asked which.
             Waiting for the member to pick (issue #216). The request being
@@ -191,6 +194,7 @@ class ConversationState(str, Enum):
     AWAITING_CANCELLATION_SELECTION = "awaiting_cancellation_selection"
     AWAITING_PROXY_TARGET = "awaiting_proxy_target"
     AWAITING_SLOT_CHOICE = "awaiting_slot_choice"
+    AWAITING_REPLACE_CONFIRMATION = "awaiting_replace_confirmation"
 
 
 class UserSession(BaseModel):
@@ -211,6 +215,11 @@ class UserSession(BaseModel):
             None when IDLE.
         pending_cancellation_id: ID of a booking awaiting cancellation confirmation.
             Set when user requests to cancel and we're waiting for them to confirm.
+        pending_replace_booking_id: ID of the existing booking the member was
+            asked to replace (issue #284). Set while in
+            AWAITING_REPLACE_CONFIRMATION.
+        replace_clarifications: How many unrelated replies that question has
+            had. One gets a clarifying re-ask; the second counts as a no.
         pending_proxy_target: The friend the proxy admin is booking on behalf of,
             as the admin typed it (issue #185). Held on the ADMIN's session, not
             the friend's: the conversation - the echo-back, the "reply yes" -
@@ -239,6 +248,8 @@ class UserSession(BaseModel):
     pending_request: TeeTimeRequest | None = None
     pending_requests: list[TeeTimeRequest] | None = None
     pending_cancellation_id: str | None = None
+    pending_replace_booking_id: str | None = None
+    replace_clarifications: int = 0
     pending_proxy_target: str | None = None
     origin_channel_id: str | None = None
     channel: str | None = None
