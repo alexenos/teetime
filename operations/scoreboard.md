@@ -93,6 +93,12 @@ headline — it answers "when did anything last break" — and it is why the per
 breakdown sits next to it. Read the headline for whether the automation is healthy
 and the breakdown for which part is not.
 
+The Routines walked are the race report (daily), the scoreboard (daily), cost
+(monthly, from 2026-11-05) and tech debt (weekly, Saturdays, from 2026-10-10).
+A weekly or monthly Routine contributes one run per period, so a missed Saturday
+breaks the streak like a missed morning does. `SCHEDULES` in
+`operations/ledger/derive_scoreboard.py` is the list.
+
 A Routine's own runs count toward this, the scoreboard Routine included. It is
 measuring the automation, and it is part of the automation.
 

@@ -157,21 +157,24 @@
       <div id="windows"></div>
     </section>
 
-    <!-- 2. Automation streak -->
-    <section class="card" aria-labelledby="h-streak">
-      <h2 id="h-streak">Automation streak</h2>
-      <p class="stat" id="streak-val">—</p>
-      <p class="stat-sub" id="streak-sub"></p>
-      <div id="streak-hist"></div>
-      <dl class="rows" id="streak-rows"></dl>
+    <!-- 2. Cost -->
+    <section class="card" aria-labelledby="h-cost">
+      <h2 id="h-cost">Cost</h2>
+      <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:12px">
+        <p class="stat" id="cost-val">—</p>
+        <span id="cost-delta"></span>
+      </div>
+      <p class="stat-sub" id="cost-sub"></p>
     </section>
   </div>
 
-  <!-- 3. Cost -->
-  <section class="card" aria-labelledby="h-cost">
-    <h2 id="h-cost">Cost</h2>
-    <p class="stat" id="cost-val">—</p>
-    <p class="stat-sub" id="cost-sub"></p>
+  <!-- 3. Automation streak -->
+  <section class="card" aria-labelledby="h-streak">
+    <h2 id="h-streak">Automation streak</h2>
+    <p class="stat" id="streak-val">—</p>
+    <p class="stat-sub" id="streak-sub"></p>
+    <div id="streak-hist"></div>
+    <dl class="rows" id="streak-rows"></dl>
   </section>
 
   <details>
@@ -198,10 +201,11 @@
   };
 
   // Arrow glyph for a delta. Direction carries the sign; the number carries the size.
-  function deltaEl(points, goodWhenUp) {
+  function deltaEl(points, goodWhenUp, label) {
     if (points === null || points === 0) {
       return '<span class="delta" style="color:var(--ink-muted)">no change</span>';
     }
+    label = label || (Math.abs(points) + " pts");
     var up = points > 0;
     var good = up === goodWhenUp;
     var color = good ? "var(--good)" : "var(--critical)";
@@ -209,7 +213,7 @@
     return '<span class="delta" style="color:' + color + '">'
       + '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">'
       + '<path d="' + path + '" fill="currentColor"/></svg>'
-      + (up ? "+" : "−") + Math.abs(points) + " pts</span>";
+      + (up ? "+" : "−") + label + "</span>";
   }
 
   function render(d) {
@@ -338,11 +342,24 @@
       rows.push(["Cost", "not available"]);
     } else {
       $("cost-val").textContent = "$" + c.usd.toFixed(2);
-      $("cost-sub").textContent = c.month + " · "
-        + (c.usd_per_booking === null ? "" : "$" + c.usd_per_booking.toFixed(2) + " per booking · ")
-        + (c.prior_usd == null ? "" : "vs $" + c.prior_usd.toFixed(2) + " in " + c.prior_month + " · ")
-        + "scope: " + c.scope;
-      rows.push(["Cost, " + c.month, "$" + c.usd.toFixed(2)]);
+      // Total spend, month over month. Lower is better, so a fall is green.
+      var costHtml = "Total for " + c.month;
+      if (c.prior_usd != null) {
+        var diff = c.usd - c.prior_usd;
+        var pctChg = c.prior_usd > 0 ? Math.round(Math.abs(diff) / c.prior_usd * 100) : null;
+        $("cost-delta").innerHTML = deltaEl(diff === 0 ? null : diff, false,
+          "$" + Math.abs(diff).toFixed(2) + (pctChg === null ? "" : " (" + pctChg + "%)"));
+        costHtml += " vs $" + c.prior_usd.toFixed(2) + " total in " + c.prior_month;
+      }
+      costHtml += " · scope: " + c.scope;
+      if (c.usd_per_booking !== null) {
+        costHtml += '<div style="margin-top:4px">$' + c.usd_per_booking.toFixed(2)
+          + " per booking this month (" + c.bookings + " bookings)</div>";
+      }
+      $("cost-sub").innerHTML = costHtml;
+      rows.push(["Cost, " + c.month + " (total)", "$" + c.usd.toFixed(2)]);
+      if (c.prior_usd != null) { rows.push(["Cost, " + c.prior_month + " (total)", "$" + c.prior_usd.toFixed(2)]); }
+      if (c.usd_per_booking !== null) { rows.push(["Cost per booking, " + c.month, "$" + c.usd_per_booking.toFixed(2)]); }
     }
 
     // ---- table view (required: the light-mode palette carries a contrast WARN) ----
