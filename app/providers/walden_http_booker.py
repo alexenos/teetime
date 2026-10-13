@@ -378,6 +378,9 @@ class DirectBookingResult:
     # direct path's counterpart to _extract_booking_error_message, which reads
     # the browser DOM this path never touches.
     response_message: str | None = None
+    # The same text, one entry per message container (issue #284): the caller
+    # picks out a restriction by container, not by splitting joined text.
+    response_messages: list[str] = field(default_factory=list)
     # The tee sheet the refresh returned, kept solely so a failed booking can be
     # diagnosed. A blocked verdict raises exactly two questions about it - was
     # the club still counting down, and was the slot open - and neither can be
@@ -421,6 +424,7 @@ class DirectBookingResult:
             "timing": self.timing,
             "finalMarkup": self.final_markup,
             "responseMessage": self.response_message,
+            "responseMessages": list(self.response_messages),
             "refreshMarkup": self.refresh_markup,
             "bookedSlotTime": self.booked_slot_time,
             "attemptedTimes": list(self.attempted_times),
@@ -887,7 +891,8 @@ class DirectHttpBooker:
             # A step that could not find the element it needed is often a step
             # the site refused; the reason, if it gave one, is in the response
             # that step was reading.
-            result.response_message = find_response_message(result.final_markup)
+            result.response_messages = find_response_messages(result.final_markup)
+            result.response_message = join_response_messages(result.response_messages)
             logger.warning(
                 "DIRECT_HTTP: Chain failed in phase %s: %s%s",
                 result.phase,
@@ -1065,7 +1070,8 @@ class DirectHttpBooker:
         # Whatever the site rendered in its message containers rides along, so a
         # refusal for a reason we have no pattern for still reaches the member
         # instead of being reported as an unexplained non-confirmation.
-        result.response_message = find_response_message(response.markup)
+        result.response_messages = find_response_messages(response.markup)
+        result.response_message = join_response_messages(result.response_messages)
 
         result.phase = PHASE_COMPLETE
         result.success = True
@@ -2995,7 +3001,7 @@ def _book_now_still_pending(document: Node) -> bool:
     return bool(_find_unset_player_selects(document))
 
 
-def find_response_message(markup: str) -> str | None:
+def find_response_messages(markup: str) -> list[str]:
     """Extract visible validation/message text from a partial response.
 
     The direct-HTTP counterpart of ``_extract_booking_error_message``, which
@@ -3009,7 +3015,8 @@ def find_response_message(markup: str) -> str | None:
     alongside an outcome decided elsewhere costs nothing if it is noise.
 
     Returns:
-        The collected message text, or None when the response carries none.
+        The collected message texts, one per container; empty when the response
+        carries none.
     """
     document = parse_html(markup)
     seen: set[str] = set()
@@ -3032,11 +3039,20 @@ def find_response_message(markup: str) -> str | None:
         seen.add(text.lower())
         messages.append(text)
 
+    return messages
+
+
+def join_response_messages(messages: list[str]) -> str | None:
+    """The messages as one line, capped, or None when there are none."""
     if not messages:
         return None
-
     joined = "; ".join(messages)
     return joined[:_MAX_MESSAGE_CHARS] + "..." if len(joined) > _MAX_MESSAGE_CHARS else joined
+
+
+def find_response_message(markup: str) -> str | None:
+    """``find_response_messages`` as one capped line, or None when there are none."""
+    return join_response_messages(find_response_messages(markup))
 
 
 def container_message_text(markup: str) -> str:

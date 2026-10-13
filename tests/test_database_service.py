@@ -1258,3 +1258,78 @@ async def test_an_unreadable_ladder_never_stops_a_booking_loading(
 
     assert stored is not None
     assert stored.request.fallback_ladder is None
+
+
+class TestLiveBookingsOn:
+    """The same-day check reads only what could hold a member's round (issue #284)."""
+
+    @staticmethod
+    def _booking(
+        booking_id: str,
+        status: BookingStatus,
+        day: date = date(2025, 12, 20),
+        phone: str = "+15551234567",
+    ) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id=booking_id,
+            phone_number=phone,
+            request=TeeTimeRequest(requested_date=day, requested_time=time(8, 0), num_players=4),
+            status=status,
+        )
+
+    @pytest.mark.asyncio
+    async def test_filters_by_member_date_and_live_status(
+        self, database_service: DatabaseService
+    ) -> None:
+        for booking in [
+            self._booking("live0001", BookingStatus.SCHEDULED),
+            self._booking("live0002", BookingStatus.SUCCESS),
+            self._booking("live0003", BookingStatus.IN_PROGRESS),
+            self._booking("live0004", BookingStatus.PENDING),
+            self._booking("dead0001", BookingStatus.FAILED),
+            self._booking("dead0002", BookingStatus.CANCELLED),
+            self._booking("other-day", BookingStatus.SCHEDULED, day=date(2025, 12, 21)),
+            self._booking("other-who", BookingStatus.SCHEDULED, phone="+15550000000"),
+        ]:
+            await database_service.create_booking(booking)
+
+        found = await database_service.get_live_bookings_on("+15551234567", [date(2025, 12, 20)])
+        assert {b.id for b in found} == {"live0001", "live0002", "live0003", "live0004"}
+
+    @pytest.mark.asyncio
+    async def test_no_dates_reads_nothing(self, database_service: DatabaseService) -> None:
+        await database_service.create_booking(self._booking("live0001", BookingStatus.SCHEDULED))
+        assert await database_service.get_live_bookings_on("+15551234567", []) == []
+
+
+class TestReplaceQuestionSessionFields:
+    """The replace question survives a save and a load (issue #284)."""
+
+    @pytest.mark.asyncio
+    async def test_round_trip(
+        self, database_service: DatabaseService, sample_request: TeeTimeRequest
+    ) -> None:
+        session = UserSession(phone_number="+15551234567")
+        await database_service.create_session(session)
+
+        session.state = ConversationState.AWAITING_REPLACE_CONFIRMATION
+        session.pending_request = sample_request
+        session.pending_replace_booking_id = "held0001"
+        session.replace_clarifications = 1
+        await database_service.update_session(session)
+
+        loaded = await database_service.get_session("+15551234567")
+        assert loaded is not None
+        assert loaded.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+        assert loaded.pending_replace_booking_id == "held0001"
+        assert loaded.replace_clarifications == 1
+
+    @pytest.mark.asyncio
+    async def test_a_row_without_the_count_loads_as_zero(
+        self, database_service: DatabaseService
+    ) -> None:
+        await database_service.create_session(UserSession(phone_number="+15551234567"))
+        loaded = await database_service.get_session("+15551234567")
+        assert loaded is not None
+        assert loaded.replace_clarifications == 0
+        assert loaded.pending_replace_booking_id is None

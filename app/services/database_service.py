@@ -141,6 +141,8 @@ class DatabaseService:
             state=session.state,
             pending_request_json=pending_json,
             pending_cancellation_id=session.pending_cancellation_id,
+            pending_replace_booking_id=session.pending_replace_booking_id,
+            replace_clarifications=session.replace_clarifications,
             pending_proxy_target=session.pending_proxy_target,
             origin_channel_id=session.origin_channel_id,
             channel=session.channel,
@@ -171,6 +173,8 @@ class DatabaseService:
             pending_request=pending_request,
             pending_requests=pending_requests,
             pending_cancellation_id=record.pending_cancellation_id,  # type: ignore[arg-type]
+            pending_replace_booking_id=record.pending_replace_booking_id,  # type: ignore[arg-type]
+            replace_clarifications=record.replace_clarifications or 0,  # type: ignore[arg-type]
             pending_proxy_target=record.pending_proxy_target,  # type: ignore[arg-type]
             origin_channel_id=record.origin_channel_id,  # type: ignore[arg-type]
             channel=record.channel,  # type: ignore[arg-type]
@@ -213,6 +217,33 @@ class DatabaseService:
             result = await db.execute(query)
             records = result.scalars().all()
             return [self._record_to_booking(r) for r in records]
+
+    async def get_live_bookings_on(
+        self, phone_number: str, dates: list[date]
+    ) -> list[TeeTimeBooking]:
+        """A member's bookings on ``dates`` that hold, or are about to hold, their round.
+
+        Pending, scheduled, in progress or won; filtered in the query, so the
+        same-day check (issue #284) does not read a member's whole history.
+        """
+        if not dates:
+            return []
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BookingRecord).where(
+                    BookingRecord.phone_number == phone_number,
+                    BookingRecord.requested_date.in_(dates),
+                    BookingRecord.status.in_(
+                        [
+                            BookingStatus.PENDING,
+                            BookingStatus.SCHEDULED,
+                            BookingStatus.IN_PROGRESS,
+                            BookingStatus.SUCCESS,
+                        ]
+                    ),
+                )
+            )
+            return [self._record_to_booking(r) for r in result.scalars().all()]
 
     async def update_booking(self, booking: TeeTimeBooking) -> TeeTimeBooking:
         """Update an existing booking record."""
@@ -310,6 +341,8 @@ class DatabaseService:
                 pending_json = session.pending_request.model_dump_json()
             record.pending_request_json = pending_json  # type: ignore[assignment]
             record.pending_cancellation_id = session.pending_cancellation_id  # type: ignore[assignment]
+            record.pending_replace_booking_id = session.pending_replace_booking_id  # type: ignore[assignment]
+            record.replace_clarifications = session.replace_clarifications  # type: ignore[assignment]
             record.pending_proxy_target = session.pending_proxy_target  # type: ignore[assignment]
             record.origin_channel_id = session.origin_channel_id  # type: ignore[assignment]
             record.channel = session.channel  # type: ignore[assignment]

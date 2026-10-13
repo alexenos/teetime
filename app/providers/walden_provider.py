@@ -3008,6 +3008,8 @@ class WaldenGolfProvider(ReservationProvider):
 
                 technical = f"Fast booking failed at {phase}: {error}"
                 site_message = chain_result.get("responseMessage")
+                site_messages = chain_result.get("responseMessages")
+                last_attempted = self._last_attempted_time(chain_result, booked_time)
                 # "Could not check" is not "not booked". Saying so keeps this
                 # message honest in the same way the verification branch below is.
                 unchecked = (
@@ -3022,6 +3024,9 @@ class WaldenGolfProvider(ReservationProvider):
                         site_message=site_message,
                         technical=technical,
                         unchecked=unchecked,
+                        requested_time=target_time,
+                        attempted_time=last_attempted,
+                        site_messages=site_messages,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -3101,6 +3106,8 @@ class WaldenGolfProvider(ReservationProvider):
                 # The response's own message containers are the only place a
                 # refusal we have no phrase for can still be read from.
                 site_message = chain_result.get("responseMessage")
+                site_messages = chain_result.get("responseMessages")
+                last_attempted = self._last_attempted_time(chain_result, booked_time)
                 self._flush_pre_window_sheet("unverified")
                 return BookingResult(
                     success=False,
@@ -3108,6 +3115,9 @@ class WaldenGolfProvider(ReservationProvider):
                         site_message=site_message,
                         technical=technical,
                         unchecked=held is None,
+                        requested_time=target_time,
+                        attempted_time=last_attempted,
+                        site_messages=site_messages,
                     ),
                     booked_time=booked_time,
                     course_name=self.NORTHGATE_COURSE_NAME,
@@ -6059,7 +6069,14 @@ class WaldenGolfProvider(ReservationProvider):
         return bool(confirmed)
 
     def _member_facing_failure(
-        self, *, site_message: str | None, technical: str, unchecked: bool
+        self,
+        *,
+        site_message: str | None,
+        technical: str,
+        unchecked: bool,
+        requested_time: time | None = None,
+        attempted_time: time | None = None,
+        site_messages: list[str] | None = None,
     ) -> str:
         """Phrase a failed direct-HTTP booking for the member who asked for it.
 
@@ -6081,10 +6098,50 @@ class WaldenGolfProvider(ReservationProvider):
         """
         if site_message:
             logger.error("DIRECT_HTTP: %s; the site said: %s", technical, site_message)
+            site_message = self._lead_with_restriction(site_message, site_messages)
         message = site_message or technical
+        if (
+            requested_time is not None
+            and attempted_time is not None
+            and attempted_time != requested_time
+        ):
+            # The notice header names the time the member asked for; the
+            # refusal came on a fallback, and "09:23 AM was refused" would be
+            # false (issue #284).
+            # "Refused" only when the club said so; other failures (transport,
+            # an unreadable outcome) establish no refusal.
+            verb = "The club refused" if message.startswith("Restriction:") else "I tried"
+            message = (
+                f"{verb} {attempted_time:%I:%M %p}, a fallback for your "
+                f"{requested_time:%I:%M %p} request: {message}"
+            )
         if unchecked:
             message += " (the member's reservations page could not be checked)"
         return message
+
+    @staticmethod
+    def _last_attempted_time(chain_result: dict[str, Any], fallback: time | None) -> time | None:
+        """The slot the chain tried last, which is the one a refusal belongs to.
+
+        ``booked_time`` is the slot the run started on; after a fallback it is
+        stale (issue #284). Absent or empty ``attemptedTimes`` falls back to it.
+        """
+        attempted = [t for t in chain_result.get("attemptedTimes") or [] if isinstance(t, time)]
+        return attempted[-1] if attempted else fallback
+
+    @staticmethod
+    def _lead_with_restriction(site_message: str, site_messages: list[str] | None = None) -> str:
+        """Keep only the club's restriction when the message carries one.
+
+        A restriction (e.g. one round per day) is the whole reason for the
+        refusal. Any "slot is blocked by another user" alert beside it is
+        stale - the booker has already discounted it - and sending both
+        misled a member into thinking a rival took the slot (issue #284).
+        Works on the message containers, so a restriction that itself contains
+        a semicolon is not cut short.
+        """
+        restrictions = [m for m in site_messages or [] if m.startswith("Restriction:")]
+        return "; ".join(restrictions) if restrictions else site_message
 
     def _booking_text_verdict(self, text: str, context: str) -> tuple[bool | None, str]:
         """Classify booking text as confirmed, refused, or silent.

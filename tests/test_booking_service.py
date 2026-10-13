@@ -68,6 +68,28 @@ def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
 _REAL_SHEET_GRID_FOR = BookingService._sheet_grid_for
 
 
+# Captured before the fixture below replaces them, for TestSameDayReplacement.
+_REAL_RESOLVE_CONFLICTS = BookingService._resolve_same_day_conflicts
+_REAL_IN_RACE_FREEZE = BookingService._in_race_freeze
+_REAL_ANSWER_REPEATS = BookingService._answer_repeat_requests
+
+
+@pytest.fixture(autouse=True)
+def no_same_day_conflicts_and_no_race_freeze(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most tests are not about issue #284's same-day rule or the 6:28-6:35 freeze.
+
+    The conflict lookup reads bookings from the database, which most tests here
+    replace with a MagicMock, and the freeze reads the wall clock, which would
+    make the suite fail if it ever ran at 6:30 CT. Both are stubbed to "nothing
+    to report"; TestSameDayReplacement restores the real ones.
+    """
+    monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        BookingService, "_answer_repeat_requests", AsyncMock(return_value=("", False))
+    )
+    monkeypatch.setattr(BookingService, "_in_race_freeze", staticmethod(lambda: False))
+
+
 @pytest.fixture(autouse=True)
 def no_tee_sheet_on_file(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Every date's sheet is unread unless a test says otherwise (issue #216).
@@ -176,6 +198,10 @@ class TestBookingServiceBookings:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -430,6 +456,8 @@ class TestBookingServiceImmediateExecution:
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(return_value=created_booking)
             mock_db.get_booking = AsyncMock(return_value=executed_booking)
 
@@ -506,6 +534,8 @@ class TestBookingServiceImmediateExecution:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             mock_provider = MagicMock()
@@ -555,6 +585,8 @@ class TestBookingServiceImmediateExecution:
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(return_value=created_booking)
             mock_db.get_booking = AsyncMock(return_value=executed_booking)
 
@@ -769,6 +801,8 @@ class TestBookingServiceIntentHandling:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -797,6 +831,7 @@ class TestBookingServiceIntentHandling:
         """Test handling a status intent with no bookings."""
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             response = await booking_service._handle_status_intent(sample_session)
             assert "don't have any" in response.lower()
 
@@ -834,6 +869,7 @@ class TestBookingServiceIntentHandling:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             response = await booking_service._handle_cancel_intent(sample_session, parsed)
             assert "don't have any bookings to cancel" in response.lower()
 
@@ -1103,6 +1139,7 @@ class TestBookingServiceProcessIntent:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             response = await booking_service._process_intent(sample_session, parsed)
             assert "don't have any" in response.lower() or "bookings" in response.lower()
 
@@ -1763,6 +1800,8 @@ class TestBookingService48HourRestriction:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
             mock_db.get_booking = AsyncMock(return_value=None)  # For execute path
             mock_db.update_booking = AsyncMock(side_effect=create_booking_side_effect)
@@ -1804,6 +1843,8 @@ class TestBookingService48HourRestriction:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             with patch.object(CTDateTime, "now") as mock_ct_now:
@@ -2201,6 +2242,8 @@ class TestOriginChannelRouting:
             async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
                 return booking
 
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
 
             future_request = TeeTimeRequest(
@@ -2515,6 +2558,8 @@ class TestImmediateMultiBookingRunsAsOneBatch:
             found = stored.get(booking_id)
             return found.model_copy(deep=True) if found is not None else None
 
+        mock_db.get_bookings = AsyncMock(return_value=[])
+        mock_db.get_live_bookings_on = AsyncMock(return_value=[])
         mock_db.create_booking = AsyncMock(side_effect=save)
         mock_db.update_booking = AsyncMock(side_effect=save)
         mock_db.get_booking = AsyncMock(side_effect=load)
@@ -2954,6 +2999,7 @@ class TestReconcileInterruptedBookings:
         """With nothing stuck, reconciliation does nothing and sends nothing."""
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.update_booking = AsyncMock()
 
             with patch("app.services.booking_service.sms_service") as mock_sms:
@@ -3109,6 +3155,8 @@ class TestImmediateBookingDoesNotBlockReply:
             )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
             mock_db.get_booking = AsyncMock(
@@ -3721,6 +3769,8 @@ class TestCredentialIsRequired:
     ) -> None:
         """A row would look scheduled to the user and fail a week later."""
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock()
 
             with pytest.raises(ValueError):
@@ -3742,6 +3792,8 @@ class TestCredentialIsRequired:
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_or_create_session = AsyncMock(return_value=session)
             mock_db.update_session = AsyncMock(return_value=session)
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock()
 
             response = await booking_service.handle_incoming_message("+15551234567", "yes")
@@ -4543,6 +4595,8 @@ class TestSlotAgreement:
         )
 
         with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[])
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
             mock_db.create_booking = AsyncMock(side_effect=lambda booking: booking)
             with patch.object(CTDateTime, "now") as mock_now:
                 mock_now.return_value = pytz.timezone("America/Chicago").localize(
@@ -4651,3 +4705,578 @@ async def test_a_changed_party_size_is_a_new_request_not_a_pick(
     assert (request.requested_time, request.num_players) == (time(7, 54), 2)
     assert request.asked_time is None
     assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
+
+
+class TestSameDayDuplicateRefusal:
+    """One Northgate round per member per day: refuse the second request (#284).
+
+    Which bookings count (live statuses, the one date) is decided by the query;
+    see TestLiveBookingsOn in test_database_service.py.
+    """
+
+    @pytest.mark.asyncio
+    async def test_second_request_same_date_refused(self, booking_service: BookingService) -> None:
+        existing = TeeTimeBooking(
+            id="aaaa1111",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 30), requested_time=time(9, 23), num_players=4
+            ),
+            status=BookingStatus.SCHEDULED,
+        )
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=1
+        )
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[existing])
+            mock_db.create_booking = AsyncMock()
+            with pytest.raises(ValueError, match=r"already have 09:23 AM on Tue Dec 30"):
+                await booking_service.create_booking("+15551234567", request)
+            mock_db.get_live_bookings_on.assert_awaited_once_with(
+                "+15551234567", [date(2025, 12, 30)]
+            )
+            mock_db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_live_booking_lets_the_request_through(
+        self, booking_service: BookingService
+    ) -> None:
+        import pytz
+
+        request = TeeTimeRequest(
+            requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=1
+        )
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
+            mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
+            with patch.object(CTDateTime, "now") as mock_ct_now:
+                mock_ct_now.return_value = pytz.timezone("America/Chicago").localize(
+                    datetime(2025, 12, 22, 10, 0)
+                )
+                booking = await booking_service.create_booking("+15551234567", request)
+        assert booking.status == BookingStatus.SCHEDULED
+
+
+class TestSameDayReplacement:
+    """The same-day conversation: one round per member per day (issue #284)."""
+
+    PHONE = "+15551234567"
+    DAY = date(2025, 12, 30)
+
+    @pytest.fixture(autouse=True)
+    def real_conflict_logic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", _REAL_RESOLVE_CONFLICTS)
+        monkeypatch.setattr(BookingService, "_answer_repeat_requests", _REAL_ANSWER_REPEATS)
+        monkeypatch.setattr(BookingService, "_in_race_freeze", staticmethod(_REAL_IN_RACE_FREEZE))
+
+    @staticmethod
+    def _now(hour: int = 10, minute: int = 0, day: int = 22):  # type: ignore[no-untyped-def]
+        import pytz
+
+        return patch.object(
+            CTDateTime,
+            "now",
+            return_value=pytz.timezone("America/Chicago").localize(
+                datetime(2025, 12, day, hour, minute)
+            ),
+        )
+
+    def _held(
+        self, status: BookingStatus = BookingStatus.SCHEDULED, at: time = time(9, 23)
+    ) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id="held0001",
+            phone_number=self.PHONE,
+            request=TeeTimeRequest(requested_date=self.DAY, requested_time=at, num_players=4),
+            status=status,
+        )
+
+    def _session(self, at: time, state: ConversationState = ConversationState.IDLE) -> UserSession:
+        return UserSession(
+            phone_number=self.PHONE,
+            state=state,
+            pending_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=at, num_players=4
+            ),
+        )
+
+    @pytest.fixture(autouse=True)
+    def parser(self):  # type: ignore[no-untyped-def]
+        """The replace question's non-yes/no replies are parsed; default: unclear."""
+        with patch("app.services.booking_service.gemini_service") as gemini:
+            gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="unclear"))
+            yield gemini
+
+    @pytest.fixture
+    def db(self):  # type: ignore[no-untyped-def]
+        with patch("app.services.booking_service.database_service") as mock_db:
+            live = [self._held()]
+            mock_db.live = live  # what the live query returns; cancelling empties it
+
+            async def cancel(_booking_id: str) -> TeeTimeBooking:
+                live.clear()
+                return self._held()
+
+            mock_db.get_live_bookings_on = AsyncMock(side_effect=lambda *a: list(live))
+            mock_db.get_booking = AsyncMock(return_value=self._held())
+            mock_db.cancel_pending_booking = AsyncMock(side_effect=cancel)
+            mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+            yield mock_db
+
+    @pytest.mark.asyncio
+    async def test_same_time_is_answered_and_nothing_else_happens(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        session = self._session(time(9, 23))
+        with self._now():
+            reply = await booking_service._continue_slot_agreement(session)
+        assert reply == "You already have 09:23 AM queued for Tuesday, December 30."
+        assert session.state == ConversationState.IDLE
+        assert session.pending_request is None
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_different_time_asks_before_changing_anything(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        session = self._session(time(8, 0))
+        with self._now():
+            reply = await booking_service._continue_slot_agreement(session)
+        assert "You already have 09:23 AM queued for Tuesday, December 30." in reply
+        assert "change the tee time to 08:00 AM on Tuesday, December 30?" in reply
+        assert session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+        assert session.pending_replace_booking_id == "held0001"
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_booking_being_attempted_is_left_alone(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.live[:] = [self._held(BookingStatus.IN_PROGRESS)]
+        session = self._session(time(8, 0))
+        with self._now():
+            reply = await booking_service._continue_slot_agreement(session)
+        assert "being booked right now" in reply
+        assert session.state == ConversationState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_an_open_window_needs_the_new_time_confirmed_open(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        session = self._session(time(8, 0))
+        assert session.pending_request is not None
+        session.pending_request.slot_confirmed = False
+        with self._now(day=29):  # the window for the 30th opened on the 23rd
+            reply = await booking_service._continue_slot_agreement(session)
+        assert "can't confirm 08:00 AM is open" in reply
+        assert "left your 09:23 AM booking as it is" in reply
+        assert session.state == ConversationState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_a_won_booking_is_kept_when_the_new_time_is_not_open(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=[time(8, 8)])),
+            patch.object(BookingService, "_cancel_confirmed_booking", AsyncMock()) as cancel,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "08:00 AM is no longer open" in reply
+        assert "left your 09:23 AM booking as it is" in reply
+        cancel.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_won_booking_is_kept_when_the_sheet_cannot_be_read(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=None)),
+            patch.object(BookingService, "_cancel_confirmed_booking", AsyncMock()) as cancel,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "couldn't check the club's sheet" in reply
+        cancel.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_won_booking_is_replaced_once_the_new_time_is_confirmed_open(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=[time(8, 0)])),
+            patch.object(
+                BookingService,
+                "_cancel_confirmed_booking",
+                AsyncMock(side_effect=lambda _b: db.live.clear() or True),
+            ) as cancel,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        cancel.assert_awaited_once()
+        db.create_booking.assert_awaited_once()
+        assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+        assert reply.endswith("Your old tee time is released and the new one is not secured yet.")
+
+    @pytest.mark.asyncio
+    async def test_yes_cancels_the_old_booking_and_books_the_new_time(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with self._now():
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        db.cancel_pending_booking.assert_awaited_once_with("held0001")
+        created = db.create_booking.await_args.args[0]
+        assert created.request.requested_time == time(8, 0)
+        assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+        assert session.state == ConversationState.IDLE
+        assert session.pending_replace_booking_id is None
+
+    @pytest.mark.asyncio
+    async def test_yes_changes_nothing_if_the_old_booking_cannot_be_cancelled(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        db.cancel_pending_booking.side_effect = None
+        db.cancel_pending_booking.return_value = None  # the racer claimed it first
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with self._now():
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "haven't changed anything" in reply
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_does_nothing(self, booking_service: BookingService, db: MagicMock) -> None:
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        reply = await booking_service._handle_replace_reply(session, "no")
+        assert "leave your existing booking" in reply
+        assert session.state == ConversationState.IDLE
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_reply_is_asked_about_once_then_counts_as_no(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        first = await booking_service._handle_replace_reply(session, "how is the weather")
+        assert "reply yes or no" in first
+        assert session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+        second = await booking_service._handle_replace_reply(session, "banana")
+        assert "Send your request again" in second
+        assert session.state == ConversationState.IDLE
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_requests_are_declined_during_the_race(
+        self, booking_service: BookingService
+    ) -> None:
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+            ),
+        )
+        session = UserSession(phone_number=self.PHONE)
+        for hour, minute in [(6, 28), (6, 30), (6, 34)]:
+            with self._now(hour, minute):
+                reply = await booking_service._handle_book_intent(session, parsed)
+            assert "between 6:28 and 6:35 AM CT" in reply
+            assert session.pending_request is None
+        with self._now(6, 35):
+            assert BookingService._in_race_freeze() is False
+        with self._now(6, 27):
+            assert BookingService._in_race_freeze() is False
+
+    @pytest.mark.asyncio
+    async def test_two_times_on_one_day_in_one_message_are_refused(
+        self, booking_service: BookingService
+    ) -> None:
+        requests = [
+            TeeTimeRequest(requested_date=self.DAY, requested_time=time(8, 0), num_players=4),
+            TeeTimeRequest(requested_date=self.DAY, requested_time=time(9, 0), num_players=4),
+        ]
+        parsed = ParsedIntent(intent="book", tee_time_requests=requests)
+        session = UserSession(phone_number=self.PHONE)
+        with self._now():
+            reply = await booking_service._handle_book_intent(session, parsed)
+        assert "one round per member per day" in reply
+        assert session.pending_requests is None
+
+
+class TestReviewFixesForSameDayFlow:
+    """Follow-ups to the first review of issue #284's same-day flow."""
+
+    PHONE = "+15551234567"
+    DAY = date(2025, 12, 30)
+
+    @pytest.fixture(autouse=True)
+    def real_conflict_logic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", _REAL_RESOLVE_CONFLICTS)
+        monkeypatch.setattr(BookingService, "_answer_repeat_requests", _REAL_ANSWER_REPEATS)
+
+    def test_every_added_conversation_state_has_a_postgres_migration(self) -> None:
+        from app.models.database import _ADDED_CONVERSATION_STATES
+
+        original = {
+            "IDLE",
+            "AWAITING_DATE",
+            "AWAITING_TIME",
+            "AWAITING_PLAYERS",
+            "AWAITING_CONFIRMATION",
+        }
+        assert {s.name for s in ConversationState} - original == set(_ADDED_CONVERSATION_STATES)
+
+    @pytest.mark.asyncio
+    async def test_a_repeat_of_a_held_time_is_answered_before_the_sheet_is_read(
+        self, booking_service: BookingService
+    ) -> None:
+        held = TeeTimeBooking(
+            id="held0001",
+            phone_number=self.PHONE,
+            request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(9, 23), num_players=4
+            ),
+            status=BookingStatus.SUCCESS,
+            actual_booked_time=time(9, 23),
+        )
+        session = UserSession(
+            phone_number=self.PHONE,
+            pending_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(9, 23), num_players=4
+            ),
+        )
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch.object(
+                BookingService, "_check_slot", AsyncMock(side_effect=AssertionError("sheet read"))
+            ),
+        ):
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[held])
+            reply = await booking_service._continue_slot_agreement(session)
+        assert reply == "You already have 09:23 AM booked for Tuesday, December 30."
+        assert session.state == ConversationState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_a_stale_replace_question_is_dropped_and_the_message_read_afresh(
+        self, booking_service: BookingService
+    ) -> None:
+        session = UserSession(
+            phone_number=self.PHONE,
+            state=ConversationState.AWAITING_REPLACE_CONFIRMATION,
+            pending_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+            ),
+            pending_replace_booking_id="held0001",
+            last_interaction=datetime.utcnow() - timedelta(hours=5),
+        )
+        with (
+            patch.object(booking_service, "get_session", AsyncMock(return_value=session)),
+            patch.object(booking_service, "update_session", AsyncMock()),
+            patch("app.services.booking_service.gemini_service") as gemini,
+            patch.object(BookingService, "_cancel_confirmed_booking", AsyncMock()) as cancel,
+            patch("app.services.booking_service.database_service") as mock_db,
+        ):
+            mock_db.cancel_pending_booking = AsyncMock()
+            gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent="help"))
+            reply = await booking_service.handle_incoming_message(self.PHONE, "yes")
+        assert reply.startswith("Your earlier question about changing your tee time timed out")
+        assert session.state == ConversationState.IDLE
+        assert session.pending_replace_booking_id is None
+        cancel.assert_not_called()
+        mock_db.cancel_pending_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_two_simultaneous_requests_for_one_day_book_only_one(
+        self, booking_service: BookingService
+    ) -> None:
+        stored: list[TeeTimeBooking] = []
+
+        async def get_live_bookings_on(
+            phone_number: str, dates: list[date]
+        ) -> list[TeeTimeBooking]:
+            await asyncio.sleep(0)
+            return [b for b in stored if b.request.requested_date in dates]
+
+        async def create(booking: TeeTimeBooking) -> TeeTimeBooking:
+            await asyncio.sleep(0)
+            stored.append(booking)
+            return booking
+
+        def request(at: time) -> TeeTimeRequest:
+            return TeeTimeRequest(requested_date=self.DAY, requested_time=at, num_players=1)
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_live_bookings_on = get_live_bookings_on
+            mock_db.create_booking = create
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+            results = await asyncio.gather(
+                booking_service.create_booking(self.PHONE, request(time(9, 23))),
+                booking_service.create_booking(self.PHONE, request(time(9, 23))),
+                return_exceptions=True,
+            )
+        assert len(stored) == 1
+        assert sum(isinstance(r, ValueError) for r in results) == 1
+
+
+class TestReplaceQuestionReplies:
+    """A reply that is a command, not an answer, is carried out (issue #284)."""
+
+    PHONE = "+15551234567"
+    DAY = date(2025, 12, 30)
+
+    @pytest.fixture(autouse=True)
+    def real_conflict_logic(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(BookingService, "_resolve_same_day_conflicts", _REAL_RESOLVE_CONFLICTS)
+
+    def _session(self) -> UserSession:
+        return UserSession(
+            phone_number=self.PHONE,
+            state=ConversationState.AWAITING_REPLACE_CONFIRMATION,
+            pending_request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+            ),
+            pending_replace_booking_id="held0001",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("intent", ["cancel", "status", "help"])
+    async def test_a_command_drops_the_question_and_runs(
+        self, booking_service: BookingService, intent: str
+    ) -> None:
+        session = self._session()
+        with (
+            patch("app.services.booking_service.gemini_service") as gemini,
+            patch.object(
+                BookingService, "_process_intent", AsyncMock(return_value="ran the command")
+            ) as process,
+        ):
+            gemini.parse_message = AsyncMock(return_value=ParsedIntent(intent=intent))
+            reply = await booking_service._handle_replace_reply(session, "whatever")
+        assert reply.startswith("Okay, I'll leave your existing booking as it is.")
+        assert reply.endswith("ran the command")
+        process.assert_awaited_once()
+        assert session.state == ConversationState.IDLE
+        assert session.pending_replace_booking_id is None
+        assert session.pending_request is None
+
+    @pytest.mark.asyncio
+    async def test_a_new_booking_request_drops_the_question_and_is_handled(
+        self, booking_service: BookingService
+    ) -> None:
+        session = self._session()
+        new = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=date(2025, 12, 31), requested_time=time(7, 0), num_players=2
+            ),
+        )
+        with (
+            patch("app.services.booking_service.gemini_service") as gemini,
+            patch.object(
+                BookingService, "_process_intent", AsyncMock(return_value="asked to confirm")
+            ) as process,
+        ):
+            gemini.parse_message = AsyncMock(return_value=new)
+            reply = await booking_service._handle_replace_reply(session, "book dec 31 at 7")
+        assert reply.endswith("asked to confirm")
+        process.assert_awaited_once()
+        assert session.pending_replace_booking_id is None
+
+    @pytest.mark.asyncio
+    async def test_a_parser_failure_counts_as_an_unrelated_reply(
+        self, booking_service: BookingService
+    ) -> None:
+        session = self._session()
+        with patch("app.services.booking_service.gemini_service") as gemini:
+            gemini.parse_message = AsyncMock(side_effect=RuntimeError("boom"))
+            reply = await booking_service._handle_replace_reply(session, "hmm")
+        assert "reply yes or no" in reply
+        assert session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+
+    @pytest.mark.asyncio
+    async def test_an_empty_live_sheet_is_unreadable_not_closed(
+        self, booking_service: BookingService
+    ) -> None:
+        provider = MagicMock()
+        provider.get_available_times = AsyncMock(return_value=[])
+        request = TeeTimeRequest(requested_date=self.DAY, requested_time=time(8, 0), num_players=4)
+        with (
+            patch.object(booking_service, "_provider_for", AsyncMock(return_value=provider)),
+            patch.object(booking_service, "_release_provider", AsyncMock()),
+        ):
+            assert await booking_service._live_open_times(self.PHONE, request) is None
+
+    @pytest.mark.asyncio
+    async def test_a_multi_request_message_asks_about_the_conflict_then_carries_on(
+        self, booking_service: BookingService
+    ) -> None:
+        """Two dates, one conflicting: ask about it, and the other proceeds after."""
+        held = TeeTimeBooking(
+            id="held0001",
+            phone_number=self.PHONE,
+            request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(9, 23), num_players=4
+            ),
+            status=BookingStatus.SCHEDULED,
+        )
+        conflicting = TeeTimeRequest(
+            requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+        )
+        other = TeeTimeRequest(
+            requested_date=date(2025, 12, 31), requested_time=time(7, 0), num_players=4
+        )
+        session = UserSession(phone_number=self.PHONE, pending_requests=[conflicting, other])
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch.object(
+                booking_service, "_answer_repeat_requests", AsyncMock(return_value=("", False))
+            ),
+        ):
+            live = [held]
+
+            async def cancel(_booking_id: str) -> TeeTimeBooking:
+                live.clear()
+                return held
+
+            mock_db.get_live_bookings_on = AsyncMock(side_effect=lambda *a: list(live))
+            mock_db.get_booking = AsyncMock(return_value=held)
+            mock_db.cancel_pending_booking = AsyncMock(side_effect=cancel)
+            mock_db.create_booking = AsyncMock(side_effect=lambda b: b)
+            mock_db.update_booking = AsyncMock(side_effect=lambda b: b)
+            with patch.object(CTDateTime, "now") as now:
+                import pytz
+
+                now.return_value = pytz.timezone("America/Chicago").localize(
+                    datetime(2025, 12, 22, 10, 0)
+                )
+                question = await booking_service._agree_and_confirm(session)
+                assert "change the tee time to 08:00 AM" in question
+                assert session.state == ConversationState.AWAITING_REPLACE_CONFIRMATION
+                # Both requests are still held while the question is open.
+                assert session.pending_requests == [conflicting, other]
+
+                reply = await booking_service._handle_replace_reply(session, "yes")
+        assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
+        # The replaced request is booked; the other is now up for its usual yes.
+        mock_db.cancel_pending_booking.assert_awaited_once_with("held0001")
+        assert mock_db.create_booking.await_args.args[0].request.requested_time == time(8, 0)
+        assert session.state == ConversationState.AWAITING_CONFIRMATION
+        assert session.pending_request == other
+        assert "07:00 AM" in reply
