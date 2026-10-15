@@ -1454,20 +1454,19 @@ class BookingService:
                     + self._slot_summary(request, await self._unchecked_reason(request))
                 )
             return (
-                f"I'll book {len(requests)} tee times{attribution.suffix()}:\n"
+                f"Book {len(requests)} tee times{attribution.suffix()}? Reply yes.\n"
                 + "\n".join(booking_summaries)
-                + "\n\nReply 'yes' to confirm all bookings."
             )
 
         request = requests[0]
         date_str = request.requested_date.strftime("%A, %B %d")
         time_str = request.requested_time.strftime("%I:%M %p")
         note = self._slot_note(request, await self._unchecked_reason(request))
-        return (
-            f"I'll book a tee time{attribution.suffix()} for {date_str} at {time_str} "
-            f"for {request.num_players} players. {note + ' ' if note else ''}"
-            "Reply 'yes' to confirm."
+        ask = (
+            f"Book {date_str} at {time_str}, {request.num_players} players"
+            f"{attribution.suffix()}? Reply yes."
         )
+        return f"{ask}\n{note}" if note else ask
 
     async def _unchecked_reason(self, request: TeeTimeRequest) -> str | None:
         """Why a request's time could not be checked: no sheet, or nothing open on it.
@@ -1485,12 +1484,8 @@ class BookingService:
     def _slot_note(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
         """One or two sentences on what the sheet said about a single request."""
         date_str = request.requested_date.strftime("%A, %B %d")
-        if request.slot_confirmed is True:
-            if request.fallback_ladder is None:
-                return f"{slot_agreement.clock(request.requested_time)} is on the club's sheet."
-            return slot_agreement.ladder_note(
-                request.requested_time, request.fallback_ladder, request.fallback_window_minutes
-            )
+        # A time the sheet has needs no note: the fallback ladder is routine, and
+        # it buried the "reply yes" line. Only a time we could not check is said.
         if request.slot_confirmed is False:
             check = SlotCheck(
                 kind="unknown", requested=request.requested_time, reason=unchecked_reason
@@ -1501,14 +1496,6 @@ class BookingService:
     @staticmethod
     def _slot_summary(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
         """The same, short enough for one line of a multi-booking list."""
-        if request.slot_confirmed is True:
-            if not request.fallback_ladder:
-                return " (on the club's sheet)"
-            shown = ", ".join(
-                slot_agreement.clock(t)
-                for t in request.fallback_ladder[: slot_agreement.LADDER_PREVIEW]
-            )
-            return f" (on the club's sheet; if it's gone: {shown})"
         if request.slot_confirmed is False:
             seen = (
                 "the sheet showed nothing open"

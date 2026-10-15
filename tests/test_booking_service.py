@@ -1128,7 +1128,7 @@ class TestBookingServiceProcessIntent:
         )
 
         response = await booking_service._process_intent(sample_session, parsed)
-        assert "confirm" in response.lower()
+        assert "reply yes" in response.lower()
 
     @pytest.mark.asyncio
     async def test_process_intent_status(
@@ -4280,11 +4280,7 @@ class TestSlotAgreement:
             time(7, 38),
             time(8, 38),
         ]
-        assert reply == (
-            "I'll book a tee time for Saturday, October 10 at 08:08 AM for 4 players. "
-            "08:08 AM is on the club's sheet. If it's gone, I'll try 08:00 AM, then "
-            "08:15 AM, then 07:53 AM (and 5 more within 32 minutes). Reply 'yes' to confirm."
-        )
+        assert reply == ("Book Saturday, October 10 at 08:08 AM, 4 players? Reply yes.")
 
     @pytest.mark.asyncio
     async def test_a_time_the_sheet_does_not_have_asks_which(
@@ -4335,9 +4331,7 @@ class TestSlotAgreement:
         assert request.fallback_ladder is not None
         # Every neighbour on an 8-minute grid is aligned, so ties go to the earlier.
         assert request.fallback_ladder[:3] == [time(7, 54), time(8, 10), time(7, 46)]
-        assert "for Tuesday, October 13 at 08:02 AM" in reply
-        assert "If it's gone, I'll try 07:54 AM, then 08:10 AM, then 07:46 AM" in reply
-        assert reply.endswith("Reply 'yes' to confirm.")
+        assert reply == "Book Tuesday, October 13 at 08:02 AM, 4 players? Reply yes."
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4493,10 +4487,10 @@ class TestSlotAgreement:
         assert request.fallback_ladder is None
         assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
         assert reply == (
-            "I'll book a tee time for Saturday, October 10 at 08:00 AM for 4 players. "
+            "Book Saturday, October 10 at 08:00 AM, 4 players? Reply yes.\n"
             "I haven't seen Saturday, October 10's tee sheet yet, so I can't check that "
             "08:00 AM is a real tee time. If it isn't, or it's gone, I'll take the closest "
-            "one within 32 minutes. Reply 'yes' to confirm."
+            "one within 32 minutes."
         )
 
     @pytest.mark.asyncio
@@ -4533,7 +4527,7 @@ class TestSlotAgreement:
 
         assert sample_session.pending_request is not None
         assert sample_session.pending_request.slot_confirmed is False
-        assert reply.endswith("Reply 'yes' to confirm.")
+        assert reply.startswith("Book Saturday, October 10 at 08:00 AM, 4 players? Reply yes.")
 
     @pytest.mark.asyncio
     async def test_several_requests_are_asked_about_in_turn(
@@ -4566,12 +4560,9 @@ class TestSlotAgreement:
             time(8, 10),
         ]
         assert summary == (
-            "I'll book 2 tee times:\n"
-            "1. Saturday, October 10 at 08:08 AM for 4 players (on the club's sheet; if "
-            "it's gone: 08:00 AM, 08:15 AM, 07:53 AM)\n"
-            "2. Tuesday, October 13 at 08:10 AM for 2 players (on the club's sheet; if "
-            "it's gone: 08:02 AM, 08:18 AM, 07:54 AM)\n\n"
-            "Reply 'yes' to confirm all bookings."
+            "Book 2 tee times? Reply yes.\n"
+            "1. Saturday, October 10 at 08:08 AM for 4 players\n"
+            "2. Tuesday, October 13 at 08:10 AM for 2 players"
         )
 
     @pytest.mark.asyncio
