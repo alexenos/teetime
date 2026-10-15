@@ -33,6 +33,11 @@ Two figures, both totals rather than averages:
 
 **Trend:** last 4 weeks against the preceding 4 weeks.
 
+**Page order, 2026-10-15:** the last-4-weeks rate is the headline, with its trend
+directly beside it, then the prior 4 weeks, then all time. The all-time rate carries
+every early miss and cannot reach 100%, so it is context rather than the top-level
+metric.
+
 **Source:** `race-report.jsonl`, the `outcome` object. Each row is one morning's
 counts, written by the race report Routine from `RESERVATION_CHECK`.
 `phase=complete, success=True` does not establish a reservation — a distinction
