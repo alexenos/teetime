@@ -335,25 +335,19 @@ def test_cost_shows_the_prior_month_when_it_has_a_row() -> None:
     assert (cost["month"], cost["prior_month"], cost["prior_usd"]) == ("2026-10", "2026-09", 37.17)
 
 
-def test_cost_history_is_six_months_with_gaps_as_none() -> None:
+def test_cost_history_is_twelve_months_with_gaps_as_none() -> None:
     rows = [_raced(RACE_START), _seed("2026-08", 71.18), _seed("2026-09", 37.17)]
     history = _board(rows, NOW)["cost"]["history"]
-    assert [h["month"] for h in history] == [
-        "2026-04",
-        "2026-05",
-        "2026-06",
-        "2026-07",
-        "2026-08",
-        "2026-09",
-    ]
-    assert [h["usd"] for h in history] == [None, None, None, None, 71.18, 37.17]
+    assert len(history) == 12
+    assert (history[0]["month"], history[-1]["month"]) == ("2025-10", "2026-09")
+    assert [h["usd"] for h in history] == [None] * 10 + [71.18, 37.17]
 
 
 def test_cost_history_crosses_a_year_boundary() -> None:
     rows = [_raced(RACE_START), _seed("2027-01", 10.0)]
     rows[1]["date"] = "2027-02-05"
     history = _board(rows, _ct(dt.date(2027, 2, 6), 9, 0))["cost"]["history"]
-    assert history[0]["month"] == "2026-08" and history[-1] == {"month": "2027-01", "usd": 10.0}
+    assert history[0]["month"] == "2026-02" and history[-1] == {"month": "2027-01", "usd": 10.0}
 
 
 def test_a_failed_cost_row_does_not_replace_the_last_good_figure() -> None:

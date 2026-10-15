@@ -157,9 +157,8 @@
     </div>
   </section>
 
-  <div class="grid">
-    <!-- 2. Cost -->
-    <section class="card" aria-labelledby="h-cost">
+  <!-- 2. Cost -->
+  <section class="card" aria-labelledby="h-cost">
       <h2 id="h-cost">Cost</h2>
       <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:12px">
         <p class="stat" id="cost-val">—</p>
@@ -167,8 +166,7 @@
       </div>
       <p class="stat-sub" id="cost-sub"></p>
       <div id="cost-chart"></div>
-    </section>
-  </div>
+  </section>
 
   <!-- 3. Automation streak -->
   <section class="card" aria-labelledby="h-streak">
@@ -367,7 +365,7 @@
       if (c.prior_usd != null) { rows.push(["Cost, " + monthAbbr(c.prior_month) + " (total)", "$" + c.prior_usd.toFixed(2)]); }
       if (c.usd_per_booking !== null) { rows.push(["Cost per booking, " + monthAbbr(c.month), "$" + c.usd_per_booking.toFixed(2)]); }
 
-      // Six-month bars, oldest first. A month with no figure is a gap, not $0.
+      // Twelve-month bars, oldest first. A month with no figure is a gap, not $0.
       var hist = c.history || [];
       var max = hist.reduce(function (m, h) { return h.usd > m ? h.usd : m; }, 0);
       if (hist.length && max > 0) {
@@ -382,7 +380,7 @@
             + '<i style="display:block;width:100%;height:' + ht + '%;background:var(--series-1);border-radius:3px 3px 0 0"></i></div>'
             + '<span style="font-size:11px;color:var(--ink-2)">' + label + '</span></div>';
         }).join("");
-        $("cost-chart").innerHTML = '<div role="img" aria-label="Monthly cost, last six months" '
+        $("cost-chart").innerHTML = '<div role="img" aria-label="Monthly cost, last twelve months" '
           + 'style="display:flex;gap:8px;margin-top:16px">' + bars + '</div>';
       }
     }

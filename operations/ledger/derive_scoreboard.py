@@ -183,14 +183,14 @@ def cost_board(rows: list[Row], races: list[Row]) -> Row:
     )
     before = [r for r in good if r["month"] == prior]
 
-    # Six months ending at the reported one, oldest first. A month with no cost
+    # Twelve months ending at the reported one, oldest first. A month with no cost
     # row is None, not 0: the chart shows a gap rather than a free month.
     by_month: dict[str, Row] = {}
     for r in sorted(good, key=lambda r: r["date"]):
         by_month[r["month"]] = r
     year, mon = map(int, latest["month"].split("-"))
     months = []
-    for back in range(5, -1, -1):
+    for back in range(11, -1, -1):
         idx = year * 12 + (mon - 1) - back
         months.append(f"{idx // 12:04d}-{idx % 12 + 1:02d}")
     history = [

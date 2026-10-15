@@ -67,12 +67,54 @@
     "prior_month": "2026-08",
     "prior_usd": 71.18,
     "history": [
-      {"month": "2026-04", "usd": null},
-      {"month": "2026-05", "usd": null},
-      {"month": "2026-06", "usd": null},
-      {"month": "2026-07", "usd": null},
-      {"month": "2026-08", "usd": 71.18},
-      {"month": "2026-09", "usd": 37.17}
+      {
+        "month": "2025-10",
+        "usd": null
+      },
+      {
+        "month": "2025-11",
+        "usd": null
+      },
+      {
+        "month": "2025-12",
+        "usd": null
+      },
+      {
+        "month": "2026-01",
+        "usd": null
+      },
+      {
+        "month": "2026-02",
+        "usd": null
+      },
+      {
+        "month": "2026-03",
+        "usd": null
+      },
+      {
+        "month": "2026-04",
+        "usd": null
+      },
+      {
+        "month": "2026-05",
+        "usd": null
+      },
+      {
+        "month": "2026-06",
+        "usd": null
+      },
+      {
+        "month": "2026-07",
+        "usd": null
+      },
+      {
+        "month": "2026-08",
+        "usd": 71.18
+      },
+      {
+        "month": "2026-09",
+        "usd": 37.17
+      }
     ]
   }
 }
