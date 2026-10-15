@@ -65,6 +65,14 @@
     "available": true,
     "reason": null,
     "prior_month": "2026-08",
-    "prior_usd": 71.18
+    "prior_usd": 71.18,
+    "history": [
+      {"month": "2026-04", "usd": null},
+      {"month": "2026-05", "usd": null},
+      {"month": "2026-06", "usd": null},
+      {"month": "2026-07", "usd": null},
+      {"month": "2026-08", "usd": 71.18},
+      {"month": "2026-09", "usd": 37.17}
+    ]
   }
 }

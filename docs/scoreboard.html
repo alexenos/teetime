@@ -166,6 +166,7 @@
         <span id="cost-delta"></span>
       </div>
       <p class="stat-sub" id="cost-sub"></p>
+      <div id="cost-chart"></div>
     </section>
   </div>
 
@@ -200,6 +201,10 @@
         { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     } catch (e) { return iso; }
   };
+
+  // "2026-09" -> "Sep". Fixed names, so the label does not depend on locale or timezone.
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var monthAbbr = function (ym) { return MONTHS[parseInt(String(ym).slice(5, 7), 10) - 1] || ym; };
 
   // Arrow glyph for a delta. Direction carries the sign; the number carries the size.
   function deltaEl(points, goodWhenUp, label) {
@@ -343,23 +348,43 @@
     } else {
       $("cost-val").textContent = "$" + c.usd.toFixed(2);
       // Total spend, month over month. Lower is better, so a fall is green.
-      var costHtml = "Total for " + c.month;
+      var costHtml = "Total for " + monthAbbr(c.month);
       if (c.prior_usd != null) {
         var diff = c.usd - c.prior_usd;
         var pctChg = c.prior_usd > 0 ? Math.round(Math.abs(diff) / c.prior_usd * 100) : null;
         $("cost-delta").innerHTML = deltaEl(diff === 0 ? null : diff, false,
           "$" + Math.abs(diff).toFixed(2) + (pctChg === null ? "" : " (" + pctChg + "%)"));
-        costHtml += " vs $" + c.prior_usd.toFixed(2) + " total in " + c.prior_month;
+        costHtml += " vs $" + c.prior_usd.toFixed(2) + " total in " + monthAbbr(c.prior_month);
       }
       costHtml += " · scope: " + c.scope;
       if (c.usd_per_booking !== null) {
+        // c.month is the last full month the cost Routine reported, not the current one.
         costHtml += '<div style="margin-top:4px">$' + c.usd_per_booking.toFixed(2)
-          + " per booking this month (" + c.bookings + " bookings)</div>";
+          + " per booking in " + monthAbbr(c.month) + " (" + c.bookings + " bookings)</div>";
       }
       $("cost-sub").innerHTML = costHtml;
-      rows.push(["Cost, " + c.month + " (total)", "$" + c.usd.toFixed(2)]);
-      if (c.prior_usd != null) { rows.push(["Cost, " + c.prior_month + " (total)", "$" + c.prior_usd.toFixed(2)]); }
-      if (c.usd_per_booking !== null) { rows.push(["Cost per booking, " + c.month, "$" + c.usd_per_booking.toFixed(2)]); }
+      rows.push(["Cost, " + monthAbbr(c.month) + " (total)", "$" + c.usd.toFixed(2)]);
+      if (c.prior_usd != null) { rows.push(["Cost, " + monthAbbr(c.prior_month) + " (total)", "$" + c.prior_usd.toFixed(2)]); }
+      if (c.usd_per_booking !== null) { rows.push(["Cost per booking, " + monthAbbr(c.month), "$" + c.usd_per_booking.toFixed(2)]); }
+
+      // Six-month bars, oldest first. A month with no figure is a gap, not $0.
+      var hist = c.history || [];
+      var max = hist.reduce(function (m, h) { return h.usd > m ? h.usd : m; }, 0);
+      if (hist.length && max > 0) {
+        var bars = hist.map(function (h) {
+          var label = monthAbbr(h.month);
+          var has = h.usd !== null && h.usd !== undefined;
+          var ht = has ? Math.max(2, Math.round(h.usd / max * 100)) : 0;
+          rows.push(["Cost, " + label + " (chart)", has ? "$" + h.usd.toFixed(2) : "no figure"]);
+          return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0">'
+            + '<span class="nodata" style="font-size:11px">' + (has ? "$" + Math.round(h.usd) : "—") + '</span>'
+            + '<div style="height:80px;width:100%;display:flex;align-items:flex-end">'
+            + '<i style="display:block;width:100%;height:' + ht + '%;background:var(--series-1);border-radius:3px 3px 0 0"></i></div>'
+            + '<span style="font-size:11px;color:var(--ink-2)">' + label + '</span></div>';
+        }).join("");
+        $("cost-chart").innerHTML = '<div role="img" aria-label="Monthly cost, last six months" '
+          + 'style="display:flex;gap:8px;margin-top:16px">' + bars + '</div>';
+      }
     }
 
     // ---- table view (required: the light-mode palette carries a contrast WARN) ----
