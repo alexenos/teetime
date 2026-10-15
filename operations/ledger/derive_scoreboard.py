@@ -151,6 +151,13 @@ def validate_cost(row: Row, where: str) -> None:
         raise ValueError(f"{where}: a cost figure with no stated scope")
 
 
+def _months_back(month: str, n: int) -> str:
+    """The YYYY-MM that is n months before `month`."""
+    year, mon = map(int, month.split("-"))
+    idx = year * 12 + (mon - 1) - n
+    return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
+
+
 def cost_board(rows: list[Row], races: list[Row]) -> Row:
     """Cost from the newest successful cost row; unavailable when there is none.
 
@@ -178,10 +185,18 @@ def cost_board(rows: list[Row], races: list[Row]) -> Row:
         )
 
     n = booked(latest["month"])
-    prior = (dt.date.fromisoformat(latest["month"] + "-01") - dt.timedelta(days=1)).strftime(
-        "%Y-%m"
-    )
+    prior = _months_back(latest["month"], 1)
     before = [r for r in good if r["month"] == prior]
+
+    # Twelve months ending at the reported one, oldest first. A month with no cost
+    # row is None, not 0: the chart shows a gap rather than a free month.
+    by_month: dict[str, Row] = {}
+    for r in sorted(good, key=lambda r: r["date"]):
+        by_month[r["month"]] = r
+    history = [
+        {"month": m, "usd": round(by_month[m]["usd_gcp"], 2) if m in by_month else None}
+        for m in (_months_back(latest["month"], back) for back in range(11, -1, -1))
+    ]
     return {
         "month": latest["month"],
         "usd": round(latest["usd_gcp"], 2),
@@ -192,6 +207,7 @@ def cost_board(rows: list[Row], races: list[Row]) -> Row:
         "reason": None,
         "prior_month": prior if before else None,
         "prior_usd": round(before[-1]["usd_gcp"], 2) if before else None,
+        "history": history,
     }
 
 
@@ -327,10 +343,13 @@ def walk(rows: list[Row], now: dt.datetime, corrections: Corrections) -> Row:
         # main() prints it to stderr for the Routine instead.
         "last_failure_reason": f"{last[2]}: {last[3]}" if last else None,
         "last_failure_note": last[4] if last else None,
+        # Every scheduled Routine is listed. None means no scored run yet (not
+        # started, or still inside the completion allowance), not a streak of 0.
         "by_routine": {
             name: streaks([e for e in entries if e[2] == name])[-1]
-            for name in SCHEDULES
             if any(e[2] == name for e in entries)
+            else None
+            for name in SCHEDULES
         },
         "history": [n for n in combined[:-1] if n > 0],
         "window": {"first": entries[0][0].isoformat(), "last": entries[-1][0].isoformat()},

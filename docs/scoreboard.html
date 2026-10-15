@@ -142,31 +142,31 @@
 
   <!-- 1. Outcome split. Hero = the booked rate, a single ratio, so a meter. -->
   <section class="card" aria-labelledby="h-outcome">
-    <h2 id="h-outcome">Booking outcomes &middot; all time</h2>
-    <p class="hero-val" id="rate-hero">—</p>
+    <h2 id="h-outcome">Booking outcomes &middot; last 4 weeks</h2>
+    <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 16px">
+      <p class="hero-val" id="rate-hero">—</p>
+      <span id="rate-trend"></span>
+    </div>
     <p class="hero-sub" id="rate-sub"></p>
     <div class="meter" role="img" id="rate-meter-wrap" aria-label="">
       <i id="rate-meter" style="width:0%"></i>
     </div>
+    <div class="grid" style="margin-top:20px">
+      <div id="prior-win"></div>
+      <div id="all-win"></div>
+    </div>
   </section>
 
-  <div class="grid">
-    <!-- windows + trend -->
-    <section class="card" aria-labelledby="h-windows">
-      <h2 id="h-windows">Last 4 weeks vs prior 4</h2>
-      <div id="windows"></div>
-    </section>
-
-    <!-- 2. Cost -->
-    <section class="card" aria-labelledby="h-cost">
-      <h2 id="h-cost">Cost</h2>
-      <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:12px">
-        <p class="stat" id="cost-val">—</p>
-        <span id="cost-delta"></span>
-      </div>
-      <p class="stat-sub" id="cost-sub"></p>
-    </section>
-  </div>
+  <!-- 2. Cost -->
+  <section class="card" aria-labelledby="h-cost">
+    <h2 id="h-cost">Cost</h2>
+    <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:12px">
+      <p class="stat" id="cost-val">—</p>
+      <span id="cost-delta"></span>
+    </div>
+    <p class="stat-sub" id="cost-sub"></p>
+    <div id="cost-chart"></div>
+  </section>
 
   <!-- 3. Automation streak -->
   <section class="card" aria-labelledby="h-streak">
@@ -199,6 +199,10 @@
         { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     } catch (e) { return iso; }
   };
+
+  // "2026-09" -> "Sep". Fixed names, so the label does not depend on locale or timezone.
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var monthAbbr = function (ym) { return MONTHS[parseInt(String(ym).slice(5, 7), 10) - 1] || ym; };
 
   // Arrow glyph for a delta. Direction carries the sign; the number carries the size.
   function deltaEl(points, goodWhenUp, label) {
@@ -239,43 +243,42 @@
     }
 
     // ---- 1. Outcome ----
-    var o = d.outcome, at = o.all_time;
-    var total = at.booked + at.miss;
-    var rate = pct(at.booked, total);
-    $("rate-hero").textContent = rate === null ? "No data" : rate + "%";
-    $("rate-sub").textContent = total === 0
-      ? "No requests recorded yet."
-      : at.booked + " of " + total + " requests booked (" + at.exact + " exact, "
-        + at.fallback + " fallback), across " + at.mornings + " race mornings.";
-    $("rate-meter").style.width = (rate || 0) + "%";
+    // Order: last 4 weeks (hero), its trend vs the prior 4, prior 4, all time.
+    var o = d.outcome, at = o.all_time, l4 = o.last_4wk, p4 = o.prior_4wk;
+    var l4t = l4.booked + l4.miss, p4t = p4.booked + p4.miss, at_t = at.booked + at.miss;
+    var rNow = pct(l4.booked, l4t), rPrev = pct(p4.booked, p4t), rate = pct(at.booked, at_t);
+
+    $("rate-hero").textContent = rNow === null ? "No data" : rNow + "%";
+    var trend = (rNow === null || rPrev === null) ? null : rNow - rPrev;
+    $("rate-trend").innerHTML = trend === null ? ""
+      : deltaEl(trend, true) + ' <span class="nodata">vs prior 4 weeks</span>';
+    $("rate-sub").textContent = l4t === 0
+      ? "No requests in the last 4 weeks."
+      : l4.booked + " of " + l4t + " requests booked, across " + l4.mornings + " race mornings.";
+    $("rate-meter").style.width = (rNow || 0) + "%";
     $("rate-meter-wrap").setAttribute("aria-label",
-      rate === null ? "No data" : rate + " percent of requests booked");
-    rows.push(["Requests booked, all time", at.booked + " of " + total]);
+      rNow === null ? "No data" : rNow + " percent of requests booked in the last 4 weeks");
+
+    function winEl(name, r, w, t, extra) {
+      return '<div class="window"><div class="window-name"><span>' + name + '</span>'
+        + '<b>' + (r === null ? "—" : r + "%") + '</b></div>'
+        + '<div class="meter" role="img" aria-label="' + name + ': '
+        + (r === null ? "no data" : r + " percent booked") + '">'
+        + '<i style="width:' + (r || 0) + '%"></i></div>'
+        + '<div class="nodata" style="margin-top:6px">' + w.booked + " of " + t + " booked, "
+        + w.mornings + " mornings" + (extra || "") + '</div></div>';
+    }
+    $("prior-win").innerHTML = winEl("Prior 4 weeks", rPrev, p4, p4t);
+    $("all-win").innerHTML = winEl("All time", rate, at, at_t,
+      " (" + at.exact + " exact, " + at.fallback + " fallback)");
+
+    rows.push(["Requests booked, last 4 weeks", l4.booked + " of " + l4t]);
+    rows.push(["Trend, last 4 weeks vs prior", trend === null ? "—" : (trend > 0 ? "+" : "") + trend + " pts"]);
+    rows.push(["Requests booked, prior 4 weeks", p4.booked + " of " + p4t]);
+    rows.push(["Requests booked, all time", at.booked + " of " + at_t]);
     rows.push(["Exact, all time", at.exact]);
     rows.push(["Fallback, all time", at.fallback]);
     rows.push(["Race mornings, all time", at.mornings]);
-
-    // ---- windows + trend ----
-    var wins = [["Last 4 weeks", o.last_4wk], ["Prior 4 weeks", o.prior_4wk]];
-    var html = "";
-    wins.forEach(function (w) {
-      var t = w[1].booked + w[1].miss, r = pct(w[1].booked, t);
-      html += '<div class="window"><div class="window-name"><span>' + w[0] + '</span>'
-        + '<b>' + (r === null ? "—" : r + "%") + '</b></div>'
-        + '<div class="meter" role="img" aria-label="' + w[0] + ': '
-        + (r === null ? "no data" : r + " percent booked") + '">'
-        + '<i style="width:' + (r || 0) + '%"></i></div>'
-        + '<div class="nodata" style="margin-top:6px">' + w[1].booked + " booked, "
-        + w[1].miss + " missed, " + w[1].mornings + " mornings</div></div>";
-      rows.push([w[0] + " booked", w[1].booked + " of " + t]);
-    });
-    var rNow = pct(o.last_4wk.booked, o.last_4wk.booked + o.last_4wk.miss);
-    var rPrev = pct(o.prior_4wk.booked, o.prior_4wk.booked + o.prior_4wk.miss);
-    var trend = (rNow === null || rPrev === null) ? null : rNow - rPrev;
-    html += '<div style="margin-top:14px;font-size:13px;color:var(--ink-2)">Trend '
-      + deltaEl(trend, true) + "</div>";
-    $("windows").innerHTML = html;
-    rows.push(["Trend, last 4 weeks vs prior", trend === null ? "—" : (trend > 0 ? "+" : "") + trend + " pts"]);
 
     // ---- 2. Streak ----
     var s = d.streak;
@@ -325,8 +328,10 @@
 
       var br = s.by_routine || {}, dl = "";
       Object.keys(br).forEach(function (k) {
-        dl += "<dt>" + k + "</dt><dd>" + br[k] + "</dd>";
-        rows.push(["Streak, " + k, br[k]]);
+        // null: no scored run yet, which is not a streak of 0.
+        var v = br[k] === null ? "no scored run yet" : br[k];
+        dl += "<dt>" + k + "</dt><dd>" + v + "</dd>";
+        rows.push(["Streak, " + k, v]);
       });
       $("streak-rows").innerHTML = dl;
     }
@@ -343,23 +348,52 @@
     } else {
       $("cost-val").textContent = "$" + c.usd.toFixed(2);
       // Total spend, month over month. Lower is better, so a fall is green.
-      var costHtml = "Total for " + c.month;
+      var costHtml = "Total for " + monthAbbr(c.month);
       if (c.prior_usd != null) {
         var diff = c.usd - c.prior_usd;
         var pctChg = c.prior_usd > 0 ? Math.round(Math.abs(diff) / c.prior_usd * 100) : null;
         $("cost-delta").innerHTML = deltaEl(diff === 0 ? null : diff, false,
           "$" + Math.abs(diff).toFixed(2) + (pctChg === null ? "" : " (" + pctChg + "%)"));
-        costHtml += " vs $" + c.prior_usd.toFixed(2) + " total in " + c.prior_month;
+        costHtml += " vs $" + c.prior_usd.toFixed(2) + " total in " + monthAbbr(c.prior_month);
       }
       costHtml += " · scope: " + c.scope;
       if (c.usd_per_booking !== null) {
+        // c.month is the last full month the cost Routine reported, not the current one.
         costHtml += '<div style="margin-top:4px">$' + c.usd_per_booking.toFixed(2)
-          + " per booking this month (" + c.bookings + " bookings)</div>";
+          + " per booking in " + monthAbbr(c.month) + " (" + c.bookings + " bookings)</div>";
       }
       $("cost-sub").innerHTML = costHtml;
-      rows.push(["Cost, " + c.month + " (total)", "$" + c.usd.toFixed(2)]);
-      if (c.prior_usd != null) { rows.push(["Cost, " + c.prior_month + " (total)", "$" + c.prior_usd.toFixed(2)]); }
-      if (c.usd_per_booking !== null) { rows.push(["Cost per booking, " + c.month, "$" + c.usd_per_booking.toFixed(2)]); }
+      rows.push(["Cost, " + monthAbbr(c.month) + " (total)", "$" + c.usd.toFixed(2)]);
+      if (c.prior_usd != null) { rows.push(["Cost, " + monthAbbr(c.prior_month) + " (total)", "$" + c.prior_usd.toFixed(2)]); }
+      if (c.usd_per_booking !== null) { rows.push(["Cost per booking, " + monthAbbr(c.month), "$" + c.usd_per_booking.toFixed(2)]); }
+
+      // Twelve-month bars, oldest first. A month with no figure is a gap, not $0.
+      var hist = c.history || [];
+      var max = hist.reduce(function (m, h) { return h.usd > m ? h.usd : m; }, 0);
+      hist.forEach(function (h) {
+        var has = h.usd !== null && h.usd !== undefined;
+        rows.push(["Cost, " + monthAbbr(h.month) + " (chart)", has ? "$" + h.usd.toFixed(2) : "no figure"]);
+      });
+      var anyFigure = hist.some(function (h) { return h.usd !== null && h.usd !== undefined; });
+      if (hist.length && !anyFigure) {
+        $("cost-chart").innerHTML = '<p class="nodata" style="margin-top:16px">No monthly figures to chart yet.</p>';
+      } else if (hist.length) {
+        var bars = hist.map(function (h) {
+          var label = monthAbbr(h.month);
+          var has = h.usd !== null && h.usd !== undefined;
+          var ht = has ? (max > 0 ? Math.max(2, Math.round(h.usd / max * 100)) : 2) : 0;
+          return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0">'
+            + '<span class="nodata" style="font-size:11px">' + (has ? "$" + Math.round(h.usd) : "—") + '</span>'
+            + '<div style="height:80px;width:100%;display:flex;align-items:flex-end">'
+            + '<i style="display:block;width:100%;height:' + ht + '%;background:var(--series-1);border-radius:3px 3px 0 0"></i></div>'
+            + '<span style="font-size:11px;color:var(--ink-2)">' + label + '</span>'
+            // Year under Dec and Jan marks the year boundary.
+            + '<span class="nodata" style="font-size:11px;min-height:13px">'
+            + (/-(12|01)$/.test(h.month) ? h.month.slice(0, 4) : "") + '</span></div>';
+        }).join("");
+        $("cost-chart").innerHTML = '<div role="img" aria-label="Monthly cost, last twelve months" '
+          + 'style="display:flex;gap:8px;margin-top:16px">' + bars + '</div>';
+      }
     }
 
     // ---- table view (required: the light-mode palette carries a contrast WARN) ----
