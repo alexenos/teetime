@@ -378,7 +378,10 @@
             + '<span class="nodata" style="font-size:11px">' + (has ? "$" + Math.round(h.usd) : "—") + '</span>'
             + '<div style="height:80px;width:100%;display:flex;align-items:flex-end">'
             + '<i style="display:block;width:100%;height:' + ht + '%;background:var(--series-1);border-radius:3px 3px 0 0"></i></div>'
-            + '<span style="font-size:11px;color:var(--ink-2)">' + label + '</span></div>';
+            + '<span style="font-size:11px;color:var(--ink-2)">' + label + '</span>'
+            // Year under Dec and Jan marks the year boundary.
+            + '<span class="nodata" style="font-size:11px;min-height:13px">'
+            + (/-(12|01)$/.test(h.month) ? h.month.slice(0, 4) : "") + '</span></div>';
         }).join("");
         $("cost-chart").innerHTML = '<div role="img" aria-label="Monthly cost, last twelve months" '
           + 'style="display:flex;gap:8px;margin-top:16px">' + bars + '</div>';
