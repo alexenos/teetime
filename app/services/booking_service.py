@@ -1937,9 +1937,7 @@ class BookingService:
             session.pending_cancellation_id = booking.id
             await self.update_session(session)
 
-            return (
-                f"Reply yes to cancel your {status_label} booking for " f"{date_str} at {time_str}."
-            )
+            return f"Reply yes to cancel your {status_label} booking for {date_str} at {time_str}."
 
         # Multiple bookings - ask which one to cancel and set state
         # Sort by date/time for consistent ordering when user replies with a number
@@ -2051,7 +2049,7 @@ class BookingService:
         session.pending_cancellation_id = matched_booking.id
         session.state = ConversationState.IDLE
 
-        return f"Reply yes to cancel your {status_label} booking for " f"{date_str} at {time_str}."
+        return f"Reply yes to cancel your {status_label} booking for {date_str} at {time_str}."
 
     async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> bool:
         """
