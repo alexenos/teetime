@@ -60,6 +60,11 @@ NOTIFY_MAX_ATTEMPTS = 3
 NOTIFY_RETRY_DELAY_S = 2
 
 
+def _players(count: int) -> str:
+    """ "1 player" or "4 players"."""
+    return f"{count} player" if count == 1 else f"{count} players"
+
+
 def describe_slot_agreement(booking: TeeTimeBooking) -> str:
     """What was agreed about a booking's tee time, as the race log states it.
 
@@ -72,8 +77,9 @@ def describe_slot_agreement(booking: TeeTimeBooking) -> str:
     * ``agreed=sheet`` - the time is a tee time the club's sheet offered, and
       the member agreed to it. Reserving it is Exact; reserving anything else
       is Fallback.
-    * ``agreed=unchecked`` - no reading of the sheet was available, the member
-      was told so, and the time is as typed.
+    * ``agreed=unchecked`` - no reading of the sheet was available, so the time
+      was not checked and is assumed correct as typed. The member is not told
+      (the confirmation prompt no longer says so; see issue #309).
     * ``agreed=none`` - booked before the check existed, or through the API.
     """
     request = booking.request
@@ -1452,7 +1458,7 @@ class BookingService:
         if len(requests) > 1:
             lines = [
                 f"{i}. {r.requested_date:%A, %B %d} at {r.requested_time:%I:%M %p} "
-                f"for {r.num_players} players"
+                f"for {_players(r.num_players)}"
                 for i, r in enumerate(requests, 1)
             ]
             header = f"Reply yes to confirm {len(requests)} tee times{attribution.suffix()}:"
@@ -1462,7 +1468,7 @@ class BookingService:
         return (
             f"Reply yes to confirm{attribution.suffix()}: "
             f"{request.requested_date:%A, %B %d} at {request.requested_time:%I:%M %p}, "
-            f"{request.num_players} players."
+            f"{_players(request.num_players)}."
         )
 
     def _ask_for_proxy_target(self, session: UserSession) -> str | None:

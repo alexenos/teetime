@@ -4334,6 +4334,25 @@ class TestSlotAgreement:
         assert reply == "Reply yes to confirm: Tuesday, October 13 at 08:02 AM, 4 players."
 
     @pytest.mark.asyncio
+    async def test_a_solo_booking_is_one_player(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(SAT, [time(8, 0), time(8, 8)])
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=SAT, requested_time=time(8, 8), num_players=1
+            ),
+        )
+
+        reply = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert reply == "Reply yes to confirm: Saturday, October 10 at 08:08 AM, 1 player."
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("message", "agreed"), [("8:10am", time(8, 10)), ("7:54", time(7, 54))]
     )
