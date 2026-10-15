@@ -343,10 +343,13 @@ def walk(rows: list[Row], now: dt.datetime, corrections: Corrections) -> Row:
         # main() prints it to stderr for the Routine instead.
         "last_failure_reason": f"{last[2]}: {last[3]}" if last else None,
         "last_failure_note": last[4] if last else None,
+        # Every scheduled Routine is listed. None means it has had no scheduled
+        # run yet (the monthly cost Routine before 2026-11-05), not a streak of 0.
         "by_routine": {
             name: streaks([e for e in entries if e[2] == name])[-1]
-            for name in SCHEDULES
             if any(e[2] == name for e in entries)
+            else None
+            for name in SCHEDULES
         },
         "history": [n for n in combined[:-1] if n > 0],
         "window": {"first": entries[0][0].isoformat(), "last": entries[-1][0].isoformat()},

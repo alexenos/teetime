@@ -328,8 +328,10 @@
 
       var br = s.by_routine || {}, dl = "";
       Object.keys(br).forEach(function (k) {
-        dl += "<dt>" + k + "</dt><dd>" + br[k] + "</dd>";
-        rows.push(["Streak, " + k, br[k]]);
+        // null: no scheduled run yet (cost's first is 5 Nov), which is not a streak of 0.
+        var v = br[k] === null ? "no scheduled run yet" : br[k];
+        dl += "<dt>" + k + "</dt><dd>" + v + "</dd>";
+        rows.push(["Streak, " + k, v]);
       });
       $("streak-rows").innerHTML = dl;
     }

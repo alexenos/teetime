@@ -130,7 +130,12 @@ def test_the_scoreboard_does_not_score_its_own_run() -> None:
     days = _days(2)
     rows = [_quiet(d) for d in days] + [_quiet(days[0], "scoreboard")]
     s = _streak(rows, _ct(days[1], 7, 31))
-    assert s["by_routine"] == {"race-report": 2, "scoreboard": 1}
+    assert s["by_routine"] == {
+        "race-report": 2,
+        "scoreboard": 1,
+        "cost": None,
+        "tech-debt": None,
+    }
     assert s["consecutive"] == 3
 
 
@@ -142,7 +147,12 @@ def test_routines_interleave_so_any_failure_resets_the_combined_streak() -> None
     s = _streak(rows, _ct(days[2], 9, 0))
     # Day 2: race (ok), scoreboard (failed). Day 3: race, scoreboard.
     assert s["consecutive"] == 2
-    assert s["by_routine"] == {"race-report": 3, "scoreboard": 1}
+    assert s["by_routine"] == {
+        "race-report": 3,
+        "scoreboard": 1,
+        "cost": None,
+        "tech-debt": None,
+    }
 
 
 def test_backfill_rows_neither_extend_nor_break_the_streak() -> None:
@@ -361,7 +371,7 @@ def test_a_seed_row_stays_outside_the_streak() -> None:
     now = _ct(days[1], 7, 30)
     with_seed = _board([_quiet(d) for d in days] + [_seed()], now)["streak"]
     assert with_seed["consecutive"] == 2
-    assert "cost" not in with_seed["by_routine"]
+    assert with_seed["by_routine"]["cost"] is None
 
 
 def test_a_missing_monthly_cost_run_breaks_the_streak() -> None:

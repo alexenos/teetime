@@ -44,6 +44,7 @@
     "by_routine": {
       "race-report": 6,
       "scoreboard": 6,
+      "cost": null,
       "tech-debt": 0
     },
     "history": [
