@@ -1440,73 +1440,30 @@ class BookingService:
         return "Sorry, I didn't catch which one. " + self._slot_question(request, position, total)
 
     async def _confirmation_prompt(self, session: UserSession) -> str:
-        """The "reply yes" message for the requests this conversation agreed."""
+        """The "reply yes" message for the requests this conversation agreed.
+
+        Short, and led by what the member has to do: members were not replying.
+        Nothing about the sheet or the fallback times - those run when the
+        booking does, and a time the sheet lacks was already asked about.
+        """
         attribution = await self._attribution_for(session)
         requests = self._pending(session)
 
         if len(requests) > 1:
-            booking_summaries = []
-            for i, request in enumerate(requests, 1):
-                date_str = request.requested_date.strftime("%A, %B %d")
-                time_str = request.requested_time.strftime("%I:%M %p")
-                booking_summaries.append(
-                    f"{i}. {date_str} at {time_str} for {request.num_players} players"
-                    + self._slot_summary(request, await self._unchecked_reason(request))
-                )
-            return (
-                f"Book {len(requests)} tee times{attribution.suffix()}? Reply yes.\n"
-                + "\n".join(booking_summaries)
-            )
+            lines = [
+                f"{i}. {r.requested_date:%A, %B %d} at {r.requested_time:%I:%M %p} "
+                f"for {r.num_players} players"
+                for i, r in enumerate(requests, 1)
+            ]
+            header = f"Reply yes to confirm {len(requests)} tee times{attribution.suffix()}:"
+            return "\n".join([header, *lines])
 
         request = requests[0]
-        date_str = request.requested_date.strftime("%A, %B %d")
-        time_str = request.requested_time.strftime("%I:%M %p")
-        note = self._slot_note(request, await self._unchecked_reason(request))
-        ask = (
-            f"Book {date_str} at {time_str}, {request.num_players} players"
-            f"{attribution.suffix()}? Reply yes."
+        return (
+            f"Reply yes to confirm{attribution.suffix()}: "
+            f"{request.requested_date:%A, %B %d} at {request.requested_time:%I:%M %p}, "
+            f"{request.num_players} players."
         )
-        return f"{ask}\n{note}" if note else ask
-
-    async def _unchecked_reason(self, request: TeeTimeRequest) -> str | None:
-        """Why a request's time could not be checked: no sheet, or nothing open on it.
-
-        Read again rather than carried on the request, which would need another
-        field only this message uses. None for a request that was checked.
-        """
-        if request.slot_confirmed is not False:
-            return None
-        grid = await self._sheet_grid_for(request.requested_date)
-        check = slot_agreement.check_requested_time(request.requested_time, grid)
-        return check.reason if check.kind == "unknown" else "no_sheet"
-
-    @staticmethod
-    def _slot_note(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
-        """One or two sentences on what the sheet said about a single request."""
-        date_str = request.requested_date.strftime("%A, %B %d")
-        # A time the sheet has needs no note: the fallback ladder is routine, and
-        # it buried the "reply yes" line. Only a time we could not check is said.
-        if request.slot_confirmed is False:
-            check = SlotCheck(
-                kind="unknown", requested=request.requested_time, reason=unchecked_reason
-            )
-            return slot_agreement.unchecked_note(check, date_str, request.fallback_window_minutes)
-        return ""
-
-    @staticmethod
-    def _slot_summary(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
-        """The same, short enough for one line of a multi-booking list."""
-        if request.slot_confirmed is False:
-            seen = (
-                "the sheet showed nothing open"
-                if unchecked_reason == "nothing_open"
-                else "sheet not seen yet"
-            )
-            return (
-                f" ({seen}; the closest within {request.fallback_window_minutes} "
-                "minutes if it isn't open)"
-            )
-        return ""
 
     def _ask_for_proxy_target(self, session: UserSession) -> str | None:
         """Ask the admin who a booking is for, when they didn't say.
