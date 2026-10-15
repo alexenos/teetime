@@ -525,7 +525,7 @@ class GeminiService:
                     requested_time=default_time,
                     num_players=num_players,
                 ),
-                response_message=f"I'll book a tee time for {target_date.strftime('%A, %B %d')} at {default_time.strftime('%I:%M %p')} for {num_players} players. Reply 'yes' to confirm.",
+                response_message=f"Reply yes to confirm: {target_date.strftime('%A, %B %d')} at {default_time.strftime('%I:%M %p')}, {num_players} players.",
             )
 
         if any(word in message_lower for word in ["status", "booking", "scheduled"]):

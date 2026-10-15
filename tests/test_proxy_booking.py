@@ -500,7 +500,10 @@ class TestProxyBookingFlow:
                 assert admin.pending_proxy_target == ALEX_ID
 
                 echo = await service.handle_incoming_message(ADMIN_ID, "2", channel="telegram")
-                assert "for Alex for Tuesday, October 13 at 08:02 AM" in echo
+                assert (
+                    "Reply yes to confirm for Alex: Tuesday, October 13 at 08:02 AM, 4 players"
+                    in echo
+                )
 
             with patch.object(service, "create_booking", AsyncMock()) as create:
                 create.return_value = AsyncMock(

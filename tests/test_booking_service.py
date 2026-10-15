@@ -889,7 +889,7 @@ class TestBookingServiceIntentHandling:
 
             response = await booking_service._handle_cancel_intent(sample_session, parsed)
             # Now asks for confirmation instead of immediately cancelling
-            assert "are you sure" in response.lower()
+            assert "reply yes to cancel" in response.lower()
             assert sample_session.pending_cancellation_id == sample_booking.id
 
     @pytest.mark.asyncio
@@ -1128,7 +1128,7 @@ class TestBookingServiceProcessIntent:
         )
 
         response = await booking_service._process_intent(sample_session, parsed)
-        assert "confirm" in response.lower()
+        assert "reply yes" in response.lower()
 
     @pytest.mark.asyncio
     async def test_process_intent_status(
@@ -4280,11 +4280,7 @@ class TestSlotAgreement:
             time(7, 38),
             time(8, 38),
         ]
-        assert reply == (
-            "I'll book a tee time for Saturday, October 10 at 08:08 AM for 4 players. "
-            "08:08 AM is on the club's sheet. If it's gone, I'll try 08:00 AM, then "
-            "08:15 AM, then 07:53 AM (and 5 more within 32 minutes). Reply 'yes' to confirm."
-        )
+        assert reply == "Reply yes to confirm: Saturday, October 10 at 08:08 AM, 4 players."
 
     @pytest.mark.asyncio
     async def test_a_time_the_sheet_does_not_have_asks_which(
@@ -4335,9 +4331,26 @@ class TestSlotAgreement:
         assert request.fallback_ladder is not None
         # Every neighbour on an 8-minute grid is aligned, so ties go to the earlier.
         assert request.fallback_ladder[:3] == [time(7, 54), time(8, 10), time(7, 46)]
-        assert "for Tuesday, October 13 at 08:02 AM" in reply
-        assert "If it's gone, I'll try 07:54 AM, then 08:10 AM, then 07:46 AM" in reply
-        assert reply.endswith("Reply 'yes' to confirm.")
+        assert reply == "Reply yes to confirm: Tuesday, October 13 at 08:02 AM, 4 players."
+
+    @pytest.mark.asyncio
+    async def test_a_solo_booking_is_one_player(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        no_tee_sheet_on_file.return_value = _grid_for(SAT, [time(8, 0), time(8, 8)])
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_request=TeeTimeRequest(
+                requested_date=SAT, requested_time=time(8, 8), num_players=1
+            ),
+        )
+
+        reply = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert reply == "Reply yes to confirm: Saturday, October 10 at 08:08 AM, 1 player."
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -4492,12 +4505,8 @@ class TestSlotAgreement:
         assert request.slot_confirmed is False
         assert request.fallback_ladder is None
         assert sample_session.state == ConversationState.AWAITING_CONFIRMATION
-        assert reply == (
-            "I'll book a tee time for Saturday, October 10 at 08:00 AM for 4 players. "
-            "I haven't seen Saturday, October 10's tee sheet yet, so I can't check that "
-            "08:00 AM is a real tee time. If it isn't, or it's gone, I'll take the closest "
-            "one within 32 minutes. Reply 'yes' to confirm."
-        )
+        # Nothing is said about the unseen sheet: the fallback runs at booking time.
+        assert reply == "Reply yes to confirm: Saturday, October 10 at 08:00 AM, 4 players."
 
     @pytest.mark.asyncio
     async def test_a_sheet_with_nothing_open_is_not_called_unseen(
@@ -4514,7 +4523,7 @@ class TestSlotAgreement:
             sample_session, self._parsed(SAT, time(8, 0))
         )
 
-        assert "showed nothing open when I last read it" in reply
+        assert reply == "Reply yes to confirm: Saturday, October 10 at 08:00 AM, 4 players."
 
     @pytest.mark.asyncio
     async def test_a_lookup_failure_is_an_unread_sheet_not_a_refusal(
@@ -4533,7 +4542,7 @@ class TestSlotAgreement:
 
         assert sample_session.pending_request is not None
         assert sample_session.pending_request.slot_confirmed is False
-        assert reply.endswith("Reply 'yes' to confirm.")
+        assert reply == "Reply yes to confirm: Saturday, October 10 at 08:00 AM, 4 players."
 
     @pytest.mark.asyncio
     async def test_several_requests_are_asked_about_in_turn(
@@ -4566,12 +4575,34 @@ class TestSlotAgreement:
             time(8, 10),
         ]
         assert summary == (
-            "I'll book 2 tee times:\n"
-            "1. Saturday, October 10 at 08:08 AM for 4 players (on the club's sheet; if "
-            "it's gone: 08:00 AM, 08:15 AM, 07:53 AM)\n"
-            "2. Tuesday, October 13 at 08:10 AM for 2 players (on the club's sheet; if "
-            "it's gone: 08:02 AM, 08:18 AM, 07:54 AM)\n\n"
-            "Reply 'yes' to confirm all bookings."
+            "Reply yes to confirm 2 tee times:\n"
+            "1. Saturday, October 10 at 08:08 AM for 4 players\n"
+            "2. Tuesday, October 13 at 08:10 AM for 2 players"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_multi_booking_prompt_has_no_sheet_text_for_any_line(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        # SAT has a sheet (ladder recorded); TUE has none (unchecked).
+        no_tee_sheet_on_file.side_effect = lambda d: _grid_for(d, ALTERNATING) if d == SAT else None
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_requests=[
+                TeeTimeRequest(requested_date=SAT, requested_time=time(8, 8), num_players=4),
+                TeeTimeRequest(requested_date=TUE, requested_time=time(8, 0), num_players=1),
+            ],
+        )
+
+        reply = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert reply == (
+            "Reply yes to confirm 2 tee times:\n"
+            "1. Saturday, October 10 at 08:08 AM for 4 players\n"
+            "2. Tuesday, October 13 at 08:00 AM for 1 player"
         )
 
     @pytest.mark.asyncio

@@ -23,10 +23,8 @@ from app.services.slot_agreement import (
     check_requested_time,
     choice_question,
     fallback_ladder,
-    ladder_note,
     nearest_open,
     parse_pick,
-    unchecked_note,
 )
 
 
@@ -256,25 +254,4 @@ class TestWording:
             "The open tee times on offer for Tuesday, October 06 are:\n"
             "1. 07:54 AM\n2. 08:02 AM\n3. 08:10 AM\n"
             "Which one? Reply with the number or the time."
-        )
-
-    def test_the_ladder_note_shows_the_first_rungs_and_counts_the_rest(self) -> None:
-        ladder = fallback_ladder(time(8, 8), ALTERNATING, 32)
-        text = ladder_note(time(8, 8), ladder, 32)
-        assert text == (
-            "08:08 AM is on the club's sheet. If it's gone, I'll try 08:00 AM, then "
-            "08:15 AM, then 07:53 AM (and 5 more within 32 minutes)."
-        )
-
-    def test_a_ladder_with_nothing_on_it_says_so(self) -> None:
-        text = ladder_note(time(7, 15), [], 32)
-        assert "nothing to fall back to" in text
-
-    def test_an_unchecked_time_says_what_happens_instead(self) -> None:
-        check = check_requested_time(time(8, 0), None)
-        text = unchecked_note(check, "Saturday, October 10", 32)
-        assert text == (
-            "I haven't seen Saturday, October 10's tee sheet yet, so I can't check that "
-            "08:00 AM is a real tee time. If it isn't, or it's gone, I'll take the closest "
-            "one within 32 minutes."
         )

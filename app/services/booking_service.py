@@ -60,6 +60,11 @@ NOTIFY_MAX_ATTEMPTS = 3
 NOTIFY_RETRY_DELAY_S = 2
 
 
+def _players(count: int) -> str:
+    """ "1 player" or "4 players"."""
+    return f"{count} player" if count == 1 else f"{count} players"
+
+
 def describe_slot_agreement(booking: TeeTimeBooking) -> str:
     """What was agreed about a booking's tee time, as the race log states it.
 
@@ -72,8 +77,9 @@ def describe_slot_agreement(booking: TeeTimeBooking) -> str:
     * ``agreed=sheet`` - the time is a tee time the club's sheet offered, and
       the member agreed to it. Reserving it is Exact; reserving anything else
       is Fallback.
-    * ``agreed=unchecked`` - no reading of the sheet was available, the member
-      was told so, and the time is as typed.
+    * ``agreed=unchecked`` - no reading of the sheet was available, so the time
+      was not checked and is assumed correct as typed. The member is not told
+      (the confirmation prompt no longer says so; see issue #309).
     * ``agreed=none`` - booked before the check existed, or through the API.
     """
     request = booking.request
@@ -152,8 +158,8 @@ LIVE_BOOKING_STATUSES = (
 )
 
 # Replies that settle a pending booking confirmation without asking the LLM
-# what they mean. The bot just printed the bookings and said "Reply 'yes' to
-# confirm", so a bare "yes" needs no interpretation - and sending it to Gemini
+# what they mean. The bot just printed the bookings and asked for a "yes", so
+# a bare "yes" needs no interpretation - and sending it to Gemini
 # anyway means a transient API failure can lose an already-parsed booking at
 # the one moment it costs the most.
 #
@@ -1440,86 +1446,30 @@ class BookingService:
         return "Sorry, I didn't catch which one. " + self._slot_question(request, position, total)
 
     async def _confirmation_prompt(self, session: UserSession) -> str:
-        """The "reply yes" message for the requests this conversation agreed."""
+        """The "reply yes" message for the requests this conversation agreed.
+
+        Short, and led by what the member has to do: members were not replying.
+        Nothing about the sheet or the fallback times - those run when the
+        booking does, and a time the sheet lacks was already asked about.
+        """
         attribution = await self._attribution_for(session)
         requests = self._pending(session)
 
         if len(requests) > 1:
-            booking_summaries = []
-            for i, request in enumerate(requests, 1):
-                date_str = request.requested_date.strftime("%A, %B %d")
-                time_str = request.requested_time.strftime("%I:%M %p")
-                booking_summaries.append(
-                    f"{i}. {date_str} at {time_str} for {request.num_players} players"
-                    + self._slot_summary(request, await self._unchecked_reason(request))
-                )
-            return (
-                f"I'll book {len(requests)} tee times{attribution.suffix()}:\n"
-                + "\n".join(booking_summaries)
-                + "\n\nReply 'yes' to confirm all bookings."
-            )
+            lines = [
+                f"{i}. {r.requested_date:%A, %B %d} at {r.requested_time:%I:%M %p} "
+                f"for {_players(r.num_players)}"
+                for i, r in enumerate(requests, 1)
+            ]
+            header = f"Reply yes to confirm {len(requests)} tee times{attribution.suffix()}:"
+            return "\n".join([header, *lines])
 
         request = requests[0]
-        date_str = request.requested_date.strftime("%A, %B %d")
-        time_str = request.requested_time.strftime("%I:%M %p")
-        note = self._slot_note(request, await self._unchecked_reason(request))
         return (
-            f"I'll book a tee time{attribution.suffix()} for {date_str} at {time_str} "
-            f"for {request.num_players} players. {note + ' ' if note else ''}"
-            "Reply 'yes' to confirm."
+            f"Reply yes to confirm{attribution.suffix()}: "
+            f"{request.requested_date:%A, %B %d} at {request.requested_time:%I:%M %p}, "
+            f"{_players(request.num_players)}."
         )
-
-    async def _unchecked_reason(self, request: TeeTimeRequest) -> str | None:
-        """Why a request's time could not be checked: no sheet, or nothing open on it.
-
-        Read again rather than carried on the request, which would need another
-        field only this message uses. None for a request that was checked.
-        """
-        if request.slot_confirmed is not False:
-            return None
-        grid = await self._sheet_grid_for(request.requested_date)
-        check = slot_agreement.check_requested_time(request.requested_time, grid)
-        return check.reason if check.kind == "unknown" else "no_sheet"
-
-    @staticmethod
-    def _slot_note(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
-        """One or two sentences on what the sheet said about a single request."""
-        date_str = request.requested_date.strftime("%A, %B %d")
-        if request.slot_confirmed is True:
-            if request.fallback_ladder is None:
-                return f"{slot_agreement.clock(request.requested_time)} is on the club's sheet."
-            return slot_agreement.ladder_note(
-                request.requested_time, request.fallback_ladder, request.fallback_window_minutes
-            )
-        if request.slot_confirmed is False:
-            check = SlotCheck(
-                kind="unknown", requested=request.requested_time, reason=unchecked_reason
-            )
-            return slot_agreement.unchecked_note(check, date_str, request.fallback_window_minutes)
-        return ""
-
-    @staticmethod
-    def _slot_summary(request: TeeTimeRequest, unchecked_reason: str | None) -> str:
-        """The same, short enough for one line of a multi-booking list."""
-        if request.slot_confirmed is True:
-            if not request.fallback_ladder:
-                return " (on the club's sheet)"
-            shown = ", ".join(
-                slot_agreement.clock(t)
-                for t in request.fallback_ladder[: slot_agreement.LADDER_PREVIEW]
-            )
-            return f" (on the club's sheet; if it's gone: {shown})"
-        if request.slot_confirmed is False:
-            seen = (
-                "the sheet showed nothing open"
-                if unchecked_reason == "nothing_open"
-                else "sheet not seen yet"
-            )
-            return (
-                f" ({seen}; the closest within {request.fallback_window_minutes} "
-                "minutes if it isn't open)"
-            )
-        return ""
 
     def _ask_for_proxy_target(self, session: UserSession) -> str | None:
         """Ask the admin who a booking is for, when they didn't say.
@@ -1987,10 +1937,7 @@ class BookingService:
             session.pending_cancellation_id = booking.id
             await self.update_session(session)
 
-            return (
-                f"Are you sure you want to cancel your {status_label} booking for "
-                f"{date_str} at {time_str}? Reply 'yes' to confirm."
-            )
+            return f"Reply yes to cancel your {status_label} booking for {date_str} at {time_str}."
 
         # Multiple bookings - ask which one to cancel and set state
         # Sort by date/time for consistent ordering when user replies with a number
@@ -2102,10 +2049,7 @@ class BookingService:
         session.pending_cancellation_id = matched_booking.id
         session.state = ConversationState.IDLE
 
-        return (
-            f"Are you sure you want to cancel your {status_label} booking for "
-            f"{date_str} at {time_str}? Reply 'yes' to confirm."
-        )
+        return f"Reply yes to cancel your {status_label} booking for {date_str} at {time_str}."
 
     async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> bool:
         """
