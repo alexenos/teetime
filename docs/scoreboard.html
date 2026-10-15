@@ -374,13 +374,14 @@
         var has = h.usd !== null && h.usd !== undefined;
         rows.push(["Cost, " + monthAbbr(h.month) + " (chart)", has ? "$" + h.usd.toFixed(2) : "no figure"]);
       });
-      if (hist.length && max <= 0) {
+      var anyFigure = hist.some(function (h) { return h.usd !== null && h.usd !== undefined; });
+      if (hist.length && !anyFigure) {
         $("cost-chart").innerHTML = '<p class="nodata" style="margin-top:16px">No monthly figures to chart yet.</p>';
       } else if (hist.length) {
         var bars = hist.map(function (h) {
           var label = monthAbbr(h.month);
           var has = h.usd !== null && h.usd !== undefined;
-          var ht = has ? Math.max(2, Math.round(h.usd / max * 100)) : 0;
+          var ht = has ? (max > 0 ? Math.max(2, Math.round(h.usd / max * 100)) : 2) : 0;
           return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0">'
             + '<span class="nodata" style="font-size:11px">' + (has ? "$" + Math.round(h.usd) : "—") + '</span>'
             + '<div style="height:80px;width:100%;display:flex;align-items:flex-end">'
