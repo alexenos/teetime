@@ -36,11 +36,6 @@ from app.providers.walden_sheet_grid import SheetGrid
 # nearest - without turning a question into a list to read.
 NEAREST_OPTIONS = 3
 
-# How many rungs of the ladder a confirmation spells out. The whole ladder is
-# stored on the booking; the message only needs the first few to say what
-# "the next best" means.
-LADDER_PREVIEW = 3
-
 # The racer's alignment step: BatchBookingRequest.tee_time_interval_minutes,
 # which nothing overrides. A slot a multiple of this from the target ranks ahead
 # of a nearer one that is not. Pinned to that default by a test.
@@ -244,31 +239,4 @@ def choice_question(check: SlotCheck, date_str: str, first_ask: bool = True) -> 
     return (
         f"{lead} The closest open tee times are:\n{options}\n"
         "Which one? Reply with the number or the time."
-    )
-
-
-def ladder_note(target: time, ladder: Sequence[time], window_minutes: int) -> str:
-    """Say, before anything is scheduled, what the bot takes if the pick is gone."""
-    if not ladder:
-        return (
-            f"{clock(target)} is on the club's sheet. There's no other open tee time "
-            f"within {window_minutes} minutes of it, so if it's gone I'll have nothing to "
-            "fall back to."
-        )
-    shown = ", then ".join(clock(t) for t in ladder[:LADDER_PREVIEW])
-    rest = len(ladder) - LADDER_PREVIEW
-    more = f" (and {rest} more within {window_minutes} minutes)" if rest > 0 else ""
-    return f"{clock(target)} is on the club's sheet. If it's gone, I'll try {shown}{more}."
-
-
-def unchecked_note(check: SlotCheck, date_str: str, window_minutes: int) -> str:
-    """Say plainly that the time could not be checked, and what happens then."""
-    requested = clock(check.requested)
-    if check.reason == "nothing_open":
-        seen = f"{date_str}'s tee sheet showed nothing open when I last read it"
-    else:
-        seen = f"I haven't seen {date_str}'s tee sheet yet"
-    return (
-        f"{seen}, so I can't check that {requested} is a real tee time. If it isn't, "
-        f"or it's gone, I'll take the closest one within {window_minutes} minutes."
     )

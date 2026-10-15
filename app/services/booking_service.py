@@ -158,8 +158,8 @@ LIVE_BOOKING_STATUSES = (
 )
 
 # Replies that settle a pending booking confirmation without asking the LLM
-# what they mean. The bot just printed the bookings and said "Reply 'yes' to
-# confirm", so a bare "yes" needs no interpretation - and sending it to Gemini
+# what they mean. The bot just printed the bookings and asked for a "yes", so
+# a bare "yes" needs no interpretation - and sending it to Gemini
 # anyway means a transient API failure can lose an already-parsed booking at
 # the one moment it costs the most.
 #
@@ -1938,8 +1938,7 @@ class BookingService:
             await self.update_session(session)
 
             return (
-                f"Are you sure you want to cancel your {status_label} booking for "
-                f"{date_str} at {time_str}? Reply 'yes' to confirm."
+                f"Reply yes to cancel your {status_label} booking for " f"{date_str} at {time_str}."
             )
 
         # Multiple bookings - ask which one to cancel and set state
@@ -2052,10 +2051,7 @@ class BookingService:
         session.pending_cancellation_id = matched_booking.id
         session.state = ConversationState.IDLE
 
-        return (
-            f"Are you sure you want to cancel your {status_label} booking for "
-            f"{date_str} at {time_str}? Reply 'yes' to confirm."
-        )
+        return f"Reply yes to cancel your {status_label} booking for " f"{date_str} at {time_str}."
 
     async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> bool:
         """

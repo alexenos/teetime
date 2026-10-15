@@ -889,7 +889,7 @@ class TestBookingServiceIntentHandling:
 
             response = await booking_service._handle_cancel_intent(sample_session, parsed)
             # Now asks for confirmation instead of immediately cancelling
-            assert "are you sure" in response.lower()
+            assert "reply yes to cancel" in response.lower()
             assert sample_session.pending_cancellation_id == sample_booking.id
 
     @pytest.mark.asyncio
@@ -4578,6 +4578,31 @@ class TestSlotAgreement:
             "Reply yes to confirm 2 tee times:\n"
             "1. Saturday, October 10 at 08:08 AM for 4 players\n"
             "2. Tuesday, October 13 at 08:10 AM for 2 players"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_multi_booking_prompt_has_no_sheet_text_for_any_line(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        no_tee_sheet_on_file: AsyncMock,
+    ) -> None:
+        # SAT has a sheet (ladder recorded); TUE has none (unchecked).
+        no_tee_sheet_on_file.side_effect = lambda d: _grid_for(d, ALTERNATING) if d == SAT else None
+        parsed = ParsedIntent(
+            intent="book",
+            tee_time_requests=[
+                TeeTimeRequest(requested_date=SAT, requested_time=time(8, 8), num_players=4),
+                TeeTimeRequest(requested_date=TUE, requested_time=time(8, 0), num_players=1),
+            ],
+        )
+
+        reply = await booking_service._handle_book_intent(sample_session, parsed)
+
+        assert reply == (
+            "Reply yes to confirm 2 tee times:\n"
+            "1. Saturday, October 10 at 08:08 AM for 4 players\n"
+            "2. Tuesday, October 13 at 08:00 AM for 1 player"
         )
 
     @pytest.mark.asyncio
