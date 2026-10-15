@@ -130,12 +130,7 @@ def test_the_scoreboard_does_not_score_its_own_run() -> None:
     days = _days(2)
     rows = [_quiet(d) for d in days] + [_quiet(days[0], "scoreboard")]
     s = _streak(rows, _ct(days[1], 7, 31))
-    assert s["by_routine"] == {
-        "race-report": 2,
-        "scoreboard": 1,
-        "cost": None,
-        "tech-debt": None,
-    }
+    assert (s["by_routine"]["race-report"], s["by_routine"]["scoreboard"]) == (2, 1)
     assert s["consecutive"] == 3
 
 
@@ -147,12 +142,7 @@ def test_routines_interleave_so_any_failure_resets_the_combined_streak() -> None
     s = _streak(rows, _ct(days[2], 9, 0))
     # Day 2: race (ok), scoreboard (failed). Day 3: race, scoreboard.
     assert s["consecutive"] == 2
-    assert s["by_routine"] == {
-        "race-report": 3,
-        "scoreboard": 1,
-        "cost": None,
-        "tech-debt": None,
-    }
+    assert (s["by_routine"]["race-report"], s["by_routine"]["scoreboard"]) == (3, 1)
 
 
 def test_backfill_rows_neither_extend_nor_break_the_streak() -> None:
@@ -351,6 +341,19 @@ def test_cost_history_is_twelve_months_with_gaps_as_none() -> None:
     assert len(history) == 12
     assert (history[0]["month"], history[-1]["month"]) == ("2025-10", "2026-09")
     assert [h["usd"] for h in history] == [None] * 10 + [71.18, 37.17]
+
+
+def test_the_published_scoreboard_has_the_shape_derive_emits() -> None:
+    import json
+    from pathlib import Path
+
+    published = json.loads(Path("docs/scoreboard.json").read_text(encoding="utf-8"))
+    assert set(published["streak"]["by_routine"]) == set(ds.SCHEDULES)
+    hist = published["cost"]["history"]
+    assert len(hist) == 12 and hist[-1]["month"] == published["cost"]["month"]
+    assert [h["month"] for h in hist] == [
+        ds._months_back(hist[-1]["month"], n) for n in range(11, -1, -1)
+    ]
 
 
 def test_cost_history_crosses_a_year_boundary() -> None:

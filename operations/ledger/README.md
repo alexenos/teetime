@@ -165,7 +165,7 @@ published. This is the history a trend is plotted from.
  "published":"docs/scoreboard.json",
  "outcome_all_time":{"exact":0,"fallback":0,"booked":0,"miss":0},
  "outcome_4wk":{"exact":0,"fallback":0,"booked":0,"miss":0},
- "streak":{"consecutive":0,"unverified":0,"by_routine":{},"total_ok":0},
+ "streak":{"consecutive":0,"unverified":0,"by_routine":{"race-report":null,"scoreboard":null,"cost":null,"tech-debt":null},"total_ok":0},
  "cost":{"month":"2026-09","usd_total":null,"usd_per_booking":null,"source":"unavailable"}}
 ```
 

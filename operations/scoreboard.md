@@ -98,6 +98,11 @@ headline — it answers "when did anything last break" — and it is why the per
 breakdown sits next to it. Read the headline for whether the automation is healthy
 and the breakdown for which part is not.
 
+The breakdown lists every scheduled Routine (`streak.by_routine`). A Routine with no
+scored run yet — not started, or still inside the 45-minute completion allowance —
+is `null` and shown as "no scored run yet". That is not a streak of 0, which would
+mean a failure.
+
 The Routines walked are the race report (daily), the scoreboard (daily), cost
 (monthly, from 2026-11-05) and tech debt (weekly, Saturdays, from 2026-10-10).
 A weekly or monthly Routine contributes one run per period, so a missed Saturday
@@ -170,6 +175,13 @@ backfill: a missing row is detectable, an inferred row presented as read is not.
 $/booking is the input to the Cloud SQL retention decision open since #41 and #168
 (~$9.50/month). Its divisor is `exact + fallback` from `race-report.jsonl` and
 needs no new source.
+
+**Chart:** the page also plots the twelve months ending at the reported one
+(`cost.history`, oldest first). A month with no cost row is `null` and draws as a gap,
+never as $0. The year is printed under Dec and Jan so the boundary is visible. Only
+August and September 2026 exist, so earlier bars are empty until months are backfilled
+or the Routine runs. The $/booking line is labelled with the month it covers, which is
+the last completed month, not the current one.
 
 **Source:** the newest successful `cost` row in GCS (`operations/cost/`), written by
 the cost Routine. August and September 2026 are manual seeds. September was checked against the

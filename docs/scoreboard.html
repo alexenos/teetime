@@ -159,13 +159,13 @@
 
   <!-- 2. Cost -->
   <section class="card" aria-labelledby="h-cost">
-      <h2 id="h-cost">Cost</h2>
-      <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:12px">
-        <p class="stat" id="cost-val">—</p>
-        <span id="cost-delta"></span>
-      </div>
-      <p class="stat-sub" id="cost-sub"></p>
-      <div id="cost-chart"></div>
+    <h2 id="h-cost">Cost</h2>
+    <div style="display:flex;align-items:baseline;flex-wrap:wrap;gap:12px">
+      <p class="stat" id="cost-val">—</p>
+      <span id="cost-delta"></span>
+    </div>
+    <p class="stat-sub" id="cost-sub"></p>
+    <div id="cost-chart"></div>
   </section>
 
   <!-- 3. Automation streak -->
@@ -328,8 +328,8 @@
 
       var br = s.by_routine || {}, dl = "";
       Object.keys(br).forEach(function (k) {
-        // null: no scheduled run yet (cost's first is 5 Nov), which is not a streak of 0.
-        var v = br[k] === null ? "no scheduled run yet" : br[k];
+        // null: no scored run yet, which is not a streak of 0.
+        var v = br[k] === null ? "no scored run yet" : br[k];
         dl += "<dt>" + k + "</dt><dd>" + v + "</dd>";
         rows.push(["Streak, " + k, v]);
       });
@@ -370,12 +370,17 @@
       // Twelve-month bars, oldest first. A month with no figure is a gap, not $0.
       var hist = c.history || [];
       var max = hist.reduce(function (m, h) { return h.usd > m ? h.usd : m; }, 0);
-      if (hist.length && max > 0) {
+      hist.forEach(function (h) {
+        var has = h.usd !== null && h.usd !== undefined;
+        rows.push(["Cost, " + monthAbbr(h.month) + " (chart)", has ? "$" + h.usd.toFixed(2) : "no figure"]);
+      });
+      if (hist.length && max <= 0) {
+        $("cost-chart").innerHTML = '<p class="nodata" style="margin-top:16px">No monthly figures to chart yet.</p>';
+      } else if (hist.length) {
         var bars = hist.map(function (h) {
           var label = monthAbbr(h.month);
           var has = h.usd !== null && h.usd !== undefined;
           var ht = has ? Math.max(2, Math.round(h.usd / max * 100)) : 0;
-          rows.push(["Cost, " + label + " (chart)", has ? "$" + h.usd.toFixed(2) : "no figure"]);
           return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0">'
             + '<span class="nodata" style="font-size:11px">' + (has ? "$" + Math.round(h.usd) : "—") + '</span>'
             + '<div style="height:80px;width:100%;display:flex;align-items:flex-end">'
