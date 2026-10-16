@@ -17,8 +17,9 @@ the maintainer's word only once a date replaces `proposed`.
 | `deprecated` | files an issue if its paths still exist; no fix |
 | `removable` | eligible for a removal PR |
 | `planned` | code for it is a question, not a finding |
+| `removed` | lives in the Removed table, not the feature tables; files an issue if code reappears at its paths |
 
-No row below is `removable`. Two are proposed `deprecated`, and what would make
+No feature row below is `removable`. Two are proposed `deprecated`, and what would make
 them `removable` is written in their notes.
 
 ## How the draft was made, and what it does not establish
@@ -68,6 +69,19 @@ deployed value can differ from the default (`CLAUDE.md`, "Verify an apply").
 | Shared message layer | `live` | `app/services/sms_service.py`, `app/providers/sms_base.py`, `app/services/help_text.py` | proposed | **Not Twilio-specific, and not removable with Twilio.** `sms_service` is the per-channel router that Telegram goes through, and `telegram_provider.py` imports `sms_base`. The names are historical |
 | Twilio SMS / WhatsApp | `deprecated` | `app/providers/twilio_provider.py`, `/webhooks/twilio/sms` and `/webhooks/twilio/status` in `app/api/webhooks.py`, `twilio_*` in `app/config.py`, the Twilio secrets in `terraform/main.tf` | 2026-10-15 | #178 asks to remove it. **Before marking `removable`:** `MockSMSProvider` lives in `twilio_provider.py` and `sms_service` falls back to it, so it has to move first; `messaging_channel = "twilio"` is still a valid terraform value and is the Python default in `app/config.py`; `observer_phone_number` and `member_setup.py` may assume phone numbers. None of this was traced to the end |
 | Discord channel | `deprecated` | `app/providers/discord_provider.py`, `app/services/discord_gateway.py`, the gateway branch in `app/main.py` | 2026-10-15 | Dormant under the Telegram default: the gateway starts only when `messaging_channel = "discord"`. Re-enabling it forces `min/max_instances = 1` and always-on CPU (~$58/month, #168). `DISCORD_*` secrets are still created by terraform. Your call whether this is retired or a fallback you want kept |
+
+## Removed
+
+A feature moves here when its code is deleted: the removal PR moves the row out of
+the tables above and into this one, so the decision survives the deletion. Nothing
+has been removed yet.
+
+The paths here are where the code *was*. They are exempt from the "manifest path no
+longer exists" check, and the opposite check applies instead: code reappearing at
+one of them is a question for the maintainer, not a finding that it is dead.
+
+| Feature | Removed | PR | Why | Paths it had |
+|---|---|---|---|---|
 
 ## Not in this table
 

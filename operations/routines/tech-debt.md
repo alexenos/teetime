@@ -92,10 +92,11 @@ decided.
 | `deprecated` | being retired; files an issue if its paths still exist, no fix |
 | `removable` | maintainer has decided it can go; **eligible for a removal PR** |
 | `planned` | not built yet; code for it is a question, not a finding |
+| `removed` | code deleted on purpose; the row sits in the manifest's Removed table. Files an issue only if code reappears at one of its paths, as a question, not a claim |
 
 The Routine files an issue when:
 
-- a manifest path no longer exists (the manifest is stale, a `td:docs-drift` finding)
+- a manifest path no longer exists (the manifest is stale, a `td:docs-drift` finding). Paths in the Removed table are exempt: they are expected to be gone
 - a `deprecated` or `removable` feature still has code
 - code under `app/` belongs to no manifest feature, **as a request to classify it,
   never as a claim that it is dead**. "No callers found" is stated as a hypothesis
