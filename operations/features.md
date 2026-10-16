@@ -70,6 +70,17 @@ deployed value can differ from the default (`CLAUDE.md`, "Verify an apply").
 | Twilio SMS / WhatsApp | `deprecated` | `app/providers/twilio_provider.py`, `/webhooks/twilio/sms` and `/webhooks/twilio/status` in `app/api/webhooks.py`, `twilio_*` in `app/config.py`, the Twilio secrets in `terraform/main.tf` | 2026-10-15 | #178 asks to remove it. **Before marking `removable`:** `MockSMSProvider` lives in `twilio_provider.py` and `sms_service` falls back to it, so it has to move first; `messaging_channel = "twilio"` is still a valid terraform value and is the Python default in `app/config.py`; `observer_phone_number` and `member_setup.py` may assume phone numbers. None of this was traced to the end |
 | Discord channel | `deprecated` | `app/providers/discord_provider.py`, `app/services/discord_gateway.py`, the gateway branch in `app/main.py` | 2026-10-15 | Dormant under the Telegram default: the gateway starts only when `messaging_channel = "discord"`. Re-enabling it forces `min/max_instances = 1` and always-on CPU (~$58/month, #168). `DISCORD_*` secrets are still created by terraform. Your call whether this is retired or a fallback you want kept |
 
+## Core
+
+Shared by every feature above. A file that belongs to all of them is listed here so
+that it does not have to be claimed by one.
+
+| Feature | Status | Paths | Decided | Notes |
+|---|---|---|---|---|
+| Application shell and settings | `live` | `app/main.py`, `app/config.py`, `app/models/schemas.py` | proposed | FastAPI app, lifespan and the `Settings` class. `app/config.py` also carries the `twilio_*` and Discord settings named in their rows |
+| Reservation-provider interface | `live` | `app/providers/base.py` | proposed | |
+| Time-zone helpers | `live` | `app/utils/timezone.py` | proposed | |
+
 ## Removed
 
 A feature moves here when its code is deleted: the removal PR moves the row out of
@@ -85,10 +96,10 @@ one of them is a question for the maintainer, not a finding that it is dead.
 
 ## Not in this table
 
-Everything under `terraform/`, `scripts/`, `tests/` and `operations/` is outside
-the Routine's `app/` check. A row is missing for any `app/` file the tables above
-do not name; that is intended, and the Routine will file an issue asking for it to
-be classified.
+Everything under `scripts/`, `tests/` and `operations/` is outside the manifest, and
+so is `terraform/` except where a row names a file there as part of a feature.
 
-Known gap: `app/models/schemas.py` and `app/config.py` are shared by every
-feature and listed only where one feature clearly owns a part of them.
+The tables are checked by `tests/test_feature_manifest.py`: every `app/` and
+`terraform/` path a row names must exist, and every `app/**/*.py` file must be named
+by a row or sit under a directory a row names. A PR that adds, retires or deletes a
+feature updates this file in the same change (`CLAUDE.md`, "Writing conventions").

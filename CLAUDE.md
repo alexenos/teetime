@@ -109,6 +109,10 @@ environment that sets `CI` but has no browser.
 
 Measurement, and the Routines that run on a schedule: `operations/`.
 
+- `operations/features.md` � the feature manifest the tech-debt Routine judges
+  legacy code against. A PR that adds, retires or deletes a feature updates it in
+  the same change; `tests/test_feature_manifest.py` fails if an `app/` file belongs
+  to no row or a named path is gone
 - `operations/scoreboard.md` — three metrics and their definitions. Published as
   a page at `alexenos.github.io/teetime/scoreboard.html` when the Routine exists.
 - `operations/routines/` — one file per Routine, including its prompt and what it

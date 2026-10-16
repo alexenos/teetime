@@ -316,6 +316,9 @@ git checkout -b fix/<short-slug> && git push -u origin fix/<short-slug>
 - **State the accepted costs.** Regressions in latency, UX, or reliability that
   the change knowingly buys. A reviewer who finds one you didn't name assumes
   you missed it.
+- **Update `operations/features.md`** if the PR adds, retires or deletes a feature
+  (a new module under `app/`, a switched-off channel, a removal). The manifest
+  test fails the PR otherwise; a removal also moves the row to the Removed table.
 - **Flag what you could not verify** (e.g. terraform CLI is not installed
   locally, so `validate` never runs here).
 - **Call out changed-not-added tests** and why the old assertion encoded the
