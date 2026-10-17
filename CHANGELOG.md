@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   20ms to +1175. Twelve won races on seven mornings put the gate between about
   +815 and +1010, three Friday wins came on the first ask (the gate there is only
   known to be at or before +815), and the +1055..+1175 tail never won. The new
-  plan gives every morning a 10ms gate bracket and puts a refusal below every
-  gate seen. It is a measuring plan: the member count can come down once the
+  plan gives a gate inside +745..+1015 a 10ms bracket, with a refusal below every
+  gate seen so far; a gate outside that range is not bracketed (before +745 it
+  is an upper bound again, after +1015 the serial walk takes over). Whether
+  later gates stay inside the range is a hypothesis. It is a measuring plan: the member count can come down once the
   brackets settle. Still 28 members. Five defaults change in both
   `app/config.py` and `terraform/variables.tf`.
 

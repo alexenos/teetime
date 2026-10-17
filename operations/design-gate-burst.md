@@ -45,7 +45,7 @@ The burst is one plan, every weekday, every task:
 
 | part | members | spacing | purpose |
 |---|---|---|---|
-| +745 .. +1015 | 28 | 10 ms | measure: every morning gets a gate bracket 10 ms wide, wherever the gate falls |
+| +745 .. +1015 | 28 | 10 ms | measure: a gate that falls inside this range gets a bracket 10 ms wide |
 
 *Since 2026-10-17.* Until 2026-10-16 (twelve won races, seven mornings) the plan
 was 8 members every 20 ms from +815, 13 every 5 ms from +975 to +1035 and 7 every
@@ -57,7 +57,15 @@ has won (+815, three Friday races), the top covers the latest bracket seen
 ((+1005, +1010]), and the old +1055 .. +1175 tail never won. It is a measuring
 plan: once enough mornings bracket the gate, the span can be narrowed and the
 member count reduced. Finer than 10 ms is not worth a member while the clock
-offset behind each morning's lead is only measured to about +-20 ms. The serial fallback walk runs after the burst,
+offset behind each morning's lead is only measured to about +-20 ms.
+
+What this establishes and what it does not. Established, from twelve races: no
+gate has been bracketed outside +815 .. +1010, so the range covers every gate
+seen. Hypothesis: that it will keep doing so. A gate before +745 would be
+granted on the first ask with no refusal before it (an upper bound only, as
+the Friday first-ask wins were); a gate after +1015 would leave the burst with
+no grant, and the serial walk would take over. Either outcome is a signal to
+move the range, not a bracket. The serial fallback walk runs after the burst,
 unchanged. Each member is sent at its instant minus the day's clock-offset lead,
 as before.
 
