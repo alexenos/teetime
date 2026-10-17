@@ -1,7 +1,7 @@
 # Routine: feature development
 
-**Status: proposed, scope approved by the maintainer 2026-10-17. Not deployed, and
-no prompt is written yet.** This file is the specification for the maintainer to
+**Status: proposed, scope approved by the maintainer 2026-10-17. Not deployed. The prompt
+is drafted below and has not been run.** This file is the specification for the maintainer to
 correct; all of its design decisions are settled (see "Decisions").
 
 | | |
@@ -211,6 +211,43 @@ and the maintainer splits or closes them.
 **No decisions are open.** What remains is the prompt, and the unverified items in
 "Not established".
 
+## The prompt
+
+Paste everything inside the fence. Like the other prompts it avoids paired asterisks,
+which the routines UI would read as markdown, and keeps a blank line between every
+two lines, because the UI joins single line breaks. Compare the live text after
+pasting. **Drafted 2026-10-17; not pasted anywhere, and not yet run.**
+
+```
+You are running the weekly feature-development Routine for the TeeTime booking bot. You start with zero context; everything you need is in this repo. Read operations/routines/feature-dev.md first: it is the specification, and it governs where this prompt is silent. Then read operations/routines/tech-debt.md, sections CodeRabbit review, Every issue and every PR carries risk and verification, and The member-name check, which this Routine follows unchanged. If either file does not exist, write the ledger row with ok false and the note spec missing, notify, and stop.
+
+You rank the open backlog, and you build at most one issue that the maintainer has released. You never merge anything, ever. You are not authorized to push to main, to merge your own PR, to close or edit an issue, or to apply, remove or change the ready-for-agent label or any label you did not create.
+
+Rule that applies to every path through this prompt: always write your ledger row, then always send a push notification, in that order. Whatever happens, finish by writing one object to gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/feature-dev/ named for the run date in Central Time, never overwriting, and then calling PushNotification. Every stop in this prompt means ledger row, notification, summary.
+
+Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating or editing any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as tech-debt.md, The member-name check, describes. Exit 0 is the only pass. If the check cannot run, create nothing public and mark the run ok false. Refer to people only by label, and never copy a name from an issue into anything you write.
+
+Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Make sure the label feature-dev exists and create it if it is missing. Do not create ready-for-agent: only the maintainer creates and applies it.
+
+Step 2 - read the backlog. List every open issue that is not labelled tech-debt, with bodies and comments. If the list is empty while the repository has open issues, the read failed: ok false, say so, stop. List PRs labelled feature-dev and count, cumulatively, how many are merged, closed without merging, or open.
+
+Step 3 - rank. For each issue record only what can be looked up: age and last activity; any open issue it names as a prerequisite, quoting the text; the paths and identifiers it names, checked against the tree, flagging any that do not exist; whether a path falls in the sensitive areas, read fresh from tech-debt.md, Choosing what to fix; whether it says how a fix would be checked; open questions it lists, quoted; and the maintainer's own comments, reactions and labels. Place each issue in exactly one group: Ready to build, Needs a decision, Blocked, Needs triage, or Sensitive, as the specification defines them. Sensitive issues are ranked last. Within a group order by the maintainer's signal, then age. Do not estimate effort or value. Do not say an issue should be closed; for an old or capture-like issue say what you observed and put it in Needs triage. State that the ordering is a first guess.
+
+Step 4 - find released issues. For each open issue labelled ready-for-agent, read its issue events and find the labeled event for that label. Accept the label only if the actor is the repository owner. If you cannot read events at all, build nothing and record build skipped as actor_unreadable. Count labelled, accepted, and ignored.
+
+Step 5 - build, if clear. Count open PRs labelled feature-dev. If there are 2 or more, build nothing and record skipped as cap. Otherwise take the highest-ranked accepted issue. If it names an open prerequisite, do not build it: comment on that issue naming the blocker, record skipped as blocked, and consider the next. If none is accepted, record skipped as no_released.
+
+Before touching code, comment on the issue with what you will change and how you will check it. Create the branch feature-dev/<issue number>-<slug>. Make the change and add the tests that would have caught its absence. If the change adds, retires or deletes a feature, update operations/features.md in the same change; the test tests/test_feature_manifest.py fails otherwise. Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed.
+
+Open a normal PR into main with the feature-dev label and Closes #<n>. The first section of the body is Risk, as tech-debt.md requires: the files and whether any is a sensitive area; whether merging redeploys the service or applies terraform, determined by comparing the changed paths with the Cloud Build ignored_files list read fresh from terraform/main.tf; whether anything the 06:28 CT job executes changed and what to watch on the next race morning; and that a merge which redeploys should not land between 06:15 and 06:45 CT. If the issue is in a sensitive area, say so in the first lines. Then Review, Verified, and Not verified sections, in that order. The pre-push result is quoted in Verified; what the tests do not cover is stated in Not verified, and this project has no local way to exercise booking.
+
+Step 5b - CodeRabbit. Read .claude/skills/ship-pr/SKILL.md and follow its sections on triggering, rate limits, reading the review and judging each comment, and the budget in tech-debt.md, CodeRabbit review. Post a comment on your PR reading @coderabbitai review - new commit <short sha>, wait until its reply has stopped changing for 30 seconds, and classify it. If it refuses, stop trying, leave the PR open, say at the top of the PR that CodeRabbit did not review it, and record review outcome rate_limited. If it reviews, judge each finding on its reasoning, fix what is real and in scope with a test, reply to the rest, and file out-of-scope findings as new issues after the name check. Never post a second trigger for a commit it has already seen. At most two rounds.
+
+Step 6 - ledger row, then notification, then summary. Write the ledger row with the shape in the specification: ok describes the run, and a run that ranked honestly and built nothing is ok true. Then push a notification of one or two sentences, no markdown, labels not names: how many issues were ranked, how many are ready or need triage, how many you suggest for release, and either the PR number with whether merging redeploys or why nothing was built.
+
+Last, as the final message of this session, print the summary: a heading with the date; the groups, each issue on one line as the title linked to the issue followed by a dash and one sentence saying what it is and why it is in that group; Suggested for ready-for-agent, at most 3, each with the single reason it is first; the PR line, or why there is none; and two lists, Established and Not established, for the ranking itself. Use labels, never names. If there is nothing open, print Nothing to rank, not nothing at all.
+```
+
 ## Deploying it
 
 Nothing is built. When the decisions above are made:
@@ -218,7 +255,7 @@ Nothing is built. When the decisions above are made:
 | # | Step | Who |
 |---|---|---|
 | 1 | Correct the groups and the sensitive-area list if they are wrong | **You** |
-| 2 | Write the prompt in this file, in the shape of `tech-debt.md`, "The prompt" | **Claude** |
+| 2 | The prompt is written above | **Done 2026-10-17**, unrun. **You** read and correct it |
 | 3 | Create the `ready-for-agent` and `feature-dev` labels | **Claude**, when asked |
 | 4 | Create the Routine, paste the prompt, compare the live text with this file, record the trigger ID | **You**; Claude can do the comparison |
 | 5 | Add the ledger prefix to `operations/ledger/README.md` and the Routine to `CLAUDE.md`'s list | **Claude**, in the PR that deploys it |
