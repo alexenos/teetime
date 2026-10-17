@@ -2,7 +2,7 @@
 
 **Status: proposed, scope approved by the maintainer 2026-10-17. Not deployed, and
 no prompt is written yet.** This file is the specification for the maintainer to
-correct. The prompt is written once the open decisions at the bottom are settled.
+correct; all of its design decisions are settled (see "Decisions").
 
 | | |
 |---|---|
@@ -34,8 +34,8 @@ how the maintainer says "build this one". The Routine never applies, removes or
 edits it, and an issue without it is ranked and never built. The label is the whole
 of the maintainer's control over the build queue, so it has to mean one thing.
 
-**Who may apply it is a question this spec cannot fully answer from the
-repository.** The intent is that only the maintainer does. The Routine checks the
+**Who may apply it:** only the maintainer, settled 2026-10-17. What the repository
+cannot answer is whether that can be enforced. The Routine checks the
 issue's `labeled` events for the actor, and ignores the label when the actor is
 anyone else. But Routine sessions probably act through the maintainer's own GitHub
 credentials, which would make the Routine and the maintainer the same actor to
@@ -200,18 +200,16 @@ markdown, labels not names. For example:
 - **How many of the 50 are features.** The count is of all open issues. The split
   between features, bugs, decisions and stale items has not been made.
 
-## Decisions for the maintainer
+## Decisions
 
 Settled 2026-10-17: build is in scope from the start; sensitive issues are buildable
-and ranked last; weekly, Sunday, 08:00 CT.
+and ranked last; weekly, Sunday, 08:00 CT; only the maintainer's `ready-for-agent`
+counts, with no collaborator exception; and issues that are not tasks are not
+excluded by a label. They land in *Needs triage* with the observation behind them,
+and the maintainer splits or closes them.
 
-1. **Who may apply `ready-for-agent`.** Presumably only you. Say if a collaborator
-   should also count. See the caveat above on whether the check can tell you from
-   the Routine.
-2. **What to do with issues that are not tasks**, such as one that bundles several
-   problems under screenshots, or one holding pasted bot output. The spec has no
-   exclude list; they land in *Needs triage* with the observation behind it, and you
-   split or close them. Say if you would rather they were labelled out of the read.
+**No decisions are open.** What remains is the prompt, and the unverified items in
+"Not established".
 
 ## Deploying it
 
@@ -219,7 +217,7 @@ Nothing is built. When the decisions above are made:
 
 | # | Step | Who |
 |---|---|---|
-| 1 | Answer the two decisions; correct the groups and the sensitive-area list if they are wrong | **You** |
+| 1 | Correct the groups and the sensitive-area list if they are wrong | **You** |
 | 2 | Write the prompt in this file, in the shape of `tech-debt.md`, "The prompt" | **Claude** |
 | 3 | Create the `ready-for-agent` and `feature-dev` labels | **Claude**, when asked |
 | 4 | Create the Routine, paste the prompt, compare the live text with this file, record the trigger ID | **You**; Claude can do the comparison |
