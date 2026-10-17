@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The opening burst is one even grid, every 10ms from +745 to +1015.** It was
+  8 members every 20ms from +815, 13 every 5ms from +975 to +1035, and 7 every
+  20ms to +1175. Twelve won races on seven mornings put the gate between about
+  +815 and +1010, three Friday wins came on the first ask (the gate there is only
+  known to be at or before +815), and the +1055..+1175 tail never won. The new
+  plan gives every morning a 10ms gate bracket and puts a refusal below every
+  gate seen. It is a measuring plan: the member count can come down once the
+  brackets settle. Still 28 members. Five defaults change in both
+  `app/config.py` and `terraform/variables.tf`.
+
 ### Added
 
 - **Members get a pseudonym when they connect a login, and logs use it (#256).**

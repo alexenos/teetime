@@ -45,19 +45,27 @@ The burst is one plan, every weekday, every task:
 
 | part | members | spacing | purpose |
 |---|---|---|---|
-| +815 .. +955 | 8 | 20 ms | search: where does the gate really open? |
-| +975 .. +1035 | 13 | 5 ms | the race: some member lands within 5 ms after a gate anywhere in here |
-| +1055 .. +1175 | 7 | 20 ms | a gate later than the dense part |
+| +745 .. +1015 | 28 | 10 ms | measure: every morning gets a gate bracket 10 ms wide, wherever the gate falls |
 
-28 members, all for the target. The last member is +1175 because 20 ms steps
-from +1035 do not land on +1185. The serial fallback walk runs after the burst,
+*Since 2026-10-17.* Until 2026-10-16 (twelve won races, seven mornings) the plan
+was 8 members every 20 ms from +815, 13 every 5 ms from +975 to +1035 and 7 every
+20 ms to +1175.
+
+28 members, all for the target. The grid is even on the aim (+1005), so it
+reaches +1015 and not +1010. The floor is 70 ms under the lowest first ask that
+has won (+815, three Friday races), the top covers the latest bracket seen
+((+1005, +1010]), and the old +1055 .. +1175 tail never won. It is a measuring
+plan: once enough mornings bracket the gate, the span can be narrowed and the
+member count reduced. Finer than 10 ms is not worth a member while the clock
+offset behind each morning's lead is only measured to about +-20 ms. The serial fallback walk runs after the burst,
 unchanged. Each member is sent at its instant minus the day's clock-offset lead,
 as before.
 
 The shape is five settings around the aim (`walden_burst_start_before_aim_ms`
-190, `walden_burst_end_after_aim_ms` 180, `walden_burst_dense_half_width_ms` 30,
-`walden_burst_dense_spacing_ms` 5, `walden_burst_sparse_spacing_ms` 20), so the
-whole plan moves with the gate setting. `burst_plan_offsets_ms()` in
+260, `walden_burst_end_after_aim_ms` 10, `walden_burst_dense_half_width_ms` 260,
+`walden_burst_dense_spacing_ms` 10, `walden_burst_sparse_spacing_ms` 20), so the
+whole plan moves with the gate setting. The dense part is as wide as the whole
+span, so the sparse spacing never applies. `burst_plan_offsets_ms()` in
 `app/config.py` turns them into the member list.
 
 ## Connections opened ahead of time
