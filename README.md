@@ -1,17 +1,30 @@
 # TeeTime - Golf Reservation Assistant
 
 An LLM-powered application that helps reserve golf tee times at Northgate Country Club by
-message - over Telegram, Discord, or SMS.
+message. Telegram is the default channel; Discord and Twilio SMS are deprecated (see
+`operations/features.md`).
 
 > **Note**: The booking platform is waldengolf.com (Walden Golf manages multiple clubs), but this application is specifically configured for Northgate Country Club.
 
 ## Features
 
-- Messaging interface over Telegram, Discord and Twilio SMS - which can run
-  concurrently, each conversation answered on the channel it started from
+- Messaging interface over Telegram. Discord and Twilio SMS are still wired in but
+  deprecated; the channels can run concurrently, each conversation answered on the
+  channel it started from
 - Natural language understanding via Google Gemini API
-- Automated booking at reservation open time (6:30am CT, 7 days in advance)
-- Confirmation and status notifications
+- Automated booking at reservation open time (6:30am CT, 7 days in advance), raced by
+  a Cloud Run job that fires at 06:28 CT and books over direct HTTP, falling back to a
+  browser
+- Each member books under their own Walden login, which they enter themselves on a
+  setup page and which is stored encrypted (Cloud KMS). Anyone in the members'
+  Telegram group may use the bot; an admin can book on a member's behalf
+- Confirmation and status notifications, with the club's reason when a time is blocked
+- A tee-sheet observer that snapshots the sheet each morning, used to confirm a
+  requested time exists before the race
+- Member names are replaced by labels in logs, and stored data is purged on a
+  retention schedule
+
+`operations/features.md` is the full, checked list of features and their status.
 
 ## Architecture
 
@@ -23,7 +36,9 @@ message - over Telegram, Discord, or SMS.
   over that same one. Telegram needs no always-on instance, so the service can
   scale to zero - see `operations/telegram-setup.md`.
 - **LLM**: Google Gemini API with function calling
-- **Scheduling**: Cloud Run Jobs + Cloud Scheduler
+- **Scheduling**: Cloud Run Jobs + Cloud Scheduler. The racer job (`teetime-racer`)
+  runs the 06:28 CT booking race; the observer job (`teetime-observer`) snapshots the
+  tee sheet before it
 - **Database**: Cloud SQL (Postgres) / SQLite for local dev
 
 ## Local Development
@@ -76,8 +91,13 @@ poetry run mypy app
 
 - `GET /` - Service info
 - `GET /health` - Health check
-- `POST /webhooks/twilio/sms` - Twilio SMS webhook
 - `POST /webhooks/telegram` - Telegram bot webhook
+- `POST /webhooks/twilio/sms` - Twilio SMS webhook (deprecated)
+- `POST /webhooks/twilio/status` - Twilio delivery status callback (deprecated)
+- `POST /jobs/execute-due-bookings` - Run due bookings
+- `POST /jobs/purge-expired` - Apply the data-retention purge
+- `GET`/`POST` the member setup page, where a member enters their own Walden login
+  (path defined by `SETUP_PATH` in `app/services/member_setup.py`; not in the OpenAPI schema)
 - `GET /bookings` - List bookings
 - `POST /bookings` - Create booking
 - `GET /bookings/{id}` - Get booking details
@@ -193,7 +213,7 @@ After Terraform creates the infrastructure, trigger the first build:
 gcloud builds submit --config=cloudbuild.yaml .
 ```
 
-### Configure Twilio Webhook
+### Configure Twilio Webhook (deprecated)
 
 Get the Cloud Run URL from Terraform output and configure in Twilio:
 
@@ -221,6 +241,8 @@ The Terraform configuration manages:
 - Artifact Registry repository
 - Secret Manager secrets (containers only)
 - Cloud Scheduler job for booking execution
+- The racer and observer Cloud Run jobs, with their schedules
+- A Cloud KMS key for member login encryption
 - IAM service accounts and bindings
 
 ## License
