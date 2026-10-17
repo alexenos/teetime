@@ -92,19 +92,21 @@ decided.
 | `deprecated` | being retired; files an issue if its paths still exist, no fix |
 | `removable` | maintainer has decided it can go; **eligible for a removal PR** |
 | `planned` | not built yet; code for it is a question, not a finding |
+| `removed` | code deleted on purpose; the row sits in the manifest's Removed table. Files an issue only if code reappears at one of its paths, as a question, not a claim |
 
 The Routine files an issue when:
 
-- a manifest path no longer exists (the manifest is stale, a `td:docs-drift` finding)
+- a manifest path no longer exists (the manifest is stale, a `td:docs-drift` finding). Paths in the Removed table are exempt: they are expected to be gone
 - a `deprecated` or `removable` feature still has code
 - code under `app/` belongs to no manifest feature, **as a request to classify it,
   never as a claim that it is dead**. "No callers found" is stated as a hypothesis
   with the search that produced it
 
 It never decides on its own that a feature is abandoned and never removes
-anything the manifest does not mark `removable`. The manifest does not exist yet.
-Until it does, the category records `ran: false, reason: "no_manifest"` and is
-skipped. That is **not** a failed check and does not make the run `ok: false`.
+anything the manifest does not mark `removable`. The manifest was drafted on
+2026-10-15 (#287); a row whose Decided cell says `proposed` is a draft awaiting the
+maintainer, not a decision. Were the file absent, the category would record
+`ran: false, reason: "no_manifest"` and be skipped. That is **not** a failed check and does not make the run `ok: false`.
 
 Candidates the maintainer may want to classify first, from the file names alone.
 These are hypotheses, not findings: the Discord provider and gateway, the Twilio
@@ -510,5 +512,5 @@ before the first scheduled fire, Saturday 2026-10-10 04:00 CDT (09:00Z).**
 | 6 | Read access to `MEMBER_PSEUDONYM_LABELS` from the Routine's environment | **You** (confirmed by you) |
 | 7 | The Routine's GitHub access must be able to create issues and labels, push branches and open PRs. The race report only needs to push and open PRs, so this is the one permission it may not already have | **You** |
 | 8 | Labels | Automatic: the Routine creates any that are missing at the start of each run |
-| 9 | `operations/features.md`, the feature manifest. Without it `td:legacy-feature` is skipped, which is allowed, so this does not block deploying | **You** decide each status. Claude can draft the table for you to correct |
+| 9 | `operations/features.md`, the feature manifest. Without it `td:legacy-feature` is skipped, which is allowed, so this does not block deploying | **Drafted 2026-10-15 (#287).** **You** decide each status: every row says `proposed` in its Decided column until you replace it with a date |
 | 10 | Watch the first run, Saturday 2026-10-10 at 04:00 CDT. It is the first test of: GitHub write access, the 15-issue cap, the name check, the session summary, and whether a Routine session can schedule a wake-up for a CodeRabbit retry | **You** (Claude can review the result) |
