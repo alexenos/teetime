@@ -96,8 +96,8 @@ poetry run mypy app
 - `POST /webhooks/twilio/status` - Twilio delivery status callback (deprecated)
 - `POST /jobs/execute-due-bookings` - Run due bookings
 - `POST /jobs/purge-expired` - Apply the data-retention purge
-- `GET`/`POST` the member setup page, where a member enters their own Walden login
-  (path defined by `SETUP_PATH` in `app/services/member_setup.py`; not in the OpenAPI schema)
+- `GET`/`POST /onboarding/walden` - Member setup page, where a member enters their own
+  Walden login (not in the OpenAPI schema)
 - `GET /bookings` - List bookings
 - `POST /bookings` - Create booking
 - `GET /bookings/{id}` - Get booking details
