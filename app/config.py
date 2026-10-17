@@ -315,8 +315,7 @@ class Settings(BaseSettings):
     #
     # 5 since 2026-09-25, making the aim +1005 against a +1000 gate. The margin
     # is not what covers the probe's error any more: the burst's dense part
-    # (walden_burst_dense_half_width_ms) puts a member every 5ms within +-30ms
-    # of the aim. History worth keeping: #173 set this file to 0 on 2026-09-04,
+    # (walden_burst_dense_half_width_ms) spaces members evenly around the aim. History worth keeping: #173 set this file to 0 on 2026-09-04,
     # but terraform's default stayed 30 and terraform is what deploys, so every
     # race from then until 2026-09-25 aimed at +1030. Keep the two defaults equal.
     walden_reserve_aim_margin_ms: int = 5
@@ -469,25 +468,32 @@ class Settings(BaseSettings):
     # walden_burst_end_after_aim_ms after it. With the defaults and a +1005 aim,
     # in ms past 06:30:00:
     #
-    #   815, 835, ... 955       every 20ms   8 members
-    #   975, 980, ... 1035      every 5ms   13 members
-    #   1055, 1075, ... 1175    every 20ms   7 members
+    #   745, 755, ... 1015      every 10ms  28 members
     #
-    # 28 members. The sparse steps are laid outward from the dense part, so the
-    # last member is +1175: one more 20ms step would pass +1185.
+    # The dense part is as wide as the whole span (+-260ms), so the sparse
+    # spacing never applies and the plan is one even grid. The aim is on it
+    # (+1005); the grid reaches +1015 because the span below the aim is 260ms
+    # and the span above it is 10ms.
     #
-    # Why this shape, since 2026-09-25. Nothing had ever been written to the wire
-    # between +817 (refused, 08-12) and about +1014 (granted, 09-18), so where
-    # inside that span the gate opens had never been measured. The sparse part
-    # before the aim finds it, every weekday alike; the dense part is the race,
-    # so that wherever in +975..+1035 the gate falls, some member arrives within
-    # 5ms after it; the sparse part after the aim covers a later gate. Every
-    # member asks for the target, and the serial fallback walk runs after the
-    # burst as before. See operations/design-gate-burst.md.
-    walden_burst_start_before_aim_ms: int = 190
-    walden_burst_end_after_aim_ms: int = 180
-    walden_burst_dense_half_width_ms: int = 30
-    walden_burst_dense_spacing_ms: int = 5
+    # Why this shape, since 2026-10-17. This is a measuring plan: the aim is to
+    # find where the gate opens and how much it moves, so that the burst can
+    # later be made smaller. Twelve won races on seven mornings put
+    # the gate anywhere from about +815 to +1010, and three Friday wins came on
+    # the very first ask (+815), so the gate on those mornings is only known to
+    # be at or before it. An even 10ms grid gives every morning a bracket of the
+    # same width wherever the gate falls. The floor, +745, sits 70ms under the
+    # lowest first ask, so a refusal precedes every gate seen so far; the top,
+    # +1015, covers the latest bracket (+1005, +1010]. The old +1055..+1175 tail
+    # never won in twelve races. Finer than 10ms is not worth a member: the
+    # clock offset behind each morning's lead is measured to about +-20ms.
+    # Every member asks for the target, and the serial fallback walk runs after
+    # the burst as before. See operations/design-gate-burst.md. The previous
+    # shape (815..975 every 20ms, 975..1035 every 5ms, 1055..1175 every 20ms)
+    # was start 190, end 180, dense half-width 30, dense 5ms, sparse 20ms.
+    walden_burst_start_before_aim_ms: int = 260
+    walden_burst_end_after_aim_ms: int = 10
+    walden_burst_dense_half_width_ms: int = 260
+    walden_burst_dense_spacing_ms: int = 10
     walden_burst_sparse_spacing_ms: int = 20
 
     # An explicit burst plan as comma-separated ms around the aim (negative is

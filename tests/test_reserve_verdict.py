@@ -189,17 +189,13 @@ class TestSweepLadder:
         offsets = config.walden_burst_offsets_ms()
         aim_ms = config.walden_window_opens_offset_ms + config.walden_reserve_aim_margin_ms
         plan = [aim_ms + offset for offset in offsets]
-        # The plan exactly as it was specified on 2026-09-25, in ms past
-        # 06:30:00: from +815 every 20ms to +975, every 5ms to +1035, then every
-        # 20ms again out to +1185 - whose last step lands on +1175.
-        assert plan == (
-            list(range(815, 975, 20)) + list(range(975, 1036, 5)) + list(range(1055, 1186, 20))
-        )
+        # The plan as it has been since 2026-10-17, in ms past 06:30:00: one
+        # even grid every 10ms from +745 to +1015. It was 815..975 every 20ms,
+        # 975..1035 every 5ms and 1055..1175 every 20ms from 2026-09-25 to
+        # 2026-10-16. The grid is laid on the aim, so +1005 is one of the members.
+        assert plan == list(range(745, 1016, 10))
         assert len(plan) == 28
-        # The dense part is +-30ms around the aim, one member every 5ms, and the
-        # aim itself is one of them.
-        dense = [offset for offset in offsets if -30 <= offset <= 30]
-        assert dense == list(range(-30, 31, 5))
+        assert aim_ms in plan
         # Every weekday the same: nothing in the plan knows what day it is.
         # Target-only by default (see operations/race-reports/2026-09-04-evening.md):
         # a fallback interleaved into the burst shares the target's ViewState, and
@@ -222,9 +218,9 @@ class TestSweepLadder:
         plan = [aim_ms + offset for offset in config.walden_burst_offsets_ms()]
 
         assert aim_ms == 975
-        assert plan[0] == 785
-        assert plan[-1] == 1145
-        assert [p for p in plan if 945 <= p <= 1005] == list(range(945, 1006, 5))
+        assert plan[0] == 715
+        assert plan[-1] == 985
+        assert plan == list(range(715, 986, 10))
 
     def test_burst_target_only_stays_coupled_to_a_longer_offset_list(
         self, monkeypatch: pytest.MonkeyPatch

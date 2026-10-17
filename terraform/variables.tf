@@ -485,9 +485,9 @@ variable "walden_reserve_aim_margin_ms" {
 # default equal to its counterpart in app/config.py.
 
 variable "walden_burst_start_before_aim_ms" {
-  description = "How far before the aim the burst's first member is due: 190 puts it at +815 against a +1005 aim. The span below the dense part is where the gate is searched for."
+  description = "How far before the aim the burst's first member is due: 260 puts it at +745 against a +1005 aim, 70ms under the lowest first ask that has won (+815). The span below the aim is where the gate is searched for."
   type        = number
-  default     = 190
+  default     = 260
 
   validation {
     condition     = var.walden_burst_start_before_aim_ms == floor(var.walden_burst_start_before_aim_ms) && var.walden_burst_start_before_aim_ms >= 0 && var.walden_burst_start_before_aim_ms <= 1000
@@ -496,9 +496,9 @@ variable "walden_burst_start_before_aim_ms" {
 }
 
 variable "walden_burst_end_after_aim_ms" {
-  description = "How far after the aim the burst may reach: 180 allows members up to +1185 against a +1005 aim (the last 20ms step lands on +1175). Covers a gate later than the dense part."
+  description = "How far after the aim the burst may reach: 10 allows members up to +1015 against a +1005 aim, covering the latest gate bracket seen (+1005, +1010]. The old +1055..+1175 tail never won in twelve races."
   type        = number
-  default     = 180
+  default     = 10
 
   validation {
     condition     = var.walden_burst_end_after_aim_ms == floor(var.walden_burst_end_after_aim_ms) && var.walden_burst_end_after_aim_ms >= 0 && var.walden_burst_end_after_aim_ms <= 3000
@@ -507,9 +507,9 @@ variable "walden_burst_end_after_aim_ms" {
 }
 
 variable "walden_burst_dense_half_width_ms" {
-  description = "Half-width of the burst's dense part around the aim: 30 puts dense members from +975 to +1035 against a +1005 aim. Wherever the gate falls inside it, some member arrives within one dense spacing after it."
+  description = "Half-width of the burst's dense part around the aim: 260 makes the dense part as wide as the whole span (+745 to +1015 against a +1005 aim, clipped by the end above), so the burst is one even grid. Wherever the gate falls inside it, some member arrives within one dense spacing after it."
   type        = number
-  default     = 30
+  default     = 260
 
   validation {
     condition     = var.walden_burst_dense_half_width_ms == floor(var.walden_burst_dense_half_width_ms) && var.walden_burst_dense_half_width_ms >= 0 && var.walden_burst_dense_half_width_ms <= 500
@@ -518,9 +518,9 @@ variable "walden_burst_dense_half_width_ms" {
 }
 
 variable "walden_burst_dense_spacing_ms" {
-  description = "Spacing of the burst's dense part, and so how far after the gate its first member can land at worst."
+  description = "Spacing of the burst's dense part, and so how far after the gate its first member can land at worst. 10 gives every morning a gate bracket 10ms wide; the clock offset behind each morning's lead is only measured to about +-20ms, so finer is not worth a member."
   type        = number
-  default     = 5
+  default     = 10
 
   validation {
     condition     = var.walden_burst_dense_spacing_ms == floor(var.walden_burst_dense_spacing_ms) && var.walden_burst_dense_spacing_ms >= 1 && var.walden_burst_dense_spacing_ms <= 100
@@ -529,7 +529,7 @@ variable "walden_burst_dense_spacing_ms" {
 }
 
 variable "walden_burst_sparse_spacing_ms" {
-  description = "Spacing of the burst outside its dense part, stepped outward from the dense part's edges."
+  description = "Spacing of the burst outside its dense part, stepped outward from the dense part's edges. Unused while the dense part spans the whole burst."
   type        = number
   default     = 20
 
