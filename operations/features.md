@@ -19,8 +19,8 @@ the maintainer's word only once a date replaces `proposed`.
 | `planned` | code for it is a question, not a finding |
 | `removed` | lives in the Removed table, not the feature tables; files an issue if code reappears at its paths |
 
-No feature row below is `removable`. Two are proposed `deprecated`, and what would make
-them `removable` is written in their notes.
+No feature row below is `removable`. Two are `deprecated` (decided 2026-10-15), and what
+would make them `removable` is written in their notes.
 
 ## How the draft was made, and what it does not establish
 
@@ -32,7 +32,7 @@ Established, by reading `app/` and `terraform/` on 2026-10-15:
 
 **Not established:** anything about production use. No log was read. "Live" below
 means *wired in and on by default*, not *exercised last week*. The two features
-proposed `deprecated` are inferred from the terraform default
+marked `deprecated` rest on the terraform default
 (`messaging_channel = "telegram"`) and from open issue #178; whether Discord or
 Twilio is still switched on in the deployed service is unverified, and the
 deployed value can differ from the default (`CLAUDE.md`, "Verify an apply").

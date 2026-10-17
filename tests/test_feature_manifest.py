@@ -43,7 +43,12 @@ def _feature_rows() -> list[tuple[str, list[str]]]:
 
 
 def _declared_paths() -> set[str]:
-    return {path for _, paths in _feature_rows() for path in paths}
+    """Every path a feature row names, with a directory always ending in a slash."""
+    return {
+        path + "/" if (_ROOT / path).is_dir() and not path.endswith("/") else path
+        for _, paths in _feature_rows()
+        for path in paths
+    }
 
 
 def test_manifest_has_feature_rows() -> None:
