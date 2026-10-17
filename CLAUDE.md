@@ -125,7 +125,8 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 Three Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
 scoreboard, daily at `30 12 * * *` UTC, and tech debt, Saturdays at `0 9 * * 6`
 UTC (`operations/routines/tech-debt.md`). Tech debt never merges; it files issues
-and opens a PR you merge. The cost Routine is specified and not deployed. The
+and opens a PR you merge. The cost Routine is specified and not deployed. A feature-dev Routine is
+proposed, with no prompt (`operations/routines/feature-dev.md`). The
 race report and scoreboard crons move an hour on 2026-11-01. A prompt pasted into the
 routines UI is read as markdown and loses paired `*`; compare the live text
 after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
