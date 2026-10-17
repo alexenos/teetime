@@ -44,7 +44,7 @@ ruff = "^0.8.0"
 mypy = "^1.13.0"
 types-pytz = "^2025.2.0.20251108"
 beautifulsoup4 = "^4.12.0"
-vulture = "^2.14"
+vulture = "^2.16"
 
 [build-system]
 requires = ["poetry-core"]
@@ -70,17 +70,10 @@ ignore_missing_imports = true
 paths = ["app"]
 min_confidence = 60
 ignore_decorators = ["@router.*", "@field_validator", "@model_validator", "@app.*", "@*.event"]
-# Names a framework calls or reads, so no caller exists in app/: pydantic's
-# class Config, HTMLParser's handle_* overrides, the context-manager __exit__
-# arguments, and discord.Intents attributes. _relocate_reserve is a false
-# positive: _relocate_reserve_in is the one called (#292).
-ignore_names = [
-    "Config", "env_file", "env_file_encoding", "extra",
-    "handle_starttag", "handle_startendtag", "handle_endtag", "handle_data",
-    "exc_type", "exc_val", "exc_tb", "exc_info",
-    "guilds", "dm_messages", "guild_messages", "message_content",
-    "_relocate_reserve",
-]
+# HTMLParser calls handle_* on its subclasses, so no caller exists in app/.
+# Other framework-called names are marked on their own line with `# noqa: V10x`
+# instead, because ignore_names matches a name in every file.
+ignore_names = ["handle_starttag", "handle_startendtag", "handle_endtag", "handle_data"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

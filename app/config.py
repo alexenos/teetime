@@ -902,12 +902,12 @@ class Settings(BaseSettings):
             return max(1, self.walden_reserve_burst_target_only)
         return len(self.walden_burst_offsets_ms())
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    class Config:  # noqa: V102
+        env_file = ".env"  # noqa: V107
+        env_file_encoding = "utf-8"  # noqa: V107
         # .env may carry keys this branch doesn't know about (e.g. settings
         # introduced on another branch); ignore them instead of crashing.
-        extra = "ignore"
+        extra = "ignore"  # noqa: V107
 
 
 settings = Settings()
