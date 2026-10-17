@@ -8,23 +8,17 @@ message. Telegram is the default channel; Discord and Twilio SMS are deprecated 
 
 ## Features
 
-- Messaging interface over Telegram. Discord and Twilio SMS are still wired in but
-  deprecated; the channels can run concurrently, each conversation answered on the
-  channel it started from
-- Natural language understanding via Google Gemini API
-- Automated booking at reservation open time (6:30am CT, 7 days in advance), raced by
-  a Cloud Run job that fires at 06:28 CT and books over direct HTTP, falling back to a
-  browser
+- Book a tee time by message, in plain language, over Telegram. Discord and Twilio SMS
+  are still wired in but deprecated
+- The bot books for you the moment the club opens reservations (6:30am CT, 7 days in
+  advance), so you do not have to be at a screen
+- Before the race, it checks your request against the club's real tee sheet and offers
+  the nearest times that exist, so you agree to a time that can actually be booked
+- Confirmations and status messages, including the club's reason when a time is blocked
 - Each member books under their own Walden login, which they enter themselves on a
-  setup page and which is stored encrypted (Cloud KMS). Anyone in the members'
-  Telegram group may use the bot; an admin can book on a member's behalf
-- Confirmation and status notifications, with the club's reason when a time is blocked
-- A tee-sheet observer that snapshots the sheet each morning, used to confirm a
-  requested time exists before the race
-- Member names are replaced by labels in logs, and stored data is purged on a
-  retention schedule
-
-`operations/features.md` is the full, checked list of features and their status.
+  private setup page. Anyone in the members' Telegram group can use the bot, and an
+  admin can book on a member's behalf
+- Leaving the members' group cancels your pending bookings and deletes your stored login
 
 ## Architecture
 
