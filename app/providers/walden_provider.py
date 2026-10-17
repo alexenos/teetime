@@ -813,9 +813,9 @@ class WaldenGolfProvider(ReservationProvider):
 
     async def __aexit__(
         self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
+        exc_type: type[BaseException] | None,  # noqa: V107
+        exc_val: BaseException | None,  # noqa: V107
+        exc_tb: Any,  # noqa: V107
     ) -> None:
         """Async context manager exit."""
         await self.close()

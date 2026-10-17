@@ -1554,7 +1554,7 @@ class PrimeFacesSession:
         """Enter a context manager that closes the client on exit."""
         return self
 
-    def __exit__(self, *exc_info: object) -> None:
+    def __exit__(self, *exc_info: object) -> None:  # noqa: V107
         """Close the client when leaving the context."""
         self.close()
 
