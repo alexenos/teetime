@@ -216,6 +216,15 @@ both cumulative so a reader diffs consecutive rows. If the maintainer closes mor
 than about half of what this Routine opens, the priorities, the eligibility filter or
 the PR quality is wrong, and that is the signal to change them.
 
+## Shares the DST defect
+
+A cron pinned to UTC drifts against CT twice a year: `0 13 * * 0` is 08:00 CDT and
+07:00 CST. On 2026-11-01 it becomes 07:00 CT, still after the 06:28 CT job and clear
+of tech debt's Saturday, so leaving it is harmless. To keep 08:00 CT, change it to
+`0 14 * * 0` and change the `fires` time in `SCHEDULES`
+(`operations/ledger/derive_scoreboard.py`) to match. Recorded so the set of crons
+needing the 2026-11-01 review is complete.
+
 ## Notification
 
 Every run, since a weekly cadence makes silence ambiguous. One or two sentences, no
