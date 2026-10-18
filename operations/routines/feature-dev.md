@@ -35,9 +35,12 @@ edits it, and an issue without it is ranked and never built. The label is the wh
 of the maintainer's control over the build queue, so it has to mean one thing.
 
 **Who may apply it:** only the maintainer, settled 2026-10-17. What the repository
-cannot answer is whether that can be enforced. The Routine checks the
-issue's `labeled` events for the actor, and ignores the label when the actor is
-anyone else. But Routine sessions probably act through the maintainer's own GitHub
+cannot answer is whether that can be enforced. **The maintainer is the
+repository owner account** (`alexenos`); no other identity counts. The Routine reads
+the issue's `labeled` and `unlabeled` events for `ready-for-agent`. **The latest one
+decides**: the issue is released only if that event is a `labeled` event whose actor
+is the maintainer. A label that was removed, or removed and reapplied by anyone else,
+does not release the issue, whatever an earlier event said. But Routine sessions probably act through the maintainer's own GitHub
 credentials, which would make the Routine and the maintainer the same actor to
 GitHub. In that case the check cannot tell them apart, and the real guarantee is
 the Routine's instruction never to touch the label, not an identity check. **Not
@@ -158,7 +161,7 @@ The values below are invented to show the shape.
 
 ```json
 {"date":"2026-10-25","routine":"feature-dev","ok":true,
- "read":{"open_issues":34,"excluded_tech_debt":4,"with_comments":34},
+ "read":{"total_open":38,"open_issues":34,"excluded_tech_debt":4,"with_comments":34},
  "groups":{"ready":6,"needs_decision":9,"blocked":5,"needs_triage":8,"sensitive":6},
  "suggested":[309,134,276],
  "released":{"labelled":2,"maintainer_applied":2,"ignored_label":0},
@@ -166,9 +169,11 @@ The values below are invented to show the shape.
  "prior":{"suggested_then_labelled":1,"prs_merged":0,"prs_closed_unmerged":0,"prs_open":1}}
 ```
 
-`ok` describes the run, not the ranking. `read.open_issues` of 0 on a backlog that is
-not empty is a failed read, `ok: false`: this repository has been misled by a valid
-zero-row result before. `released.ignored_label` counts issues carrying the label
+`ok` describes the run, not the ranking. `read.open_issues` of 0 is a failed read,
+`ok: false`, only when `read.total_open` shows open issues that are not labelled
+`tech-debt`: this repository has been misled by a valid zero-row result before.
+If every open issue is labelled `tech-debt`, an empty list is correct, and the run
+is `ok: true` with nothing to rank. `released.ignored_label` counts issues carrying the label
 from an actor the Routine would not accept. `build.skipped` is `null` when a PR was
 opened, otherwise one of `no_released`, `blocked`, `cap`, `actor_unreadable`,
 `check_failed`, `error`. Having nothing released is `ok: true`.
@@ -229,11 +234,11 @@ Rule that applies to every path through this prompt: no names. Issues, comments,
 
 Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Make sure the label feature-dev exists and create it if it is missing. Do not create ready-for-agent: only the maintainer creates and applies it.
 
-Step 2 - read the backlog. List every open issue that is not labelled tech-debt, with bodies and comments. If the list is empty while the repository has open issues, the read failed: ok false, say so, stop. List PRs labelled feature-dev and count, cumulatively, how many are merged, closed without merging, or open.
+Step 2 - read the backlog. List every open issue that is not labelled tech-debt, with bodies and comments. Also list all open issues without the filter. If the filtered list is empty while some open issue is not labelled tech-debt, the read failed: ok false, say so, stop. If every open issue is labelled tech-debt, the empty list is correct: rank nothing and continue. List PRs labelled feature-dev and count, cumulatively, how many are merged, closed without merging, or open.
 
 Step 3 - rank. For each issue record only what can be looked up: age and last activity; any open issue it names as a prerequisite, quoting the text; the paths and identifiers it names, checked against the tree, flagging any that do not exist; whether a path falls in the sensitive areas, read fresh from tech-debt.md, Choosing what to fix; whether it says how a fix would be checked; open questions it lists, quoted; and the maintainer's own comments, reactions and labels. Place each issue in exactly one group: Ready to build, Needs a decision, Blocked, Needs triage, or Sensitive, as the specification defines them. Sensitive issues are ranked last. Within a group order by the maintainer's signal, then age. Do not estimate effort or value. Do not say an issue should be closed; for an old or capture-like issue say what you observed and put it in Needs triage. State that the ordering is a first guess.
 
-Step 4 - find released issues. For each open issue labelled ready-for-agent, read its issue events and find the labeled event for that label. Accept the label only if the actor is the repository owner. If you cannot read events at all, build nothing and record build skipped as actor_unreadable. Count labelled, accepted, and ignored.
+Step 4 - find released issues. For each open issue labelled ready-for-agent, read its issue events and take the latest labeled or unlabeled event for that label. The maintainer is the repository owner account and no other identity counts. Accept the issue only if that latest event is a labeled event whose actor is the repository owner; if the label was removed, or removed and reapplied by anyone else, do not accept it. If you cannot read events at all, build nothing and record build skipped as actor_unreadable. Count labelled, accepted, and ignored.
 
 Step 5 - build, if clear. Count open PRs labelled feature-dev. If there are 2 or more, build nothing and record skipped as cap. Otherwise take the highest-ranked accepted issue. If it names an open prerequisite, do not build it: comment on that issue naming the blocker, record skipped as blocked, and consider the next. If none is accepted, record skipped as no_released.
 
