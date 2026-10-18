@@ -28,30 +28,52 @@ need no label:
    the maintainer's priorities, with the reason.
 2. **Build one.** Take the best issue it is *eligible* to build and open a PR.
 
-The controls are: **the priorities file** (what matters, and what to leave alone),
-**the eligibility filter** below (it builds only well-specified work), and **the
+The controls are: **the priorities in this file** ("Choosing what to build": what
+matters, and what to leave alone), **the eligibility filter** below (it builds only well-specified work), and **the
 merge**, which is always the maintainer's. The Routine never merges, exactly as tech
 debt never does.
 
-## The priorities file
+## Choosing what to build
 
-`operations/priorities.md` is the maintainer's prioritization instruction: a short,
-ordered list of what matters most, in plain words, plus a **Hold** list of issues or
-themes the Routine must not build. The maintainer edits it; the Routine only reads
-it. It is the single place to say "this first" or "not that", so there is no label to
-apply and nothing to remember per issue.
+The maintainer's prioritization instruction, kept here the way tech debt keeps
+"Choosing what to fix": in this specification, which the Routine reads from `main` on
+every run. Changing a priority is a change to this file.
 
-How it is used:
+**DRAFT.** A session wrote the themes below on 2026-10-18 from issue titles and
+project notes, not from the maintainer. Rewrite them. Until then the Routine treats
+them as the maintainer's word.
 
-- The Routine matches each issue to the highest-ranked theme it plausibly belongs to
-  and **quotes the sentence of the issue that made it match**. Matching is judgment,
-  so the summary shows the quote and the theme next to every placement. An issue that
+**What matters, in order.** Write each as a sentence or two a stranger could match an
+issue against; the Routine quotes the part of an issue that made it match, so vague
+themes produce vague matches.
+
+1. **Winning the 6:30 race, and never losing a booking silently.** Anything that
+   changes whether a member gets the tee time they asked for, or that leaves a booking
+   stuck or unreported if the service crashes mid-run.
+2. **Members can use the bot without the maintainer.** Joining, connecting a login,
+   leaving, having their data removed, and not needing anyone's help to book.
+3. **Members always know what happened.** Clear confirmations and failure messages,
+   including why a time could not be booked.
+4. **Cheap and boring to run.** Cost, infrastructure checks and anything that makes
+   the deployment safer to change.
+5. **Anything else a member asked for.**
+
+Cleanup (lint suppressions, dead code, stale docs) is the tech-debt Routine's, not
+this one's.
+
+**Hold.** Issues or themes the Routine must not build, whatever their rank. An issue
+on Hold stays ranked and shown; it is only removed from the build set. Closing a
+Routine PR unmerged also stops that issue being rebuilt.
+
+- *(none yet)*
+
+**How the Routine uses it:**
+
+- It matches each issue to the highest-ranked theme it plausibly belongs to and
+  **quotes the sentence of the issue that made it match**. Matching is judgment, so
+  the summary shows the quote and the theme next to every placement. An issue that
   fits no theme ranks last.
-- A **Hold** entry removes an issue from the build set entirely. It is still ranked
-  and shown.
-- **If the file is missing or empty**, the Routine ranks by the maintainer's signal
-  and age, builds nothing, and records `build.skipped: "no_priorities"`. It does not
-  invent priorities.
+- Within a group, order by theme, then the maintainer's signal, then age.
 
 ## Ranking
 
@@ -67,7 +89,7 @@ own Routine), with comments, and for each records only things that can be looked
 | Verification path | whether the body says how a fix would be checked. Absent is a fact, not a verdict |
 | Open questions | decisions the body says are still needed, quoted |
 | Existing PRs | whether an open PR already closes it, or an earlier `feature-dev` PR for it was closed unmerged |
-| Priority theme | the theme from `operations/priorities.md` it matches, with the quoted sentence; or none |
+| Priority theme | the theme from "Choosing what to build" it matches, with the quoted sentence; or none |
 | Maintainer signal | the maintainer's own comments and reactions, which outrank everything above |
 
 From those, the Routine places each issue in one group, with the reason on the same
@@ -81,7 +103,7 @@ line:
 | **Needs triage** | the issue is not yet a task: it has no verification path and names no real file, or it is old with no activity, or it looks like a capture (screenshots, pasted bot output, several problems in one body). Stated as a hypothesis with the observation behind it, never as "this is stale" |
 | **Sensitive** | it touches a sensitive area. Ranked last, but buildable: see below |
 
-Within a group, order by priority theme (the file's order), then the maintainer's
+Within a group, order by priority theme (the order above), then the maintainer's
 signal, then age. **The ordering is labelled a first guess.** It has no evidence
 behind it, and the summary says so until there is some.
 
@@ -106,7 +128,7 @@ It uses labels, never names, because the summary is written into a transcript.
 
 ## Building one issue
 
-**Eligible** means: in *Ready to build*; not on the Hold list; no open PR already
+**Eligible** means: in *Ready to build*; not on the Hold list above; no open PR already
 closing it; and no earlier `feature-dev` PR for it closed unmerged (the maintainer
 already said no). Never one in *Needs a decision*, *Blocked* or *Needs triage*: an
 unattended build from an under-specified issue is the failure this filter exists to
@@ -144,15 +166,15 @@ does. At or over the cap it ranks and builds nothing.
 touching app code redeploys the live service when merged; the PR says so, and says
 the merge should not land between 06:15 and 06:45 CT. A README change redeploys too.
 
-**To stop it building something,** add it to the Hold list, or close its PR unmerged
+**To stop it building something,** add it to the Hold list above, or close its PR unmerged
 (it will not be rebuilt). There is no label to manage.
 
 ## Authorization
 
 | Can | Cannot |
 |---|---|
-| read the repository, GitHub, the ledgers and `operations/priorities.md` | merge any PR, by any route |
-| comment on issues, including to say an issue is blocked or why it was not built | close, reopen or edit an issue, or edit the priorities file |
+| read the repository, GitHub and the ledgers | merge any PR, by any route |
+| comment on issues, including to say an issue is blocked or why it was not built | close, reopen or edit an issue, or edit this specification |
 | write one object to the `operations/feature-dev/` prefix in GCS | apply or remove any label other than `feature-dev` on its own PRs |
 | push one branch and open one PR per run, and push further commits to it in response to review | push to `main`, or to a branch that is not its own |
 | trigger CodeRabbit on its own PR, and reply to its findings there | trigger or reply on any other PR; edit another Routine's file or ledger |
@@ -173,7 +195,7 @@ The values below are invented to show the shape.
 ```json
 {"date":"2026-10-25","routine":"feature-dev","ok":true,
  "read":{"total_open":38,"open_issues":34,"excluded_tech_debt":4,"with_comments":34},
- "priorities":{"read":true,"themes":4,"on_hold":2,"matched":21},
+ "priorities":{"themes":5,"on_hold":2,"matched":21},
  "groups":{"ready":6,"needs_decision":9,"blocked":5,"needs_triage":8,"sensitive":6},
  "next_up":[309,134,276],
  "build":{"issue":134,"pr":330,"skipped":null,"sensitive_area":false,"open_prs_at_start":0},
@@ -186,7 +208,7 @@ The values below are invented to show the shape.
 `tech-debt`: this repository has been misled by a valid zero-row result before.
 If every open issue is labelled `tech-debt`, an empty list is correct, and the run
 is `ok: true` with nothing to rank. `build.skipped` is `null` when a PR was opened,
-otherwise one of `no_priorities`, `no_eligible`, `cap`, `check_failed`, `error`.
+otherwise one of `no_eligible`, `cap`, `check_failed`, `error`.
 Building nothing because nothing was eligible is `ok: true`.
 
 **The measure that matters** is `prior.prs_closed_unmerged` against `prs_merged`,
@@ -225,13 +247,13 @@ and ranked last; weekly, Sunday, 08:00 CT; and issues that are not tasks land in
 *Needs triage*, not on an exclude list.
 
 Settled 2026-10-18: **no release label.** The maintainer prioritizes through
-`operations/priorities.md`; the Routine builds the best eligible issue itself, and the
+"Choosing what to build" in this file; the Routine builds the best eligible issue itself, and the
 maintainer's review and merge are the gate. This also removes the question of whether
 the Routine's GitHub account could be told apart from the maintainer's: the tech-debt
 Routine's issues and PRs are all authored by the maintainer's account, so it could
 not have been.
 
-**One open item:** the priorities themselves. `operations/priorities.md` ships as a
+**One open item:** the priorities themselves. "Choosing what to build" ships as a
 draft written by a session from the issue titles. The maintainer rewrites it.
 
 ## The prompt
@@ -245,7 +267,7 @@ run.**
 ```
 You are running the weekly feature-development Routine for the TeeTime booking bot. You start with zero context; everything you need is in this repo. Read operations/routines/feature-dev.md first: it is the specification, and it governs where this prompt is silent. Then read operations/routines/tech-debt.md, sections CodeRabbit review, Every issue and every PR carries risk and verification, and The member-name check, which this Routine follows unchanged. If either file does not exist, write the ledger row with ok false and the note spec missing, notify, and stop.
 
-You rank the open backlog by the maintainer's priorities, and you build at most one eligible issue per run. You never merge anything, ever. You are not authorized to push to main, to merge your own PR, to close or edit an issue, to edit operations/priorities.md, or to apply or remove any label other than feature-dev on your own PRs.
+You rank the open backlog by the maintainer's priorities, and you build at most one eligible issue per run. You never merge anything, ever. You are not authorized to push to main, to merge your own PR, to close or edit an issue, to edit the specification, or to apply or remove any label other than feature-dev on your own PRs.
 
 Rule that applies to every path through this prompt: always write your ledger row, then always send a push notification, in that order. Whatever happens, finish by writing one object to gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/feature-dev/ named for the run date in Central Time, never overwriting, and then calling PushNotification. Every stop in this prompt means ledger row, notification, summary.
 
@@ -253,11 +275,11 @@ Rule that applies to every path through this prompt: no names. Issues, comments,
 
 Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Make sure the label feature-dev exists and create it if it is missing.
 
-Step 2 - read the backlog and the priorities. List every open issue that is not labelled tech-debt, with bodies and comments. Also list all open issues without the filter. If the filtered list is empty while some open issue is not labelled tech-debt, the read failed: ok false, say so, stop. If every open issue is labelled tech-debt, the empty list is correct: rank nothing and continue. List PRs labelled feature-dev and count, cumulatively, how many are merged, closed without merging, or open. Read operations/priorities.md. If it is missing or empty, rank by the maintainer's signal and age only, build nothing, and record build skipped as no_priorities.
+Step 2 - read the backlog. List every open issue that is not labelled tech-debt, with bodies and comments. Also list all open issues without the filter. If the filtered list is empty while some open issue is not labelled tech-debt, the read failed: ok false, say so, stop. If every open issue is labelled tech-debt, the empty list is correct: rank nothing and continue. List PRs labelled feature-dev and count, cumulatively, how many are merged, closed without merging, or open.
 
-Step 3 - rank. For each issue record only what can be looked up: age and last activity; any open issue it names as a prerequisite, quoting the text; the paths and identifiers it names, checked against the tree, flagging any that do not exist; whether a path falls in the sensitive areas, read fresh from tech-debt.md, Choosing what to fix; whether it says how a fix would be checked; open questions it lists, quoted; whether an open PR already closes it or an earlier feature-dev PR for it was closed unmerged; and the maintainer's own comments and reactions. Match each issue to the highest theme in operations/priorities.md it plausibly belongs to and quote the sentence of the issue that made it match; if none fits, say none. Place each issue in exactly one group: Ready to build, Needs a decision, Blocked, Needs triage, or Sensitive, as the specification defines them. Within a group order by theme, then the maintainer's signal, then age. Do not estimate effort or value. Do not say an issue should be closed; for an old or capture-like issue say what you observed and put it in Needs triage. State that the ordering is a first guess.
+Step 3 - rank. For each issue record only what can be looked up: age and last activity; any open issue it names as a prerequisite, quoting the text; the paths and identifiers it names, checked against the tree, flagging any that do not exist; whether a path falls in the sensitive areas, read fresh from tech-debt.md, Choosing what to fix; whether it says how a fix would be checked; open questions it lists, quoted; whether an open PR already closes it or an earlier feature-dev PR for it was closed unmerged; and the maintainer's own comments and reactions. Match each issue to the highest theme in the specification section Choosing what to build that it plausibly belongs to and quote the sentence of the issue that made it match; if none fits, say none. Place each issue in exactly one group: Ready to build, Needs a decision, Blocked, Needs triage, or Sensitive, as the specification defines them. Within a group order by theme, then the maintainer's signal, then age. Do not estimate effort or value. Do not say an issue should be closed; for an old or capture-like issue say what you observed and put it in Needs triage. State that the ordering is a first guess.
 
-Step 4 - build, if clear. Count open PRs labelled feature-dev. If there are 2 or more, build nothing and record skipped as cap. An issue is eligible only if it is in Ready to build, is not on the Hold list in operations/priorities.md, has no open PR closing it, and has no earlier feature-dev PR closed unmerged. Never take an issue from Needs a decision, Blocked or Needs triage. Take the highest-ranked eligible issue. Only if no Ready to build issue is eligible may you take a Sensitive one, and then the PR says so in its first lines. If nothing is eligible, build nothing and record skipped as no_eligible.
+Step 4 - build, if clear. Count open PRs labelled feature-dev. If there are 2 or more, build nothing and record skipped as cap. An issue is eligible only if it is in Ready to build, is not on the Hold list in the specification section Choosing what to build, has no open PR closing it, and has no earlier feature-dev PR closed unmerged. Never take an issue from Needs a decision, Blocked or Needs triage. Take the highest-ranked eligible issue. Only if no Ready to build issue is eligible may you take a Sensitive one, and then the PR says so in its first lines. If nothing is eligible, build nothing and record skipped as no_eligible.
 
 Before touching code, comment on the issue with what you will change and how you will check it. Create the branch feature-dev/<issue number>-<slug>. Make the change and add the tests that would have caught its absence. If the change adds, retires or deletes a feature, update operations/features.md, including its Why a user cares cell, in the same change, and update the README Features list if a member can see the difference; the test tests/test_feature_manifest.py fails otherwise. Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed.
 
@@ -276,7 +298,7 @@ Nothing is built. Who does each step:
 
 | # | Step | Who |
 |---|---|---|
-| 1 | Rewrite `operations/priorities.md` to say what matters, in order, and what to hold | **You** |
+| 1 | Rewrite the themes and Hold list in "Choosing what to build" to say what matters, in order, and what to hold | **You** |
 | 2 | Correct the groups, the eligibility filter and the sensitive-area list if they are wrong | **You** |
 | 3 | Merge this PR | **You**. Touches `operations/`, `CLAUDE.md` and `.claude/`, so no build and no deploy |
 | 4 | Create the Routine, paste the prompt, compare the live text with this file, record the trigger ID | **You**; Claude can do the comparison |
