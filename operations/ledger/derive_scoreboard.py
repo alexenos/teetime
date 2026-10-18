@@ -74,6 +74,12 @@ SCHEDULES = {
     # Its first scheduled fire was 2026-10-10. The cron is UTC, so it needs
     # moving to `0 10 * * 6` at the 2026-11-01 DST change to stay at 04:00 CT.
     "tech-debt": Schedule(fires=dt.time(4, 0), start=dt.date(2026, 10, 10), every_days=7),
+    # Weekly, Sunday 08:00 CDT (`0 13 * * 0` UTC; operations/routines/feature-dev.md).
+    # Add this only once the Routine exists: a scheduled date with no row breaks the
+    # streak, so listing it early charges the streak for a run nobody scheduled. The
+    # first scheduled fire is 2026-10-25. The cron is UTC, so it needs moving to
+    # `0 14 * * 0` at the 2026-11-01 DST change to stay at 08:00 CT.
+    "feature-dev": Schedule(fires=dt.time(8, 0), start=dt.date(2026, 10, 25), every_days=7),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8
