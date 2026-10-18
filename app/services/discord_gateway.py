@@ -73,10 +73,10 @@ class DiscordGateway:
         self._task: asyncio.Task[None] | None = None
 
         intents = discord.Intents.none()
-        intents.guilds = True  # channel/guild state; silences discord.py state warnings
-        intents.dm_messages = True
-        intents.guild_messages = True  # let the user talk to the bot in a server channel too
-        intents.message_content = True
+        intents.guilds = True  # noqa: V101  # channel/guild state; silences discord.py state warnings
+        intents.dm_messages = True  # noqa: V101
+        intents.guild_messages = True  # noqa: V101  # let the user talk to the bot in a server channel too
+        intents.message_content = True  # noqa: V101
         self.client = discord.Client(intents=intents)
 
         @self.client.event

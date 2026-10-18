@@ -214,7 +214,7 @@ The run has a fixed shape. Walk it and note where it diverges:
 | Pre-locate | `JS slot finder found slot` | `exact=True`, and **how many fallbacks** it kept |
 | Clock | `Clock skew measured` | probes, transitions, offset, one-way |
 | Lead | `Reserve will be sent Nms early` | Should be tens of ms, not hundreds |
-| Fire | `Firing opening burst of N ... past the window (aim +1005ms)` | Since 2026-09-27 the plan is +815..+1175 around a +1005 aim (§7g); before that the first ask aimed at +1030 |
+| Fire | `Firing opening burst of N ... past the window (aim +1005ms)` | Since 2026-09-27 the plan is a burst around a +1005 aim: +815..+1175 until 2026-10-17, then +745..+1015 every 10ms (§7g); before that the first ask aimed at +1030 |
 | Burst timing | `BURST_TIMING:` / `BURST_CPU:` | Every member on a warm connection, write drift within ~2ms; CPU run-queue delay, pressure and throttling near zero (§7g) |
 | Gate | `GATE_BRACKET:` | Where each slot first said yes: `(last refusal, first grant]` by write time plus lead (§7g) |
 | Each answer | `Reserve k -> <verdict>` | Verdict, club clock, bytes, sheet rows, form slot, and **`round trip`** against the 3.0s budget (§7b) |
@@ -877,9 +877,11 @@ only burst-era Friday that won 08:38. Do not read pre-09-27 send times as wire
 times, and do not compare them to post-09-27 write times without that offset.
 
 **The plan, the same every weekday.** Gate `walden_window_opens_offset_ms`
-(+1000) plus margin 5 = aim **+1005**. Members every 20ms from +815 to +975,
-every 5ms from +975 to +1035, every 20ms from +1055 to +1175: 28, all for the
-target, then the serial fallback walk as before. Each is sent at its instant
+(+1000) plus margin 5 = aim **+1005**. Since 2026-10-17: members every 10ms
+from +745 to +1015, 28 all for the target, then the serial fallback walk as
+before. Before that (09-27 to 10-16, twelve won races): every 20ms from +815 to
++975, every 5ms from +975 to +1035, every 20ms from +1055 to +1175, also 28. A
+report on a race from either side of 10-17 must say which plan ran. Each is sent at its instant
 minus the day's lead. Connections are opened ~2s before the first member, one
 per member; `prewarm` in run.json says how that went (`skipped` means staging
 left under 250ms).
@@ -902,9 +904,10 @@ poetry run python scripts/fetch_debug_artifacts.py gate --since 20260927
 
 That prints each race's bracket, the per-weekday intersection (flagged when
 brackets disagree), and each race's CPU and write record. "Granted at the first
-ask" means the gate is at or before +815 and the burst should start earlier; "no
-grant" means someone was faster than our first ask after the gate, or the gate
-was later than +1175 - check another task's bracket that morning and the
+ask" means the gate is at or before the burst's first slot (+815, from 2026-10-17
++745) and the burst should start earlier; "no grant" means someone was faster
+than our first ask after the gate, or the gate was later than the last slot
+(+1175, from 2026-10-17 +1015) - check another task's bracket that morning and the
 observer's flip table before choosing. When the brackets settle, the fix is one
 number: `walden_window_opens_offset_ms` in `terraform/variables.tf`.
 
