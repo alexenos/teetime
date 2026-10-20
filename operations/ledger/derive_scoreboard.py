@@ -74,6 +74,11 @@ SCHEDULES = {
     # Its first scheduled fire was 2026-10-10. The cron is UTC, so it needs
     # moving to `0 10 * * 6` at the 2026-11-01 DST change to stay at 04:00 CT.
     "tech-debt": Schedule(fires=dt.time(4, 0), start=dt.date(2026, 10, 10), every_days=7),
+    # Weekly, Saturday 08:00 CT (`CRON_TZ=America/Chicago 0 8 * * 6`;
+    # operations/routines/feature-dev.md). Its first scheduled fire is 2026-10-24. The
+    # cron is in Chicago time, so unlike the UTC crons above it has no DST shift and
+    # `fires` never needs editing.
+    "feature-dev": Schedule(fires=dt.time(8, 0), start=dt.date(2026, 10, 24), every_days=7),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8

@@ -45,7 +45,8 @@
       "race-report": 10,
       "scoreboard": 2,
       "cost": null,
-      "tech-debt": 2
+      "tech-debt": 2,
+      "feature-dev": null
     },
     "history": [
       3,
