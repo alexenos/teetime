@@ -1,6 +1,6 @@
 # Routine: cost
 
-**Status: proposed, no longer blocked. Not deployed.** The billing export is on and the query has run against real rows (2026-10-09); what remains is creating the Routine (Deploying it, step 4).
+**Status: created by the maintainer 2026-10-15; first scheduled run 2026-11-05.** The billing export is on and the query has run against real rows (2026-10-09). **Not recorded here:** the trigger ID, and whether the live prompt text matches this file (Deploying it, step 4, asks for both).
 
 | | |
 |---|---|

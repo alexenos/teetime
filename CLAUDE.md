@@ -126,11 +126,17 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 - `operations/credential-encryption.md` — the Cloud KMS key, who has read a
   login, and the migration off the hand-made Fernet key
 
-Three Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
-scoreboard, daily at `30 12 * * *` UTC, and tech debt, Saturdays at `0 9 * * 6`
-UTC (`operations/routines/tech-debt.md`). Tech debt never merges; it files issues
-and opens a PR you merge. The cost Routine is specified and not deployed. The
-race report and scoreboard crons move an hour on 2026-11-01. A prompt pasted into the
+Four Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
+scoreboard, daily at `30 12 * * *` UTC, tech debt, Saturdays at `0 9 * * 6`
+UTC (`operations/routines/tech-debt.md`), and cost, monthly on the 5th
+(`operations/routines/cost.md`; created by the maintainer 2026-10-15, first run
+2026-11-05, trigger ID and live prompt text not yet recorded there). Tech debt never
+merges; it files issues and opens a PR you merge. A feature-dev Routine is proposed,
+with a drafted prompt that has not been run (`operations/routines/feature-dev.md`);
+the priorities it ranks by are in that file, under "Choosing what to build". The
+race report and scoreboard crons move an hour on 2026-11-01, and so would
+feature-dev's if it is deployed by then (`0 13 * * 0` becomes 07:00 CST; `0 14 * * 0`
+keeps 08:00). A prompt pasted into the
 routines UI is read as markdown and loses paired `*`; compare the live text
 after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
 the PR check-ins are not Routines; they are maintainer-invoked and push only to

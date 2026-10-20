@@ -324,6 +324,11 @@ git checkout -b fix/<short-slug> && git push -u origin fix/<short-slug>
 - **Call out changed-not-added tests** and why the old assertion encoded the
   behaviour being replaced. This is the single most common source of review
   pushback.
+- **Check the README's Features list** if the PR adds, changes or removes
+  something a member can see or do (a new message flow, a channel, a notice). The
+  README lists user-facing features only; operational pieces belong in
+  `operations/features.md`. Say in the PR body that a README change redeploys:
+  `README.md` is outside the Cloud Build `ignored_files` list.
 
 ## 3. Wait
 
