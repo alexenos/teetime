@@ -1,13 +1,16 @@
 # Routine: feature development
 
-**Status: proposed, scope approved by the maintainer 2026-10-17, label-free design
-2026-10-18. Not deployed. The prompt is drafted below and has not been run.** This
-file is the specification for the maintainer to correct; its design decisions are
-settled (see "Decisions").
+**Status: created by the maintainer 2026-10-19 (20:37 CDT), enabled; first scheduled
+fire Saturday 2026-10-24 at 08:00 CT.** This file is the specification and the source
+of the prompt. The prompt reads it from `main`, so it must stay there: if it is
+missing the run stops and records `ok: false`. The live prompt text was compared with
+the prompt below through the triggers API on 2026-10-20 and is identical. Scope
+approved 2026-10-17, label-free design 2026-10-18; the prompt has not yet run.
 
 | | |
 |---|---|
-| **Trigger** | weekly, Sunday `0 13 * * 0` UTC (08:00 CDT; 07:00 CST after 2026-11-01, the same DST defect the other Routines carry). A different day and hour from tech debt (Saturday 04:00 CDT), so the two never compete for the hourly CodeRabbit quota, and well clear of the 06:28 CT job |
+| **Trigger** | weekly, Saturday 08:00 CT: `CRON_TZ=America/Chicago 0 8 * * 6`. The same day as tech debt but four hours later, so the two do not compete for the hourly CodeRabbit allowance, and well clear of the 06:28 CT job. The cron is in Chicago time, so it has no DST shift |
+| **Deployed as** | a Routine, "TeeTime Feature Dev", `trig_01T9XfV5N4evsjd82TkKpS3f`, in the same environment as the tech-debt and scoreboard Routines (`env_01MDpUqqDJRTVhqkh1hnrxgK`), repository `alexenos/teetime`, model `claude-opus-5-5`, Auto-fix on |
 | **Runs as** | a new Claude Code session per firing, with no prior context |
 | **Authorization** | reads the repository and GitHub. Comments on issues. Pushes one branch and opens one PR per run. Writes one ledger object to GCS. **Never merges.** |
 | **Emits** | a ranked list of the open backlog in the session summary; at most one PR per run; one ledger object per run at `operations/feature-dev/<YYYY-MM-DD>.json` in GCS |
@@ -191,7 +194,7 @@ gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/feature-dev/<
 The values below are invented to show the shape.
 
 ```json
-{"date":"2026-10-25","routine":"feature-dev","ok":true,
+{"date":"2026-10-24","routine":"feature-dev","ok":true,
  "read":{"total_open":38,"open_issues":34,"excluded_tech_debt":4,"with_comments":34},
  "priorities":{"themes":5,"on_hold":2,"matched":21},
  "groups":{"ready":6,"needs_decision":9,"blocked":5,"needs_triage":8,"sensitive":6},
@@ -214,14 +217,38 @@ both cumulative so a reader diffs consecutive rows. If the maintainer closes mor
 than about half of what this Routine opens, the priorities, the eligibility filter or
 the PR quality is wrong, and that is the signal to change them.
 
-## Shares the DST defect
+## Auto-fix
 
-A cron pinned to UTC drifts against CT twice a year: `0 13 * * 0` is 08:00 CDT and
-07:00 CST. On 2026-11-01 it becomes 07:00 CT, still after the 06:28 CT job and clear
-of tech debt's Saturday, so leaving it is harmless. To keep 08:00 CT, change it to
-`0 14 * * 0` and change the `fires` time in `SCHEDULES`
-(`operations/ledger/derive_scoreboard.py`) to match. Recorded so the set of crons
-needing the 2026-11-01 review is complete.
+`autofix_on_pr_create` is **on** for this Routine's trigger (read from the triggers API
+on 2026-10-20). The desktop app then watches each PR the Routine opens and, on a CI
+failure, a merge conflict or a review comment, runs a fix session on that PR's branch,
+pushes, replies on the thread and resolves it. The maintainer turned it on because the
+Routine's own session ends with its run, and a failure or comment that arrives hours
+later would otherwise sit unattended.
+
+It is a second actor on the PR, so the rules differ from the Routine's:
+
+- **Still bounded:** it never merges, and it pushes only to the PR's own branch. The
+  maintainer reviews and merges every PR.
+- **Not enforced on it:** the member-name check on the replies and commits it writes
+  (they are public), the "judge each finding on its reasoning" rules, the rule not to
+  widen the PR and to file out-of-scope findings as issues, and the full pre-push
+  command before each push. Whether it follows them is not established. The
+  maintainer's read of the PR is the only check on what it adds.
+- **Threads:** the prompt says the Routine does not resolve threads; Auto-fix does.
+  A reply still states what was done.
+- **The ledger:** the run's `review` fields describe the Routine's session only.
+  Commits Auto-fix adds afterwards are visible on the PR and are not in the row, so
+  `head_reviewed` can be stale; the PR states the sha CodeRabbit reviewed.
+- **Not established:** how Auto-fix behaves on a PR opened by a Routine session. It has
+  not been observed.
+
+## No DST defect
+
+This trigger's cron carries `CRON_TZ=America/Chicago`, so it stays at 08:00 CT across
+the 2026-11-01 change, unlike the UTC crons of the race report, scoreboard and tech
+debt. Tech debt's `0 9 * * 6` UTC moves from 04:00 CDT to 03:00 CST that day, which
+only widens the gap between the two.
 
 ## Notification
 
@@ -250,7 +277,8 @@ markdown, labels not names. For example:
 ## Decisions
 
 Settled 2026-10-17: build is in scope from the start; sensitive issues are buildable
-and ranked last; weekly, Sunday, 08:00 CT; and issues that are not tasks land in
+and ranked last; weekly, 08:00 CT (written as Sunday here, created as Saturday by the
+maintainer on 2026-10-19; the trigger is the record); and issues that are not tasks land in
 *Needs triage*, not on an exclude list.
 
 Settled 2026-10-18: **no release label.** The maintainer prioritizes through
@@ -301,14 +329,14 @@ Last, as the final message of this session, print the summary: a heading with th
 
 ## Deploying it
 
-Nothing is built. Who does each step:
+Who does each step:
 
 | # | Step | Who |
 |---|---|---|
 | 1 | Confirm the themes and Hold list in "Choosing what to build" | **Done 2026-10-19** |
 | 2 | Correct the groups, the eligibility filter and the sensitive-area list if they are wrong | **You** |
-| 3 | Merge this PR | **You**. Touches `operations/`, `CLAUDE.md` and `.claude/`, so no build and no deploy |
-| 4 | Create the Routine, paste the prompt, compare the live text with this file, record the trigger ID | **You**; Claude can do the comparison |
-| 5 | Add the Routine to `SCHEDULES` in `operations/ledger/derive_scoreboard.py` and to `operations/scoreboard.md` §2, only once the Routine exists. A scheduled date with no row breaks the streak | **Claude**, in a separate PR |
-| 6 | Add the ledger prefix to `operations/ledger/README.md` and the Routine to `CLAUDE.md`'s list | **Claude**, in the PR that deploys it |
-| 7 | Watch the first run: it is the first test of the grouping and of building from a ranking | **You** |
+| 3 | Merge the spec and prompt (#322) | **Done 2026-10-19** |
+| 4 | Create the Routine, paste the prompt, compare the live text with this file, record the trigger ID | **Done 2026-10-19 / 2026-10-20**: created by the maintainer, compared by Claude, ID recorded above |
+| 5 | Add the Routine to `SCHEDULES` in `operations/ledger/derive_scoreboard.py` and to `operations/scoreboard.md` section 2: weekly, Saturday 08:00 CT, from 2026-10-24. A scheduled date with no row breaks the streak | **Claude**, in the open PR #328, to merge before the first fire |
+| 6 | Add the ledger prefix to `operations/ledger/README.md` and the Routine to `CLAUDE.md`'s list | **Done in this PR** |
+| 7 | Watch the first run, Saturday 2026-10-24 at 08:00 CT: the first test of the grouping, of building from a ranking, and of Auto-fix on a Routine's PR | **You** |

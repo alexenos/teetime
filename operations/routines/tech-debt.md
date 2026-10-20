@@ -192,6 +192,32 @@ worth avoiding; the PR says when it would be safe.
 The Routine also reads `MEMBER_PSEUDONYM_LABELS` from Secret Manager, for the name
 check below.
 
+## Auto-fix
+
+`autofix_on_pr_create` is **on** for this Routine's trigger (read from the triggers API
+on 2026-10-20). The desktop app then watches each PR the Routine opens and, on a CI
+failure, a merge conflict or a review comment, runs a fix session on that PR's branch,
+pushes, replies on the thread and resolves it. The maintainer turned it on because the
+Routine's own session ends with its run, and a failure or comment that arrives hours
+later would otherwise sit unattended.
+
+It is a second actor on the PR, so the rules differ from the Routine's:
+
+- **Still bounded:** it never merges, and it pushes only to the PR's own branch. The
+  maintainer reviews and merges every PR.
+- **Not enforced on it:** the member-name check on the replies and commits it writes
+  (they are public), the "judge each finding on its reasoning" rules, the rule not to
+  widen the PR and to file out-of-scope findings as issues, and the full pre-push
+  command before each push. Whether it follows them is not established. The
+  maintainer's read of the PR is the only check on what it adds.
+- **Threads:** the prompt says the Routine does not resolve threads; Auto-fix does.
+  A reply still states what was done.
+- **The ledger:** the run's `review` fields describe the Routine's session only.
+  Commits Auto-fix adds afterwards are visible on the PR and are not in the row, so
+  `head_reviewed` can be stale; the PR states the sha CodeRabbit reviewed.
+- **Not established:** how Auto-fix behaves on a PR opened by a Routine session. It has
+  not been observed.
+
 ## CodeRabbit review
 
 CodeRabbit never reviews this repository on its own (a star threshold and a draft
