@@ -129,8 +129,8 @@ Measurement, and the Routines that run on a schedule: `operations/`.
 Five Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
 scoreboard, daily at `30 12 * * *` UTC, tech debt, Saturdays at `0 9 * * 6`
 UTC (`operations/routines/tech-debt.md`), and cost, monthly on the 5th
-(`operations/routines/cost.md`; created by the maintainer 2026-10-15, first run
-2026-11-05, trigger ID and live prompt text not yet recorded there). Tech debt never
+(`operations/routines/cost.md`; created 2026-10-09, `CRON_TZ=America/Chicago 0 5 5 * *`,
+first run 2026-11-05). Tech debt never
 merges; it files issues and opens a PR you merge. Feature dev ranks the backlog and builds one eligible issue
 (`operations/routines/feature-dev.md`, Saturdays 08:00 CT, created 2026-10-19, not yet
 run; its priorities are in that file, under "Choosing what to build"); it never

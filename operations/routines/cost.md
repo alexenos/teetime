@@ -1,10 +1,10 @@
 # Routine: cost
 
-**Status: created by the maintainer 2026-10-15; first scheduled run 2026-11-05.** The billing export is on and the query has run against real rows (2026-10-09). **Not recorded here:** the trigger ID, and whether the live prompt text matches this file (Deploying it, step 4, asks for both).
+**Status: created by the maintainer 2026-10-09 (22:55 CDT, per the triggers API), enabled; first scheduled run Thursday 2026-11-05 at 05:00 CT.** Trigger `trig_01ALYtPuTWuPiQsNrw5YXZCZ`, "TeeTime Cost", model `claude-sonnet-5-5`, in the same environment as the other Routines (`env_01MDpUqqDJRTVhqkh1hnrxgK`), Auto-fix off. The live prompt text was compared with the prompt below through the triggers API on 2026-10-20 and is identical (570 words). The billing export is on and the query has run against real rows (2026-10-09).
 
 | | |
 |---|---|
-| **Trigger** | monthly, proposed — `0 11 5 * *` UTC (05:00 CST on the 5th, the maintainer's choice 2026-10-09), reporting the month just ended |
+| **Trigger** | monthly on the 5th at 05:00 CT: `CRON_TZ=America/Chicago 0 5 5 * *` (the maintainer's choice 2026-10-09; set back to 05:00 on 2026-10-19 after it had been changed to 07:00). Reports the month just ended |
 | **Authorization** | queries BigQuery, writes one new object to GCS. Commits nothing. |
 | **Emits** | one object per run at `operations/cost/<YYYY-MM>.json` in GCS |
 | **Owns** | the cost metric |
@@ -77,14 +77,11 @@ invites $/booking comparisons against a denominator that does not match.
    reason. A month with no row is indistinguishable from a month that was never
    checked.
 
-## Shares the DST defect
+## No DST defect
 
-A cron pinned to UTC drifts against CT twice a year: `0 11 5 * *` is 06:00 CDT and
-05:00 CST. At monthly granularity the consequence is an hour, and either hour is
-before the scoreboard Routine's 07:30 CT (06:30 CST until its own cron moves), so
-this one is cosmetic rather than load-bearing — unlike the race report, where 05:40
-CT lands before the race it reports on. Recorded so the set of crons needing the
-2026-11-01 review is complete, even where the answer is "leave it".
+The trigger's cron carries `CRON_TZ=America/Chicago`, so it fires at 05:00 CT whichever
+way DST falls. The UTC crons of the race report, scoreboard and tech debt do shift on
+2026-11-01; this one does not, and needs no review then.
 
 ## When to run it
 
@@ -100,9 +97,9 @@ settled by the 9th. Run `cost.sql` for October on 2026-11-01 as well as on the
 5th and compare; if the figure never moves, the trigger could go earlier.
 
 This Routine fires before the scoreboard Routine on the same morning, in every
-month and whichever way DST falls: `0 11 5 * *` is 05:00 CST or 06:00 CDT, and the
-scoreboard is at 06:30 CST or 07:30 CDT. The ordering is deliberate (maintainer,
-2026-10-09), and this cron needs no change at either DST boundary.
+month and whichever way DST falls: this cron is 05:00 CT, and the scoreboard is at
+06:30 CST or 07:30 CDT. The ordering is deliberate (maintainer, 2026-10-09), and this
+cron needs no change at either DST boundary.
 
 Separate defect, not this Routine's: until the scoreboard cron moves from `30 12`
 to `30 13` UTC on 2026-11-01 (`operations/routines/scoreboard.md`, Shares the DST
@@ -117,9 +114,11 @@ skip the scoreboard run whatever the cost row says.
    2026-10-09: $37.17 both. The seed row is written by `scripts/cost_row.py --seed`
    to `operations/cost/2026-09.json`; it carries a `backfill` object, so it is
    outside the streak.
-4. Create the Routine from The prompt below (trigger `0 11 5 * *` UTC, model
-   `claude-sonnet-5-5`), record its trigger ID here, and change **Status**. Merge
-   the PR that adds `scripts/cost_row.py` first: the prompt runs it from `main`.
+4. ~~Create the Routine from The prompt below (trigger `CRON_TZ=America/Chicago 0 5 5 * *`,
+   model `claude-sonnet-5-5`), record its trigger ID here, and change **Status**.~~
+   Done: created 2026-10-09, trigger ID recorded in the Status line, live text compared
+   and identical on 2026-10-20. `scripts/cost_row.py` is on `main`, which the prompt
+   needs.
 5. Resolve #228 and record the scope decision here.
 
 The scoreboard shows the seeded September figure once the scoreboard Routine's
