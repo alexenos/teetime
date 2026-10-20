@@ -9,6 +9,7 @@ did that run succeed, and what did it measure.
 | `operations/scoreboard/` | scoreboard | the derived metrics, as published |
 | `operations/cost/` | cost | the month's spend |
 | `operations/tech-debt/` | tech debt | the week's scan coverage, fix attempt and review outcome |
+| `operations/feature-dev/` | feature dev | the week's ranking, build attempt and review outcome |
 
 The `.jsonl` files in this directory are empty and exist to make the set visible
 in the repository. The data is in GCS, one object per run. `backfill/` is the
