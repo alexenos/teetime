@@ -9,7 +9,7 @@ approved 2026-10-17, label-free design 2026-10-18; the prompt has not yet run.
 
 | | |
 |---|---|
-| **Trigger** | weekly, Saturday 08:00 CT: `CRON_TZ=America/Chicago 0 8 * * 6`. The same day as tech debt but four hours later, so the two do not compete for the hourly CodeRabbit allowance, and well clear of the 06:28 CT job. The cron is in Chicago time, so it has no DST shift |
+| **Trigger** | weekly, Saturday 08:00 CT: `CRON_TZ=America/Chicago 0 8 * * 6`. The same day as tech debt but four hours later before 2026-11-01 and five hours later after it (tech debt's UTC cron moves from 04:00 CDT to 03:00 CST), so the two do not compete for the hourly CodeRabbit allowance, and well clear of the 06:28 CT job. The cron is in Chicago time, so it has no DST shift |
 | **Deployed as** | a Routine, "TeeTime Feature Dev", `trig_01T9XfV5N4evsjd82TkKpS3f`, in the same environment as the tech-debt and scoreboard Routines (`env_01MDpUqqDJRTVhqkh1hnrxgK`), repository `alexenos/teetime`, model `claude-opus-5-5`, Auto-fix on |
 | **Runs as** | a new Claude Code session per firing, with no prior context |
 | **Authorization** | reads the repository and GitHub. Comments on issues. Pushes one branch and opens one PR per run. Writes one ledger object to GCS. **Never merges.** |
@@ -219,12 +219,13 @@ the PR quality is wrong, and that is the signal to change them.
 
 ## Auto-fix
 
-`autofix_on_pr_create` is **on** for this Routine's trigger (read from the triggers API
-on 2026-10-20). The desktop app then watches each PR the Routine opens and, on a CI
-failure, a merge conflict or a review comment, runs a fix session on that PR's branch,
-pushes, replies on the thread and resolves it. The maintainer turned it on because the
-Routine's own session ends with its run, and a failure or comment that arrives hours
-later would otherwise sit unattended.
+**Established:** `autofix_on_pr_create` is on for this Routine's trigger (read from the
+triggers API on 2026-10-20). **Expected, not observed:** that the desktop app then
+watches each PR the Routine opens and, on a CI failure, a merge conflict or a review
+comment, runs a fix session on that PR's branch, pushes, replies on the thread and
+resolves it. The maintainer turned it on because the Routine's own session ends with
+its run, and a failure or comment that arrives hours later would otherwise sit
+unattended.
 
 It is a second actor on the PR, so the rules differ from the Routine's:
 

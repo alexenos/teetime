@@ -136,7 +136,8 @@ merges; it files issues and opens a PR you merge. Feature dev ranks the backlog 
 run; its priorities are in that file, under "Choosing what to build"); it never
 merges either. Auto-fix is on for the tech-debt and feature-dev triggers, so the app
 may push fixes to their PR branches after the run. The race report and scoreboard
-crons move an hour on 2026-11-01; feature-dev's is in Chicago time and does not. A prompt pasted into the
+crons move an hour on 2026-11-01, and so does tech debt's (04:00 CDT becomes 03:00
+CST); feature-dev's is in Chicago time and does not. A prompt pasted into the
 routines UI is read as markdown and loses paired `*`; compare the live text
 after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
 the PR check-ins are not Routines; they are maintainer-invoked and push only to

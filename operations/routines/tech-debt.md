@@ -194,12 +194,13 @@ check below.
 
 ## Auto-fix
 
-`autofix_on_pr_create` is **on** for this Routine's trigger (read from the triggers API
-on 2026-10-20). The desktop app then watches each PR the Routine opens and, on a CI
-failure, a merge conflict or a review comment, runs a fix session on that PR's branch,
-pushes, replies on the thread and resolves it. The maintainer turned it on because the
-Routine's own session ends with its run, and a failure or comment that arrives hours
-later would otherwise sit unattended.
+**Established:** `autofix_on_pr_create` is on for this Routine's trigger (read from the
+triggers API on 2026-10-20). **Expected, not observed:** that the desktop app then
+watches each PR the Routine opens and, on a CI failure, a merge conflict or a review
+comment, runs a fix session on that PR's branch, pushes, replies on the thread and
+resolves it. The maintainer turned it on because the Routine's own session ends with
+its run, and a failure or comment that arrives hours later would otherwise sit
+unattended.
 
 It is a second actor on the PR, so the rules differ from the Routine's:
 
