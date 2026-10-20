@@ -105,7 +105,7 @@ mean a failure.
 
 The Routines walked are the race report (daily), the scoreboard (daily), cost
 (monthly, from 2026-11-05), tech debt (weekly, Saturdays, from 2026-10-10) and
-feature-dev (weekly, Sundays, from 2026-10-25).
+feature-dev (weekly, Saturdays, from 2026-10-24).
 A weekly or monthly Routine contributes one run per period, so a missed Saturday
 breaks the streak like a missed morning does. `SCHEDULES` in
 `operations/ledger/derive_scoreboard.py` is the list.

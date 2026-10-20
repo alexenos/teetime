@@ -422,16 +422,16 @@ def test_weekly_tech_debt_dates_step_by_seven_days() -> None:
     assert dates == [dt.date(2026, 10, 10), dt.date(2026, 10, 17), dt.date(2026, 10, 24)]
 
 
-def test_weekly_feature_dev_dates_start_on_the_first_sunday_and_step_by_seven_days() -> None:
-    dates = ds.scheduled_dates("feature-dev", [], _ct(dt.date(2026, 11, 8), 9, 0))
-    assert dates == [dt.date(2026, 10, 25), dt.date(2026, 11, 1), dt.date(2026, 11, 8)]
+def test_weekly_feature_dev_dates_start_on_the_first_saturday_and_step_by_seven_days() -> None:
+    dates = ds.scheduled_dates("feature-dev", [], _ct(dt.date(2026, 11, 7), 9, 0))
+    assert dates == [dt.date(2026, 10, 24), dt.date(2026, 10, 31), dt.date(2026, 11, 7)]
 
 
 def test_a_missing_feature_dev_run_breaks_the_streak_and_a_present_one_scores() -> None:
     rows = [_quiet(RACE_START)]
-    now = _ct(dt.date(2026, 10, 25), 9, 0)
-    assert _board(rows, now)["streak"]["last_failure"] == "2026-10-25"
-    ok = _quiet(dt.date(2026, 10, 25), routine="feature-dev")
+    now = _ct(dt.date(2026, 10, 24), 9, 0)
+    assert _board(rows, now)["streak"]["last_failure"] == "2026-10-24"
+    ok = _quiet(dt.date(2026, 10, 24), routine="feature-dev")
     assert _board(rows + [ok], now)["streak"]["by_routine"]["feature-dev"] == 1
 
 
