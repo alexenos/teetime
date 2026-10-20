@@ -39,9 +39,7 @@ The maintainer's prioritization instruction, kept here the way tech debt keeps
 "Choosing what to fix": in this specification, which the Routine reads from `main` on
 every run. Changing a priority is a change to this file.
 
-**DRAFT.** A session wrote the themes below on 2026-10-18 from issue titles and
-project notes, not from the maintainer. Rewrite them. Until then the Routine treats
-them as the maintainer's word.
+Confirmed by the maintainer on 2026-10-19.
 
 **What matters, in order.** Write each as a sentence or two a stranger could match an
 issue against; the Routine quotes the part of an issue that made it match, so vague
@@ -262,8 +260,8 @@ the Routine's GitHub account could be told apart from the maintainer's: the tech
 Routine's issues and PRs are all authored by the maintainer's account, so it could
 not have been.
 
-**One open item:** the priorities themselves. "Choosing what to build" ships as a
-draft written by a session from the issue titles. The maintainer rewrites it.
+Confirmed 2026-10-19: the priorities in "Choosing what to build" are the maintainer's.
+No design decisions are open.
 
 ## The prompt
 
@@ -307,7 +305,7 @@ Nothing is built. Who does each step:
 
 | # | Step | Who |
 |---|---|---|
-| 1 | Rewrite the themes and Hold list in "Choosing what to build" to say what matters, in order, and what to hold | **You** |
+| 1 | Confirm the themes and Hold list in "Choosing what to build" | **Done 2026-10-19** |
 | 2 | Correct the groups, the eligibility filter and the sensitive-area list if they are wrong | **You** |
 | 3 | Merge this PR | **You**. Touches `operations/`, `CLAUDE.md` and `.claude/`, so no build and no deploy |
 | 4 | Create the Routine, paste the prompt, compare the live text with this file, record the trigger ID | **You**; Claude can do the comparison |
