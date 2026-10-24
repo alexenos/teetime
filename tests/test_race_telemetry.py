@@ -17,11 +17,11 @@ See operations/race-reports/2026-08-21.md.
 """
 
 import gzip
-import time
 from pathlib import Path
 
 import pytest
 
+from app.providers import walden_http_booker
 from app.providers.walden_http import parse_html, parse_partial_response
 from app.providers.walden_http_booker import (
     RESERVE_ACCEPTED,
@@ -200,8 +200,10 @@ class TestPostResponseAccounting:
         value = _container_cpu_ms()
         assert value is None or value > 0
 
-    def test_container_cpu_counts_work_rather_than_idle(self) -> None:
-        """The counter must not advance with wall-clock on an idle container.
+    def test_container_cpu_counts_work_rather_than_idle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counter is the cgroup's usage alone, not a sum of its columns.
 
         Guards the bug this replaced: the first version summed every /proc/stat
         column, idle included, so on a 4-CPU box it advanced by roughly
@@ -209,18 +211,40 @@ class TestPostResponseAccounting:
         heavy contention on an idle machine, in the one field meant to tell
         contention from a slow vCPU.
 
-        Sleeping burns wall time and no CPU, so a counter of real usage must
-        advance by far less than the sleep.
+        A fake cpu.stat makes that deterministic: summing these columns would
+        read 10000ms or more, and only ``usage_usec`` gives 5000.
         """
-        before = _container_cpu_ms()
-        if before is None:
-            pytest.skip("no cgroup CPU accounting available here")
-        time.sleep(0.3)
-        after = _container_cpu_ms()
-        assert after is not None
-        # Generous: other processes share this container. The broken version
-        # would have advanced by ~1200ms here, so anything near the sleep fails.
-        assert after - before < 250
+        cpu_stat = tmp_path / "cpu.stat"
+        cpu_stat.write_text(
+            "usage_usec 5000000\nuser_usec 3000000\nsystem_usec 2000000\nnr_periods 100\n",
+            encoding="ascii",
+        )
+        monkeypatch.setattr(walden_http_booker, "_CGROUP_V2_CPU_STAT", str(cpu_stat))
+        monkeypatch.setattr(walden_http_booker, "_CGROUP_V1_CPU_USAGE", ())
+
+        assert _container_cpu_ms() == 5000
+
+    def test_container_cpu_falls_back_to_cgroup_v1(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """v1 reports nanoseconds in a bare file, read when v2 is absent."""
+        usage = tmp_path / "cpuacct.usage"
+        usage.write_text("2500000000\n", encoding="ascii")
+        monkeypatch.setattr(walden_http_booker, "_CGROUP_V2_CPU_STAT", str(tmp_path / "missing"))
+        monkeypatch.setattr(
+            walden_http_booker, "_CGROUP_V1_CPU_USAGE", (str(tmp_path / "absent"), str(usage))
+        )
+
+        assert _container_cpu_ms() == 2500
+
+    def test_container_cpu_is_none_without_cgroup_accounting(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No readable controller is "no measurement", never an exception."""
+        monkeypatch.setattr(walden_http_booker, "_CGROUP_V2_CPU_STAT", str(tmp_path / "missing"))
+        monkeypatch.setattr(walden_http_booker, "_CGROUP_V1_CPU_USAGE", (str(tmp_path / "absent"),))
+
+        assert _container_cpu_ms() is None
 
     def test_container_cpu_is_monotonic(self) -> None:
         """A cumulative counter, so a delta is meaningful."""
