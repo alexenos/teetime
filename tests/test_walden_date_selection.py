@@ -417,7 +417,11 @@ class TestTheSheetAsTheClubRendersIt:
     def sheet(self) -> BeautifulSoup:
         path = pathlib.Path(__file__).parent / "fixtures" / "walden_tee_time_final.html"
         if not path.exists():
-            pytest.skip("tee sheet fixture not found")
+            pytest.fail(
+                f"Tee sheet fixture missing: {path}. It is committed, so a missing file is a "
+                "fault, not an opt-out; restore it or regenerate it with "
+                "scripts/capture_html_snapshots.py."
+            )
         return BeautifulSoup(path.read_text(encoding="utf-8", errors="replace"), "html.parser")
 
     def test_the_strip_spans_seven_days_from_the_captured_day(self, sheet: BeautifulSoup) -> None:

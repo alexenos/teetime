@@ -26,7 +26,11 @@ def login_page_html() -> BeautifulSoup:
     """Load the login page HTML fixture."""
     html_path = FIXTURES_DIR / "walden_login_page.html"
     if not html_path.exists():
-        pytest.skip("Login page fixture not found. Run capture_html_snapshots.py first.")
+        pytest.fail(
+            f"Login page fixture missing: {html_path}. It is committed, so a missing file is a "
+            "fault, not an opt-out; restore it or regenerate it with "
+            "scripts/capture_html_snapshots.py."
+        )
     return BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
 
 
@@ -35,7 +39,11 @@ def tee_time_page_html() -> BeautifulSoup:
     """Load the tee time page HTML fixture."""
     html_path = FIXTURES_DIR / "walden_tee_time_loaded.html"
     if not html_path.exists():
-        pytest.skip("Tee time page fixture not found. Run capture_html_snapshots.py first.")
+        pytest.fail(
+            f"Tee time page fixture missing: {html_path}. It is committed, so a missing file is a "
+            "fault, not an opt-out; restore it or regenerate it with "
+            "scripts/capture_html_snapshots.py."
+        )
     return BeautifulSoup(html_path.read_text(encoding="utf-8"), "html.parser")
 
 
