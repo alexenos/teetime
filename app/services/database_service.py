@@ -223,8 +223,10 @@ class DatabaseService:
     ) -> list[TeeTimeBooking]:
         """A member's bookings on ``dates`` that hold, or are about to hold, their round.
 
-        Pending, scheduled, in progress or won; filtered in the query, so the
-        same-day check (issue #284) does not read a member's whole history.
+        Pending, scheduled, in progress, won, or being cancelled (a CANCELLING
+        row holds the round until it is settled, issue #353); filtered in the
+        query, so the same-day check (issue #284) does not read a member's
+        whole history.
         """
         if not dates:
             return []
@@ -239,6 +241,7 @@ class DatabaseService:
                             BookingStatus.SCHEDULED,
                             BookingStatus.IN_PROGRESS,
                             BookingStatus.SUCCESS,
+                            BookingStatus.CANCELLING,
                         ]
                     ),
                 )

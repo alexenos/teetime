@@ -139,7 +139,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> None:
-    """Reconcile interrupted bookings once the messaging channel can deliver."""
+    """Reconcile interrupted bookings once the messaging channel can deliver,
+    then settle unrecorded cancellations."""
     try:
         if discord_gateway is not None:
             try:
@@ -162,6 +163,14 @@ async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> 
         raise
     except Exception:
         logger.exception("Failed to reconcile interrupted bookings at startup")
+    # Cancellations whose outcome was not recorded (issue #353), settled even if
+    # the reconcile above failed: they are a separate set of rows.
+    try:
+        await booking_service.settle_cancelling_bookings()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Failed to settle cancelling bookings at startup")
 
 
 app = FastAPI(

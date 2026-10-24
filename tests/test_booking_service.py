@@ -8,7 +8,7 @@ and SMS conversations.
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -376,6 +376,7 @@ class TestBookingServiceBookings:
 
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_booking = AsyncMock(return_value=success_booking)
+            mock_db.update_booking = AsyncMock()
 
             mock_provider = MagicMock()
             mock_provider.cancel_booking = AsyncMock(return_value=False)
@@ -5338,6 +5339,19 @@ class TestReplaceQuestionReplies:
         assert "07:00 AM" in reply
 
 
+def _first_write_only() -> Callable[[TeeTimeBooking], None]:
+    """An update_booking whose first write (the CANCELLING one) succeeds and the rest fail."""
+    writes = 0
+
+    def write(_booking: TeeTimeBooking) -> None:
+        nonlocal writes
+        writes += 1
+        if writes > 1:
+            raise RuntimeError("connection reset")
+
+    return write
+
+
 class TestCancelAfterClubCancelSucceeds:
     """Issue #301: the club cancel and the database write fail separately."""
 
@@ -5370,10 +5384,13 @@ class TestCancelAfterClubCancelSucceeds:
     ) -> None:
         booking = self._won()
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.update_booking = AsyncMock(side_effect=[RuntimeError("connection reset"), None])
+            # The CANCELLING write, then a failed CANCELLED write, then the retry.
+            mock_db.update_booking = AsyncMock(
+                side_effect=[None, RuntimeError("connection reset"), None]
+            )
             outcome = await booking_service._cancel_confirmed_booking(booking)
         assert outcome is CancelOutcome.CANCELLED
-        assert mock_db.update_booking.await_count == 2
+        assert mock_db.update_booking.await_count == 3
         assert booking.status == BookingStatus.CANCELLED
 
     @pytest.mark.asyncio
@@ -5385,13 +5402,13 @@ class TestCancelAfterClubCancelSucceeds:
     ) -> None:
         booking = self._won()
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            mock_db.update_booking = AsyncMock(side_effect=_first_write_only())
             with caplog.at_level(logging.ERROR, logger="app.services.booking_service"):
                 outcome = await booking_service._cancel_confirmed_booking(booking)
         assert outcome is CancelOutcome.UNRECORDED
         assert outcome.club_cancelled
         provider.cancel_booking.assert_awaited_once()
-        assert mock_db.update_booking.await_count == CANCEL_RECORD_ATTEMPTS
+        assert mock_db.update_booking.await_count == 1 + CANCEL_RECORD_ATTEMPTS
         assert "CANCEL_UNRECORDED: booking won00001" in caplog.text
         # The not-cancelled path's error text must not be written over a real cancel.
         assert "Cancellation failed" not in (booking.error_message or "")
@@ -5402,7 +5419,7 @@ class TestCancelAfterClubCancelSucceeds:
     ) -> None:
         provider.cancel_booking = AsyncMock(side_effect=RuntimeError("site timeout"))
         with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            mock_db.update_booking = AsyncMock(side_effect=_first_write_only())
             outcome = await booking_service._cancel_confirmed_booking(self._won())
         assert outcome is CancelOutcome.NOT_CANCELLED
 
@@ -5438,7 +5455,210 @@ class TestCancelAfterClubCancelSucceeds:
         booking = self._won()
         with patch("app.services.booking_service.database_service") as mock_db:
             mock_db.get_booking = AsyncMock(return_value=booking)
-            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            mock_db.update_booking = AsyncMock(side_effect=_first_write_only())
             result = await booking_service.cancel_booking(booking.id)
         assert result is booking
         assert result.status == BookingStatus.CANCELLED
+
+
+def _recording_writes(fail_on: set[int] | None = None) -> tuple[list[BookingStatus], Callable]:
+    """An update_booking that records the status of each write and fails the listed ones."""
+    statuses: list[BookingStatus] = []
+
+    def write(booking: TeeTimeBooking) -> None:
+        statuses.append(booking.status)
+        if fail_on and len(statuses) in fail_on:
+            raise RuntimeError("connection reset")
+
+    return statuses, write
+
+
+class TestCancellingIsRecordedFirst:
+    """Issue #353: the cancel is recorded before the club is asked, and settled later."""
+
+    PHONE = "+15551234567"
+    DAY = date(2025, 12, 30)
+
+    def _won(
+        self, status: BookingStatus = BookingStatus.SUCCESS, age_min: int = 60
+    ) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id="won00001",
+            phone_number=self.PHONE,
+            request=TeeTimeRequest(
+                requested_date=self.DAY, requested_time=time(8, 0), num_players=4
+            ),
+            status=status,
+            actual_booked_time=time(8, 8),
+            updated_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=age_min),
+        )
+
+    @pytest.fixture(autouse=True)
+    def no_retry_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("app.services.booking_service.CANCEL_RECORD_RETRY_DELAY_S", 0)
+
+    @pytest.fixture
+    def provider(self, booking_service: BookingService) -> MagicMock:
+        provider = MagicMock()
+        provider.cancel_booking = AsyncMock(return_value=True)
+        provider.reservation_exists = AsyncMock(return_value=False)
+        booking_service.set_reservation_provider(provider)
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_the_club_is_not_asked_when_the_first_write_fails(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        booking = self._won()
+        statuses, write = _recording_writes(fail_on={1})
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=write)
+            outcome = await booking_service._cancel_confirmed_booking(booking)
+        assert outcome is CancelOutcome.NOT_CANCELLED
+        provider.cancel_booking.assert_not_called()
+        assert statuses == [BookingStatus.CANCELLING]
+        assert booking.status == BookingStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_cancel_writes_cancelling_then_cancelled(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        statuses, write = _recording_writes()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=write)
+            outcome = await booking_service._cancel_confirmed_booking(self._won())
+        assert outcome is CancelOutcome.CANCELLED
+        assert statuses == [BookingStatus.CANCELLING, BookingStatus.CANCELLED]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_cancel_writes_success_back(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        provider.cancel_booking = AsyncMock(return_value=False)
+        booking = self._won()
+        statuses, write = _recording_writes()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=write)
+            outcome = await booking_service._cancel_confirmed_booking(booking)
+        assert outcome is CancelOutcome.NOT_CANCELLED
+        assert statuses == [BookingStatus.CANCELLING, BookingStatus.SUCCESS]
+        assert booking.status == BookingStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_an_unrecorded_cancel_leaves_the_row_cancelling(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        statuses, write = _recording_writes(fail_on={2, 3})
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=write)
+            outcome = await booking_service._cancel_confirmed_booking(self._won())
+        assert outcome is CancelOutcome.UNRECORDED
+        # Only the first write landed, so the stored row says CANCELLING, not SUCCESS.
+        assert statuses[0] == BookingStatus.CANCELLING
+        assert statuses[1:] == [BookingStatus.CANCELLED] * CANCEL_RECORD_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_an_exception_from_the_club_leaves_the_row_cancelling(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        provider.cancel_booking = AsyncMock(side_effect=RuntimeError("driver died"))
+        statuses, write = _recording_writes()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=write)
+            outcome = await booking_service._cancel_confirmed_booking(self._won())
+        assert outcome is CancelOutcome.NOT_CANCELLED
+        assert statuses == [BookingStatus.CANCELLING, BookingStatus.CANCELLING]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("listed", "settled_as"),
+        [(True, BookingStatus.SUCCESS), (False, BookingStatus.CANCELLED)],
+    )
+    async def test_settling_reads_the_reservations_page(
+        self,
+        booking_service: BookingService,
+        provider: MagicMock,
+        listed: bool,
+        settled_as: BookingStatus,
+    ) -> None:
+        provider.reservation_exists = AsyncMock(return_value=listed)
+        booking = self._won(BookingStatus.CANCELLING)
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booking])
+            mock_db.update_booking = AsyncMock()
+            settled = await booking_service.settle_cancelling_bookings()
+        mock_db.get_bookings.assert_awaited_once_with(status=BookingStatus.CANCELLING)
+        provider.reservation_exists.assert_awaited_once_with(self.DAY, time(8, 8))
+        assert settled == [booking]
+        assert booking.status == settled_as
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_page_leaves_the_row_cancelling(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        provider.reservation_exists = AsyncMock(return_value=None)
+        booking = self._won(BookingStatus.CANCELLING)
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock()
+            settled = await booking_service._settle_cancellations([booking])
+        assert settled == []
+        assert booking.status == BookingStatus.CANCELLING
+        mock_db.update_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_recent_row_is_not_settled(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        booking = self._won(BookingStatus.CANCELLING, age_min=1)
+        settled = await booking_service._settle_cancellations([booking])
+        assert settled == []
+        provider.reservation_exists.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_settling_write_leaves_the_row_cancelling(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        booking = self._won(BookingStatus.CANCELLING)
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            settled = await booking_service._settle_cancellations([booking])
+        assert settled == []
+        assert booking.status == BookingStatus.CANCELLING
+
+    @pytest.mark.asyncio
+    async def test_a_settled_cancel_no_longer_blocks_that_day(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        """The rebooking case: the club no longer lists it, so the day is free."""
+        booking = self._won(BookingStatus.CANCELLING)
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[booking])
+            mock_db.update_booking = AsyncMock()
+            live = await booking_service._live_bookings_on(self.PHONE, [self.DAY])
+        assert live == []
+        assert booking.status == BookingStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_an_unsettled_cancel_is_named_when_rebooking(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        provider.reservation_exists = AsyncMock(return_value=None)
+        booking = self._won(BookingStatus.CANCELLING)
+        request = TeeTimeRequest(requested_date=self.DAY, requested_time=time(9, 0), num_players=1)
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch.object(
+                CTDateTime,
+                "now",
+                return_value=CTDateTime.normalize_to_ct(datetime(2025, 12, 22, 10, 0)),
+            ),
+        ):
+            mock_db.get_live_bookings_on = AsyncMock(return_value=[booking])
+            with pytest.raises(ValueError, match="still confirming with the club"):
+                await booking_service._validate_booking_request(self.PHONE, request)
+
+    def test_every_added_booking_status_has_a_postgres_migration(self) -> None:
+        from app.models.database import _ADDED_BOOKING_STATUSES
+
+        original = {"PENDING", "SCHEDULED", "IN_PROGRESS", "SUCCESS", "FAILED", "CANCELLED"}
+        assert {s.name for s in BookingStatus} - original == set(_ADDED_BOOKING_STATUSES)

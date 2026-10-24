@@ -19,6 +19,7 @@ class BookingStatus(str, Enum):
     Status flow:
         PENDING -> SCHEDULED -> IN_PROGRESS -> SUCCESS/FAILED
                              |-> CANCELLED
+        SUCCESS -> CANCELLING -> CANCELLED (or back to SUCCESS)
 
     Statuses:
         PENDING: Initial state when a booking request is created but not yet
@@ -34,6 +35,9 @@ class BookingStatus(str, Enum):
         FAILED: The booking attempt failed (e.g., time unavailable, site error).
             The error_message field will contain details about the failure.
         CANCELLED: The user cancelled the booking request before it was executed.
+        CANCELLING: A won booking is being cancelled at the club, recorded before
+            the club is asked (issue #353). A row left here means the outcome was
+            not recorded; it is settled from the member's reservations page.
     """
 
     PENDING = "pending"
@@ -42,6 +46,7 @@ class BookingStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    CANCELLING = "cancelling"
 
 
 class TeeTimeRequest(BaseModel):

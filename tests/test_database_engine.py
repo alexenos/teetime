@@ -8,6 +8,8 @@ the job raised "connection is closed" before it could look for a booking. These
 tests pin the pool settings that keep that from recurring.
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -15,6 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.models.database import (
+    _ADDED_BOOKING_STATUSES,
     _ADDED_COLUMNS,
     _ADDED_CONVERSATION_STATES,
     Base,
@@ -24,9 +27,10 @@ from app.models.database import (
     _normalize_database_url,
     _pool_options_for,
     _run_column_migrations,
+    _run_enum_migrations,
     engine,
 )
-from app.models.schemas import ConversationState
+from app.models.schemas import BookingStatus, ConversationState
 
 POSTGRES_URL = "postgresql+asyncpg://user:pw@host/db"
 
@@ -222,3 +226,33 @@ class TestColumnMigrations:
         """Postgres pins the enum at CREATE TABLE time; a typo here fails only there."""
         for value in _ADDED_CONVERSATION_STATES:
             assert value in ConversationState.__members__
+
+    def test_every_added_booking_status_is_a_real_enum_member(self) -> None:
+        for value in _ADDED_BOOKING_STATUSES:
+            assert value in BookingStatus.__members__
+
+    @pytest.mark.asyncio
+    async def test_enum_migrations_add_missing_values_to_each_type(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CANCELLING reaches the bookingstatus type, not only conversationstate (#353)."""
+        monkeypatch.setattr(settings, "database_url", "postgresql+asyncpg://u:p@h/d")
+        executed: list[str] = []
+        conn = MagicMock()
+
+        def execute(statement: object, params: dict | None = None) -> MagicMock:
+            executed.append(str(statement))
+            result = MagicMock()
+            result.fetchone.return_value = None  # every value is missing
+            return result
+
+        conn.execute.side_effect = execute
+        sync_engine = MagicMock()
+        sync_engine.connect.return_value.__enter__.return_value = conn
+        with patch("sqlalchemy.create_engine", return_value=sync_engine):
+            await _run_enum_migrations()
+
+        assert "ALTER TYPE bookingstatus ADD VALUE 'CANCELLING'" in executed
+        for value in _ADDED_CONVERSATION_STATES:
+            assert f"ALTER TYPE conversationstate ADD VALUE '{value}'" in executed
+        sync_engine.dispose.assert_called_once()

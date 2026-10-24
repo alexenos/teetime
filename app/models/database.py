@@ -406,6 +406,17 @@ _ADDED_CONVERSATION_STATES: list[str] = [
     "AWAITING_REPLACE_CONFIRMATION",
 ]
 
+# BookingStatus members added after the initial deployment, for the same reason.
+_ADDED_BOOKING_STATUSES: list[str] = [
+    "CANCELLING",
+]
+
+# Each Postgres enum type and the members added to it after it was created.
+_ADDED_ENUM_VALUES: list[tuple[str, list[str]]] = [
+    ("conversationstate", _ADDED_CONVERSATION_STATES),
+    ("bookingstatus", _ADDED_BOOKING_STATUSES),
+]
+
 
 async def _run_enum_migrations() -> None:
     """
@@ -425,23 +436,24 @@ async def _run_enum_migrations() -> None:
 
     try:
         with sync_engine.connect() as conn:
-            for value in _ADDED_CONVERSATION_STATES:
-                result = conn.execute(
-                    text(
-                        "SELECT 1 FROM pg_enum "
-                        "WHERE enumlabel = :value AND enumtypid = "
-                        "(SELECT oid FROM pg_type WHERE typname = 'conversationstate')"
-                    ),
-                    {"value": value},
-                )
-                if result.fetchone() is None:
-                    # Not parameterizable: ALTER TYPE takes a literal, not a
-                    # bind parameter. Safe because the values are this module's
-                    # own constants, never anything user-supplied.
-                    conn.execute(text(f"ALTER TYPE conversationstate ADD VALUE '{value}'"))
-                    logger.info("Added %s to conversationstate enum", value)
-                else:
-                    logger.debug("%s already exists in conversationstate enum", value)
+            for type_name, values in _ADDED_ENUM_VALUES:
+                for value in values:
+                    result = conn.execute(
+                        text(
+                            "SELECT 1 FROM pg_enum "
+                            "WHERE enumlabel = :value AND enumtypid = "
+                            "(SELECT oid FROM pg_type WHERE typname = :type_name)"
+                        ),
+                        {"value": value, "type_name": type_name},
+                    )
+                    if result.fetchone() is None:
+                        # Not parameterizable: ALTER TYPE takes literals, not
+                        # bind parameters. Safe because the names and values are
+                        # this module's own constants, never anything user-supplied.
+                        conn.execute(text(f"ALTER TYPE {type_name} ADD VALUE '{value}'"))
+                        logger.info("Added %s to %s enum", value, type_name)
+                    else:
+                        logger.debug("%s already exists in %s enum", value, type_name)
     finally:
         sync_engine.dispose()
 

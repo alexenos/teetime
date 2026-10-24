@@ -4647,3 +4647,46 @@ class TestMemberFacingFailure:
         assert WaldenGolfProvider._last_attempted_time(chain, time(9, 23)) == time(9, 15)
         assert WaldenGolfProvider._last_attempted_time({}, time(9, 23)) == time(9, 23)
         assert WaldenGolfProvider._last_attempted_time({"attemptedTimes": []}, None) is None
+
+
+class TestReservationExistsForSettling:
+    """The public reservations-page read used to settle cancellations (issue #353)."""
+
+    def test_reads_the_page_after_logging_in_and_quits(self, provider: WaldenGolfProvider) -> None:
+        from datetime import date, time
+
+        driver = MagicMock()
+        with (
+            patch.object(provider, "_create_driver", return_value=driver),
+            patch.object(provider, "_perform_login", return_value=True),
+            patch.object(provider, "_reservation_exists", return_value=False) as check,
+        ):
+            assert provider._reservation_exists_sync(date(2026, 2, 1), time(8, 8)) is False
+        check.assert_called_once_with(driver, date(2026, 2, 1), time(8, 8))
+        driver.quit.assert_called_once()
+
+    def test_a_failed_login_is_unknown_not_absent(self, provider: WaldenGolfProvider) -> None:
+        from datetime import date, time
+
+        driver = MagicMock()
+        with (
+            patch.object(provider, "_create_driver", return_value=driver),
+            patch.object(provider, "_perform_login", return_value=False),
+            patch.object(provider, "_reservation_exists") as check,
+        ):
+            assert provider._reservation_exists_sync(date(2026, 2, 1), time(8, 8)) is None
+        check.assert_not_called()
+        driver.quit.assert_called_once()
+
+    def test_a_driver_error_is_unknown(self, provider: WaldenGolfProvider) -> None:
+        from datetime import date, time
+
+        from selenium.common.exceptions import WebDriverException
+
+        driver = MagicMock()
+        with (
+            patch.object(provider, "_create_driver", return_value=driver),
+            patch.object(provider, "_perform_login", side_effect=WebDriverException("gone")),
+        ):
+            assert provider._reservation_exists_sync(date(2026, 2, 1), time(8, 8)) is None
+        driver.quit.assert_called_once()
