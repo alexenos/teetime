@@ -39,8 +39,14 @@ BOOKING_EXECUTION_TIMEOUT_SECONDS = 300
 # reported as unknown (issue #155). The attempt is not cancelled at the
 # timeout: the browser thread behind it cannot be stopped, and cancelling only
 # threw away a result the club may already have granted. A racer task's
-# TASK_BUDGET_S plus this stays inside its Cloud Run task timeout.
-LATE_RESULT_GRACE_SECONDS = 240
+# TASK_BUDGET_S, plus DELAY_NOTICE_ALLOWANCE_SECONDS, plus this, leaves time
+# inside its Cloud Run task timeout to send the final messages.
+LATE_RESULT_GRACE_SECONDS = 180
+
+# The longest the "taking longer than usual" notices may take, retries
+# included. A send can take 15s and is retried twice, so without a bound a
+# group's notices could eat the time the final messages need.
+DELAY_NOTICE_ALLOWANCE_SECONDS = 30
 
 # What the member is told when the attempt has not finished even after the
 # grace period. The timeout does not mean no Reserve was sent, only that this
@@ -316,7 +322,16 @@ async def run_bookings_and_report(
                 timeout,
                 grace_s,
             )
-            await booking_service.notify_result_delayed(due_bookings)
+            try:
+                await asyncio.wait_for(
+                    booking_service.notify_result_delayed(due_bookings),
+                    timeout=DELAY_NOTICE_ALLOWANCE_SECONDS,
+                )
+            except TimeoutError:
+                logger.error(
+                    "BATCH_JOB: Delay notices did not all send within %ds",
+                    DELAY_NOTICE_ALLOWANCE_SECONDS,
+                )
             batch_results = await asyncio.wait_for(batch, timeout=grace_s)
     except TimeoutError:
         logger.error("BATCH_JOB: Batch execution timed out, including the grace period")

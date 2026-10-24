@@ -2835,6 +2835,13 @@ class BookingService:
                 ),
             )
 
+        # A row the attempt itself already recorded FAILED has a known reason,
+        # so it is reported as that failure even when this caller cannot vouch
+        # for the outcome. A matching error is this caller's own earlier write,
+        # on a retry after its first send failed.
+        failure_already_known = (
+            current.status == BookingStatus.FAILED and current.error_message != error
+        )
         # Only write back a row that is still there to write to; update_booking
         # raises on a missing record, and the message matters more than the row.
         if current.status != BookingStatus.FAILED:
@@ -2843,7 +2850,7 @@ class BookingService:
             if persisted is not None:
                 await database_service.update_booking(current)
 
-        if not outcome_known:
+        if not outcome_known and not failure_already_known:
             return await self._send_outcome_unknown(current, error)
         return await self._notify_booking_result(
             current,

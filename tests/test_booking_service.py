@@ -5745,6 +5745,55 @@ class TestLateAndUnknownOutcomes:
         db.update_booking.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_a_failure_the_attempt_recorded_keeps_its_reason(
+        self, booking_service: BookingService
+    ) -> None:
+        """Another group of the same batch finished and failed for a known reason."""
+        failed = self._running()
+        failed.status = BookingStatus.FAILED
+        failed.error_message = "The slot was taken by another member."
+        with (
+            patch("app.services.booking_service.database_service") as db,
+            patch("app.services.booking_service.sms_service") as sms,
+        ):
+            db.get_booking = AsyncMock(return_value=failed)
+            db.update_booking = AsyncMock()
+            sms.send_sms = AsyncMock(return_value="msg1")
+            sms.send_booking_failure = AsyncMock(return_value="msg2")
+            await booking_service.notify_unreported_bookings(
+                [self._running()],
+                "The booking attempt did not finish in time.",
+                outcome_known=False,
+            )
+        sms.send_sms.assert_not_called()
+        assert (
+            sms.send_booking_failure.await_args.args[1] == "The slot was taken by another member."
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_retry_of_its_own_unknown_report_stays_unknown(
+        self, booking_service: BookingService
+    ) -> None:
+        """The first pass wrote FAILED with this error, then its send failed."""
+        error = "The booking attempt did not finish in time."
+        written = self._running()
+        written.status = BookingStatus.FAILED
+        written.error_message = error
+        with (
+            patch("app.services.booking_service.database_service") as db,
+            patch("app.services.booking_service.sms_service") as sms,
+        ):
+            db.get_booking = AsyncMock(return_value=written)
+            db.update_booking = AsyncMock()
+            sms.send_sms = AsyncMock(return_value="msg1")
+            sms.send_booking_failure = AsyncMock(return_value="msg2")
+            await booking_service.notify_unreported_bookings(
+                [self._running()], error, outcome_known=False
+            )
+        sms.send_booking_failure.assert_not_called()
+        assert "I don't know whether your tee time" in sms.send_sms.await_args.args[1]
+
+    @pytest.mark.asyncio
     async def test_a_failed_read_still_reaches_the_member(
         self, booking_service: BookingService
     ) -> None:

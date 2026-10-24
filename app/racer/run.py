@@ -56,9 +56,9 @@ LOGIN_LEAD_S = 120
 # How long one task may spend, measured from its own start: the hold, its own
 # race, and any late races of leftover groups. Every race's timeout is capped by
 # what is left of this, so however many bookings a group holds, a timed-out race
-# - after LATE_RESULT_GRACE_SECONDS more waiting for a late result (issue #155,
-# app/api/jobs.py) - still messages its members before Cloud Run's task timeout
-# (1500s, terraform/racer.tf) kills the container. That in turn stays shorter than
+# - after its delay notices and LATE_RESULT_GRACE_SECONDS more waiting for a
+# late result (issue #155, app/api/jobs.py) - still messages its members before
+# Cloud Run's task timeout (1500s, terraform/racer.tf) kills the container. That in turn stays shorter than
 # INTERRUPTED_MIN_AGE, so no claim looks orphaned while its task can still run.
 TASK_BUDGET_S = 1200
 

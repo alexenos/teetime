@@ -623,7 +623,10 @@ class TestJobsTimeout:
         """
 
         async def mock_wait_for(awaitable, timeout):
-            # Both waits time out: the shielded first one, then the grace period.
+            # Every wait times out: the shielded first one, the delay notices
+            # and the grace period. A coroutine handed in is closed unrun.
+            if asyncio.iscoroutine(awaitable):
+                awaitable.close()
             raise TimeoutError()
 
         with patch("app.api.jobs.settings") as mock_settings:
@@ -671,7 +674,7 @@ class TestJobsTimeout:
                     assert message == TIMEOUT_NOTIFICATION_MESSAGE
                     # Told first that it is late, then that the outcome is
                     # unknown - not that it failed (issue #155).
-                    mock_service.notify_result_delayed.assert_awaited_once_with([sample_booking])
+                    mock_service.notify_result_delayed.assert_called_once_with([sample_booking])
                     assert (
                         mock_service.notify_unreported_bookings.await_args.kwargs["outcome_known"]
                         is False
@@ -1114,8 +1117,51 @@ class TestALateResultIsWaitedFor:
         assert cancelled.is_set()
 
     def test_the_grace_period_fits_inside_the_racer_task_timeout(self) -> None:
-        from app.api.jobs import LATE_RESULT_GRACE_SECONDS
+        """The final messages still need time after the notices and the grace period."""
+        from app.api.jobs import DELAY_NOTICE_ALLOWANCE_SECONDS, LATE_RESULT_GRACE_SECONDS
         from app.racer.run import TASK_BUDGET_S
 
         job_task_timeout_s = 1500  # terraform/racer.tf
-        assert TASK_BUDGET_S + LATE_RESULT_GRACE_SECONDS < job_task_timeout_s
+        final_messages_s = 60
+        assert (
+            TASK_BUDGET_S
+            + DELAY_NOTICE_ALLOWANCE_SECONDS
+            + LATE_RESULT_GRACE_SECONDS
+            + final_messages_s
+            <= job_task_timeout_s
+        )
+
+    @pytest.mark.asyncio
+    async def test_slow_delay_notices_do_not_eat_the_grace_period(
+        self, sample_booking: TeeTimeBooking, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app.api.jobs.DELAY_NOTICE_ALLOWANCE_SECONDS", 0.01)
+
+        async def slow_win(bookings, execute_at):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(0.2)
+            return [("test1234", BookingResult(success=False, error_message="Slot taken"))]
+
+        async def hung_notice(bookings):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(60)
+
+        with (
+            patch("app.api.jobs.booking_service") as service,
+            patch("app.api.jobs.sms_service") as sms,
+        ):
+            service.execute_bookings_batch = slow_win
+            service.notify_result_delayed = hung_notice
+            service.notify_unreported_bookings = AsyncMock()
+            service.get_booking = AsyncMock(return_value=sample_booking)
+            sms.send_booking_failure = AsyncMock()
+            result = await run_bookings_and_report(
+                [sample_booking],
+                execute_at=datetime(2025, 12, 13, 6, 30),
+                executed_at=datetime(2025, 12, 13, 6, 28),
+                timeout_s=0.01,
+                grace_s=5,
+            )
+
+        # The notice was abandoned at its allowance, and the late result still landed.
+        assert result.failed == 1
+        service.notify_unreported_bookings.assert_not_called()
+        sms.send_booking_failure.assert_awaited_once()
