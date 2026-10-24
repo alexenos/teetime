@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
 from enum import Enum
+from functools import partial
 
 from app.config import settings
 from app.models.schemas import (
@@ -2660,7 +2661,9 @@ class BookingService:
             merged.append((booking_id, retry))
         return merged
 
-    async def notify_unreported_bookings(self, bookings: list[TeeTimeBooking], error: str) -> None:
+    async def notify_unreported_bookings(
+        self, bookings: list[TeeTimeBooking], error: str, *, outcome_known: bool = True
+    ) -> None:
         """Report bookings a caller ran but could not account for itself.
 
         The scheduled job bounds the batch with asyncio.wait_for, so a slow
@@ -2672,9 +2675,51 @@ class BookingService:
         Each row is re-read rather than assumed failed: cancelling the await
         does not stop the Selenium thread behind it, so a booking may have been
         persisted as a success on its way out and must be reported as one.
+
+        ``outcome_known=False`` is for an attempt that may still have reserved
+        a tee time (it ran out of time): a row still IN_PROGRESS is recorded
+        FAILED, but the member is told the outcome is unknown and to check the
+        club's site, not that the booking failed (issue #155).
         """
         for booking in bookings:
-            await self._try_notify_unreported_booking(booking, error)
+            await self._try_notify_unreported_booking(booking, error, outcome_known)
+
+    async def notify_result_delayed(self, bookings: list[TeeTimeBooking]) -> None:
+        """Tell each member their attempt is still running past its timeout (#155)."""
+        for booking in bookings:
+            await self._notify_with_retry(
+                partial(self._send_result_delayed, booking),
+                booking.id,
+                "a delay notice",
+            )
+
+    async def _send_result_delayed(self, booking: TeeTimeBooking) -> str | None:
+        return await sms_service.send_sms(
+            booking.phone_number,
+            f"{booking.requester_handle or ''}The booking attempt for "
+            f"{self._booking_details(booking)} is taking longer than usual. I'll message "
+            "you as soon as I know whether it went through.",
+            booking.origin_channel_id,
+            booking.channel,
+        )
+
+    async def _send_outcome_unknown(self, booking: TeeTimeBooking, why: str) -> str | None:
+        return await sms_service.send_sms(
+            booking.phone_number,
+            f"{booking.requester_handle or ''}I don't know whether your tee time for "
+            f"{self._booking_details(booking)} was booked. {why} Please check the club's "
+            "website before booking again.",
+            booking.origin_channel_id,
+            booking.channel,
+        )
+
+    @staticmethod
+    def _booking_details(booking: TeeTimeBooking) -> str:
+        return (
+            f"{booking.request.requested_date:%A, %B %d} at "
+            f"{booking.request.requested_time:%I:%M %p} for "
+            f"{_players(booking.request.num_players)}"
+        )
 
     async def _notify_with_retry(
         self, send: Callable[[], Awaitable[str | None]], booking_id: str | None, what: str
@@ -2746,15 +2791,19 @@ class BookingService:
             lambda: self._notify_booking_result(booking, result), booking.id, "the outcome"
         )
 
-    async def _try_notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> None:
+    async def _try_notify_unreported_booking(
+        self, booking: TeeTimeBooking, error: str, outcome_known: bool = True
+    ) -> None:
         """Same, for a booking the batch never accounted for."""
         await self._notify_with_retry(
-            lambda: self._notify_unreported_booking(booking, error),
+            lambda: self._notify_unreported_booking(booking, error, outcome_known),
             booking.id,
             "an unaccounted attempt",
         )
 
-    async def _notify_unreported_booking(self, booking: TeeTimeBooking, error: str) -> str | None:
+    async def _notify_unreported_booking(
+        self, booking: TeeTimeBooking, error: str, outcome_known: bool = True
+    ) -> str | None:
         """Report a booking the batch left unaccounted for.
 
         The batch may have resolved and persisted the row before failing, so
@@ -2764,7 +2813,16 @@ class BookingService:
         Returns the delivery's message id, or None if it did not land - see
         _notify_with_retry, which decides whether to try again on that.
         """
-        persisted = await self.get_booking(booking.id) if booking.id is not None else None
+        try:
+            persisted = await self.get_booking(booking.id) if booking.id is not None else None
+        except Exception:
+            # Retrying the read on every attempt and then giving up would leave
+            # the member with no message at all (issue #155); the state is
+            # unknown, so say so instead of guessing either way.
+            logger.exception("Could not read booking %s to report it", booking.id)
+            return await self._send_outcome_unknown(
+                booking, "I couldn't check how the booking attempt went."
+            )
         current = persisted or booking
 
         if current.status == BookingStatus.SUCCESS:
@@ -2785,6 +2843,8 @@ class BookingService:
             if persisted is not None:
                 await database_service.update_booking(current)
 
+        if not outcome_known:
+            return await self._send_outcome_unknown(current, error)
         return await self._notify_booking_result(
             current,
             BookingResult(success=False, error_message=current.error_message or error),
