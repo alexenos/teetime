@@ -6366,6 +6366,13 @@ class WaldenGolfProvider(ReservationProvider):
             if not self._perform_login(driver):
                 logger.error("RESERVATION_CHECK: Login failed; cannot read the reservations page")
                 return None
+            listed = self._reservation_exists(driver, target_date, booked_time)
+            if listed is not False:
+                return listed
+            # An empty scan can be a page that had not rendered its table, and
+            # "not listed" settles a booking as CANCELLED, so it takes a second
+            # read (which reloads the page) to agree.
+            logger.info("RESERVATION_CHECK: Not listed; reading the page again to confirm")
             return self._reservation_exists(driver, target_date, booked_time)
         except WebDriverException as e:
             logger.warning(f"RESERVATION_CHECK: Could not read the reservations page: {e}")

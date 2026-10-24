@@ -4659,11 +4659,29 @@ class TestReservationExistsForSettling:
         with (
             patch.object(provider, "_create_driver", return_value=driver),
             patch.object(provider, "_perform_login", return_value=True),
-            patch.object(provider, "_reservation_exists", return_value=False) as check,
+            patch.object(provider, "_reservation_exists", return_value=True) as check,
         ):
-            assert provider._reservation_exists_sync(date(2026, 2, 1), time(8, 8)) is False
+            assert provider._reservation_exists_sync(date(2026, 2, 1), time(8, 8)) is True
         check.assert_called_once_with(driver, date(2026, 2, 1), time(8, 8))
         driver.quit.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("second", "answer"),
+        [(False, False), (True, True), (None, None)],
+    )
+    def test_not_listed_is_only_reported_when_a_second_read_agrees(
+        self, provider: WaldenGolfProvider, second: bool | None, answer: bool | None
+    ) -> None:
+        """An unrendered table scans as empty; one empty read must not settle CANCELLED."""
+        from datetime import date, time
+
+        with (
+            patch.object(provider, "_create_driver", return_value=MagicMock()),
+            patch.object(provider, "_perform_login", return_value=True),
+            patch.object(provider, "_reservation_exists", side_effect=[False, second]) as check,
+        ):
+            assert provider._reservation_exists_sync(date(2026, 2, 1), time(8, 8)) is answer
+        assert check.call_count == 2
 
     def test_a_failed_login_is_unknown_not_absent(self, provider: WaldenGolfProvider) -> None:
         from datetime import date, time
