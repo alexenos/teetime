@@ -243,7 +243,10 @@ class TestColumnMigrations:
         def execute(statement: object, params: dict | None = None) -> MagicMock:
             executed.append(str(statement))
             result = MagicMock()
-            result.fetchone.return_value = None  # every value is missing
+            # Every type exists; every value is missing.
+            result.fetchone.return_value = (
+                (1,) if str(statement).startswith("SELECT 1 FROM pg_type") else None
+            )
             return result
 
         conn.execute.side_effect = execute
@@ -256,3 +259,26 @@ class TestColumnMigrations:
         for value in _ADDED_CONVERSATION_STATES:
             assert f"ALTER TYPE conversationstate ADD VALUE '{value}'" in executed
         sync_engine.dispose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_enum_type_is_skipped_not_raised(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A wrong type name must not stop the service starting."""
+        monkeypatch.setattr(settings, "database_url", "postgresql+asyncpg://u:p@h/d")
+        executed: list[str] = []
+        conn = MagicMock()
+
+        def execute(statement: object, params: dict | None = None) -> MagicMock:
+            executed.append(str(statement))
+            result = MagicMock()
+            result.fetchone.return_value = None  # no type, no value
+            return result
+
+        conn.execute.side_effect = execute
+        sync_engine = MagicMock()
+        sync_engine.connect.return_value.__enter__.return_value = conn
+        with patch("sqlalchemy.create_engine", return_value=sync_engine):
+            await _run_enum_migrations()
+
+        assert not any(sql.startswith("ALTER TYPE") for sql in executed)

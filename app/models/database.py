@@ -437,6 +437,17 @@ async def _run_enum_migrations() -> None:
     try:
         with sync_engine.connect() as conn:
             for type_name, values in _ADDED_ENUM_VALUES:
+                # A missing type would make ALTER TYPE raise and stop startup;
+                # a value that cannot be added only fails the writes that use it.
+                if (
+                    conn.execute(
+                        text("SELECT 1 FROM pg_type WHERE typname = :type_name"),
+                        {"type_name": type_name},
+                    ).fetchone()
+                    is None
+                ):
+                    logger.error("Enum type %s not found; not adding %s", type_name, values)
+                    continue
                 for value in values:
                     result = conn.execute(
                         text(
