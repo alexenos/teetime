@@ -70,13 +70,27 @@ jobs:
           install-chromedriver: true
 
       - name: Run tests with pytest
-        run: poetry run pytest -v --tb=short
+        run: poetry run pytest -v --tb=short --cov --cov-report=json:coverage.json
         env:
           # Both come from the step above, so the pair always matches. Empty
           # or unset falls back to the default lookups, which is what ran here
           # before this step existed.
           CHROME_BINARY: ${{ steps.setup-chrome.outputs.chrome-path }}
           CHROMEDRIVER_BINARY: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+
+      # Report only, no threshold (#11). The table is in the job summary and
+      # coverage.json is the artifact the tech-debt and feature-dev Routines read.
+      - name: Publish coverage
+        if: ${{ !cancelled() }}
+        run: poetry run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.json
+          if-no-files-found: ignore
 
   lint:
     runs-on: ubuntu-latest

@@ -45,6 +45,7 @@ mypy = "^1.13.0"
 types-pytz = "^2025.2.0.20251108"
 beautifulsoup4 = "^4.12.0"
 vulture = "^2.16"
+pytest-cov = "^6"
 
 [build-system]
 requires = ["poetry-core"]
@@ -80,3 +81,13 @@ asyncio_mode = "auto"
 markers = [
     "integration: tests that drive a real headless Chrome (deselect with -m 'not integration')",
 ]
+
+# Coverage is reported, not gated (#11). CI runs `pytest --cov` and publishes the
+# table to the job summary; the tech-debt and feature-dev Routines read it.
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
