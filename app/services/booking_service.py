@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as dtime
+from enum import Enum
 
 from app.config import settings
 from app.models.schemas import (
@@ -58,6 +59,31 @@ _DOCS_LINK_RE = re.compile(r"\s*;?\s*For documentation on this error.*", re.DOTA
 # so a transient send failure is retried before it is given up on.
 NOTIFY_MAX_ATTEMPTS = 3
 NOTIFY_RETRY_DELAY_S = 2
+
+# Once the club has cancelled a won booking it cannot be got back, so the
+# database write that records it is retried before the record is given up on.
+CANCEL_RECORD_ATTEMPTS = 2
+CANCEL_RECORD_RETRY_DELAY_S = 1
+
+
+class CancelOutcome(Enum):
+    """What cancelling a won booking did (issue #301).
+
+    The club cancel and the database write that records it can fail
+    separately, and a member must not be told a cancel failed when the club
+    has in fact released the tee time.
+    """
+
+    CANCELLED = "cancelled"
+    """Cancelled on the club's site and recorded."""
+    UNRECORDED = "unrecorded"
+    """Cancelled on the club's site; the booking row still says SUCCESS."""
+    NOT_CANCELLED = "not_cancelled"
+    """The club still holds the booking."""
+
+    @property
+    def club_cancelled(self) -> bool:
+        return self is not CancelOutcome.NOT_CANCELLED
 
 
 def _players(count: int) -> str:
@@ -1269,7 +1295,17 @@ class BookingService:
                 )
         released_confirmed = held.status == BookingStatus.SUCCESS
         if released_confirmed:
-            cancelled = await self._cancel_confirmed_booking(held)
+            outcome = await self._cancel_confirmed_booking(held)
+            if outcome is CancelOutcome.UNRECORDED:
+                # The club released the old time but the row still holds the
+                # member's round for that day, so booking the new time now
+                # would be refused as a duplicate or double-count the day.
+                return await self._after_replace_answer(
+                    session,
+                    f"I cancelled your {held_at} booking on the website, but I couldn't "
+                    "update my own record of it, so I haven't booked the new time.",
+                )
+            cancelled = outcome.club_cancelled
         else:
             cancelled = await database_service.cancel_pending_booking(held.id) is not None
         if not cancelled:
@@ -1905,8 +1941,14 @@ class BookingService:
                     await self.update_session(session)
 
                     if booking.status == BookingStatus.SUCCESS:
-                        success = await self._cancel_confirmed_booking(booking)
-                        if success:
+                        outcome = await self._cancel_confirmed_booking(booking)
+                        if outcome is CancelOutcome.UNRECORDED:
+                            return (
+                                f"Your confirmed booking for {date_str} has been cancelled "
+                                "on the website, but I couldn't update my own record of it, "
+                                "so I may still list it as booked."
+                            )
+                        if outcome.club_cancelled:
                             return (
                                 f"Your confirmed booking for {date_str} has been cancelled "
                                 "on the website."
@@ -2051,18 +2093,20 @@ class BookingService:
 
         return f"Reply yes to cancel your {status_label} booking for {date_str} at {time_str}."
 
-    async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> bool:
+    async def _cancel_confirmed_booking(self, booking: TeeTimeBooking) -> CancelOutcome:
         """
         Cancel a confirmed booking on the club website.
 
         This method calls the reservation provider to cancel the booking on the
-        actual website, then updates the booking status in the database.
+        actual website, then updates the booking status in the database. The
+        two steps fail separately: a database failure after the club cancel
+        succeeded is ``UNRECORDED``, never ``NOT_CANCELLED``.
 
         Args:
             booking: The confirmed booking to cancel.
 
         Returns:
-            True if cancellation was successful, False otherwise.
+            What the cancellation did; see CancelOutcome.
         """
         booked_time = booking.actual_booked_time or booking.request.requested_time
         cancellation_id = (
@@ -2079,25 +2123,61 @@ class BookingService:
         try:
             provider = await self._provider_for(booking.phone_number)
             if not provider:
-                return False
+                return CancelOutcome.NOT_CANCELLED
 
             async with self._browser_slot_held(f"cancellation {cancellation_id}"):
                 success = await provider.cancel_booking(cancellation_id)
 
-            if success:
-                booking.status = BookingStatus.CANCELLED
-                await database_service.update_booking(booking)
-                return True
-            else:
-                return False
-
         except Exception as e:
             booking.error_message = f"Cancellation failed: {str(e)}"
-            await database_service.update_booking(booking)
-            return False
+            try:
+                await database_service.update_booking(booking)
+            except Exception as write_error:
+                logger.error(
+                    "Could not record the failed cancellation of booking %s: %s",
+                    booking.id,
+                    write_error,
+                )
+            return CancelOutcome.NOT_CANCELLED
         finally:
             if provider is not None:
                 await self._release_provider(provider)
+
+        if not success:
+            return CancelOutcome.NOT_CANCELLED
+        booking.status = BookingStatus.CANCELLED
+        if await self._record_cancellation(booking):
+            return CancelOutcome.CANCELLED
+        return CancelOutcome.UNRECORDED
+
+    async def _record_cancellation(self, booking: TeeTimeBooking) -> bool:
+        """Write a club-cancelled booking's CANCELLED status, retrying once."""
+        for attempt in range(1, CANCEL_RECORD_ATTEMPTS + 1):
+            try:
+                await database_service.update_booking(booking)
+                return True
+            except Exception as e:
+                if attempt == CANCEL_RECORD_ATTEMPTS:
+                    logger.error(
+                        "CANCEL_UNRECORDED: booking %s was cancelled on the club's site "
+                        "but recording it failed after %d attempts; the row still says "
+                        "%s: %s",
+                        booking.id,
+                        CANCEL_RECORD_ATTEMPTS,
+                        BookingStatus.SUCCESS.value,
+                        e,
+                    )
+                    return False
+                logger.warning(
+                    "Recording the cancellation of booking %s failed (attempt %d of %d), "
+                    "retrying: %s",
+                    booking.id,
+                    attempt,
+                    CANCEL_RECORD_ATTEMPTS,
+                    e,
+                )
+                await asyncio.sleep(CANCEL_RECORD_RETRY_DELAY_S)
+        return False
 
     async def _validate_booking_request(
         self, phone_number: str, request: TeeTimeRequest, replacing: str | None = None
@@ -2669,8 +2749,11 @@ class BookingService:
             return None
 
         if booking.status == BookingStatus.SUCCESS:
-            success = await self._cancel_confirmed_booking(booking)
-            if not success:
+            outcome = await self._cancel_confirmed_booking(booking)
+            if outcome is CancelOutcome.UNRECORDED:
+                # The stored row still says SUCCESS; the club no longer does.
+                return booking
+            if not outcome.club_cancelled:
                 return None
             return await database_service.get_booking(booking_id)
 

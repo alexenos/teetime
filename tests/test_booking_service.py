@@ -25,9 +25,11 @@ from app.models.schemas import (
 from app.providers.base import BookingResult
 from app.providers.walden_sheet_grid import GridSlot, SheetGrid
 from app.services.booking_service import (
+    CANCEL_RECORD_ATTEMPTS,
     MEMBER_ERROR_MAX_LEN,
     NOTIFY_MAX_ATTEMPTS,
     BookingService,
+    CancelOutcome,
     _member_safe_error,
     describe_slot_agreement,
 )
@@ -3664,9 +3666,9 @@ class TestCredentialResolutionFailures:
 
             with patch("app.services.booking_service.database_service") as mock_db:
                 mock_db.update_booking = AsyncMock()
-                success = await booking_service._cancel_confirmed_booking(booking)
+                outcome = await booking_service._cancel_confirmed_booking(booking)
 
-        assert success is False
+        assert outcome is CancelOutcome.NOT_CANCELLED
         provider.cancel_booking.assert_not_called()
         assert "database unavailable" in (booking.error_message or "")
 
@@ -4952,7 +4954,7 @@ class TestSameDayReplacement:
             patch.object(
                 BookingService,
                 "_cancel_confirmed_booking",
-                AsyncMock(side_effect=lambda _b: db.live.clear() or True),
+                AsyncMock(side_effect=lambda _b: db.live.clear() or CancelOutcome.CANCELLED),
             ) as cancel,
         ):
             reply = await booking_service._handle_replace_reply(session, "yes")
@@ -4960,6 +4962,29 @@ class TestSameDayReplacement:
         db.create_booking.assert_awaited_once()
         assert reply.startswith("Done - I cancelled your 09:23 AM booking.")
         assert reply.endswith("Your old tee time is released and the new one is not secured yet.")
+
+    @pytest.mark.asyncio
+    async def test_an_unrecorded_cancel_says_so_and_books_nothing(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        """Issue #301: the club released the old time; the member is told, not misled."""
+        db.get_booking.return_value = self._held(BookingStatus.SUCCESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(BookingService, "_live_open_times", AsyncMock(return_value=[time(8, 0)])),
+            patch.object(
+                BookingService,
+                "_cancel_confirmed_booking",
+                AsyncMock(return_value=CancelOutcome.UNRECORDED),
+            ),
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "I cancelled your 09:23 AM booking on the website" in reply
+        assert "haven't booked the new time" in reply
+        assert "couldn't cancel" not in reply
+        db.create_booking.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_yes_cancels_the_old_booking_and_books_the_new_time(
@@ -5311,3 +5336,109 @@ class TestReplaceQuestionReplies:
         assert session.state == ConversationState.AWAITING_CONFIRMATION
         assert session.pending_request == other
         assert "07:00 AM" in reply
+
+
+class TestCancelAfterClubCancelSucceeds:
+    """Issue #301: the club cancel and the database write fail separately."""
+
+    @staticmethod
+    def _won() -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id="won00001",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 30), requested_time=time(8, 0), num_players=4
+            ),
+            status=BookingStatus.SUCCESS,
+            actual_booked_time=time(8, 0),
+        )
+
+    @pytest.fixture(autouse=True)
+    def no_retry_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("app.services.booking_service.CANCEL_RECORD_RETRY_DELAY_S", 0)
+
+    @pytest.fixture
+    def provider(self, booking_service: BookingService) -> MagicMock:
+        provider = MagicMock()
+        provider.cancel_booking = AsyncMock(return_value=True)
+        booking_service.set_reservation_provider(provider)
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_a_failed_write_is_retried_and_then_recorded(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        booking = self._won()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=[RuntimeError("connection reset"), None])
+            outcome = await booking_service._cancel_confirmed_booking(booking)
+        assert outcome is CancelOutcome.CANCELLED
+        assert mock_db.update_booking.await_count == 2
+        assert booking.status == BookingStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_a_write_that_keeps_failing_is_unrecorded_not_failed(
+        self,
+        booking_service: BookingService,
+        provider: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        booking = self._won()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            with caplog.at_level(logging.ERROR, logger="app.services.booking_service"):
+                outcome = await booking_service._cancel_confirmed_booking(booking)
+        assert outcome is CancelOutcome.UNRECORDED
+        assert outcome.club_cancelled
+        provider.cancel_booking.assert_awaited_once()
+        assert mock_db.update_booking.await_count == CANCEL_RECORD_ATTEMPTS
+        assert "CANCEL_UNRECORDED: booking won00001" in caplog.text
+        # The not-cancelled path's error text must not be written over a real cancel.
+        assert "Cancellation failed" not in (booking.error_message or "")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_error_write_is_logged_not_raised(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        provider.cancel_booking = AsyncMock(side_effect=RuntimeError("site timeout"))
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            outcome = await booking_service._cancel_confirmed_booking(self._won())
+        assert outcome is CancelOutcome.NOT_CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_the_cancel_reply_tells_the_member_the_club_cancelled(
+        self, booking_service: BookingService
+    ) -> None:
+        booking = self._won()
+        session = UserSession(phone_number=booking.phone_number)
+        session.pending_cancellation_id = booking.id
+        with (
+            patch("app.services.booking_service.database_service") as mock_db,
+            patch.object(booking_service, "update_session", AsyncMock()),
+            patch.object(
+                BookingService,
+                "_cancel_confirmed_booking",
+                AsyncMock(return_value=CancelOutcome.UNRECORDED),
+            ),
+        ):
+            mock_db.get_bookings = AsyncMock(return_value=[booking])
+            mock_db.get_booking = AsyncMock(return_value=booking)
+            reply = await booking_service._handle_cancel_intent(
+                session, ParsedIntent(intent="cancel", raw_message="yes")
+            )
+        assert "has been cancelled on the website" in reply
+        assert "couldn't update my own record" in reply
+        assert "unable to cancel" not in reply
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_returns_the_booking_when_unrecorded(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        booking = self._won()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(return_value=booking)
+            mock_db.update_booking = AsyncMock(side_effect=RuntimeError("connection reset"))
+            result = await booking_service.cancel_booking(booking.id)
+        assert result is booking
+        assert result.status == BookingStatus.CANCELLED
