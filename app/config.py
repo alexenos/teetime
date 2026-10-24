@@ -592,7 +592,6 @@ class Settings(BaseSettings):
     booking_open_hour: int = 6
     booking_open_minute: int = 30
     days_in_advance: int = 7
-    max_tee_times_per_day: int = 2
 
     scheduler_api_key: str = ""
     scheduler_service_account: str = ""
