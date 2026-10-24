@@ -545,3 +545,23 @@ class TestBookingsEndpointsIntegration:
             get_response = test_client.get(f"/bookings/{booking_id}")
             assert get_response.status_code == 200
             assert get_response.json()["status"] == "cancelled"
+
+
+class TestStartupSettlesCancellations:
+    """Issue #353: unrecorded cancellations are settled at startup."""
+
+    @pytest.mark.asyncio
+    async def test_settling_runs_even_if_reconciling_fails(self) -> None:
+        from app.main import _reconcile_after_startup
+        from app.services.booking_service import booking_service
+
+        with (
+            patch.object(
+                booking_service,
+                "reconcile_interrupted_bookings",
+                AsyncMock(side_effect=RuntimeError("database unavailable")),
+            ),
+            patch.object(booking_service, "settle_cancelling_bookings", AsyncMock()) as settle,
+        ):
+            await _reconcile_after_startup(None)
+        settle.assert_awaited_once()

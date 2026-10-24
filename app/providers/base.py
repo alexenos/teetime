@@ -119,6 +119,15 @@ class ReservationProvider(ABC):
     async def cancel_booking(self, confirmation_number: str) -> bool:
         pass
 
+    async def reservation_exists(self, target_date: date, booked_time: time) -> bool | None:
+        """Whether the member's reservations list holds this tee time.
+
+        True when listed, False when the list was read and it is not there,
+        None when it could not be read. Not abstract: a provider that cannot
+        read reservations answers None, which callers treat as unknown.
+        """
+        return None
+
     @abstractmethod
     async def close(self) -> None:
         pass
