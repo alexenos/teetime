@@ -252,7 +252,8 @@ async def forget(requester_id: str, today: date | None = None) -> ForgetOutcome:
     Marks their label forgotten, rewrites their finished bookings to it, and
     deletes their conversation session. Bookings still to come are rewritten
     by sweep_forgotten once they finish. A member with no bookings and no
-    label gets none: there is nothing to keep, and nothing links them.
+    label gets none: there is nothing to keep, and nothing links them. Their
+    session is deleted either way.
 
     Returns the label and how many bookings were rewritten now.
     """
@@ -266,6 +267,11 @@ async def forget(requester_id: str, today: date | None = None) -> ForgetOutcome:
     label = await label_for(requester_id)
     if label is None:
         if not has_bookings:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    delete(SessionRecord).where(SessionRecord.phone_number == requester_id)
+                )
+                await session.commit()
             return ForgetOutcome(label=None, bookings_rewritten=0)
         label, _ = await assign(requester_id)
 

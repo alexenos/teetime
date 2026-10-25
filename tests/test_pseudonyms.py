@@ -414,9 +414,13 @@ class TestForget:
         assert record.requester_id == MEMBER_ID  # broken only once nothing needs it
 
     async def test_a_member_with_nothing_on_file_is_given_no_label(self, session_local) -> None:  # type: ignore[no-untyped-def]
+        # A session can hold their handle or a half-made request; it goes too.
+        await self._add(session_local, SessionRecord(phone_number=MEMBER_ID))
         outcome = await pseudonyms.forget(MEMBER_ID, today=self.TODAY)
         assert outcome.label is None
         assert await self._pseudonym_ids(session_local) == set()
+        async with session_local() as s:
+            assert (await s.execute(select(SessionRecord))).scalars().first() is None
 
     async def test_a_member_without_a_label_gets_one_for_their_history(self, session_local) -> None:  # type: ignore[no-untyped-def]
         await self._add(session_local, self._booking("old", BookingStatus.FAILED, self.TODAY))
