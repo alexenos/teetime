@@ -109,6 +109,9 @@ environment that sets `CI` but has no browser.
 
 Measurement, and the Routines that run on a schedule: `operations/`.
 
+- `operations/coverage-floor.txt` — total coverage high-water mark (#11). CI fails below
+  it, and fails above it with the value to commit, so it only rises, in the PR that earned
+  it. `scripts/check_coverage_floor.py` enforces it
 - `operations/features.md` — the feature manifest the tech-debt Routine judges
   legacy code against. A PR that adds, retires or deletes a feature updates it in
   the same change; `tests/test_feature_manifest.py` fails if an `app/` file belongs

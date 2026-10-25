@@ -93,6 +93,12 @@ jobs:
           path: coverage.json
           if-no-files-found: ignore
 
+      # High-water mark (#11): fails below operations/coverage-floor.txt, and fails
+      # above it with the value to commit, so the floor only moves up, in a PR.
+      # After the upload so the artifact is kept when this step fails.
+      - name: Check coverage floor
+        run: python scripts/check_coverage_floor.py coverage.json operations/coverage-floor.txt
+
   lint:
     runs-on: ubuntu-latest
 
