@@ -119,10 +119,44 @@ def provider() -> WaldenGolfProvider:
     return prov
 
 
+# Bound on every poll below. The conditions normally hold within a few ms; this
+# only decides how long a broken page takes to fail.
+_POLL_TIMEOUT_S = 5
+
+
 def load_page(driver, **params: int | str) -> None:  # type: ignore[no-untyped-def]
+    """Open the fixture and wait until its script has installed the handlers.
+
+    The script runs inline at the end of the body, so ``testLog`` existing is
+    the signal that every handler and the gate timer are in place. Polling for
+    it replaces a fixed sleep that passed only if the page beat it.
+    """
+    from selenium.webdriver.support.ui import WebDriverWait
+
     query = "&".join(f"{k}={v}" for k, v in params.items())
     driver.get(FIXTURE.resolve().as_uri() + (f"?{query}" if query else ""))
-    time.sleep(0.2)  # let the page's scripts install their handlers
+    WebDriverWait(driver, _POLL_TIMEOUT_S).until(
+        lambda d: d.execute_script(
+            "return document.readyState === 'complete' && Array.isArray(window.testLog)"
+        )
+    )
+
+
+def wait_for_gate_removed(driver) -> None:  # type: ignore[no-untyped-def]
+    """Wait for the page's own timer to remove ``disable-div``."""
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    WebDriverWait(driver, _POLL_TIMEOUT_S).until(
+        lambda d: d.execute_script(
+            "return !document.querySelector('.ui-datascroller')"
+            ".classList.contains('disable-div')"
+        )
+    )
+
+
+def page_origin_ms(driver) -> int:  # type: ignore[no-untyped-def]
+    """Epoch ms at which the page's navigation started; its timers count from here."""
+    return int(driver.execute_script("return performance.timeOrigin"))
 
 
 class TestTimedChain:
@@ -145,17 +179,22 @@ class TestTimedChain:
     def test_click_waits_for_enable_when_timer_fires_after_target(self, driver, provider) -> None:
         """Gate removal ~300ms AFTER the target: chain must wait, then click.
 
-        The page's enable timer starts at load; load_page sleeps 0.2s, and the
-        target is 1.0s after that, so the 1500ms timer fires roughly 300ms
-        past the target.
+        The page's 1500ms enable timer starts as its script runs, just after
+        navigation starts. Anchoring the target at 1200ms on the page's own
+        clock puts the gate's removal roughly 300ms past it, however long the
+        load took.
         """
         load_page(driver, enableAfter=1500, playerDelay=200)
-        target_ms = int((time.time() + 1.0) * 1000)
+        target_ms = page_origin_ms(driver) + 1200
 
         result = provider._stage_timed_booking_chain_js(driver, 0, 2, target_ms)
 
         assert result["success"], f"chain failed: {result}"
         timing = result["timing"]
+        # The target must still be ahead when the chain starts, or it skips the
+        # timed wait and this passes without exercising it. A load slower than
+        # the 1200ms anchor would do that; fail it instead.
+        assert timing["msUntilTarget"] > 0, f"target already past at chain start: {timing}"
         assert timing["disableDivPresentAtStart"] is True
         assert timing["slotsEnabledAfterWait"] is True
         # Waited for the overlay, then clicked. Loose bound for CI noise.
@@ -174,7 +213,7 @@ class TestTimedChain:
 class TestFastChain:
     def test_completes_full_flow(self, driver, provider) -> None:
         load_page(driver, enableAfter=0, playerDelay=400)
-        time.sleep(0.2)  # allow the enable timer to fire before the fast path
+        wait_for_gate_removed(driver)  # the fast path assumes an open sheet
 
         result = provider._execute_fast_booking_chain_js(driver, 1, 4)
 
@@ -187,7 +226,7 @@ class TestFastChain:
     def test_preselected_player_count_not_toggled(self, driver, provider) -> None:
         """When the page restores the player count, clicking again would deselect it."""
         load_page(driver, enableAfter=0, playerDelay=200, preselect=1)
-        time.sleep(0.2)
+        wait_for_gate_removed(driver)
 
         result = provider._execute_fast_booking_chain_js(driver, 0, 4)
 
@@ -196,7 +235,7 @@ class TestFastChain:
 
     def test_single_player_skips_tbd_phase(self, driver, provider) -> None:
         load_page(driver, enableAfter=0, playerDelay=200)
-        time.sleep(0.2)
+        wait_for_gate_removed(driver)
 
         result = provider._execute_fast_booking_chain_js(driver, 0, 1)
 
