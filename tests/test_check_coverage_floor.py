@@ -54,7 +54,7 @@ def test_main_fails_below_and_above(tmp_path: Path) -> None:
     assert _run(tmp_path, 82.5, "81.0\n") == 1
 
 
-@pytest.mark.parametrize("floor", ["", "abc\n"])
+@pytest.mark.parametrize("floor", ["", "abc\n", "nan\n", "inf\n", "-inf\n"])
 def test_main_cannot_check_a_bad_floor(tmp_path: Path, floor: str) -> None:
     assert _run(tmp_path, 81.0, floor) == 2
 

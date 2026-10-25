@@ -28,7 +28,10 @@ def round_down(percent: float) -> float:
 
 
 def read_floor(text: str) -> float:
-    return float(text.strip())
+    floor = float(text.strip())
+    if not math.isfinite(floor):
+        raise ValueError("coverage floor must be finite")
+    return floor
 
 
 def check(percent: float, floor: float) -> tuple[int, str]:
