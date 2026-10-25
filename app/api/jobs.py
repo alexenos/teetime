@@ -35,12 +35,24 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 BOOKING_EXECUTION_TIMEOUT_SECONDS = 300
 
-# What the member is told when the batch runs out of time. Deliberately plain:
-# it reaches them as a message, not as a log line, and "Batch execution timed
-# out" says nothing about their tee time. The timeout does not mean no Reserve
-# was sent, only that this endpoint stopped waiting to hear - so the wording
-# claims no more than that, and notify_unreported_bookings re-reads the row and
-# reports a success instead if one landed.
+# How much longer a timed-out attempt is waited for before its outcome is
+# reported as unknown (issue #155). The attempt is not cancelled at the
+# timeout: the browser thread behind it cannot be stopped, and cancelling only
+# threw away a result the club may already have granted. A racer task's
+# TASK_BUDGET_S, plus DELAY_NOTICE_ALLOWANCE_SECONDS, plus this, leaves time
+# inside its Cloud Run task timeout to send the final messages.
+LATE_RESULT_GRACE_SECONDS = 180
+
+# The longest the "taking longer than usual" notices may take, retries
+# included. A send can take 15s and is retried twice, so without a bound a
+# group's notices could eat the time the final messages need.
+DELAY_NOTICE_ALLOWANCE_SECONDS = 30
+
+# What the member is told when the attempt has not finished even after the
+# grace period. The timeout does not mean no Reserve was sent, only that this
+# stopped waiting to hear, so it says the outcome is unknown rather than that
+# the booking failed; notify_unreported_bookings re-reads the row and reports
+# a success instead if one landed.
 TIMEOUT_NOTIFICATION_MESSAGE = "The booking attempt did not finish in time."
 
 
@@ -258,6 +270,7 @@ async def run_bookings_and_report(
     execute_at: datetime,
     executed_at: datetime,
     timeout_s: float | None = None,
+    grace_s: float = LATE_RESULT_GRACE_SECONDS,
 ) -> JobExecutionResult:
     """Race a set of due bookings and tell each requester how theirs went.
 
@@ -279,25 +292,49 @@ async def run_bookings_and_report(
             task passes less when its container has less time left than that,
             so the timeout branch still reaches the members before Cloud Run
             kills the task.
+        grace_s: How much longer to wait, after telling the members their
+            result is late, before reporting the outcome as unknown.
     """
     logger.info(f"BATCH_JOB: Starting batch execution of {len(due_bookings)} bookings")
 
     booking_map = {b.id: b for b in due_bookings if b.id is not None}
+    timeout = (
+        timeout_s
+        if timeout_s is not None
+        else BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings)
+    )
+    batch = asyncio.ensure_future(
+        booking_service.execute_bookings_batch(
+            bookings=due_bookings,
+            execute_at=execute_at,
+        )
+    )
 
     try:
-        batch_results = await asyncio.wait_for(
-            booking_service.execute_bookings_batch(
-                bookings=due_bookings,
-                execute_at=execute_at,
-            ),
-            timeout=(
-                timeout_s
-                if timeout_s is not None
-                else BOOKING_EXECUTION_TIMEOUT_SECONDS * len(due_bookings)
-            ),
-        )
+        try:
+            batch_results = await asyncio.wait_for(asyncio.shield(batch), timeout=timeout)
+        except TimeoutError:
+            # The attempt keeps running (issue #155): it may already hold a tee
+            # time, and only its own completion can record and report that.
+            logger.warning(
+                "BATCH_JOB: Batch still running after %.0fs; telling the members and "
+                "waiting up to %.0fs more",
+                timeout,
+                grace_s,
+            )
+            try:
+                await asyncio.wait_for(
+                    booking_service.notify_result_delayed(due_bookings),
+                    timeout=DELAY_NOTICE_ALLOWANCE_SECONDS,
+                )
+            except TimeoutError:
+                logger.error(
+                    "BATCH_JOB: Delay notices did not all send within %ds",
+                    DELAY_NOTICE_ALLOWANCE_SECONDS,
+                )
+            batch_results = await asyncio.wait_for(batch, timeout=grace_s)
     except TimeoutError:
-        logger.error("BATCH_JOB: Batch execution timed out")
+        logger.error("BATCH_JOB: Batch execution timed out, including the grace period")
         results: list[JobExecutionItem] = []
         for booking in due_bookings:
             booking_id = booking.id or ""
@@ -313,7 +350,9 @@ async def run_bookings_and_report(
         # Every other path out of this function ends in a message per booking.
         # This one did not, so a batch that ran out of time was indistinguishable
         # to the member from one that never fired at all.
-        await booking_service.notify_unreported_bookings(due_bookings, TIMEOUT_NOTIFICATION_MESSAGE)
+        await booking_service.notify_unreported_bookings(
+            due_bookings, TIMEOUT_NOTIFICATION_MESSAGE, outcome_known=False
+        )
         return JobExecutionResult(
             executed_at=executed_at,
             total_due=len(due_bookings),
@@ -344,6 +383,11 @@ async def run_bookings_and_report(
             failed=len(due_bookings),
             results=results,
         )
+    finally:
+        # Only reached unfinished if this coroutine was itself cancelled;
+        # wait_for already cancels the attempt when the grace period runs out.
+        if not batch.done():
+            batch.cancel()
 
     logger.info("BATCH_JOB: Batch execution complete, sending SMS notifications")
 
