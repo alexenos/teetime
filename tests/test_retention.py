@@ -30,6 +30,9 @@ async def db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[async_sessionmake
         await conn.run_sync(Base.metadata.create_all)
     session_local = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr("app.services.retention.AsyncSessionLocal", session_local)
+    # The purge also runs the forgotten-member sweep (issue #276), which opens
+    # its own sessions.
+    monkeypatch.setattr("app.services.pseudonyms.AsyncSessionLocal", session_local)
     yield session_local
     await engine.dispose()
 

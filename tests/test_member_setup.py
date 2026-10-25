@@ -7,18 +7,22 @@ import json
 import logging
 import time
 import urllib.parse
+from datetime import date
+from datetime import time as dtime
 
 import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.api import onboarding, webhooks
 from app.config import settings
-from app.models.database import Base
+from app.models.database import Base, BookingRecord
+from app.models.schemas import BookingStatus
 from app.providers import telegram_provider
 from app.providers.telegram_provider import (
     TelegramProvider,
@@ -26,9 +30,11 @@ from app.providers.telegram_provider import (
     validate_init_data,
 )
 from app.providers.walden_http_login import LoginCheck, LoginOutcome
-from app.services import member_setup, telegram_members
+from app.services import database_service as database_service_module
+from app.services import member_setup, pseudonyms, telegram_members
 from app.services.credential_service import credential_service
 from app.services.member_setup import SubmitStatus, handle_command, submit_login
+from app.services.telegram_members import forget_member
 
 TOKEN = "123456:test-bot-token"
 MEMBER = 555
@@ -81,6 +87,25 @@ async def test_db(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-d
     monkeypatch.setattr(settings, "credential_encryption_key", Fernet.generate_key().decode())
     yield
     await engine.dispose()
+
+
+async def _add_booking(requester: str, status: BookingStatus) -> None:
+    async with database_service_module.AsyncSessionLocal() as s:
+        s.add(
+            BookingRecord(
+                booking_id=f"b-{requester}",
+                phone_number=requester,
+                requested_date=date(2026, 10, 1),
+                requested_time=dtime(8, 0),
+                status=status,
+            )
+        )
+        await s.commit()
+
+
+async def _booking_owners() -> set[str]:
+    async with database_service_module.AsyncSessionLocal() as s:
+        return {str(p) for p in (await s.execute(select(BookingRecord.phone_number))).scalars()}
 
 
 def sent_messages(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
@@ -240,6 +265,38 @@ class TestCommands:
     async def test_forget_with_nothing_stored(self, test_db: None) -> None:
         reply = await handle_command("forget", "confirm", str(MEMBER), True, "teetimebot")
         assert "nothing to delete" in reply.text
+
+    async def test_forget_keeps_history_under_a_label_and_tells_the_admin(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """Issue #276: the history stays, without the member's identity on it."""
+        sent = sent_messages(monkeypatch)
+        await credential_service.set_credentials(str(MEMBER), LOGIN, PASSWORD)
+        await pseudonyms.assign(str(MEMBER))
+        await _add_booking(str(MEMBER), BookingStatus.FAILED)
+
+        reply = await handle_command("forget", "confirm", str(MEMBER), True, "teetimebot")
+
+        assert "Deleted your Walden login" in reply.text
+        assert "under a pseudonym, without your name or Telegram account" in reply.text
+        assert await _booking_owners() == {"Member A"}
+        to_admin = [m for m in sent if m["to"] == "111"]
+        assert len(to_admin) == 1
+        assert "Member A sent /forget" in to_admin[0]["message"]
+        assert "MEMBER_PSEUDONYM_REGISTRY" in to_admin[0]["message"]
+
+    async def test_leaving_the_group_keeps_the_history_as_it_is(
+        self, monkeypatch: pytest.MonkeyPatch, test_db: None
+    ) -> None:
+        """By the maintainer's decision only /forget pseudonymises (issue #276)."""
+        sent_messages(monkeypatch)
+        await pseudonyms.assign(str(MEMBER))
+        await _add_booking(str(MEMBER), BookingStatus.FAILED)
+
+        result = await forget_member(str(MEMBER))
+
+        assert result.history_pseudonymised is False
+        assert await _booking_owners() == {str(MEMBER)}
 
 
 class TestSubmitLogin:
