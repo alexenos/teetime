@@ -191,6 +191,10 @@ class TestTimedChain:
 
         assert result["success"], f"chain failed: {result}"
         timing = result["timing"]
+        # The target must still be ahead when the chain starts, or it skips the
+        # timed wait and this passes without exercising it. A load slower than
+        # the 1200ms anchor would do that; fail it instead.
+        assert timing["msUntilTarget"] > 0, f"target already past at chain start: {timing}"
         assert timing["disableDivPresentAtStart"] is True
         assert timing["slotsEnabledAfterWait"] is True
         # Waited for the overlay, then clicked. Loose bound for CI noise.
