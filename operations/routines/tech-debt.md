@@ -126,13 +126,14 @@ can come in unnoticed. Consequences for this Routine's PRs:
 
 - A PR that adds tests, or deletes uncovered code, lowers the count by more than 5:
   CI fails with `fewer than the ratchet` until the PR writes the printed value to the
-  file. Wait for the PR's `Tests` run, read the value, commit it. A smaller drop
+  file. Open the PR first (the workflow does not run on a branch push alone), wait for its `Tests` run, read the value, commit it. A smaller drop
   passes and needs no commit.
 - A PR that deletes code the tests cover does not change the count, so removing
   tested dead code is not penalised. That is why the ratchet counts uncovered code
   instead of a percentage.
-- A PR that adds code without tests raises the count by more than 5 and fails; add
-  the tests.
+- A PR that adds code without tests raises the count by more than 5 and fails with
+  `more than the ratchet`; add the tests. Never write the printed value in that case,
+  which would accept the regression.
 - The file is one line, so two open PRs that both lower it conflict. The cap of
   three open PRs makes that rare; resolve by taking the lower of the two measured
   values from a fresh CI run, never by hand-computing it.
@@ -522,9 +523,11 @@ Step 3 - scan. For each category in the spec, run its checks and record how many
 
 Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or more, fix nothing and record skipped as cap. Otherwise consider every open tech-debt issue except those labelled wontfix or td:blocked or that already have an open PR. Prefer small, self-contained issues the existing tests, ruff and mypy can verify; among those, oldest first. Take a td:code-quality issue only if nothing else is eligible, and a td:legacy-feature issue only if the manifest marks the feature removable. If nothing is eligible, fix nothing and record skipped as no_candidate; do not open a PR to have something to show. Deprioritize issues in the sensitive areas the spec lists, but do not refuse them if nothing else is open, and say so in the PR. Comment on the chosen issue saying why you chose it. Make a branch named tech-debt/<issue number>-<short slug>, preserve behavior, and make the change.
 
-Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed. CI also fails the Check coverage ratchet step when the count of uncovered code is more than 5 above or below operations/coverage-ratchet.txt. After you push, wait for the PR's Tests run and, if that step fails, write the value it prints to operations/coverage-ratchet.txt and push; never compute that value from a local run.
+Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed. CI also fails the Check coverage ratchet step when the count of uncovered code is more than 5 above or below operations/coverage-ratchet.txt; Step 4a says what to do about that after the PR is open.
 
 Open a normal PR into main with the tech-debt label and Closes #<n>. The first section of the body is Risk, stating: the files and whether any is a sensitive area; whether merging redeploys the service or applies terraform, determined by comparing the changed paths with the Cloud Build ignored_files list, read fresh from terraform/main.tf rather than recalled, where a change whose every file matches the list does neither and any file outside it does both; whether anything the 06:28 CT race executes changed and what to watch on the next race morning; and whether behavior changed. Then a Review section (filled in at Step 4b), then Verified and Not verified, kept separate. Say what the tests do and do not cover for the changed code. The project has no local way to exercise booking, so do not imply a green suite establishes booking behavior.
+
+Step 4a - coverage ratchet. Opening the PR starts its Tests run; the workflow does not run on a branch push alone, so do this only after the PR is open. Wait for the PR's Tests run. Read its `coverage` artifact to check the lines this change touches; if it is unavailable, say in the PR's Not verified section that changed-line coverage was not verified. If its Check coverage ratchet step fails with "fewer than the ratchet", write the value it prints to operations/coverage-ratchet.txt and push. If it fails with "more than the ratchet", do not write the file: add tests for the new or changed code and push. Never compute that value from a local run.
 
 Step 4b - CodeRabbit. Read .claude/skills/ship-pr/SKILL.md and follow its sections on triggering, rate limits, reading the review and judging each comment. CodeRabbit never reviews this repo on its own, so post a comment on your PR reading @coderabbitai review - new commit <short sha>, with the sha of the head. Wait until its reply has stopped changing for 30 seconds, because the first wording can be edited into a refusal, then poll for findings for up to 20 minutes. Fetch both the inline review comments and the issue comments, and take only top-level comments.
 
