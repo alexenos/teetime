@@ -5,6 +5,7 @@ These tests verify the LLM-powered message parsing and intent extraction
 functionality, including the mock fallback when the API is not configured.
 """
 
+import asyncio
 from datetime import date, datetime, time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -703,6 +704,7 @@ class TestGeminiServiceParseMessage:
             assert "run out of credit" in result.response_message
             assert "admin has been told" in result.response_message
             assert "try again in a minute" not in result.response_message
+            assert result.parser_failed
             assert gemini_service._model.generate_content_async.call_count == 1
             mock_sleep.assert_not_awaited()
             send.assert_awaited_once()
@@ -734,6 +736,41 @@ class TestGeminiServiceParseMessage:
             with patch("app.services.gemini_service.monotonic", return_value=later):
                 await gemini_service.parse_message("Book 11/6 at 9:38a")
             assert send.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_concurrent_depleted_credit_requests_alert_once(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second request arriving while the first alert is in flight sends none."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        release = asyncio.Event()
+
+        async def slow_send(*args: object, **kwargs: object) -> str:
+            await release.wait()
+            return "sid"
+
+        send = AsyncMock(side_effect=slow_send)
+        with (
+            patch.object(gemini_service, "_model", MagicMock()),
+            patch("app.services.gemini_service.sms_service.send_sms", send),
+        ):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
+            )
+
+            first = asyncio.create_task(gemini_service.parse_message("Book 11/6 at 9:38a"))
+            await asyncio.sleep(0)
+            while send.await_count == 0:
+                await asyncio.sleep(0)
+            # Without the claim the second send also blocks on release: fail, don't hang.
+            second = await asyncio.wait_for(
+                gemini_service.parse_message("Book 11/6 at 9:38a"), timeout=2
+            )
+            release.set()
+            await first
+
+            assert send.await_count == 1
+            assert second.parser_failed
 
     @pytest.mark.asyncio
     async def test_depleted_credit_alert_that_fails_to_send_is_retried(

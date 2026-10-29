@@ -429,6 +429,7 @@ class GeminiService:
                 return ParsedIntent(
                     intent="unclear",
                     raw_message=message,
+                    parser_failed=True,
                     response_message=(
                         "I can't read messages right now - my language model account "
                         "has run out of credit, so nothing was booked. "
@@ -444,6 +445,7 @@ class GeminiService:
             return ParsedIntent(
                 intent="unclear",
                 raw_message=message,
+                parser_failed=True,
                 response_message=(
                     "I couldn't understand that - my language model is unavailable "
                     "right now, so nothing was booked. Please try again in a minute."
@@ -466,6 +468,10 @@ class GeminiService:
             and now - self._last_billing_alert < BILLING_ALERT_INTERVAL
         ):
             return True
+        # Claim the slot before awaiting the send, so a second request arriving
+        # while it is in flight does not send a duplicate. Released on failure.
+        previous = self._last_billing_alert
+        self._last_billing_alert = now
         try:
             sent = await sms_service.send_sms(
                 admin,
@@ -476,11 +482,12 @@ class GeminiService:
             )
         except Exception:  # noqa: BLE001 - see docstring
             logger.exception("Could not alert the admin about the Gemini balance")
+            self._last_billing_alert = previous
             return False
         if sent is None:
             logger.error("Could not alert the admin about the Gemini balance")
+            self._last_billing_alert = previous
             return False
-        self._last_billing_alert = now
         return True
 
     def _build_parsed_intent(

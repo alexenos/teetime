@@ -800,6 +800,16 @@ class BookingService:
                 f"I can only book on someone else's behalf right now, not {parsed.intent} "
                 f"for them. {display_name} can ask me to do that themselves."
             )
+        # The two selection states below answer "unclear" with their own
+        # question, which would hide that the parser is down (e.g. Gemini out
+        # of credit) and have the member keep retrying. The state is kept, so
+        # their answer still counts once parsing works again.
+        if parsed.parser_failed and session.state in (
+            ConversationState.AWAITING_CANCELLATION_SELECTION,
+            ConversationState.AWAITING_SLOT_CHOICE,
+        ):
+            return parsed.response_message or ""
+
         # Check if user is in the middle of selecting a booking to cancel
         # This takes priority over Gemini's parsed intent to avoid misinterpreting
         # date/time responses as new booking requests

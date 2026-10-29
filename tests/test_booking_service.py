@@ -1031,6 +1031,37 @@ class TestBookingServiceIntentHandling:
             # Session state should be reset to IDLE
             assert sample_session.state == ConversationState.IDLE
 
+    @pytest.mark.parametrize(
+        "state",
+        [
+            ConversationState.AWAITING_CANCELLATION_SELECTION,
+            ConversationState.AWAITING_SLOT_CHOICE,
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_parser_failure_is_reported_during_a_selection(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        state: ConversationState,
+    ) -> None:
+        """A selection state must not swallow "the parser is down" as a bad pick.
+
+        Otherwise a member answering "which one?" during a Gemini outage is
+        asked the same question again and keeps retrying.
+        """
+        sample_session.state = state
+        parsed = ParsedIntent(
+            intent="unclear",
+            parser_failed=True,
+            response_message="I can't read messages right now - nothing was booked.",
+        )
+
+        response = await booking_service._process_intent(sample_session, parsed)
+
+        assert response == "I can't read messages right now - nothing was booked."
+        assert sample_session.state == state
+
     @pytest.mark.asyncio
     async def test_cancellation_selection_by_number(
         self,
