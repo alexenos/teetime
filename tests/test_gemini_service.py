@@ -202,6 +202,7 @@ class TestGeminiServiceParseTime:
         ("raw", "expected"),
         [
             ("1:15", time(13, 15)),  # no am/pm: only the afternoon is a tee time
+            ("01:15", time(13, 15)),  # padded too (maintainer, 2026-10-29)
             ("6:00", time(18, 0)),
             ("12:08", time(12, 8)),
             ("07:00", time(7, 0)),

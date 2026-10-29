@@ -359,6 +359,9 @@ class GeminiService:
                 parsed = datetime.strptime(time_str, fmt).time()
             except ValueError:
                 continue
+            # An hour of 1-6 without am/pm, padded or not ("1:15", "01:15"), is
+            # the afternoon: the morning reading is never a tee time (the
+            # maintainer's rule, 2026-10-29).
             if 1 <= parsed.hour <= 6:
                 parsed = parsed.replace(hour=parsed.hour + 12)
             break
@@ -507,9 +510,10 @@ class GeminiService:
         try:
             sent = await sms_service.send_sms(
                 admin,
-                "Gemini refused a member's message: the prepaid credit is used up, so no "
-                "booking request can be read until it is topped up at "
-                "https://ai.studio/projects. Members are being told nothing was booked.",
+                "Gemini refused a member's message: the prepaid credit is used up. Until "
+                "it is topped up at https://ai.studio/projects, only plain requests with "
+                'an explicit date and time ("book 11/6 at 9:38am") can be read; members '
+                "who send anything else are told nothing was booked.",
                 channel="telegram",
             )
         except asyncio.CancelledError:
