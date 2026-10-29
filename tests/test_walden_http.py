@@ -10,6 +10,7 @@ import email.utils
 import logging
 import threading
 import time as time_module
+import types
 import urllib.parse
 from collections.abc import Callable
 from datetime import time
@@ -18,7 +19,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.providers import walden_http_booker
+from app.providers import walden_http, walden_http_booker
 from app.providers.walden_http import (
     AbConfig,
     DirectHttpError,
@@ -3346,6 +3347,52 @@ ACCEPTED_PAGE = PLAYER_PAGE.replace(
 )
 
 
+# A safety net for SourceRecorder's overtaking hand-off, never a timing: the
+# members involved are already in flight when either side starts waiting.
+_HANDOFF_TIMEOUT_S = 10.0
+
+
+class ThreadClock:
+    """A wall clock per thread, moved only by that thread's own waits.
+
+    Stands in for ``time_module`` and ``sleep_until`` in the booker, so each
+    burst member leaves at exactly its planned instant however long the runner
+    took to get there. On the real clock a target a few hundred ms ahead is
+    already past on a loaded runner; every member then leaves at once, after
+    the gate, and nothing is refused (2026-10-29). Every thread starts at
+    ``start_ms``; durations (``perf_counter``, ``process_time``) stay real.
+    """
+
+    def __init__(self, start_ms: int) -> None:
+        """Start every thread's clock at ``start_ms``."""
+        self.start_ms = start_ms
+        self._local = threading.local()
+
+    def _now_ms(self) -> int:
+        return getattr(self._local, "now_ms", self.start_ms)
+
+    def time(self) -> float:
+        """This thread's instant, half a ms in so ``int(t * 1000)`` reads it back exactly."""
+        return (self._now_ms() + 0.5) / 1000
+
+    def monotonic(self) -> float:
+        """The same instant: deadlines then pass only by this thread's waits."""
+        return self.time()
+
+    def sleep(self, seconds: float) -> None:
+        """Move this thread on by ``seconds``, without waiting."""
+        self._local.now_ms = self._now_ms() + max(0, round(seconds * 1000))
+
+    def sleep_until(self, target_timestamp_ms: int) -> int:
+        """Move this thread to the target, returning the drift as the real one does."""
+        now_ms = self._now_ms()
+        self._local.now_ms = max(now_ms, target_timestamp_ms)
+        return max(0, now_ms - target_timestamp_ms)
+
+    perf_counter = staticmethod(time_module.perf_counter)
+    process_time = staticmethod(time_module.process_time)
+
+
 class SourceRecorder(ChainRecorder):
     """Answers each Reserve button by its own page queue, thread-safely.
 
@@ -3361,8 +3408,14 @@ class SourceRecorder(ChainRecorder):
     the runner keeps up. ``gate_at_ms`` takes that dependence away for a slot's
     queue: with it set, the queue is ``[refusal, grant]`` and a request is
     refused or granted by when it arrived against the gate, as the club does
-    (#252). ``arrival_stall_s`` makes the third arrival wait before it is
-    recorded, so the members behind it overtake it, as a stalled runner does.
+    (#252). ``clock`` is what arrival times are read from - a ``ThreadClock``
+    when the booker runs on one too.
+
+    ``overtaken_at_ms`` stalls the member arriving at that instant, as a stalled
+    runner does: it waits until a later member has been recorded, then arrives
+    ``overtake_stall_ms`` late. The hand-off is by event rather than by a sleep
+    long enough for the member behind to get there first, so it does not depend
+    on how fast the runner's threads are scheduled.
     """
 
     def __init__(
@@ -3376,13 +3429,18 @@ class SourceRecorder(ChainRecorder):
         delay_on: set[int] | None = None,
         delay_s: float = 0.0,
         gate_at_ms: int | None = None,
-        arrival_stall_s: float = 0.0,
+        clock: "ThreadClock | None" = None,
+        overtaken_at_ms: int | None = None,
+        overtake_stall_ms: int = 0,
     ) -> None:
         """Queue the per-slot pages and the chain pages that follow a grant."""
         super().__init__(chain)
         self.gate_at_ms = gate_at_ms
-        self.arrival_stall_s = arrival_stall_s
-        self._arrivals = 0
+        self.clock: ThreadClock | types.ModuleType = clock or time_module
+        self.overtaken_at_ms = overtaken_at_ms
+        self.overtake_stall_ms = overtake_stall_ms
+        self._stalled_member_waiting = threading.Event()
+        self._overtaken = threading.Event()
         self.recorded_order: list[int] = []
         self.by_source = by_source
         self.status_on = status_on or {}
@@ -3399,20 +3457,25 @@ class SourceRecorder(ChainRecorder):
         """Answer by the requested source, or fail the request as configured."""
         params = dict(urllib.parse.parse_qsl(request.content.decode()))
         source = params.get("javax.faces.source", "")
-        ordinal = 0
-        if self.arrival_stall_s:
-            with self._lock:
-                self._arrivals += 1
-                ordinal = self._arrivals
-            if ordinal == 3:
-                time_module.sleep(self.arrival_stall_s)
+        overtaking = False
+        if self.overtaken_at_ms is not None:
+            now_ms = int(self.clock.time() * 1000)
+            if now_ms == self.overtaken_at_ms:
+                self._stalled_member_waiting.set()
+                assert self._overtaken.wait(_HANDOFF_TIMEOUT_S), "nothing overtook"
+                self.clock.sleep(self.overtake_stall_ms / 1000)
+            elif now_ms > self.overtaken_at_ms:
+                assert self._stalled_member_waiting.wait(_HANDOFF_TIMEOUT_S), "nothing stalled"
+                overtaking = True
         with self._lock:
-            self.recorded_order.append(ordinal)
             self.requests.append(params)
             self.sources.append(source)
             index = len(self.sources)
-            arrived_ms = int(time_module.time() * 1000)
+            arrived_ms = int(self.clock.time() * 1000)
+            self.recorded_order.append(arrived_ms)
             self.sent_at_ms.append(arrived_ms)
+        if overtaking:
+            self._overtaken.set()
         if index in self.stall_on:
             raise httpx.ReadTimeout("stalled by the test", request=request)
         if index in self.status_on:
@@ -3971,9 +4034,9 @@ class TestVariableBurst:
         assert [row["plannedSendMsPastWindow"] for row in rows] == [-60, -30, 0, 30]
         assert all(0 <= row["writeDriftMs"] <= 50 for row in rows)
 
-    @pytest.mark.parametrize("arrival_stall_s", [0.0, 0.08], ids=["steady", "stalled-runner"])
+    @pytest.mark.parametrize("stalled", [False, True], ids=["steady", "stalled-runner"])
     def test_the_gate_is_bracketed_between_the_last_refusal_and_the_grant(
-        self, arrival_stall_s: float
+        self, stalled: bool, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Refusals then a grant: the gate is after the last refusal and by the grant.
 
@@ -3981,14 +4044,26 @@ class TestVariableBurst:
         time against one (#252). The expected count is then read off what the
         recorder saw rather than assumed to be three: a runner that stalls
         mid-burst sends members late, and the bracket is right to report that.
+
+        Run on a ThreadClock, not the wall clock: a target 300ms ahead left a
+        loaded runner no margin, and the test failed whenever reaching the burst
+        took longer than that.
         """
-        target = window_about_to_open(in_ms=300)
+        clock = ThreadClock(int(time_module.time() * 1000))
+        monkeypatch.setattr(walden_http, "time_module", clock)
+        monkeypatch.setattr(walden_http_booker, "time_module", clock)
+        monkeypatch.setattr(walden_http_booker, "sleep_until", clock.sleep_until)
+        target = clock.start_ms + 300
         gate = target + 15  # between the members planned at 0 and +30
         recorder = SourceRecorder(
             {RESERVE_ID: [BLOCKED_ALL, ACCEPTED_PAGE]},
             CHAIN_AFTER_GRANT,
             gate_at_ms=gate,
-            arrival_stall_s=arrival_stall_s,
+            clock=clock,
+            # The member planned at 0 is overtaken by the one at +30, and lands
+            # after the gate.
+            overtaken_at_ms=target if stalled else None,
+            overtake_stall_ms=80,
         )
         booker = burst_booker(recorder, -60, -30, 0, 30, target_only=4, fallbacks=())
         with _CaptureLogs("app.providers.walden_http_booker") as records:
@@ -3997,17 +4072,16 @@ class TestVariableBurst:
         assert result.success, result.error
         (bracket,) = result.timing["gateBrackets"]
         assert bracket["slot"] == RESERVE_SLOT_TIME.strftime("%I:%M %p")
-        if arrival_stall_s:
+        if stalled:
             # Without this the stalled case could pass having reordered nothing.
             order = recorder.recorded_order
-            assert order.index(4) < order.index(3), order
+            assert order.index(target + 30) < order.index(target + 80), order
         refused = [t for t in recorder.sent_at_ms[:4] if t < gate]
-        assert bracket["refusedBefore"] == len(refused)
-        if not arrival_stall_s:
-            assert bracket["refusedBefore"] == 3
+        assert bracket["refusedBefore"] == len(refused) == (2 if stalled else 3)
+        if not stalled:
             assert bracket["askedAfter"] == 0
-            assert -2 <= bracket["lastRefusedBeforeMs"] <= 50
-            assert 28 <= bracket["grantedMs"] <= 80
+            assert bracket["lastRefusedBeforeMs"] == 0
+            assert bracket["grantedMs"] == 30
         assert bracket["grantedMs"] > bracket["lastRefusedBeforeMs"]
         # A mocked transport records no write time, so the send time stands in
         # and the line says so rather than passing it off as a write.
