@@ -11,7 +11,7 @@ from google.protobuf.json_format import MessageToDict
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
-from app.services.strict_parser import strict_parse
+from app.services.strict_parser import EARLIEST_TEE_TIME, LATEST_TEE_TIME, strict_parse
 
 logger = logging.getLogger(__name__)
 
@@ -306,42 +306,58 @@ class GeminiService:
         return None
 
     def _parse_time(self, time_str: str) -> time | None:
-        """Parse time string in various formats.
+        """Parse time string in various formats, within tee-sheet hours.
 
         Supports:
         - 24-hour: "08:58", "14:30", "8:58"
         - 24-hour with seconds: "08:58:00"
         - 12-hour with AM/PM: "8:58 AM", "8:58AM", "8:58a", "2:30 PM", "2:30pm"
+
+        Tee times run 7:00 am to 6:00 pm (EARLIEST_TEE_TIME/LATEST_TEE_TIME,
+        shared with strict_parser), so a time without am/pm whose hour is 1-6
+        is the afternoon, and any time outside those hours is None. The prompt
+        tells Gemini the same; this holds it to that whatever the model returns.
         """
         if not time_str:
             return None
 
         time_str = time_str.strip()
+        parsed: time | None = None
 
         # Try 24-hour formats first
         for fmt in ("%H:%M", "%H:%M:%S"):
             try:
-                return datetime.strptime(time_str, fmt).time()
+                parsed = datetime.strptime(time_str, fmt).time()
             except ValueError:
-                pass
+                continue
+            if 1 <= parsed.hour <= 6:
+                parsed = parsed.replace(hour=parsed.hour + 12)
+            break
 
-        # Try 12-hour formats with AM/PM
-        # Normalize: "8:58a" -> "8:58 AM", "8:58AM" -> "8:58 AM", "8:58 am" -> "8:58 AM"
-        normalized = time_str.upper()
-        # Handle "8:58a" or "8:58p" (single letter suffix)
-        normalized = re.sub(r"(\d)A$", r"\1 AM", normalized)
-        normalized = re.sub(r"(\d)P$", r"\1 PM", normalized)
-        # Handle "8:58AM" or "8:58PM" (no space before AM/PM)
-        normalized = re.sub(r"(\d)(AM|PM)$", r"\1 \2", normalized)
+        if parsed is None:
+            # Try 12-hour formats with AM/PM
+            # Normalize: "8:58a" -> "8:58 AM", "8:58AM" -> "8:58 AM", "8:58 am" -> "8:58 AM"
+            normalized = time_str.upper()
+            # Handle "8:58a" or "8:58p" (single letter suffix)
+            normalized = re.sub(r"(\d)A$", r"\1 AM", normalized)
+            normalized = re.sub(r"(\d)P$", r"\1 PM", normalized)
+            # Handle "8:58AM" or "8:58PM" (no space before AM/PM)
+            normalized = re.sub(r"(\d)(AM|PM)$", r"\1 \2", normalized)
 
-        for fmt in ("%I:%M %p", "%I:%M:%S %p"):
-            try:
-                return datetime.strptime(normalized, fmt).time()
-            except ValueError:
-                pass
+            for fmt in ("%I:%M %p", "%I:%M:%S %p"):
+                try:
+                    parsed = datetime.strptime(normalized, fmt).time()
+                    break
+                except ValueError:
+                    pass
 
-        logger.warning(f"Failed to parse time: '{time_str}'")
-        return None
+        if parsed is None:
+            logger.warning(f"Failed to parse time: '{time_str}'")
+            return None
+        if not EARLIEST_TEE_TIME <= parsed <= LATEST_TEE_TIME:
+            logger.warning(f"Time outside tee-sheet hours: '{time_str}' -> {parsed}")
+            return None
+        return parsed
 
     async def parse_message(self, message: str, context: str | None = None) -> ParsedIntent:
         if not self.model:

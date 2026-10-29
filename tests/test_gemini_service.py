@@ -187,6 +187,27 @@ class TestGeminiServiceParseTime:
         assert gemini_service._parse_time("8:58 am") == time(8, 58)
         assert gemini_service._parse_time("2:30 pm") == time(14, 30)
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("1:15", time(13, 15)),  # no am/pm: only the afternoon is a tee time
+            ("6:00", time(18, 0)),
+            ("12:08", time(12, 8)),
+            ("07:00", time(7, 0)),
+        ],
+    )
+    def test_parse_time_without_am_pm_is_read_within_tee_sheet_hours(
+        self, gemini_service: GeminiService, raw: str, expected: time
+    ) -> None:
+        assert gemini_service._parse_time(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["12:08 am", "00:08", "6:45 am", "6:30 pm", "19:00", "6:30"])
+    def test_parse_time_outside_tee_sheet_hours_is_none(
+        self, gemini_service: GeminiService, raw: str
+    ) -> None:
+        """Holds Gemini to the 7am-6pm rule whatever time the model returns."""
+        assert gemini_service._parse_time(raw) is None
+
     def test_parse_invalid_time(self, gemini_service: GeminiService) -> None:
         """Test that invalid time strings return None."""
         result = gemini_service._parse_time("invalid")
