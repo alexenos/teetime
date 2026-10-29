@@ -11,6 +11,7 @@ from google.protobuf.json_format import MessageToDict
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
+from app.services.strict_parser import strict_parse
 
 logger = logging.getLogger(__name__)
 
@@ -395,6 +396,13 @@ class GeminiService:
 
         except Exception as e:
             logger.exception(f"Gemini API error for message '{message}': {e}")
+            # A plain "book 11/6 at 9:38a for 4" needs no model to read. The
+            # strict parser accepts only that shape and never guesses, unlike
+            # _mock_parse below; anything else still gets the honest refusal.
+            strict = strict_parse(message)
+            if strict is not None:
+                logger.warning("Gemini unavailable; read the request with strict_parse")
+                return strict
             # Do NOT fall back to _mock_parse here. The mock ignores the date and
             # time in the message and defaults to "7 days out at 8:00 AM", so a
             # dead model turned "book 8/2 at 5:06p" into a confident confirmation

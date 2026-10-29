@@ -544,7 +544,7 @@ class TestGeminiServiceParseMessage:
                 side_effect=Exception("API Error")
             )
 
-            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+            result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
             assert result.intent == "unclear"
             assert result.tee_time_request is None
@@ -600,7 +600,7 @@ class TestGeminiServiceParseMessage:
             )
 
             with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
-                result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+                result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
             assert result.intent == "unclear"
             assert result.tee_time_request is None
@@ -620,7 +620,7 @@ class TestGeminiServiceParseMessage:
             )
 
             with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()):
-                await gemini_service.parse_message("Book 8/2 at 5:06p")
+                await gemini_service.parse_message("Book Saturday at 5:06p")
 
             first_call = gemini_service._model.generate_content_async.await_args_list[0]
             assert first_call.kwargs["request_options"]["timeout"] == GEMINI_REQUEST_TIMEOUT
@@ -645,7 +645,7 @@ class TestGeminiServiceParseMessage:
                 )
 
                 with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
-                    result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+                    result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
                 assert result.intent == "unclear"
                 assert "nothing was booked" in result.response_message
@@ -660,7 +660,7 @@ class TestGeminiServiceParseMessage:
                 side_effect=google_exceptions.PermissionDenied("API key not valid")
             )
 
-            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+            result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
             assert result.intent == "unclear"
             assert gemini_service._model.generate_content_async.call_count == 1
