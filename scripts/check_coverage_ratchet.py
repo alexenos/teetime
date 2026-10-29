@@ -38,10 +38,12 @@ TOLERANCE = 5
 
 
 def uncovered(totals: dict[str, Any]) -> tuple[int, int]:
+    """Return (missing statements, missing branches) from a coverage.json ``totals`` block."""
     return int(totals["missing_lines"]), int(totals["missing_branches"])
 
 
 def read_ratchet(text: str) -> int:
+    """Parse the committed ratchet: one non-negative integer. Raises ValueError otherwise."""
     allowed = int(text.strip())
     if allowed < 0:
         raise ValueError("coverage ratchet must not be negative")
@@ -49,6 +51,7 @@ def read_ratchet(text: str) -> int:
 
 
 def check(totals: dict[str, Any], allowed: int) -> tuple[int, str]:
+    """Compare the uncovered count with the ratchet; return (exit status, message)."""
     lines, branches = uncovered(totals)
     count = lines + branches
     percent = float(totals["percent_covered"])
@@ -72,6 +75,7 @@ def check(totals: dict[str, Any], allowed: int) -> tuple[int, str]:
 
 
 def main(argv: list[str]) -> int:
+    """Run the check on ``argv[1]`` (coverage.json) and ``argv[2]`` (ratchet file)."""
     if len(argv) != 3:
         print(__doc__, file=sys.stderr)
         return 2
