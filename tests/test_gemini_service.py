@@ -11,10 +11,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from google.api_core import exceptions as google_exceptions
 
+from app.config import settings
 from app.services.gemini_service import (
+    BILLING_ALERT_INTERVAL,
     GEMINI_MAX_ATTEMPTS,
     GEMINI_REQUEST_TIMEOUT,
     GeminiService,
+    is_billing_exhausted,
+)
+
+# The error text Gemini returned on 2026-10-28, from the service's logs.
+DEPLETED = (
+    "Your prepayment credits are depleted. Please go to AI Studio at "
+    "https://ai.studio/projects to manage your project and billing. Learn more at "
+    "https://ai.google.dev/gemini-api/docs/billing#prepay."
 )
 
 
@@ -664,6 +674,113 @@ class TestGeminiServiceParseMessage:
 
             assert result.intent == "unclear"
             assert gemini_service._model.generate_content_async.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_depleted_credit_is_not_retried_and_alerts_admin(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty prepaid balance is not a blip: say so, and tell the admin.
+
+        On 2026-10-28 this 429 was retried three times per message and members
+        were told to "try again in a minute" while every request kept failing.
+        """
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(return_value="sid")
+        with (
+            patch.object(gemini_service, "_model", MagicMock()),
+            patch("app.services.gemini_service.sms_service.send_sms", send),
+            patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
+            )
+
+            result = await gemini_service.parse_message("Book 11/6 at 9:38a for 4")
+
+            assert result.intent == "unclear"
+            assert result.tee_time_request is None
+            assert "nothing was booked" in result.response_message
+            assert "run out of credit" in result.response_message
+            assert "admin has been told" in result.response_message
+            assert "try again in a minute" not in result.response_message
+            assert gemini_service._model.generate_content_async.call_count == 1
+            mock_sleep.assert_not_awaited()
+            send.assert_awaited_once()
+            assert send.await_args.args[0] == "111"
+            assert send.await_args.kwargs["channel"] == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_depleted_credit_alert_is_throttled(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every member message during the outage must not ping the admin again."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(return_value="sid")
+        with (
+            patch.object(gemini_service, "_model", MagicMock()),
+            patch("app.services.gemini_service.sms_service.send_sms", send),
+        ):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
+            )
+
+            with patch("app.services.gemini_service.monotonic", return_value=1000.0):
+                await gemini_service.parse_message("Book 11/6 at 9:38a")
+                second = await gemini_service.parse_message("Book 11/6 at 9:38a")
+            assert send.await_count == 1
+            assert "admin has been told" in second.response_message
+
+            later = 1000.0 + BILLING_ALERT_INTERVAL + 1
+            with patch("app.services.gemini_service.monotonic", return_value=later):
+                await gemini_service.parse_message("Book 11/6 at 9:38a")
+            assert send.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_depleted_credit_alert_that_fails_to_send_is_retried(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed send must not claim the admin knows, nor silence the next try."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(return_value=None)
+        with (
+            patch.object(gemini_service, "_model", MagicMock()),
+            patch("app.services.gemini_service.sms_service.send_sms", send),
+        ):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
+            )
+
+            first = await gemini_service.parse_message("Book 11/6 at 9:38a")
+            await gemini_service.parse_message("Book 11/6 at 9:38a")
+
+            assert "admin has been told" not in first.response_message
+            assert "nothing was booked" in first.response_message
+            assert send.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_depleted_credit_without_an_admin_does_not_claim_one_was_told(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "")
+        send = AsyncMock(return_value="sid")
+        with (
+            patch.object(gemini_service, "_model", MagicMock()),
+            patch("app.services.gemini_service.sms_service.send_sms", send),
+        ):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
+            )
+
+            result = await gemini_service.parse_message("Book 11/6 at 9:38a")
+
+            assert "admin has been told" not in result.response_message
+            send.assert_not_awaited()
+
+    def test_a_plain_rate_limit_is_not_mistaken_for_depleted_credit(self) -> None:
+        """Only the depleted-credit 429 skips retries; a quota 429 still retries."""
+        assert is_billing_exhausted(google_exceptions.ResourceExhausted(DEPLETED))
+        assert not is_billing_exhausted(google_exceptions.ResourceExhausted("quota exceeded"))
+        assert not is_billing_exhausted(google_exceptions.ServiceUnavailable(DEPLETED))
 
     def test_model_name_comes_from_settings(self, gemini_service: GeminiService) -> None:
         """The model is configurable so a retirement can be worked around by env."""
