@@ -56,8 +56,26 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "BLE001", "S324"]
 ignore = ["E501"]
+# `# noqa: V10x` codes belong to vulture (see [tool.vulture]), not ruff.
+external = ["V"]
+
+# BLE001 is a ratchet (#291): enforced everywhere except the files below, which
+# had unjustified broad excepts when it was turned on. Each line is a tech-debt
+# issue; delete the line in the PR that clears the file. Never add a line here
+# to get a new broad except past lint - justify it with `# noqa: BLE001 - why`.
+[tool.ruff.lint.per-file-ignores]
+"app/providers/walden_provider.py" = ["BLE001"]  # #368
+"app/providers/walden_date_selection.py" = ["BLE001"]  # #369
+"app/services/booking_service.py" = ["BLE001"]  # #370
+"app/providers/twilio_provider.py" = ["BLE001"]  # #371
+"scripts/capture_booking_traffic.py" = ["BLE001"]  # #372
+"scripts/capture_html_snapshots.py" = ["BLE001"]  # #373
+"scripts/fetch_debug_artifacts.py" = ["BLE001"]  # #374
+"scripts/measure_server_clock.py" = ["BLE001"]  # #375
+"scripts/validate_selectors.py" = ["BLE001"]  # #376
+"tests/test_async_chain_integration.py" = ["BLE001"]  # #377
 
 [tool.mypy]
 python_version = "3.11"
