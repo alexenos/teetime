@@ -96,3 +96,8 @@ key.json.b64
 /run.txt
 # Local-only race-report working directory; never published.
 /operations/rr/
+
+# Coverage output
+.coverage
+coverage.json
+.coverage.*
