@@ -94,8 +94,9 @@ jobs:
           if-no-files-found: ignore
 
       # Ratchet (#11): the count of uncovered statements and branches may not rise,
-      # and must be lowered in the PR that lowers it. Fails on any difference from
-      # operations/coverage-ratchet.txt and prints the value to commit. The
+      # and must be lowered in the PR that lowers it. Fails when the count is more than
+      # 5 from operations/coverage-ratchet.txt (run-to-run noise, #379) and prints the
+      # value to commit. The
       # percentage is still reported (table above, and in this step's output).
       # After the upload so the artifact is kept when this step fails.
       - name: Check coverage ratchet

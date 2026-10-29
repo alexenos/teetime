@@ -34,16 +34,31 @@ def test_equal_passes_and_reports_the_percentage() -> None:
     assert "coverage 80.64%" in message
 
 
-def test_more_uncovered_fails() -> None:
-    status, message = ccr.check(_totals(lines=1010), 1500)
-    assert status == 1
-    assert "10 more than the ratchet 1500" in message
+def test_within_the_tolerance_passes_either_way() -> None:
+    t = ccr.TOLERANCE
+    assert ccr.check(_totals(lines=1000 + t), 1500)[0] == 0
+    assert ccr.check(_totals(lines=1000 - t), 1500)[0] == 0
+    status, message = ccr.check(_totals(lines=1000 + 1), 1500)
+    assert status == 0
+    assert "(+1)" in message
 
 
-def test_fewer_uncovered_fails_and_names_the_new_value() -> None:
-    status, message = ccr.check(_totals(lines=990), 1500)
+def test_more_uncovered_than_the_tolerance_fails() -> None:
+    status, message = ccr.check(_totals(lines=1000 + ccr.TOLERANCE + 1), 1500)
     assert status == 1
-    assert "write 1490 to operations/coverage-ratchet.txt" in message
+    assert f"{ccr.TOLERANCE + 1} more than the ratchet 1500" in message
+
+
+def test_fewer_uncovered_than_the_tolerance_fails_and_names_the_new_value() -> None:
+    count = 1500 - ccr.TOLERANCE - 1
+    status, message = ccr.check(_totals(lines=count - 500), 1500)
+    assert status == 1
+    assert f"write {count} to operations/coverage-ratchet.txt" in message
+
+
+def test_the_tolerance_is_five() -> None:
+    # Changing it is a decision (#379 is about removing it), so the test pins it.
+    assert ccr.TOLERANCE == 5
 
 
 def test_deleting_tested_code_does_not_move_the_count() -> None:
@@ -58,9 +73,13 @@ def test_main_passes_on_equal(tmp_path: Path) -> None:
     assert _run(tmp_path, _totals(), "1500\n") == 0
 
 
-def test_main_fails_above_and_below(tmp_path: Path) -> None:
-    assert _run(tmp_path, _totals(lines=1001), "1500\n") == 1
-    assert _run(tmp_path, _totals(lines=999), "1500\n") == 1
+def test_main_fails_outside_the_band(tmp_path: Path) -> None:
+    assert _run(tmp_path, _totals(lines=1000 + ccr.TOLERANCE + 1), "1500\n") == 1
+    assert _run(tmp_path, _totals(lines=1000 - ccr.TOLERANCE - 1), "1500\n") == 1
+
+
+def test_main_passes_inside_the_band(tmp_path: Path) -> None:
+    assert _run(tmp_path, _totals(lines=1000 + ccr.TOLERANCE), "1500\n") == 0
 
 
 @pytest.mark.parametrize("ratchet", ["", "abc\n", "-1\n", "1.5\n", "nan\n"])

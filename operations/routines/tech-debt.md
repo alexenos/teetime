@@ -118,17 +118,21 @@ alongside the HTTP booker.
 ### The coverage ratchet
 
 `operations/coverage-ratchet.txt` holds the number of uncovered statements plus
-branches (#11). The `Tests` workflow fails when a PR's count differs from it, in
-either direction, and prints the value to commit; the percentage is reported on
-every run but is not what is held. Consequences for this Routine's PRs:
+branches (#11). The `Tests` workflow fails when a PR's count is more than 5 above
+or below it, and prints the value to commit; the percentage is reported on every
+run but is not what is held. The band of 5 exists because two CI runs of identical
+code differed by one branch (#379); until that is fixed, up to 5 uncovered branches
+can come in unnoticed. Consequences for this Routine's PRs:
 
-- A PR that adds tests, or deletes uncovered code, lowers the count: CI fails
-  with `fewer than the ratchet` until the PR writes the printed value to the file.
-  Wait for the PR's `Tests` run, read the value, commit it.
+- A PR that adds tests, or deletes uncovered code, lowers the count by more than 5:
+  CI fails with `fewer than the ratchet` until the PR writes the printed value to the
+  file. Wait for the PR's `Tests` run, read the value, commit it. A smaller drop
+  passes and needs no commit.
 - A PR that deletes code the tests cover does not change the count, so removing
   tested dead code is not penalised. That is why the ratchet counts uncovered code
   instead of a percentage.
-- A PR that adds code without tests raises the count and fails; add the tests.
+- A PR that adds code without tests raises the count by more than 5 and fails; add
+  the tests.
 - The file is one line, so two open PRs that both lower it conflict. The cap of
   three open PRs makes that rare; resolve by taking the lower of the two measured
   values from a fresh CI run, never by hand-computing it.
@@ -518,7 +522,7 @@ Step 3 - scan. For each category in the spec, run its checks and record how many
 
 Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or more, fix nothing and record skipped as cap. Otherwise consider every open tech-debt issue except those labelled wontfix or td:blocked or that already have an open PR. Prefer small, self-contained issues the existing tests, ruff and mypy can verify; among those, oldest first. Take a td:code-quality issue only if nothing else is eligible, and a td:legacy-feature issue only if the manifest marks the feature removable. If nothing is eligible, fix nothing and record skipped as no_candidate; do not open a PR to have something to show. Deprioritize issues in the sensitive areas the spec lists, but do not refuse them if nothing else is open, and say so in the PR. Comment on the chosen issue saying why you chose it. Make a branch named tech-debt/<issue number>-<short slug>, preserve behavior, and make the change.
 
-Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed. CI also fails the Check coverage ratchet step when the count of uncovered code differs from operations/coverage-ratchet.txt, in either direction. After you push, wait for the PR's Tests run and, if that step fails, write the value it prints to operations/coverage-ratchet.txt and push; never compute that value from a local run.
+Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed. CI also fails the Check coverage ratchet step when the count of uncovered code is more than 5 above or below operations/coverage-ratchet.txt. After you push, wait for the PR's Tests run and, if that step fails, write the value it prints to operations/coverage-ratchet.txt and push; never compute that value from a local run.
 
 Open a normal PR into main with the tech-debt label and Closes #<n>. The first section of the body is Risk, stating: the files and whether any is a sensitive area; whether merging redeploys the service or applies terraform, determined by comparing the changed paths with the Cloud Build ignored_files list, read fresh from terraform/main.tf rather than recalled, where a change whose every file matches the list does neither and any file outside it does both; whether anything the 06:28 CT race executes changed and what to watch on the next race morning; and whether behavior changed. Then a Review section (filled in at Step 4b), then Verified and Not verified, kept separate. Say what the tests do and do not cover for the changed code. The project has no local way to exercise booking, so do not imply a green suite establishes booking behavior.
 
