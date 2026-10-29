@@ -1,6 +1,6 @@
 """Tests for app/services/strict_parser.py, the no-LLM fallback."""
 
-from datetime import date, time
+from datetime import date, datetime, time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -238,7 +238,10 @@ class TestGeminiFallback:
         with (
             patch.object(service, "_model", MagicMock()),
             patch("app.services.gemini_service.asyncio.sleep", AsyncMock()),
+            # The message names 11/6/26; on a later real date it is in the past.
+            patch("app.services.strict_parser.datetime") as mock_datetime,
         ):
+            mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
             service._model.generate_content_async = AsyncMock(
                 side_effect=google_exceptions.ResourceExhausted("credits are depleted")
             )
