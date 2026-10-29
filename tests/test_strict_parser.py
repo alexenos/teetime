@@ -11,32 +11,147 @@ from app.services.strict_parser import strict_parse
 
 TODAY = date(2026, 10, 28)
 
+# Every member booking request logged from 2026-10-01 to 2026-10-29 that the
+# parser should read, with the date it was sent and what the member meant.
+# Thirteen phrasings in all; the admin's messages are not included.
+MEMBER_REQUESTS = [
+    (
+        "book tee time for Sunday, October 11 at 12:00 PM for 4 players",
+        date(2026, 10, 1),
+        date(2026, 10, 11),
+        time(12, 0),
+    ),
+    (
+        "book a tee time Friday October 16 at 9:23 AM for 4 players.",
+        date(2026, 10, 1),
+        date(2026, 10, 16),
+        time(9, 23),
+    ),
+    (
+        "book a 12:08 pm tee time for 4 players on 10-11-2026",
+        date(2026, 10, 2),
+        date(2026, 10, 11),
+        time(12, 8),
+    ),
+    (
+        "book a 8:08 am tee time on October 15 for 4 players",
+        date(2026, 10, 8),
+        date(2026, 10, 15),
+        time(8, 8),
+    ),
+    (
+        "book tee time on 10/16/26 @ 9:23 a.m for 4 players",
+        date(2026, 10, 8),
+        date(2026, 10, 16),
+        time(9, 23),
+    ),
+    (
+        "book a Friday October 16 8:38 am tee time for 4 players",
+        date(2026, 10, 8),
+        date(2026, 10, 16),
+        time(8, 38),
+    ),
+    (
+        "book a tee time for Thursday October 22 at 8:08 am for 4 players",
+        date(2026, 10, 14),
+        date(2026, 10, 22),
+        time(8, 8),
+    ),
+    (
+        "book a tee time on October 23 at 8:38 a.m. for 4 players",
+        date(2026, 10, 15),
+        date(2026, 10, 23),
+        time(8, 38),
+    ),
+    (
+        "make tee time for 10/25/26 for 12:00p for 4 players.",
+        date(2026, 10, 17),
+        date(2026, 10, 25),
+        time(12, 0),
+    ),
+    (
+        "book a 8:38 am tee time for Friday October 30 for 4 players",
+        date(2026, 10, 22),
+        date(2026, 10, 30),
+        time(8, 38),
+    ),
+    (
+        "book 9:30 tee time on 10/30/26 for 4 players.",
+        date(2026, 10, 23),
+        date(2026, 10, 30),
+        time(9, 30),
+    ),
+    (
+        "book tee time 11/1/26 at 12:08pm for 4 players",
+        date(2026, 10, 23),
+        date(2026, 11, 1),
+        time(12, 8),
+    ),
+    (
+        "book a Sunday November 1 2026 tee time at 12:15 pm for 4 players",
+        date(2026, 10, 23),
+        date(2026, 11, 1),
+        time(12, 15),
+    ),
+    (
+        "schedule tee time on 11/6/26 at 9:38 am for 4 players",
+        date(2026, 10, 28),
+        date(2026, 11, 6),
+        time(9, 38),
+    ),
+    (
+        "make tee time on 11/6/26 at 9:38 AM for 4 players",
+        date(2026, 10, 28),
+        date(2026, 11, 6),
+        time(9, 38),
+    ),
+    (
+        "book a Friday November 6 2026 8:38 am tee time for 4 players",
+        date(2026, 10, 29),
+        date(2026, 11, 6),
+        time(8, 38),
+    ),
+    (
+        "book a 8:38 am tee time on Friday, November 6, 2026 for 4 players.",
+        date(2026, 10, 29),
+        date(2026, 11, 6),
+        time(8, 38),
+    ),
+]
+
+
+@pytest.mark.parametrize(("message", "sent", "expected_date", "expected_time"), MEMBER_REQUESTS)
+def test_reads_what_members_actually_send(
+    message: str, sent: date, expected_date: date, expected_time: time
+) -> None:
+    parsed = strict_parse(message, today=sent)
+
+    assert parsed is not None
+    assert parsed.intent == "book"
+    assert parsed.tee_time_request is not None
+    assert parsed.tee_time_request.requested_date == expected_date
+    assert parsed.tee_time_request.requested_time == expected_time
+    assert parsed.tee_time_request.num_players == 4
+
 
 @pytest.mark.parametrize(
     ("message", "expected_date", "expected_time", "players"),
     [
-        # The two messages Gemini refused on 2026-10-28.
-        (
-            "schedule tee time on 11/6/26 at 9:38 am for 4 players",
-            date(2026, 11, 6),
-            time(9, 38),
-            4,
-        ),
-        ("make tee time on 11/6/26 at 9:38 AM for 4 players", date(2026, 11, 6), time(9, 38), 4),
         ("Book 8/2 at 5:06p", date(2027, 8, 2), time(17, 6), 4),
-        ("book a tee time 11/6/2026 at 2pm for 2", date(2026, 11, 6), time(14, 0), 2),
+        ("book a tee time 11/6/2026 at 2pm for 2 players", date(2026, 11, 6), time(14, 0), 2),
         ("Please reserve 11/7 at 12:15 p.m. for 1 player.", date(2026, 11, 7), time(12, 15), 1),
-        ("book 11/7 at 12:05am", date(2026, 11, 7), time(0, 5), 4),
         ("book   11/7  at 8:00 a", date(2026, 11, 7), time(8, 0), 4),
+        ("book Nov 7th at 7am", date(2026, 11, 7), time(7, 0), 4),
+        ("book 11/7 at 6:00 pm", date(2026, 11, 7), time(18, 0), 4),
+        ("book 11/7 at 14:30", date(2026, 11, 7), time(14, 30), 4),
     ],
 )
-def test_reads_an_explicit_request(
+def test_reads_other_explicit_forms(
     message: str, expected_date: date, expected_time: time, players: int
 ) -> None:
     parsed = strict_parse(message, today=TODAY)
 
     assert parsed is not None
-    assert parsed.intent == "book"
     assert parsed.tee_time_request is not None
     assert parsed.tee_time_request.requested_date == expected_date
     assert parsed.tee_time_request.requested_time == expected_time
@@ -44,22 +159,55 @@ def test_reads_an_explicit_request(
 
 
 @pytest.mark.parametrize(
+    ("message", "expected_time"),
+    [
+        # Tee times run 7:00 am to 6:00 pm, so a time without am/pm has one reading.
+        ("book 11/7 at 7:00", time(7, 0)),
+        ("book 11/7 at 9:30", time(9, 30)),
+        ("book 11/7 at 11:52", time(11, 52)),
+        ("book 11/7 at 12:08", time(12, 8)),
+        ("book 11/7 at 1:15", time(13, 15)),
+        ("book 11/7 at 5:54", time(17, 54)),
+        ("book 11/7 at 6:00", time(18, 0)),
+    ],
+)
+def test_a_time_without_am_or_pm_is_read_within_tee_sheet_hours(
+    message: str, expected_time: time
+) -> None:
+    parsed = strict_parse(message, today=TODAY)
+
+    assert parsed is not None and parsed.tee_time_request is not None
+    assert parsed.tee_time_request.requested_time == expected_time
+
+
+@pytest.mark.parametrize(
     "message",
     [
-        "book 11/6 at 9:38",  # no am/pm: morning or evening?
-        "book Saturday at 9:38am",  # relative day
+        # Member requests from the log it must not read.
+        "book a tee time for Thursday October eighth at 8:08 am for 4 players",
+        "book a 12:08 pm tee time for 4 players.",  # no date
+        "book a October 25 12:08 am tee time for 4 players",  # meant pm; outside hours
+        # Outside tee-sheet hours, with or without am/pm.
+        "book 11/7 at 6:30",
+        "book 11/7 at 6:30 pm",
+        "book 11/7 at 6:45am",
+        "book 11/7 at 19:00",
+        # Ambiguous or not a single explicit booking.
+        "book Saturday at 9:38am",
         "book tomorrow at 9am",
-        "book 11/6 at 9:38am and 11/7 at 9:38am",  # two bookings
-        "book for Member B 11/6 at 9:38am",  # on someone's behalf
-        "book 11/6 at 9:38am for 5 players",  # more than a foursome
-        "book 11/6 at 13:38pm",
+        "book 11/6 at 9:38am and 11/7 at 9:38am",
+        "book 11/6 at 9:38am at 10:38am",
+        "book for Member B 11/6 at 9:38am",
+        "book Thursday November 6 at 9:38am",  # 11/6/2026 is a Friday
+        "book 11/6 at 9:38am for 5 players",
         "book 11/6 at 9:75am",
         "book 13/6 at 9:38am",
         "book 2/30 at 9:38am",
         "book 10/1/26 at 9:38am",  # a year the member wrote, already past
+        "book 11/6 at 9",  # a bare number is not a time
         "cancel 11/6 at 9:38am",
         "what do I have on 11/6 at 9:38am?",
-        "book 11/6 at 9:38am for 4 players please",  # trailing words
+        "book 11/6 at 9:38am for 4 players please send",
         "yes",
         "",
     ],
