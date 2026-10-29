@@ -1,16 +1,19 @@
 """Tests for member pseudonyms in logs and reports (issue #256)."""
 
 import logging
+from datetime import date, time, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import log_safety
 from app.config import settings
 from app.log_safety import MemberPseudonyms, clear_member_pseudonyms
-from app.models.database import Base
+from app.models.database import Base, BookingRecord, MemberPseudonymRecord, SessionRecord
+from app.models.schemas import BookingStatus
 from app.services import pseudonyms
 from app.services.pseudonyms import PseudonymError, assign, next_label, set_label
 
@@ -319,3 +322,152 @@ class TestFilterOnlyGrows:
         record = logging.LogRecord("t", logging.INFO, "", 0, f"{MEMBER_ID} {OTHER_ID}", None, None)
         filt.filter(record)
         assert record.getMessage() == "<Member C> <Member D>"
+
+
+class TestForget:
+    """Issue #276: /forget keeps a member's booking history under their label only."""
+
+    TODAY = date(2026, 10, 25)
+    GROUP_CHAT = "-1001234567890"
+
+    @pytest_asyncio.fixture
+    async def session_local(self, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_local = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        monkeypatch.setattr("app.services.pseudonyms.AsyncSessionLocal", session_local)
+        monkeypatch.setattr(settings, "member_pseudonyms_reserved", "")
+        yield session_local
+        clear_member_pseudonyms()
+        await engine.dispose()
+
+    @staticmethod
+    def _booking(
+        booking_id: str,
+        status: BookingStatus,
+        played: date,
+        requester: str = MEMBER_ID,
+        chat: str | None = MEMBER_ID,
+    ) -> BookingRecord:
+        return BookingRecord(
+            booking_id=booking_id,
+            phone_number=requester,
+            requested_date=played,
+            requested_time=time(8, 0),
+            status=status,
+            origin_channel_id=chat,
+            requester_handle="@someone ",
+            error_message="free text that might hold anything",
+        )
+
+    async def _add(self, session_local, *rows) -> None:  # type: ignore[no-untyped-def]
+        async with session_local() as s:
+            s.add_all(rows)
+            await s.commit()
+
+    async def _bookings(self, session_local) -> dict[str, BookingRecord]:  # type: ignore[no-untyped-def]
+        async with session_local() as s:
+            return {
+                str(b.booking_id): b for b in (await s.execute(select(BookingRecord))).scalars()
+            }
+
+    async def _pseudonym_ids(self, session_local) -> set[str]:  # type: ignore[no-untyped-def]
+        async with session_local() as s:
+            return {
+                str(r)
+                for r in (await s.execute(select(MemberPseudonymRecord.requester_id))).scalars()
+            }
+
+    async def test_finished_bookings_are_rewritten_and_the_rest_wait(self, session_local) -> None:  # type: ignore[no-untyped-def]
+        yesterday, tomorrow = self.TODAY - timedelta(days=1), self.TODAY + timedelta(days=1)
+        await assign(MEMBER_ID)
+        await self._add(
+            session_local,
+            self._booking("played", BookingStatus.SUCCESS, yesterday),
+            self._booking("failed", BookingStatus.FAILED, tomorrow, chat=self.GROUP_CHAT),
+            self._booking("cancelled", BookingStatus.CANCELLED, tomorrow),
+            self._booking("coming", BookingStatus.SUCCESS, tomorrow),
+            self._booking("racing", BookingStatus.IN_PROGRESS, self.TODAY),
+            self._booking("other", BookingStatus.SUCCESS, yesterday, requester=OTHER_ID),
+            SessionRecord(phone_number=MEMBER_ID),
+        )
+
+        outcome = await pseudonyms.forget(MEMBER_ID, today=self.TODAY)
+
+        assert outcome.label == "Member A"
+        assert outcome.bookings_rewritten == 3
+        rows = await self._bookings(session_local)
+        for name in ("played", "failed", "cancelled"):
+            assert rows[name].phone_number == "Member A"
+            assert rows[name].requester_handle is None
+            assert rows[name].error_message is None
+        assert rows["played"].origin_channel_id is None  # the private chat is the member
+        assert rows["failed"].origin_channel_id == self.GROUP_CHAT  # a group is nobody
+        for name in ("coming", "racing"):
+            assert rows[name].phone_number == MEMBER_ID  # the racer and messages still need it
+        assert rows["other"].phone_number == OTHER_ID
+        async with session_local() as s:
+            assert (await s.execute(select(SessionRecord))).scalars().first() is None
+            record = (await s.execute(select(MemberPseudonymRecord))).scalars().one()
+        assert record.forgotten_at is not None
+        assert record.requester_id == MEMBER_ID  # broken only once nothing needs it
+
+    async def test_a_member_with_nothing_on_file_is_given_no_label(self, session_local) -> None:  # type: ignore[no-untyped-def]
+        # A session can hold their handle or a half-made request; it goes too.
+        await self._add(session_local, SessionRecord(phone_number=MEMBER_ID))
+        outcome = await pseudonyms.forget(MEMBER_ID, today=self.TODAY)
+        assert outcome.label is None
+        assert await self._pseudonym_ids(session_local) == set()
+        async with session_local() as s:
+            assert (await s.execute(select(SessionRecord))).scalars().first() is None
+
+    async def test_a_member_without_a_label_gets_one_for_their_history(self, session_local) -> None:  # type: ignore[no-untyped-def]
+        await self._add(session_local, self._booking("old", BookingStatus.FAILED, self.TODAY))
+        outcome = await pseudonyms.forget(MEMBER_ID, today=self.TODAY)
+        assert outcome.label == "Member A"
+        assert (await self._bookings(session_local))["old"].phone_number == "Member A"
+
+    async def test_the_sweep_finishes_the_job_and_removes_the_id(self, session_local) -> None:  # type: ignore[no-untyped-def]
+        """The issue's done-when: no requester ID, handle or private chat ID remains."""
+        tomorrow = self.TODAY + timedelta(days=1)
+        await assign(MEMBER_ID)
+        await self._add(session_local, self._booking("coming", BookingStatus.SUCCESS, tomorrow))
+        await pseudonyms.forget(MEMBER_ID, today=self.TODAY)
+
+        not_yet = await pseudonyms.sweep_forgotten(today=self.TODAY)
+        assert (not_yet.bookings_rewritten, not_yet.links_released) == (0, 0)
+        assert MEMBER_ID in await self._pseudonym_ids(session_local)
+
+        await self._add(session_local, SessionRecord(phone_number=MEMBER_ID))
+        day_after = tomorrow + timedelta(days=1)
+        dry = await pseudonyms.sweep_forgotten(dry_run=True, today=day_after)
+        assert (dry.bookings_rewritten, dry.links_released) == (1, 1)
+        assert (await self._bookings(session_local))["coming"].phone_number == MEMBER_ID
+
+        done = await pseudonyms.sweep_forgotten(today=day_after)
+        assert (done.bookings_rewritten, done.links_released) == (1, 1)
+        row = (await self._bookings(session_local))["coming"]
+        assert (row.phone_number, row.requester_handle, row.origin_channel_id) == (
+            "Member A",
+            None,
+            None,
+        )
+        assert await self._pseudonym_ids(session_local) == {"forgotten-1"}
+        async with session_local() as s:
+            assert (await s.execute(select(SessionRecord))).scalars().first() is None
+
+        # The label stays taken, and the member would come back as someone new.
+        assert await assign(MEMBER_ID) == ("Member B", True)
+
+    async def test_rejoining_before_the_sweep_stops_the_rewriting(self, session_local) -> None:  # type: ignore[no-untyped-def]
+        tomorrow = self.TODAY + timedelta(days=1)
+        await assign(MEMBER_ID)
+        await self._add(session_local, self._booking("coming", BookingStatus.SUCCESS, tomorrow))
+        await pseudonyms.forget(MEMBER_ID, today=self.TODAY)
+
+        assert await assign(MEMBER_ID) == ("Member A", False)
+
+        swept = await pseudonyms.sweep_forgotten(today=tomorrow + timedelta(days=1))
+        assert (swept.bookings_rewritten, swept.links_released) == (0, 0)
+        assert (await self._bookings(session_local))["coming"].phone_number == MEMBER_ID

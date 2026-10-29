@@ -22,6 +22,7 @@ from app.models.database import (
     _ADDED_CONVERSATION_STATES,
     Base,
     BookingRecord,
+    MemberPseudonymRecord,
     SessionRecord,
     WaldenCredentialRecord,
     _normalize_database_url,
@@ -157,6 +158,13 @@ class TestColumnMigrations:
             "created_at DATETIME",
             "updated_at DATETIME",
         ],
+        # As #256 created it; forgotten_at came with #276.
+        "member_pseudonyms": [
+            "id INTEGER PRIMARY KEY",
+            "requester_id VARCHAR(20)",
+            "label VARCHAR(32)",
+            "assigned_at DATETIME",
+        ],
     }
 
     @pytest.mark.asyncio
@@ -181,6 +189,7 @@ class TestColumnMigrations:
             "sessions": SessionRecord,
             "bookings": BookingRecord,
             "walden_credentials": WaldenCredentialRecord,
+            "member_pseudonyms": MemberPseudonymRecord,
         }
         engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
         try:

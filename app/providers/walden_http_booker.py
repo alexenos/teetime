@@ -900,7 +900,7 @@ class DirectHttpBooker:
                 f" (site message: {result.response_message})" if result.response_message else "",
             )
             return result
-        except Exception as exc:  # noqa: BLE001 - this path must never abort a booking run
+        except Exception as exc:  # this path must never abort a booking run
             # An unexpected error here is a bug in this module, not a booking
             # outcome. Report it as a failed attempt so the caller can fall
             # back rather than losing the run entirely.

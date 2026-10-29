@@ -6,7 +6,7 @@ permalink: /privacy/
 
 # Privacy Policy
 
-**Last updated: October 5, 2026**
+**Last updated: October 25, 2026**
 
 TeeTime Bot is a private, invitation-only Telegram bot that books golf tee times
 at Northgate Country Club for members of a small group, each under their own
@@ -79,10 +79,11 @@ checked automatically for names before it is published.
   rejects it and you do not save a new one, it is deleted after 90 days.
 - **Booking records:** kept, with no automatic deletion. They let the bot tell
   you what it booked, let problems be diagnosed, and let the group's booking
-  patterns be studied over the years.
+  patterns be studied over the years. After you send `/forget` they are kept
+  under your label instead of your Telegram account (see below).
 - **Conversation state:** deleted after 90 days without a message from you.
 - **Your label** (such as "Member C"): kept, so an old public race report never
-  comes to mean someone else.
+  comes to mean someone else. After `/forget`, nothing links it back to you.
 - **Service logs:** 30 days.
 - **Copies of the club's tee-sheet pages** taken during bookings, which can show
   members' names: about 90 days, then up to two more weeks in a recovery
@@ -92,11 +93,32 @@ checked automatically for names before it is published.
 
 ## Deleting your information
 
-- **`/forget`** in your private chat with the bot deletes your saved Walden login
-  and cancels bookings it has not made yet.
-- **Leaving the group** does the same automatically.
-- For anything else, such as booking records or your label, ask the person who
-  invited you.
+**`/forget`**, sent in your private chat with the bot:
+
+- deletes your saved Walden login;
+- cancels bookings it has not made yet;
+- deletes the state of your conversation with the bot;
+- takes your identity off your booking history. Your past bookings are kept,
+  for the group's statistics, but under your label instead of your Telegram ID:
+  your @username, your private chat with the bot, and any error text are
+  removed from them. A booking still to be played keeps your ID until it is
+  played, because the bot needs it to tell you how it went, and is changed
+  within a day after that.
+- Once none of your bookings is left to change, the link between your Telegram
+  account and your label is deleted too. The label is not given to anyone else.
+  If you join again later, you start as a new member with a new label.
+
+This history is **pseudonymised, not anonymous**: it no longer names you, but
+someone who knew your booking habits well could still recognise them. If the
+person who runs the bot has listed you by hand under your label, they are told
+to remove that entry. Database backups can hold the earlier version for up to
+about a week.
+
+**Leaving the group** deletes your saved Walden login and cancels bookings the
+bot has not made yet. It does **not** take your identity off your booking
+history: send `/forget` before or after leaving if you want that too.
+
+For anything else, ask the person who invited you.
 
 Tee times already reserved at the club are your own, and are not affected.
 

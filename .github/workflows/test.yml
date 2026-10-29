@@ -70,13 +70,37 @@ jobs:
           install-chromedriver: true
 
       - name: Run tests with pytest
-        run: poetry run pytest -v --tb=short
+        run: poetry run pytest -v --tb=short --cov --cov-report=term --cov-report=json:coverage.json
         env:
           # Both come from the step above, so the pair always matches. Empty
           # or unset falls back to the default lookups, which is what ran here
           # before this step existed.
           CHROME_BINARY: ${{ steps.setup-chrome.outputs.chrome-path }}
           CHROMEDRIVER_BINARY: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+
+      # Report only, no threshold (#11). The per-file table is printed in the pytest
+      # log (--cov-report=term) and written to the job summary; coverage.json is the
+      # artifact the tech-debt and feature-dev Routines read.
+      - name: Publish coverage
+        if: ${{ !cancelled() }}
+        run: poetry run coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.json
+          if-no-files-found: ignore
+
+      # Ratchet (#11): the count of uncovered statements and branches may not rise,
+      # and must be lowered in the PR that lowers it. Fails when the count is more than
+      # 5 from operations/coverage-ratchet.txt (run-to-run noise, #379) and prints the
+      # value to commit. The
+      # percentage is still reported (table above, and in this step's output).
+      # After the upload so the artifact is kept when this step fails.
+      - name: Check coverage ratchet
+        run: python scripts/check_coverage_ratchet.py coverage.json operations/coverage-ratchet.txt
 
   lint:
     runs-on: ubuntu-latest

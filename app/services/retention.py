@@ -12,7 +12,9 @@ What is deliberately *not* here:
 * member_pseudonyms. A label is never reused - an old public race report must
   not come to mean someone else - so these rows outlive the member.
 * bookings. They are kept for good, to look for trends in how members book over
-  years. Nothing here deletes one, of any status or age.
+  years. Nothing here deletes one, of any status or age. A member who sent
+  /forget has their finished bookings rewritten to their label instead, by
+  pseudonyms.sweep_forgotten, which this purge runs last (issue #276).
 * A credential that is merely old. A login is deleted when the member forgets
   it or leaves (telegram_members), or here when Walden has rejected it and
   nobody has replaced it. An unused but working login is the member's to remove.
@@ -32,6 +34,7 @@ from app.models.database import (
     TeeSheetGridRecord,
     WaldenCredentialRecord,
 )
+from app.services.pseudonyms import sweep_forgotten
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,16 @@ async def purge_expired(dry_run: bool = False, now: datetime | None = None) -> P
         except Exception as e:
             logger.exception("RETENTION_PURGE: %s failed", name)
             result.errors[name] = type(e).__name__
+
+    # Not deletions, but the same nightly pass: bookings that have finished
+    # since a member sent /forget, and the links no booking still needs.
+    try:
+        sweep = await sweep_forgotten(dry_run=dry_run)
+        result.deleted["forgotten_bookings_pseudonymised"] = sweep.bookings_rewritten
+        result.deleted["forgotten_member_links_removed"] = sweep.links_released
+    except Exception as e:
+        logger.exception("RETENTION_PURGE: forgotten members failed")
+        result.errors["forgotten_members"] = type(e).__name__
 
     logger.info(
         "RETENTION_PURGE: %s deleted=%s errors=%s",

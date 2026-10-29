@@ -65,6 +65,19 @@ that issue resolves, labelled as such on the row and on the page.
 **A cost number whose scope is unstated is worse than no number**, because it
 invites $/booking comparisons against a denominator that does not match.
 
+**Gemini spend is covered; its prepaid balance is not.** The export carries the
+Gemini API as service `Gemini API`, so it is already in `usd_gcp` and in the row's
+`services` map: $0.08 for September and $0.04 for October so far (queried
+2026-10-29). What the export does not show is the AI Studio prepaid balance. On
+2026-10-28 that ran out and every member message failed with
+`429 Your prepayment credits are depleted`. A monthly figure cannot catch that.
+The service now tells the admin on Telegram when it happens, at most once an hour
+(`app/services/gemini_service.py`, `is_billing_exhausted`).
+
+**Not established:** how the export's `Gemini API` cost relates to what the
+prepaid balance is charged. $0.04 for October does not obviously explain an empty
+balance, and the balance has no API or export to read it from.
+
 ## What a run does
 
 1. Query the billing export for the month just ended, grouped by service.

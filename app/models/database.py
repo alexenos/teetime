@@ -228,13 +228,20 @@ class MemberPseudonymRecord(Base):
 
     Kept apart from walden_credentials on purpose: offboarding deletes the
     credential row, but a label is never reused - an old report must not come
-    to mean someone else - and a member who rejoins keeps theirs.
+    to mean someone else - and a member who leaves and rejoins keeps theirs.
+
+    A member who sends /forget is the exception (issue #276): their bookings
+    are rewritten to the label as they finish, and then requester_id is
+    replaced by a placeholder, so nothing maps the label back to them. The row
+    stays, so the label is still never handed out again.
 
     Columns:
         requester_id: The member's identity, as on their bookings (their
-            Telegram user ID). Unique.
+            Telegram user ID), or "forgotten-<id>" once that link is broken.
+            Unique.
         label: "Member A", "Member B", ... Unique.
         assigned_at: When the label was assigned.
+        forgotten_at: When the member sent /forget. NULL otherwise.
     """
 
     __tablename__ = "member_pseudonyms"
@@ -243,6 +250,7 @@ class MemberPseudonymRecord(Base):
     requester_id = Column(String(20), unique=True, nullable=False, index=True)
     label = Column(String(32), unique=True, nullable=False)
     assigned_at = Column(DateTime, default=datetime.utcnow)
+    forgotten_at = Column(DateTime, nullable=True)
 
 
 class TeeSheetGridRecord(Base):
@@ -356,6 +364,7 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
     ("walden_credentials", "password_fallback", "TEXT"),
     ("sessions", "pending_replace_booking_id", "VARCHAR(50)"),
     ("sessions", "replace_clarifications", "INTEGER"),
+    ("member_pseudonyms", "forgotten_at", "TIMESTAMP"),
 ]
 
 

@@ -27,7 +27,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.config import settings
 from app.models.schemas import BookingStatus
@@ -38,6 +38,7 @@ from app.providers.telegram_provider import (
     is_authorized_user,
     is_member_status,
 )
+from app.services import pseudonyms
 from app.services.booking_service import booking_service
 from app.services.credential_service import credential_service
 from app.services.sms_service import sms_service
@@ -324,20 +325,38 @@ class ForgetResult:
     cancelled: int
     still_reserved: int
     login_deleted: bool
+    # Whether their booking history is now kept under a label (/forget only).
+    history_pseudonymised: bool = False
 
 
-async def forget_member(user_id: str) -> ForgetResult:
+async def forget_member(user_id: str, *, erase_identity: bool = False) -> ForgetResult:
     """Cancel this member's bookings that have not started and delete their login.
 
     Shared by offboarding (they left the group) and /forget (they asked, #240).
     A tee time already reserved at the club is counted rather than touched: it
     is the member's own, and with their login deleted it could not be
     cancelled there anyway. An attempt in progress is left to finish.
+
+    ``erase_identity`` is /forget's alone (issue #276): it also takes the
+    member's identity off their booking history, which is kept under their
+    label. Leaving the group does not, by the maintainer's decision.
     """
     # Waits for a setup-form check in flight, so what it saves is deleted here
     # rather than written back afterwards.
     async with member_lock(user_id):
-        return await _forget_member_locked(user_id)
+        result = await _forget_member_locked(user_id)
+        if erase_identity:
+            outcome = await pseudonyms.forget(user_id)
+            result = replace(result, history_pseudonymised=outcome.label is not None)
+            if outcome.label is not None:
+                # The hand-kept registry maps labels to name forms, outside the
+                # database; only a person can edit it.
+                await _tell_admin(
+                    f"{outcome.label} sent /forget. Their booking history is kept under "
+                    f"{outcome.label} only. If {outcome.label} is in "
+                    "MEMBER_PSEUDONYM_REGISTRY, remove them there by hand."
+                )
+        return result
 
 
 async def _forget_member_locked(user_id: str) -> ForgetResult:

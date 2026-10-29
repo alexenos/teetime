@@ -13,11 +13,11 @@ change. Applying them deletes data (see Applying), so merge is the decision.
 
 | Store | Holds | Kept | Enforced by |
 |---|---|---|---|
-| `bookings` (Cloud SQL) | requests and outcomes | **indefinitely**, to study booking trends over years | nothing deletes it, by decision of the maintainer |
+| `bookings` (Cloud SQL) | requests and outcomes | **indefinitely**, to study booking trends over years; after `/forget`, under the member's label (#276) | nothing deletes it, by decision of the maintainer; `pseudonyms.forget` and the purge's `sweep_forgotten` rewrite a forgotten member's finished rows |
 | `sessions` (Cloud SQL) | conversation state | 90 days after the last message, in any state | `retention_session_days` |
 | `tee_sheet_grids` (Cloud SQL) | observer slot-grid readings | 90 days after the reading | `retention_tee_sheet_grid_days` |
 | `walden_credentials` (Cloud SQL) | a member's stored login | until `/forget` or leaving the group (existing); 90 days after Walden rejected it with no replacement | `retention_invalid_login_days` |
-| `member_pseudonyms` (Cloud SQL) | label per member | **indefinitely** | nothing deletes it, by design |
+| `member_pseudonyms` (Cloud SQL) | label per member | **indefinitely**; after `/forget`, the requester ID is replaced by `forgotten-<id>` once no booking still carries it (#276) | nothing deletes it, by design |
 | `walden/` in the debug-artifacts bucket | failure captures, race artifacts, observer snapshots | 90 days, then 7 days as a noncurrent version, then 7 days of soft delete; an overwritten object's old version goes at 90 days too, not sooner | bucket lifecycle rules, `debug_artifact_retention_days` |
 | `operations/` in the same bucket | Routine ledgers | **indefinitely** | no rule matches the prefix |
 | `billing_export` (BigQuery) | Cloud Billing export | **indefinitely** | none; it cannot be re-run for past days |
@@ -35,11 +35,24 @@ race, so it cannot hold a lock when the racer claims its bookings.
 ## Why these periods
 
 - **Bookings, indefinitely.** Kept on purpose, to look for trends in how members
-  book over years (maintainer, 2026-10-06). The row holds a member's requester ID
-  (their Telegram ID), so this is the one table where keeping everything leaves
-  a member's history on file after they leave; `docs/privacy.md` says so, and
-  removal is by asking. Anonymising a leaver's rows instead of deleting them
-  would keep the trend data without the identity, and is not built.
+  book over years (maintainer, 2026-10-06). A row holds the member's requester ID
+  (their Telegram ID). After `/forget` (#276, decided 2026-10-25):
+  - finished rows (failed or cancelled, or won and played) have `phone_number`
+    rewritten to the member's label, and `requester_handle`, `error_message` and
+    a private-chat `origin_channel_id` cleared. A group chat's ID is kept; it
+    identifies nobody.
+  - rows still to run keep the ID until they finish, because the racer, the
+    reconciler and the result message need it. The nightly purge rewrites them
+    then (`sweep_forgotten`), and once no row carries the ID, replaces
+    `member_pseudonyms.requester_id` with a placeholder.
+  - the member's session row is deleted, at `/forget` and by each sweep.
+  - **leaving the group does not do this**, by decision: leaving may not mean
+    "erase me". `docs/privacy.md` says so.
+  - this is pseudonymisation, not anonymisation: a distinctive booking pattern
+    can still be recognised. `docs/privacy.md` says that too.
+  - `MEMBER_PSEUDONYM_REGISTRY` (Secret Manager, owner-only) is outside the
+    database. The admin is told on each `/forget` to remove the label there by
+    hand.
 - **Sessions, 90 days after the last message.** A session carries no booking
   state (that is in `bookings`), and the next message creates a new one. One
   abandoned mid-conversation still holds the half-made request and nothing else
@@ -60,7 +73,8 @@ race, so it cannot hold a lock when the racer claims its bookings.
   looks like. If they should outlive the failure captures, they need their own
   longer rule, which means splitting the one `walden/` rule by prefix.
 - **Pseudonyms and `operations/`, indefinitely.** A label is never reused, or an
-  old public report would come to mean someone else. The ledgers are
+  old public report would come to mean someone else. A forgotten member's label
+  row stays for that reason, with the ID removed. The ledgers are
   measurements with no member content, and their append-only grant means nothing
   can remove them anyway.
 - **Billing export, indefinitely.** Small, and unrecoverable once lost.

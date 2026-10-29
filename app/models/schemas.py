@@ -299,6 +299,11 @@ class ParsedIntent(BaseModel):
     booking_id: str | None = None
     clarification_needed: str | None = None
     response_message: str | None = None
+    # True when the parser itself failed (Gemini raised), so response_message
+    # says why nothing was read. A state that answers "unclear" with its own
+    # question must pass this through instead, or the member never learns the
+    # bot cannot read anything.
+    parser_failed: bool = False
 
 
 class SMSMessage(BaseModel):
