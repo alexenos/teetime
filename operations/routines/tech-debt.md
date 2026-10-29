@@ -49,8 +49,8 @@ link the earlier issue.
 
 **Labels.** `tech-debt` on every issue and every fix PR. One category label each:
 `td:lint-suppression`, `td:todo`, `td:test-health`, `td:dead-code`,
-`td:docs-drift`, `td:duplication`, `td:legacy-feature`, `td:code-quality`.
-`td:blocked` for an issue the fix step should skip until the maintainer removes
+`td:docs-drift`, `td:duplication`, `td:legacy-feature`, `td:code-quality`,
+`td:coverage`. `td:blocked` for an issue the fix step should skip until the maintainer removes
 it. The existing `wontfix` label means "decided
 against".
 
@@ -63,8 +63,9 @@ A finding must carry the command or comparison that produced it.
 |---|---|
 | `td:lint-suppression` | `noqa` and `type: ignore` in `app/` and `tests/`, each with its rule code and whether the suppression is still needed (remove it, run ruff and mypy, see if anything fires) |
 | `td:todo` | `TODO`, `FIXME`, `XXX`, `HACK` comments, cross-referenced against open issues; one that cites a closed issue is stale |
-| `td:test-health` | skipped, xfail or conditionally skipped tests; tests with sleeps or time dependence; tests that touch real network or Chrome without the existing gating. Coverage informs this category: the `Tests` workflow publishes a per-file table to its job summary and a `coverage` artifact (`coverage.json`) on every run that is not cancelled and writes `coverage.json` (#11); if the artifact is missing, say so in the ledger note rather than treating it as zero coverage. A file with low coverage that the feature manifest lists as live is a candidate; total coverage is held at a floor in `operations/coverage-floor.txt` (CI fails below it), but a per-file number alone is not a finding |
+| `td:test-health` | skipped, xfail or conditionally skipped tests; tests with sleeps or time dependence; tests that touch real network or Chrome without the existing gating. Coverage gaps are `td:coverage`, not this category |
 | `td:dead-code` | unused functions, classes and imports (`poetry run vulture`, or a grep that shows no references), terraform variables never referenced, config flags with no reader. Vulture scans `app/` only, so a function called only from `tests/` is reported; that is a finding (production code kept alive by tests), stated as such in the issue. Every hit is a candidate until a grep for callers has been read. If the command is not found, run `poetry install --no-root` once; if it still is not found, use the grep and say so in the ledger note |
+| `td:coverage` | code a unit test could cover and does not (#11). Source: the `coverage` artifact (`coverage.json`) of the latest green `Tests` run on `main`: the files with the most uncovered code, ranked by `summary.missing_lines + summary.missing_branches`, not by percentage, so no threshold is invented. File at most 3 per run. A finding names the file, the enclosing function or method (the fingerprint identifier, no line numbers), the uncovered line ranges from `files[<path>].missing_lines`, what that code does, and the test that would cover it. Not a finding: `__main__.py` entrypoints and code only the 06:28 CT race, the lifespan or the observer runs against a live club, Chrome or network, which no unit test reaches, and any file the feature manifest marks removable. Coverage never proves dead code on its own: uncovered lines with no callers, by vulture or grep, are filed as `td:dead-code` and cite the coverage as corroboration. The fix is tests only, with no `app/` change; the PR then also writes the value CI prints to `operations/coverage-ratchet.txt` (see "The coverage ratchet"). If the artifact cannot be fetched, run `poetry run pytest --cov --cov-report=json:coverage.json -q` in the session, say in the issue that Chrome tests are skipped there so the figures read lower than CI, and never derive the ratchet value from a local run. If neither is possible, the category is `ran: false, reason: "no_coverage_data"`, skipped and not failed |
 | `td:docs-drift` | a claim in `CLAUDE.md`, `operations/` or `.claude/skills/` that the code or the repository contradicts: a Routine marked "not deployed" that has a trigger ID, a path or function that no longer exists, a count that no longer matches |
 | `td:duplication` | logic copied between modules, above all between the racer and the observer, which the maintainer has already said must share the booking path rather than fork it |
 | `td:legacy-feature` | code that exists for a feature that is old, replaced, or never finished. **Judged against the feature manifest, not guessed**; see below |
@@ -113,6 +114,24 @@ Candidates the maintainer may want to classify first, from the file names alone.
 These are hypotheses, not findings: the Discord provider and gateway, the Twilio
 and SMS paths, the Gemini service, and the browser-driven `walden_provider`
 alongside the HTTP booker.
+
+### The coverage ratchet
+
+`operations/coverage-ratchet.txt` holds the number of uncovered statements plus
+branches (#11). The `Tests` workflow fails when a PR's count differs from it, in
+either direction, and prints the value to commit; the percentage is reported on
+every run but is not what is held. Consequences for this Routine's PRs:
+
+- A PR that adds tests, or deletes uncovered code, lowers the count: CI fails
+  with `fewer than the ratchet` until the PR writes the printed value to the file.
+  Wait for the PR's `Tests` run, read the value, commit it.
+- A PR that deletes code the tests cover does not change the count, so removing
+  tested dead code is not penalised. That is why the ratchet counts uncovered code
+  instead of a percentage.
+- A PR that adds code without tests raises the count and fails; add the tests.
+- The file is one line, so two open PRs that both lower it conflict. The cap of
+  three open PRs makes that rare; resolve by taking the lower of the two measured
+  values from a fresh CI run, never by hand-computing it.
 
 ### Finding nothing is a valid outcome
 
@@ -424,7 +443,7 @@ not real runs.
 
 `ok` describes the run. A run that scanned honestly and found nothing is
 `ok: true`, and so is a run that fixed nothing because nothing was eligible. A
-category with `ran: false` and `reason: "no_manifest"` is skipped, not failed. A
+category with `ran: false` and `reason: "no_manifest"` or `"no_coverage_data"` is skipped, not failed. A
 run whose check covered zero files, whose name check could not run,
 or whose PR failed its own pre-push command and was opened anyway is `ok: false`
 with a note. `fix.skipped` is `null` when a fix was opened, otherwise one of
@@ -491,7 +510,7 @@ Rule that applies to every path through this prompt: always write your ledger ro
 
 Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating or editing any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as .claude/skills/race-report/SKILL.md section 8a describes. Exit 0 is the only pass. Exit 1 means replace the named lines with labels and recheck. Exit 2 means it could not check; that is not a pass, so do not create it, record ok false with a note, and say so in the notification. If a finding is itself an identifier committed to the repo, give the file, line and kind of identifier and never the string.
 
-Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Then make sure these labels exist and create any that are missing: tech-debt, td:blocked, td:lint-suppression, td:todo, td:test-health, td:dead-code, td:docs-drift, td:duplication, td:legacy-feature, td:code-quality. If you cannot create a label, that is a failed run: record ok false, notify, and stop.
+Step 1 - set up. Get today's date with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh. Only READY is a pass. On anything else, write the ledger row with ok false naming the failed path, notify, and stop. Then make sure these labels exist and create any that are missing: tech-debt, td:blocked, td:lint-suppression, td:todo, td:test-health, td:dead-code, td:docs-drift, td:duplication, td:legacy-feature, td:code-quality, td:coverage. If you cannot create a label, that is a failed run: record ok false, notify, and stop.
 
 Step 2 - read the backlog. List every issue labelled tech-debt, open and closed, with bodies, and extract the fingerprint from each body. Use no date window: a wontfix closed long ago must still suppress a refile. This is your dedup set and your fix pool. Then list PRs labelled tech-debt and count, cumulatively, how many are merged, closed without merging, or open.
 
@@ -499,7 +518,7 @@ Step 3 - scan. For each category in the spec, run its checks and record how many
 
 Step 4 - fix, if clear. Count open PRs labelled tech-debt. If there are 3 or more, fix nothing and record skipped as cap. Otherwise consider every open tech-debt issue except those labelled wontfix or td:blocked or that already have an open PR. Prefer small, self-contained issues the existing tests, ruff and mypy can verify; among those, oldest first. Take a td:code-quality issue only if nothing else is eligible, and a td:legacy-feature issue only if the manifest marks the feature removable. If nothing is eligible, fix nothing and record skipped as no_candidate; do not open a PR to have something to show. Deprioritize issues in the sensitive areas the spec lists, but do not refuse them if nothing else is open, and say so in the PR. Comment on the chosen issue saying why you chose it. Make a branch named tech-debt/<issue number>-<short slug>, preserve behavior, and make the change.
 
-Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed.
+Run the full pre-push command and quote its result: poetry run pytest -q, poetry run ruff check ., poetry run ruff format --check ., poetry run mypy app, all of them. If any fails, do not open the PR; record skipped as check_failed. CI also fails the Check coverage ratchet step when the count of uncovered code differs from operations/coverage-ratchet.txt, in either direction. After you push, wait for the PR's Tests run and, if that step fails, write the value it prints to operations/coverage-ratchet.txt and push; never compute that value from a local run.
 
 Open a normal PR into main with the tech-debt label and Closes #<n>. The first section of the body is Risk, stating: the files and whether any is a sensitive area; whether merging redeploys the service or applies terraform, determined by comparing the changed paths with the Cloud Build ignored_files list, read fresh from terraform/main.tf rather than recalled, where a change whose every file matches the list does neither and any file outside it does both; whether anything the 06:28 CT race executes changed and what to watch on the next race morning; and whether behavior changed. Then a Review section (filled in at Step 4b), then Verified and Not verified, kept separate. Say what the tests do and do not cover for the changed code. The project has no local way to exercise booking, so do not imply a green suite establishes booking behavior.
 

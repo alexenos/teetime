@@ -109,9 +109,10 @@ environment that sets `CI` but has no browser.
 
 Measurement, and the Routines that run on a schedule: `operations/`.
 
-- `operations/coverage-floor.txt` — total coverage high-water mark (#11). CI fails below
-  it, and fails above it with the value to commit, so it only rises, in the PR that earned
-  it. `scripts/check_coverage_floor.py` enforces it
+- `operations/coverage-ratchet.txt` — high-water mark on uncovered code (#11): the count of
+  uncovered statements plus branches, not a percentage. CI fails when the count rises, and
+  when it falls, printing the value to commit, so it only goes down, in the PR that earned
+  it; the percentage is still reported. `scripts/check_coverage_ratchet.py` enforces it
 - `operations/features.md` — the feature manifest the tech-debt Routine judges
   legacy code against. A PR that adds, retires or deletes a feature updates it in
   the same change; `tests/test_feature_manifest.py` fails if an `app/` file belongs
