@@ -100,3 +100,4 @@ key.json.b64
 # Coverage output
 .coverage
 coverage.json
+.coverage.*
