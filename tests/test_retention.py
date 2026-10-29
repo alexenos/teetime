@@ -169,6 +169,32 @@ async def test_pseudonyms_are_never_deleted(db: async_sessionmaker) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_purge_finishes_forgetting_a_member(db: async_sessionmaker) -> None:
+    """The nightly purge is what runs the forgotten-member sweep (issue #276)."""
+    async with db() as s:
+        s.add_all(
+            [
+                MemberPseudonymRecord(
+                    requester_id="1",
+                    label="Member A",
+                    assigned_at=_ago(5000),
+                    forgotten_at=_ago(1),
+                ),
+                # Won before the /forget and played since: the sweep's to rewrite.
+                _booking("played-since", BookingStatus.SUCCESS, 1),
+            ]
+        )
+        await s.commit()
+
+    result = await purge_expired(now=NOW)
+
+    assert result.deleted["forgotten_bookings_pseudonymised"] == 1
+    assert result.deleted["forgotten_member_links_removed"] == 1
+    assert await _ids(db, BookingRecord.phone_number) == {"Member A"}
+    assert await _ids(db, MemberPseudonymRecord.requester_id) == {"forgotten-1"}
+
+
+@pytest.mark.asyncio
 async def test_dry_run_counts_and_deletes_nothing(db: async_sessionmaker) -> None:
     async with db() as s:
         s.add(
