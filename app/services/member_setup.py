@@ -165,15 +165,17 @@ async def handle_command(
         if args.strip().lower() != "confirm":
             return CommandReply(
                 "This deletes the Walden login you saved with me and cancels any booking "
-                "requests I haven't made yet. Tee times already reserved at the club stay "
-                "yours. To go ahead, send: /forget confirm"
+                "requests I haven't made yet. Your booking history is kept for the group's "
+                "statistics, under a pseudonym instead of your name or Telegram account. Tee "
+                "times already reserved at the club stay yours. To go ahead, send: "
+                "/forget confirm"
             )
-        result = await forget_member(user_id)
+        result = await forget_member(user_id, erase_identity=True)
         logger.info(
             f"Telegram user {user_id} asked to be forgotten: {result.cancelled} booking(s) "
             f"cancelled, login {'deleted' if result.login_deleted else 'not on file'}"
         )
-        if not result.login_deleted and not result.cancelled:
+        if not result.login_deleted and not result.cancelled and not result.history_pseudonymised:
             return CommandReply("There was nothing to delete: you have no Walden login connected.")
         parts = []
         if result.login_deleted:
@@ -181,6 +183,11 @@ async def handle_command(
         if result.cancelled:
             plural = "" if result.cancelled == 1 else "s"
             parts.append(f"Cancelled {result.cancelled} pending booking request{plural}.")
+        if result.history_pseudonymised:
+            parts.append(
+                "Your booking history is kept for the group's statistics under a pseudonym, "
+                "without your name or Telegram account."
+            )
         parts.append("Send /start any time to connect a login again.")
         return CommandReply(" ".join(parts))
 
