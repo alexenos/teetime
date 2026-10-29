@@ -800,14 +800,13 @@ class BookingService:
                 f"I can only book on someone else's behalf right now, not {parsed.intent} "
                 f"for them. {display_name} can ask me to do that themselves."
             )
-        # The two selection states below answer "unclear" with their own
-        # question, which would hide that the parser is down (e.g. Gemini out
-        # of credit) and have the member keep retrying. The state is kept, so
-        # their answer still counts once parsing works again.
-        if parsed.parser_failed and session.state in (
-            ConversationState.AWAITING_CANCELLATION_SELECTION,
-            ConversationState.AWAITING_SLOT_CHOICE,
-        ):
+        # A slot choice answers "unclear" with its own question, which would
+        # hide that the parser is down (e.g. Gemini out of credit) and have the
+        # member keep retrying. The state is kept, so their answer still counts
+        # once parsing works again. A cancellation selection is not stopped
+        # here: a numbered reply needs no parser, so it gets the same check
+        # only once its own matching has failed.
+        if parsed.parser_failed and session.state == ConversationState.AWAITING_SLOT_CHOICE:
             return parsed.response_message or ""
 
         # Check if user is in the middle of selecting a booking to cancel
@@ -2095,7 +2094,10 @@ class BookingService:
                     )
 
         if not matched_booking:
-            # Could not match - keep state and ask user to try again with number
+            # Could not match - keep state. If the parser was down, say so
+            # rather than blame the reply.
+            if parsed.parser_failed:
+                return parsed.response_message or ""
             return (
                 "I couldn't match that to a booking. "
                 "Please reply with the number (1, 2, 3, etc.) from the list."

@@ -456,8 +456,9 @@ class GeminiService:
         """Tell the admin the Gemini balance is empty; True if they have been told.
 
         Throttled to once per BILLING_ALERT_INTERVAL. A send that fails is not
-        counted, so the next request tries again. Never raises: the member
-        still gets their reply if Telegram is down too.
+        counted, so the next request tries again. An ordinary send failure
+        never raises, so the member still gets their reply if Telegram is down
+        too; a cancellation propagates after the claim is released.
         """
         admin = settings.telegram_admin_id()
         if not admin:
@@ -480,6 +481,11 @@ class GeminiService:
                 "https://ai.studio/projects. Members are being told nothing was booked.",
                 channel="telegram",
             )
+        except asyncio.CancelledError:
+            # Not an Exception: release the claim, or later requests would
+            # skip the alert for an hour while saying the admin was told.
+            self._last_billing_alert = previous
+            raise
         except Exception:  # noqa: BLE001 - see docstring
             logger.exception("Could not alert the admin about the Gemini balance")
             self._last_billing_alert = previous

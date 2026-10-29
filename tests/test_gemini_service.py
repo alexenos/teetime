@@ -773,6 +773,19 @@ class TestGeminiServiceParseMessage:
             assert second.parser_failed
 
     @pytest.mark.asyncio
+    async def test_a_cancelled_alert_releases_its_claim(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A send cut off mid-flight must not silence the alert for an hour."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(side_effect=asyncio.CancelledError)
+        with patch("app.services.gemini_service.sms_service.send_sms", send):
+            with pytest.raises(asyncio.CancelledError):
+                await gemini_service._alert_admin_billing_exhausted()
+
+        assert gemini_service._last_billing_alert is None
+
+    @pytest.mark.asyncio
     async def test_depleted_credit_alert_that_fails_to_send_is_retried(
         self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
