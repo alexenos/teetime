@@ -99,7 +99,8 @@ The user can:
 When parsing booking requests:
 - Dates can be relative (e.g., "Saturday", "next week", "tomorrow") or absolute (e.g., "December 20", "12/23")
 - Times can range from early morning to late afternoon (e.g., "8am", "7:30", "2pm", "5:30pm")
-- Tee times are available from opening until 5:54pm
+- Tee times run from 7:00am to 6:00pm, so a time without am/pm has only one reading: 7 to 11 are morning, 12 and 1 to 6 are afternoon (e.g., "9:30" is 9:30am, "1:15" is 1:15pm). Never ask whether such a time is am or pm.
+- If a time given with am/pm falls outside 7:00am to 6:00pm (e.g., "12:08 am"), do not book it as written and do not guess: set intent to "unclear" and ask for the time in response_message.
 - Number of players defaults to 4 if not specified
 - "Same as last week" means repeat the previous booking
 
