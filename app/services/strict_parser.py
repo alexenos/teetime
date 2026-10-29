@@ -1,8 +1,11 @@
-"""Read a booking request without the LLM, when the LLM is unavailable.
+"""Read a booking request without the LLM.
 
-Gemini parses every message. When it fails (on 2026-10-28 the prepaid credit
-ran out and members' requests were refused), most of what members send is
-still a plain command with an explicit date, time and player count.
+Most of what members send is a plain command with an explicit date, time and
+player count, which needs no language model. So GeminiService.parse_message
+tries this parser first and calls Gemini only for what it refuses (the
+maintainer's decision, 2026-10-29). That also keeps plain bookings working when
+Gemini is down: on 2026-10-28 its prepaid credit ran out and every member
+request was refused.
 
 The 30 member booking requests logged from 2026-10-01 to 2026-10-29 used 13
 different phrasings: the date as "11/6/26", "10-11-2026", "October 23",
@@ -12,7 +15,7 @@ date, a time and a player count wherever they appear, with the small words
 that introduce them ("on", "at", "for"), and accepts the message only if what
 is left is a booking verb and filler ("a", "tee time"). Anything else left
 over - a name, a second date, "eighth" spelled out, a question - and it
-returns None, so the caller gives its usual "nothing was booked" reply.
+returns None and the message goes to Gemini.
 
 The fallback it replaces, _mock_parse, guessed a date and time from any
 message and once confirmed a booking nobody asked for; this one never guesses

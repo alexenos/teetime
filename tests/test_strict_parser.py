@@ -260,8 +260,26 @@ class TestGeminiFallback:
         assert parsed.tee_time_request.num_players == 4
 
     @pytest.mark.asyncio
-    async def test_gemini_is_still_asked_first(self) -> None:
-        """The fallback only runs on failure; a working model is never bypassed."""
+    async def test_a_plain_request_never_reaches_gemini(self) -> None:
+        """Strict parsing goes first; Gemini is not called for what it reads."""
+        service = GeminiService()
+        with (
+            patch.object(service, "_model", MagicMock()),
+            patch("app.services.strict_parser.datetime") as mock_datetime,
+        ):
+            mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
+            service._model.generate_content_async = AsyncMock()
+
+            parsed = await service.parse_message("book 11/6 at 9:38am")
+            service._model.generate_content_async.assert_not_awaited()
+
+        assert parsed.intent == "book"
+        assert parsed.tee_time_request is not None
+        assert parsed.tee_time_request.requested_time == time(9, 38)
+
+    @pytest.mark.asyncio
+    async def test_anything_else_still_goes_to_gemini(self) -> None:
+        """A message the strict parser refuses is parsed by Gemini as before."""
         service = GeminiService()
         function_call = MagicMock()
         function_call.args = {"intent": "help", "response_message": "Here's how."}
@@ -271,6 +289,7 @@ class TestGeminiFallback:
         with patch.object(service, "_model", MagicMock()):
             service._model.generate_content_async = AsyncMock(return_value=response)
 
-            parsed = await service.parse_message("book 11/6 at 9:38am")
+            parsed = await service.parse_message("how do I book?")
+            service._model.generate_content_async.assert_awaited_once()
 
         assert parsed.intent == "help"

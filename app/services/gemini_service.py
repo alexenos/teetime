@@ -392,6 +392,16 @@ class GeminiService:
         return parsed
 
     async def parse_message(self, message: str, context: str | None = None) -> ParsedIntent:
+        # A plain "book 11/6 at 9:38a for 4" needs no model to read, so the
+        # strict parser goes first and Gemini only sees what it refuses. It
+        # accepts only explicit, unambiguous booking commands and never
+        # guesses (app/services/strict_parser.py); the request still goes
+        # through the same echo-and-confirm flow as a Gemini parse.
+        strict = strict_parse(message)
+        if strict is not None:
+            logger.info("Read the request with strict_parse; Gemini not called")
+            return strict
+
         if not self.model:
             # Distinct from the API-error path below: this only fires when
             # GEMINI_API_KEY itself is unset (the local-dev-without-a-key case).
@@ -445,21 +455,8 @@ class GeminiService:
 
         except Exception as e:
             logger.exception(f"Gemini API error for message '{message}': {e}")
-            # An empty balance is told to the admin whether or not the message
-            # can still be read below: otherwise an outage the strict parser
-            # covers would go unnoticed until a message it cannot read.
-            billing_exhausted = is_billing_exhausted(e)
-            told = await self._alert_admin_billing_exhausted() if billing_exhausted else False
-
-            # A plain "book 11/6 at 9:38a for 4" needs no model to read. The
-            # strict parser accepts only that shape and never guesses, unlike
-            # _mock_parse below; anything else still gets the honest refusal.
-            strict = strict_parse(message)
-            if strict is not None:
-                logger.warning("Gemini unavailable; read the request with strict_parse")
-                return strict
-
-            if billing_exhausted:
+            if is_billing_exhausted(e):
+                told = await self._alert_admin_billing_exhausted()
                 return ParsedIntent(
                     intent="unclear",
                     raw_message=message,

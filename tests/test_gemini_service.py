@@ -734,33 +734,6 @@ class TestGeminiServiceParseMessage:
             assert send.await_args.kwargs["channel"] == "telegram"
 
     @pytest.mark.asyncio
-    async def test_depleted_credit_alerts_admin_even_when_strict_parse_reads_it(
-        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The backup parser covering a message must not hide an empty balance."""
-        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
-        send = AsyncMock(return_value="sid")
-        with (
-            patch.object(gemini_service, "_model", MagicMock()),
-            patch("app.services.gemini_service.sms_service.send_sms", send),
-            patch("app.services.strict_parser.datetime") as mock_datetime,
-        ):
-            mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
-            gemini_service._model.generate_content_async = AsyncMock(
-                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
-            )
-
-            result = await gemini_service.parse_message(
-                "schedule tee time on 11/6/26 at 9:38 am for 4 players"
-            )
-
-        assert result.intent == "book"
-        assert not result.parser_failed
-        assert result.tee_time_request is not None
-        assert result.tee_time_request.requested_time == time(9, 38)
-        send.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_depleted_credit_alert_is_throttled(
         self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
