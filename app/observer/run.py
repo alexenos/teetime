@@ -423,7 +423,7 @@ async def observe() -> bool:
         # cost the snapshots, and nothing here decides the exit code.
         try:
             await _record_grids(driver, target_date, prefix, snapshots)
-        except Exception:  # noqa: BLE001 - the run's product is already stored
+        except Exception:  # the run's product is already stored
             logger.exception("OBSERVER: recording the slot grids failed")
     finally:
         try:
@@ -497,7 +497,7 @@ async def _record_grids(
             reads = await asyncio.to_thread(
                 sheet.read_horizon, driver, _horizon_dates(target_date, days)
             )
-        except Exception:  # noqa: BLE001 - see the docstring
+        except Exception:  # see the docstring
             logger.exception("OBSERVER: the horizon read failed outright")
 
     for read in reads:
@@ -534,7 +534,7 @@ async def _record_grids(
                 sheet_date, slots, captured_at=captured_at, source="observer"
             )
         logger.info("OBSERVER: recorded the slot grid for %d date(s)", len(grids))
-    except Exception:  # noqa: BLE001 - see the docstring
+    except Exception:  # see the docstring
         logger.exception("OBSERVER: could not record the slot grids")
 
 
