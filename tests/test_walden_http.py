@@ -12,7 +12,7 @@ import threading
 import time as time_module
 import types
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import time
 from pathlib import Path
 
@@ -3411,6 +3411,13 @@ class SourceRecorder(ChainRecorder):
     (#252). ``clock`` is what arrival times are read from - a ``ThreadClock``
     when the booker runs on one too.
 
+    On a ThreadClock every member's wait returns at once, so real order is no
+    longer plan order: a later member could be granted, and the grant absorbed,
+    before an earlier one has sent - and the booker then skips the earlier one.
+    ``burst_at_ms`` puts plan order back: a request at one of those instants
+    is held until every earlier one has entered, by which point each has
+    passed its skip check.
+
     ``overtaken_at_ms`` stalls the member arriving at that instant, as a stalled
     runner does: it waits until a later member has been recorded, then arrives
     ``overtake_stall_ms`` late. The hand-off is by event rather than by a sleep
@@ -3430,6 +3437,7 @@ class SourceRecorder(ChainRecorder):
         delay_s: float = 0.0,
         gate_at_ms: int | None = None,
         clock: "ThreadClock | None" = None,
+        burst_at_ms: Collection[int] = (),
         overtaken_at_ms: int | None = None,
         overtake_stall_ms: int = 0,
     ) -> None:
@@ -3437,9 +3445,11 @@ class SourceRecorder(ChainRecorder):
         super().__init__(chain)
         self.gate_at_ms = gate_at_ms
         self.clock: ThreadClock | types.ModuleType = clock or time_module
+        self.burst_at_ms = frozenset(burst_at_ms)
+        self._entered: set[int] = set()
+        self._entry = threading.Condition()
         self.overtaken_at_ms = overtaken_at_ms
         self.overtake_stall_ms = overtake_stall_ms
-        self._stalled_member_waiting = threading.Event()
         self._overtaken = threading.Event()
         self.recorded_order: list[int] = []
         self.by_source = by_source
@@ -3457,15 +3467,20 @@ class SourceRecorder(ChainRecorder):
         """Answer by the requested source, or fail the request as configured."""
         params = dict(urllib.parse.parse_qsl(request.content.decode()))
         source = params.get("javax.faces.source", "")
+        now_ms = int(self.clock.time() * 1000)
+        if self.burst_at_ms:
+            earlier = {t for t in self.burst_at_ms if t < now_ms}
+            with self._entry:
+                self._entered.add(now_ms)
+                self._entry.notify_all()
+                entered = self._entry.wait_for(lambda: earlier <= self._entered, _HANDOFF_TIMEOUT_S)
+            assert entered, f"members due before {now_ms} never sent"
         overtaking = False
         if self.overtaken_at_ms is not None:
-            now_ms = int(self.clock.time() * 1000)
             if now_ms == self.overtaken_at_ms:
-                self._stalled_member_waiting.set()
                 assert self._overtaken.wait(_HANDOFF_TIMEOUT_S), "nothing overtook"
                 self.clock.sleep(self.overtake_stall_ms / 1000)
             elif now_ms > self.overtaken_at_ms:
-                assert self._stalled_member_waiting.wait(_HANDOFF_TIMEOUT_S), "nothing stalled"
                 overtaking = True
         with self._lock:
             self.requests.append(params)
@@ -4060,6 +4075,7 @@ class TestVariableBurst:
             CHAIN_AFTER_GRANT,
             gate_at_ms=gate,
             clock=clock,
+            burst_at_ms=[target + offset for offset in (-60, -30, 0, 30)],
             # The member planned at 0 is overtaken by the one at +30, and lands
             # after the gate.
             overtaken_at_ms=target if stalled else None,
