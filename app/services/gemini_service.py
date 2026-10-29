@@ -11,6 +11,7 @@ from google.protobuf.json_format import MessageToDict
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
+from app.services.sms_service import sms_service
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,18 @@ TRANSIENT_API_EXCEPTIONS = (
     ConnectionError,
 )
 
+# A 429 is not always a rate limit. On 2026-10-28 every request failed with
+# "429 Your prepayment credits are depleted", which no retry can fix: it lasts
+# until someone tops up the AI Studio balance, and until then members were told
+# to "try again in a minute". These fragments mark that case, matched against
+# the error text because the SDK raises the same ResourceExhausted for both.
+BILLING_EXHAUSTED_MARKERS = ("prepayment credits", "credits are depleted")
+
+# How often the admin is told about a depleted balance. One message per member
+# request would flood their chat during exactly the outage they already know
+# about; once an hour is a reminder that it is still down.
+BILLING_ALERT_INTERVAL = 3600.0
+
 # Three attempts with 0.5s then 1.0s of backoff, enough to ride out the
 # sub-second failures that make up most of them.
 GEMINI_MAX_ATTEMPTS = 3
@@ -49,6 +62,16 @@ GEMINI_RETRY_BASE_DELAY = 0.5
 # so a single hung request cannot eat the entire budget.
 GEMINI_REQUEST_TIMEOUT = 6.0
 GEMINI_TOTAL_BUDGET = 10.0
+
+
+def is_billing_exhausted(error: BaseException) -> bool:
+    """True when the API refused because the account has no credit left."""
+    if not isinstance(
+        error, google_exceptions.ResourceExhausted | google_exceptions.TooManyRequests
+    ):
+        return False
+    text = str(error).lower()
+    return any(marker in text for marker in BILLING_EXHAUSTED_MARKERS)
 
 
 def _convert_proto_to_dict(obj: Any) -> Any:
@@ -172,6 +195,10 @@ FUNCTION_DECLARATIONS = [
 class GeminiService:
     def __init__(self) -> None:
         self._model: Any = None
+        # monotonic() time of the last depleted-balance alert to the admin.
+        # In memory only: max_instances is 1, and a restart re-alerting once
+        # is harmless.
+        self._last_billing_alert: float | None = None
 
     @property
     def model(self) -> Any:
@@ -217,6 +244,8 @@ class GeminiService:
                     request_options={"timeout": min(GEMINI_REQUEST_TIMEOUT, remaining)},
                 )
             except TRANSIENT_API_EXCEPTIONS as e:
+                if is_billing_exhausted(e):
+                    raise
                 last_error = e
                 delay = GEMINI_RETRY_BASE_DELAY * (2**attempt)
                 if attempt == GEMINI_MAX_ATTEMPTS - 1 or monotonic() + delay >= deadline:
@@ -395,6 +424,19 @@ class GeminiService:
 
         except Exception as e:
             logger.exception(f"Gemini API error for message '{message}': {e}")
+            if is_billing_exhausted(e):
+                told = await self._alert_admin_billing_exhausted()
+                return ParsedIntent(
+                    intent="unclear",
+                    raw_message=message,
+                    parser_failed=True,
+                    response_message=(
+                        "I can't read messages right now - my language model account "
+                        "has run out of credit, so nothing was booked. "
+                        + ("The admin has been told; please " if told else "Please ")
+                        + "send your request again once it's fixed."
+                    ),
+                )
             # Do NOT fall back to _mock_parse here. The mock ignores the date and
             # time in the message and defaults to "7 days out at 8:00 AM", so a
             # dead model turned "book 8/2 at 5:06p" into a confident confirmation
@@ -403,11 +445,56 @@ class GeminiService:
             return ParsedIntent(
                 intent="unclear",
                 raw_message=message,
+                parser_failed=True,
                 response_message=(
                     "I couldn't understand that - my language model is unavailable "
                     "right now, so nothing was booked. Please try again in a minute."
                 ),
             )
+
+    async def _alert_admin_billing_exhausted(self) -> bool:
+        """Tell the admin the Gemini balance is empty; True if they have been told.
+
+        Throttled to once per BILLING_ALERT_INTERVAL. A send that fails is not
+        counted, so the next request tries again. An ordinary send failure
+        never raises, so the member still gets their reply if Telegram is down
+        too; a cancellation propagates after the claim is released.
+        """
+        admin = settings.telegram_admin_id()
+        if not admin:
+            return False
+        now = monotonic()
+        if (
+            self._last_billing_alert is not None
+            and now - self._last_billing_alert < BILLING_ALERT_INTERVAL
+        ):
+            return True
+        # Claim the slot before awaiting the send, so a second request arriving
+        # while it is in flight does not send a duplicate. Released on failure.
+        previous = self._last_billing_alert
+        self._last_billing_alert = now
+        try:
+            sent = await sms_service.send_sms(
+                admin,
+                "Gemini refused a member's message: the prepaid credit is used up, so no "
+                "booking request can be read until it is topped up at "
+                "https://ai.studio/projects. Members are being told nothing was booked.",
+                channel="telegram",
+            )
+        except asyncio.CancelledError:
+            # Not an Exception: release the claim, or later requests would
+            # skip the alert for an hour while saying the admin was told.
+            self._last_billing_alert = previous
+            raise
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.exception("Could not alert the admin about the Gemini balance")
+            self._last_billing_alert = previous
+            return False
+        if sent is None:
+            logger.error("Could not alert the admin about the Gemini balance")
+            self._last_billing_alert = previous
+            return False
+        return True
 
     def _build_parsed_intent(
         self, args: dict[str, Any], raw_message: str | None = None

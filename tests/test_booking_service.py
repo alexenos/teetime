@@ -1031,6 +1031,84 @@ class TestBookingServiceIntentHandling:
             # Session state should be reset to IDLE
             assert sample_session.state == ConversationState.IDLE
 
+    @pytest.mark.parametrize(
+        ("state", "reply"),
+        [
+            (ConversationState.AWAITING_CANCELLATION_SELECTION, "the Sunday one"),
+            (ConversationState.AWAITING_SLOT_CHOICE, "the earlier one"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_parser_failure_is_reported_during_a_selection(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_request: TeeTimeRequest,
+        state: ConversationState,
+        reply: str,
+    ) -> None:
+        """A selection state must not swallow "the parser is down" as a bad pick.
+
+        Otherwise a member answering "which one?" during a Gemini outage is
+        asked the same question again and keeps retrying.
+        """
+        sample_session.state = state
+        parsed = ParsedIntent(
+            intent="unclear",
+            raw_message=reply,
+            parser_failed=True,
+            response_message="I can't read messages right now - nothing was booked.",
+        )
+        booking = TeeTimeBooking(
+            id="booking1",
+            phone_number=sample_session.phone_number,
+            request=sample_request,
+            status=BookingStatus.SCHEDULED,
+        )
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=[booking])
+            response = await booking_service._process_intent(sample_session, parsed)
+
+        assert response == "I can't read messages right now - nothing was booked."
+        assert sample_session.state == state
+
+    @pytest.mark.asyncio
+    async def test_a_numbered_cancellation_needs_no_parser(
+        self,
+        booking_service: BookingService,
+        sample_session: UserSession,
+        sample_request: TeeTimeRequest,
+    ) -> None:
+        """ "2" picks the second booking even while Gemini is down."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+        parsed = ParsedIntent(
+            intent="unclear",
+            raw_message="2",
+            parser_failed=True,
+            response_message="I can't read messages right now - nothing was booked.",
+        )
+        bookings = [
+            TeeTimeBooking(
+                id=f"booking{n}",
+                phone_number=sample_session.phone_number,
+                request=TeeTimeRequest(
+                    requested_date=sample_request.requested_date + timedelta(days=n),
+                    requested_time=sample_request.requested_time,
+                    num_players=4,
+                ),
+                status=BookingStatus.SCHEDULED,
+            )
+            for n in (1, 2)
+        ]
+
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=bookings)
+            response = await booking_service._process_intent(sample_session, parsed)
+
+        assert response.startswith("Reply yes to cancel")
+        assert sample_session.pending_cancellation_id == "booking2"
+
     @pytest.mark.asyncio
     async def test_cancellation_selection_by_number(
         self,
