@@ -822,6 +822,19 @@ class TestGeminiServiceParseMessage:
             assert second.parser_failed
 
     @pytest.mark.asyncio
+    async def test_an_alert_that_raises_is_not_counted(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Telegram failing too must not silence the next try or claim the admin knows."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(side_effect=RuntimeError("telegram down"))
+        with patch("app.services.gemini_service.sms_service.send_sms", send):
+            told = await gemini_service._alert_admin_billing_exhausted()
+
+        assert told is False
+        assert gemini_service._last_billing_alert is None
+
+    @pytest.mark.asyncio
     async def test_a_cancelled_alert_releases_its_claim(
         self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
     ) -> None:

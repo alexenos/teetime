@@ -203,6 +203,9 @@ def test_a_time_without_am_or_pm_is_read_within_tee_sheet_hours(
         "book 11/6 at 9:75am",
         "book 13/6 at 9:38am",
         "book 2/30 at 9:38am",
+        "book 2/30/2027 at 9:38am",  # impossible date with a year
+        "book 11/7 at 13pm",  # an hour past 12 with am/pm
+        "book 11/7 at 25:00",  # an hour past 23
         "book 10/1/26 at 9:38am",  # a year the member wrote, already past
         "book 11/6 at 9",  # a bare number is not a time
         "cancel 11/6 at 9:38am",
