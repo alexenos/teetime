@@ -4092,6 +4092,10 @@ class TestVariableBurst:
             # Without this the stalled case could pass having reordered nothing.
             order = recorder.recorded_order
             assert order.index(target + 30) < order.index(target + 80), order
+            # The bracket is read off our send times, and the member planned at
+            # 0 sent at 0: the stall came after it, so its grant is the first.
+            assert bracket["lastRefusedBeforeMs"] == -30
+            assert bracket["grantedMs"] == 0
         refused = [t for t in recorder.sent_at_ms[:4] if t < gate]
         assert bracket["refusedBefore"] == len(refused) == (2 if stalled else 3)
         if not stalled:
