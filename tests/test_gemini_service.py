@@ -198,6 +198,28 @@ class TestGeminiServiceParseTime:
         assert gemini_service._parse_time("8:58 am") == time(8, 58)
         assert gemini_service._parse_time("2:30 pm") == time(14, 30)
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("1:15", time(13, 15)),  # no am/pm: only the afternoon is a tee time
+            ("01:15", time(13, 15)),  # padded too (maintainer, 2026-10-29)
+            ("6:00", time(18, 0)),
+            ("12:08", time(12, 8)),
+            ("07:00", time(7, 0)),
+        ],
+    )
+    def test_parse_time_without_am_pm_is_read_within_tee_sheet_hours(
+        self, gemini_service: GeminiService, raw: str, expected: time
+    ) -> None:
+        assert gemini_service._parse_time(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["12:08 am", "00:08", "6:45 am", "6:30 pm", "19:00", "6:30"])
+    def test_parse_time_outside_tee_sheet_hours_is_none(
+        self, gemini_service: GeminiService, raw: str
+    ) -> None:
+        """Holds Gemini to the 7am-6pm rule whatever time the model returns."""
+        assert gemini_service._parse_time(raw) is None
+
     def test_parse_invalid_time(self, gemini_service: GeminiService) -> None:
         """Test that invalid time strings return None."""
         result = gemini_service._parse_time("invalid")
@@ -555,7 +577,7 @@ class TestGeminiServiceParseMessage:
                 side_effect=Exception("API Error")
             )
 
-            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+            result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
             assert result.intent == "unclear"
             assert result.tee_time_request is None
@@ -611,7 +633,7 @@ class TestGeminiServiceParseMessage:
             )
 
             with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
-                result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+                result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
             assert result.intent == "unclear"
             assert result.tee_time_request is None
@@ -631,7 +653,7 @@ class TestGeminiServiceParseMessage:
             )
 
             with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()):
-                await gemini_service.parse_message("Book 8/2 at 5:06p")
+                await gemini_service.parse_message("Book Saturday at 5:06p")
 
             first_call = gemini_service._model.generate_content_async.await_args_list[0]
             assert first_call.kwargs["request_options"]["timeout"] == GEMINI_REQUEST_TIMEOUT
@@ -656,7 +678,7 @@ class TestGeminiServiceParseMessage:
                 )
 
                 with patch("app.services.gemini_service.asyncio.sleep", AsyncMock()) as mock_sleep:
-                    result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+                    result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
                 assert result.intent == "unclear"
                 assert "nothing was booked" in result.response_message
@@ -671,7 +693,7 @@ class TestGeminiServiceParseMessage:
                 side_effect=google_exceptions.PermissionDenied("API key not valid")
             )
 
-            result = await gemini_service.parse_message("Book 8/2 at 5:06p")
+            result = await gemini_service.parse_message("Book Saturday at 5:06p")
 
             assert result.intent == "unclear"
             assert gemini_service._model.generate_content_async.call_count == 1
@@ -696,7 +718,7 @@ class TestGeminiServiceParseMessage:
                 side_effect=google_exceptions.ResourceExhausted(DEPLETED)
             )
 
-            result = await gemini_service.parse_message("Book 11/6 at 9:38a for 4")
+            result = await gemini_service.parse_message("Book Saturday at 9:38a for 4")
 
             assert result.intent == "unclear"
             assert result.tee_time_request is None
@@ -710,6 +732,31 @@ class TestGeminiServiceParseMessage:
             send.assert_awaited_once()
             assert send.await_args.args[0] == "111"
             assert send.await_args.kwargs["channel"] == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_depleted_credit_mid_conversation_alerts_and_refuses(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Out of credit mid-conversation: the admin is told, the member gets
+        the outage reply, and nothing pending is replaced."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(return_value="sid")
+        with (
+            patch.object(gemini_service, "_model", MagicMock()),
+            patch("app.services.gemini_service.sms_service.send_sms", send),
+        ):
+            gemini_service._model.generate_content_async = AsyncMock(
+                side_effect=google_exceptions.ResourceExhausted(DEPLETED)
+            )
+
+            result = await gemini_service.parse_message(
+                "book 11/6 at 9:38am", context="Current state: awaiting_slot_choice"
+            )
+
+        assert result.intent == "unclear"
+        assert result.parser_failed
+        assert "run out of credit" in (result.response_message or "")
+        send.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_depleted_credit_alert_is_throttled(
@@ -727,14 +774,14 @@ class TestGeminiServiceParseMessage:
             )
 
             with patch("app.services.gemini_service.monotonic", return_value=1000.0):
-                await gemini_service.parse_message("Book 11/6 at 9:38a")
-                second = await gemini_service.parse_message("Book 11/6 at 9:38a")
+                await gemini_service.parse_message("Book Saturday at 9:38a")
+                second = await gemini_service.parse_message("Book Saturday at 9:38a")
             assert send.await_count == 1
             assert "admin has been told" in second.response_message
 
             later = 1000.0 + BILLING_ALERT_INTERVAL + 1
             with patch("app.services.gemini_service.monotonic", return_value=later):
-                await gemini_service.parse_message("Book 11/6 at 9:38a")
+                await gemini_service.parse_message("Book Saturday at 9:38a")
             assert send.await_count == 2
 
     @pytest.mark.asyncio
@@ -758,19 +805,32 @@ class TestGeminiServiceParseMessage:
                 side_effect=google_exceptions.ResourceExhausted(DEPLETED)
             )
 
-            first = asyncio.create_task(gemini_service.parse_message("Book 11/6 at 9:38a"))
+            first = asyncio.create_task(gemini_service.parse_message("Book Saturday at 9:38a"))
             await asyncio.sleep(0)
             while send.await_count == 0:
                 await asyncio.sleep(0)
             # Without the claim the second send also blocks on release: fail, don't hang.
             second = await asyncio.wait_for(
-                gemini_service.parse_message("Book 11/6 at 9:38a"), timeout=2
+                gemini_service.parse_message("Book Saturday at 9:38a"), timeout=2
             )
             release.set()
             await first
 
             assert send.await_count == 1
             assert second.parser_failed
+
+    @pytest.mark.asyncio
+    async def test_an_alert_that_raises_is_not_counted(
+        self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Telegram failing too must not silence the next try or claim the admin knows."""
+        monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
+        send = AsyncMock(side_effect=RuntimeError("telegram down"))
+        with patch("app.services.gemini_service.sms_service.send_sms", send):
+            told = await gemini_service._alert_admin_billing_exhausted()
+
+        assert told is False
+        assert gemini_service._last_billing_alert is None
 
     @pytest.mark.asyncio
     async def test_a_cancelled_alert_releases_its_claim(
@@ -800,8 +860,8 @@ class TestGeminiServiceParseMessage:
                 side_effect=google_exceptions.ResourceExhausted(DEPLETED)
             )
 
-            first = await gemini_service.parse_message("Book 11/6 at 9:38a")
-            await gemini_service.parse_message("Book 11/6 at 9:38a")
+            first = await gemini_service.parse_message("Book Saturday at 9:38a")
+            await gemini_service.parse_message("Book Saturday at 9:38a")
 
             assert "admin has been told" not in first.response_message
             assert "nothing was booked" in first.response_message
@@ -821,7 +881,7 @@ class TestGeminiServiceParseMessage:
                 side_effect=google_exceptions.ResourceExhausted(DEPLETED)
             )
 
-            result = await gemini_service.parse_message("Book 11/6 at 9:38a")
+            result = await gemini_service.parse_message("Book Saturday at 9:38a")
 
             assert "admin has been told" not in result.response_message
             send.assert_not_awaited()

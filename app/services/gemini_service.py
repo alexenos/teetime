@@ -12,6 +12,7 @@ from google.protobuf.json_format import MessageToDict
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
 from app.services.sms_service import sms_service
+from app.services.strict_parser import EARLIEST_TEE_TIME, LATEST_TEE_TIME, strict_parse
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,8 @@ The user can:
 When parsing booking requests:
 - Dates can be relative (e.g., "Saturday", "next week", "tomorrow") or absolute (e.g., "December 20", "12/23")
 - Times can range from early morning to late afternoon (e.g., "8am", "7:30", "2pm", "5:30pm")
-- Tee times are available from opening until 5:54pm
+- Tee times run from 7:00am to 6:00pm, so a time without am/pm has only one reading: 7 to 11 are morning, 12 and 1 to 6 are afternoon (e.g., "9:30" is 9:30am, "1:15" is 1:15pm). Never ask whether such a time is am or pm.
+- If a time given with am/pm falls outside 7:00am to 6:00pm (e.g., "12:08 am"), do not book it as written and do not guess: set intent to "unclear" and ask for the time in response_message.
 - Number of players defaults to 4 if not specified
 - "Same as last week" means repeat the previous booking
 
@@ -333,44 +335,81 @@ class GeminiService:
         return None
 
     def _parse_time(self, time_str: str) -> time | None:
-        """Parse time string in various formats.
+        """Parse time string in various formats, within tee-sheet hours.
 
         Supports:
         - 24-hour: "08:58", "14:30", "8:58"
         - 24-hour with seconds: "08:58:00"
         - 12-hour with AM/PM: "8:58 AM", "8:58AM", "8:58a", "2:30 PM", "2:30pm"
+
+        Tee times run 7:00 am to 6:00 pm (EARLIEST_TEE_TIME/LATEST_TEE_TIME,
+        shared with strict_parser), so a time without am/pm whose hour is 1-6
+        is the afternoon, and any time outside those hours is None. The prompt
+        tells Gemini the same; this holds it to that whatever the model returns.
         """
         if not time_str:
             return None
 
         time_str = time_str.strip()
+        parsed: time | None = None
 
         # Try 24-hour formats first
         for fmt in ("%H:%M", "%H:%M:%S"):
             try:
-                return datetime.strptime(time_str, fmt).time()
+                parsed = datetime.strptime(time_str, fmt).time()
             except ValueError:
-                pass
+                continue
+            # An hour of 1-6 without am/pm, padded or not ("1:15", "01:15"), is
+            # the afternoon: the morning reading is never a tee time (the
+            # maintainer's rule, 2026-10-29).
+            if 1 <= parsed.hour <= 6:
+                parsed = parsed.replace(hour=parsed.hour + 12)
+            break
 
-        # Try 12-hour formats with AM/PM
-        # Normalize: "8:58a" -> "8:58 AM", "8:58AM" -> "8:58 AM", "8:58 am" -> "8:58 AM"
-        normalized = time_str.upper()
-        # Handle "8:58a" or "8:58p" (single letter suffix)
-        normalized = re.sub(r"(\d)A$", r"\1 AM", normalized)
-        normalized = re.sub(r"(\d)P$", r"\1 PM", normalized)
-        # Handle "8:58AM" or "8:58PM" (no space before AM/PM)
-        normalized = re.sub(r"(\d)(AM|PM)$", r"\1 \2", normalized)
+        if parsed is None:
+            # Try 12-hour formats with AM/PM
+            # Normalize: "8:58a" -> "8:58 AM", "8:58AM" -> "8:58 AM", "8:58 am" -> "8:58 AM"
+            normalized = time_str.upper()
+            # Handle "8:58a" or "8:58p" (single letter suffix)
+            normalized = re.sub(r"(\d)A$", r"\1 AM", normalized)
+            normalized = re.sub(r"(\d)P$", r"\1 PM", normalized)
+            # Handle "8:58AM" or "8:58PM" (no space before AM/PM)
+            normalized = re.sub(r"(\d)(AM|PM)$", r"\1 \2", normalized)
 
-        for fmt in ("%I:%M %p", "%I:%M:%S %p"):
-            try:
-                return datetime.strptime(normalized, fmt).time()
-            except ValueError:
-                pass
+            for fmt in ("%I:%M %p", "%I:%M:%S %p"):
+                try:
+                    parsed = datetime.strptime(normalized, fmt).time()
+                    break
+                except ValueError:
+                    pass
 
-        logger.warning(f"Failed to parse time: '{time_str}'")
-        return None
+        if parsed is None:
+            logger.warning(f"Failed to parse time: '{time_str}'")
+            return None
+        if not EARLIEST_TEE_TIME <= parsed <= LATEST_TEE_TIME:
+            logger.warning(f"Time outside tee-sheet hours: '{time_str}' -> {parsed}")
+            return None
+        return parsed
 
     async def parse_message(self, message: str, context: str | None = None) -> ParsedIntent:
+        # A plain "book 11/6 at 9:38a for 4" needs no model to read, so the
+        # strict parser goes first and Gemini only sees what it refuses. It
+        # accepts only explicit, unambiguous booking commands and never
+        # guesses (app/services/strict_parser.py); the request still goes
+        # through the same echo-and-confirm flow as a Gemini parse.
+        #
+        # Only outside a conversation. With context (a slot choice, a pending
+        # request) the reply means something relative to it - Gemini sees the
+        # pending party size, the strict parser defaults to 4 and would turn a
+        # pick into a new request - so Gemini reads it. If Gemini then fails,
+        # the member gets the outage reply and the pending state is kept;
+        # the strict parser is not a fallback there for the same reason.
+        if context is None:
+            strict = strict_parse(message)
+            if strict is not None:
+                logger.info("Read the request with strict_parse; Gemini not called")
+                return strict
+
         if not self.model:
             # Distinct from the API-error path below: this only fires when
             # GEMINI_API_KEY itself is unset (the local-dev-without-a-key case).
@@ -476,9 +515,10 @@ class GeminiService:
         try:
             sent = await sms_service.send_sms(
                 admin,
-                "Gemini refused a member's message: the prepaid credit is used up, so no "
-                "booking request can be read until it is topped up at "
-                "https://ai.studio/projects. Members are being told nothing was booked.",
+                "Gemini refused a member's message: the prepaid credit is used up. Until "
+                "it is topped up at https://ai.studio/projects, only plain requests with "
+                'an explicit date and time ("book 11/6 at 9:38am") can be read; members '
+                "who send anything else are told nothing was booked.",
                 channel="telegram",
             )
         except asyncio.CancelledError:
