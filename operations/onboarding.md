@@ -20,7 +20,7 @@ All of these must be true. As of 2026-10-03 the last two are not.
 | KMS turned on (`credential_kms_enabled`) | #260 |
 | Pseudonyms assigned at onboarding | #257 |
 | **A real member has connected a login and raced with it** | Member B's test, after #260 |
-| **The Fernet key is retired**, so no member's login has a copy the maintainer could read | Steps 5–6 of `operations/credential-encryption.md` |
+| **The Fernet key is retired**, so no member's login has a copy the maintainer could read | Steps 5–6 of `operations/credential-encryption.md`, then the retirement PR |
 
 Until the Fernet key is retired, every login saved also keeps a Fernet fallback
 copy, which is readable with the hand-made key and not audit-logged. Inviting
