@@ -297,25 +297,28 @@ class TestGeminiFallback:
             service._model.generate_content_async.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_in_a_conversation_gemini_failing_falls_back_to_strict(self) -> None:
+    async def test_in_a_conversation_gemini_failing_is_not_read_strictly(self) -> None:
+        """With Gemini down mid-conversation, the reply is refused, not misread.
+
+        The strict parser would default an omitted party size to 4, turning a
+        slot pick into a new request that replaces what is pending.
+        """
         service = GeminiService()
         with (
             patch.object(service, "_model", MagicMock()),
             patch("app.services.gemini_service.asyncio.sleep", AsyncMock()),
-            patch("app.services.strict_parser.datetime") as mock_datetime,
         ):
-            mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
             service._model.generate_content_async = AsyncMock(
                 side_effect=google_exceptions.ServiceUnavailable("overloaded")
             )
 
             parsed = await service.parse_message(
-                "book 11/6 at 9:38am", context="Current state: awaiting_confirmation"
+                "book 11/6 at 9:38am", context="Current state: awaiting_slot_choice"
             )
 
-        assert parsed.intent == "book"
-        assert parsed.tee_time_request is not None
-        assert parsed.tee_time_request.requested_time == time(9, 38)
+        assert parsed.intent == "unclear"
+        assert parsed.parser_failed
+        assert parsed.tee_time_request is None
 
     @pytest.mark.asyncio
     async def test_anything_else_still_goes_to_gemini(self) -> None:

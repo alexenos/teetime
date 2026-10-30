@@ -734,28 +734,28 @@ class TestGeminiServiceParseMessage:
             assert send.await_args.kwargs["channel"] == "telegram"
 
     @pytest.mark.asyncio
-    async def test_depleted_credit_mid_conversation_alerts_and_reads_a_plain_request(
+    async def test_depleted_credit_mid_conversation_alerts_and_refuses(
         self, gemini_service: GeminiService, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Out of credit mid-conversation: the admin is told, and a plain command still reads."""
+        """Out of credit mid-conversation: the admin is told, the member gets
+        the outage reply, and nothing pending is replaced."""
         monkeypatch.setattr(settings, "telegram_admin_user_id", "111")
         send = AsyncMock(return_value="sid")
         with (
             patch.object(gemini_service, "_model", MagicMock()),
             patch("app.services.gemini_service.sms_service.send_sms", send),
-            patch("app.services.strict_parser.datetime") as mock_datetime,
         ):
-            mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
             gemini_service._model.generate_content_async = AsyncMock(
                 side_effect=google_exceptions.ResourceExhausted(DEPLETED)
             )
 
             result = await gemini_service.parse_message(
-                "book 11/6 at 9:38am", context="Current state: awaiting_confirmation"
+                "book 11/6 at 9:38am", context="Current state: awaiting_slot_choice"
             )
 
-        assert result.intent == "book"
-        assert not result.parser_failed
+        assert result.intent == "unclear"
+        assert result.parser_failed
+        assert "run out of credit" in (result.response_message or "")
         send.assert_awaited_once()
 
     @pytest.mark.asyncio

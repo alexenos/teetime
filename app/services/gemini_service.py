@@ -400,8 +400,10 @@ class GeminiService:
         #
         # Only outside a conversation. With context (a slot choice, a pending
         # request) the reply means something relative to it - Gemini sees the
-        # pending party size, the strict parser defaults to 4 - so Gemini reads
-        # it, and the strict parser is only the fallback if Gemini fails.
+        # pending party size, the strict parser defaults to 4 and would turn a
+        # pick into a new request - so Gemini reads it. If Gemini then fails,
+        # the member gets the outage reply and the pending state is kept;
+        # the strict parser is not a fallback there for the same reason.
         if context is None:
             strict = strict_parse(message)
             if strict is not None:
@@ -461,15 +463,6 @@ class GeminiService:
 
         except Exception as e:
             logger.exception(f"Gemini API error for message '{message}': {e}")
-            # In a conversation the strict parser was skipped above; with
-            # Gemini down, a plain booking command is still better read than
-            # refused. The usual confirmation follows either way.
-            strict = strict_parse(message) if context is not None else None
-            if strict is not None:
-                logger.warning("Gemini unavailable; read the request with strict_parse")
-                if is_billing_exhausted(e):
-                    await self._alert_admin_billing_exhausted()
-                return strict
             if is_billing_exhausted(e):
                 told = await self._alert_admin_billing_exhausted()
                 return ParsedIntent(
