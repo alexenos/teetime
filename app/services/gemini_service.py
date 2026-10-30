@@ -397,10 +397,16 @@ class GeminiService:
         # accepts only explicit, unambiguous booking commands and never
         # guesses (app/services/strict_parser.py); the request still goes
         # through the same echo-and-confirm flow as a Gemini parse.
-        strict = strict_parse(message)
-        if strict is not None:
-            logger.info("Read the request with strict_parse; Gemini not called")
-            return strict
+        #
+        # Only outside a conversation. With context (a slot choice, a pending
+        # request) the reply means something relative to it - Gemini sees the
+        # pending party size, the strict parser defaults to 4 - so Gemini reads
+        # it, and the strict parser is only the fallback if Gemini fails.
+        if context is None:
+            strict = strict_parse(message)
+            if strict is not None:
+                logger.info("Read the request with strict_parse; Gemini not called")
+                return strict
 
         if not self.model:
             # Distinct from the API-error path below: this only fires when
@@ -455,6 +461,15 @@ class GeminiService:
 
         except Exception as e:
             logger.exception(f"Gemini API error for message '{message}': {e}")
+            # In a conversation the strict parser was skipped above; with
+            # Gemini down, a plain booking command is still better read than
+            # refused. The usual confirmation follows either way.
+            strict = strict_parse(message) if context is not None else None
+            if strict is not None:
+                logger.warning("Gemini unavailable; read the request with strict_parse")
+                if is_billing_exhausted(e):
+                    await self._alert_admin_billing_exhausted()
+                return strict
             if is_billing_exhausted(e):
                 told = await self._alert_admin_billing_exhausted()
                 return ParsedIntent(
