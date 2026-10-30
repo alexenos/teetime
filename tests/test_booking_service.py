@@ -3654,18 +3654,33 @@ class TestNotifyUnreportedBookings:
     async def test_every_booking_is_reported_even_when_one_send_raises(
         self, booking_service: BookingService
     ) -> None:
-        """One member's failed send must not strand the rest of the batch."""
+        """One member's failed send must not strand the rest of the batch.
+
+        The read answers by id rather than from a two-item list: a retry re-reads
+        the row, and an exhausted list raised into the outcome-unknown branch,
+        whose send went to the real sms_service (#381).
+        """
         first = self._booking(BookingStatus.SUCCESS, "b1")
         second = self._booking(BookingStatus.SUCCESS, "b2")
+        rows = {"b1": first, "b2": second}
 
-        booking_service.get_booking = AsyncMock(side_effect=[first, second])  # type: ignore[method-assign]
+        booking_service.get_booking = AsyncMock(side_effect=rows.get)  # type: ignore[method-assign]
         booking_service._notify_booking_result = AsyncMock(  # type: ignore[method-assign]
-            side_effect=[RuntimeError("discord down"), None]
+            side_effect=[RuntimeError("discord down"), "msg1", "msg2"]
         )
 
-        await booking_service.notify_unreported_bookings([first, second], "timed out")
+        with (
+            patch("app.services.booking_service.NOTIFY_RETRY_DELAY_S", 0),
+            patch("app.services.booking_service.sms_service") as sms,
+        ):
+            await booking_service.notify_unreported_bookings([first, second], "timed out")
 
-        assert booking_service._notify_booking_result.await_count == 2  # type: ignore[attr-defined]
+        reported = [
+            call.args[0].id
+            for call in booking_service._notify_booking_result.await_args_list  # type: ignore[attr-defined]
+        ]
+        assert reported == ["b1", "b1", "b2"]
+        sms.send_sms.assert_not_called()
 
 
 class TestCredentialResolutionFailures:
