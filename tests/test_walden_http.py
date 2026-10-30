@@ -4111,6 +4111,40 @@ class TestVariableBurst:
         assert any(line.startswith("BURST_TIMING:") for line in lines)
         assert any(line.startswith("BURST_CPU:") for line in lines)
 
+    def test_the_latest_refusal_by_plan_order_is_carried_whatever_the_arrival_order(
+        self,
+    ) -> None:
+        """A later member's refusal absorbed first is not displaced by an earlier one's.
+
+        Which future completes first is the scheduler's choice, so the burst
+        tests reached this branch only on runs where refusals happened to land
+        out of plan order - one source of branch coverage varying between CI
+        runs of identical code (#379). Absorbed directly, in that order, here.
+        """
+        booker = make_booker(ChainRecorder([BLOCKED_ALL]))
+        burst = walden_http_booker._OpeningBurst(observations=[])
+
+        def refusal(index: int) -> walden_http_booker._BurstExchange:
+            member = walden_http_booker._BurstMember(
+                index=index,
+                offset_ms=30 * index,
+                slot_time=RESERVE_SLOT_TIME,
+                config=AbConfig(source=RESERVE_ID, form=FORM_ID),
+                body=b"",
+                is_target=True,
+            )
+            response = parse_partial_response(partial_response(BLOCKED_ALL, f"vs-{index}"))
+            return walden_http_booker._BurstExchange(member, 30 * index, response, None)
+
+        for index in (2, 1):
+            booker._absorb_burst_exchange(
+                burst, refusal(index), won=threading.Event(), view_state="vs", frame_ms=0
+            )
+
+        assert [o.verdict for o in burst.observations] == ["refused", "refused"]
+        assert burst.carried_observation is not None
+        assert burst.carried_observation.attempt == 3  # member 2, absorbed first
+
     def test_the_connections_are_opened_just_before_the_first_member(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -22,6 +22,7 @@ import threading
 import time as time_module
 from collections.abc import Iterator
 from datetime import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -387,6 +388,23 @@ class TestCpuTelemetry:
         assert cpu_telemetry.parse_psi_some_total_us("full total=1\n") is None
         assert cpu_telemetry.parse_schedstat_run_delay_ns("1000 2500 7\n") == 2500
         assert cpu_telemetry.parse_schedstat_run_delay_ns("") is None
+
+    def test_a_thread_gone_before_its_schedstat_is_read_is_left_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A thread can exit between the listing and the read; it is skipped, not an error.
+
+        On a live runner whether one does is luck, which made branch coverage
+        vary between CI runs of identical code (#379), so it is staged here.
+        """
+        (tmp_path / "1").mkdir()
+        (tmp_path / "1" / "schedstat").write_text("1000 2500 7\n")
+        (tmp_path / "2").mkdir()  # exited: nothing left to read
+        (tmp_path / "3").mkdir()
+        (tmp_path / "3" / "schedstat").write_text("")  # read, but unparseable
+        monkeypatch.setattr(cpu_telemetry, "_OWN_TASKS_DIR", str(tmp_path))
+
+        assert cpu_telemetry._own_run_delay_ns() == (2500, 1)
 
     def test_delta_arithmetic_and_unmeasured_fields(self) -> None:
         before = cpu_telemetry.CpuSnapshot(
