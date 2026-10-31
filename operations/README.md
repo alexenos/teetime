@@ -27,17 +27,16 @@ A **Routine** is a scheduled trigger: a cron expression, a prompt, and a fresh
 session per firing. One file here per Routine. Each run appends a **row**; rows
 produce the **scoreboard**.
 
-One Routine is deployed: the race report, daily at `40 11 * * *` UTC — 06:40 CT
-during daylight time only, and 05:40 CT once it ends on 2026-11-01, which is
-before the race it reports on. It writes that morning's report, opens a PR and
-merges it once `Tests` is green — the only agent
-action in this project that reaches `main` without being read first.
-`routines/race-report.md` states what bounds it.
+Which Routines are deployed, and when each fires, is listed once, in `CLAUDE.md`
+(Operations), and summarised in the table under "Current state" below. Each
+Routine's own file under `routines/` states its trigger and status. This file
+does not repeat the list in prose, so it cannot drift in a second place.
 
-Two more are specified and not deployed: `routines/scoreboard.md`, which derives
-the three metrics from the other ledgers and publishes a page to `docs/`, and
-`routines/cost.md`, which is additionally blocked on a Cloud Billing export that
-does not exist. Without them the scoreboard has definitions and no values.
+Two of them merge their own PR without the maintainer reading it first, each
+limited to named paths and gated on a green `Tests` check: the race report (one
+file under `race-reports/`, bounded in `routines/race-report.md`) and the
+scoreboard (`docs/scoreboard.json` and `docs/scoreboard.html`, bounded in
+`routines/scoreboard.md`). Every other Routine opens PRs and never merges.
 
 ## Two constraints
 
@@ -61,7 +60,8 @@ diagnosis; it applies equally to operating material.
 | Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
 | Scoreboard Routine | documented as deployed 2026-10-04 (`routines/scoreboard.md`, CLAUDE.md); `docs/**` is documented as in the deploy filter since the 2026-09-27 apply (CLAUDE.md). Live trigger and build log not checked for this table |
 | Tech debt Routine | documented as deployed (CLAUDE.md); Saturdays at `0 9 * * 6` UTC (`routines/tech-debt.md`); never merges, files issues and opens a PR |
-| Cost Routine | specified, not deployed; blocked on a billing export outside this repository |
+| Cost Routine | documented as created 2026-10-09, monthly on the 5th, first run 2026-11-05 (`routines/cost.md`, CLAUDE.md); billing export documented as on |
+| Feature dev Routine | documented as created 2026-10-19, Saturdays 08:00 CT (`routines/feature-dev.md`, CLAUDE.md); never merges, builds one issue and opens a PR. Ledger objects exist in GCS for 2026-10-24 and 2026-10-31 |
 | Scoreboard page | written, at `https://alexenos.github.io/teetime/scoreboard.html`, showing the outcome split **backfilled** from the race reports, flagged on the page itself; streak and cost unavailable |
 | Ledgers | one per Routine; schemas written. 23 race-report rows backfilled from the reports (`ledger/backfill/`); CLAUDE.md documents the race report Routine writing its rows to GCS from 2026-10-01, and the scoreboard and tech-debt Routine specs say theirs go under `operations/` in the artifacts bucket. GCS objects not listed for this table. The `*.jsonl` files here have 0 lines, so they are not the live ledger |
 
