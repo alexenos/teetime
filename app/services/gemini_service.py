@@ -5,9 +5,10 @@ from datetime import date, datetime, time, timedelta
 from time import monotonic
 from typing import Any
 
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
-from google.protobuf.json_format import MessageToDict
+import httpx
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from app.config import settings
 from app.models.schemas import ParsedIntent, TeeTimeRequest
@@ -25,14 +26,18 @@ logger = logging.getLogger(__name__)
 # unavailable" with nothing booked - which is exactly what happened to a 'Yes'
 # confirming two tee times, one minute after the same model had parsed the
 # booking request successfully.
+#
+# The google-genai SDK raises one APIError type for every HTTP failure and
+# carries the status in .code, so "transient" is decided by code (issue #133;
+# the old google-generativeai SDK had an exception class per status):
+#   429 quota / rate limit, 500 internal, 503 overloaded, 504 deadline.
+# Network failures and timeouts reach us as httpx exceptions, since the SDK's
+# async client is httpx-based when aiohttp is not installed.
+TRANSIENT_STATUS_CODES = frozenset({429, 500, 503, 504})
 TRANSIENT_API_EXCEPTIONS = (
-    google_exceptions.ResourceExhausted,  # 429 - quota / rate limit
-    google_exceptions.TooManyRequests,  # 429
-    google_exceptions.ServiceUnavailable,  # 503 - model overloaded
-    google_exceptions.InternalServerError,  # 500
-    google_exceptions.DeadlineExceeded,  # request timed out
-    google_exceptions.Aborted,
-    google_exceptions.RetryError,
+    genai_errors.APIError,  # narrowed to TRANSIENT_STATUS_CODES by is_transient
+    httpx.TimeoutException,
+    httpx.TransportError,
     TimeoutError,
     ConnectionError,
 )
@@ -65,48 +70,19 @@ GEMINI_REQUEST_TIMEOUT = 6.0
 GEMINI_TOTAL_BUDGET = 10.0
 
 
+def is_transient(error: BaseException) -> bool:
+    """True when a second attempt could plausibly succeed."""
+    if isinstance(error, genai_errors.APIError):
+        return error.code in TRANSIENT_STATUS_CODES
+    return isinstance(error, TRANSIENT_API_EXCEPTIONS)
+
+
 def is_billing_exhausted(error: BaseException) -> bool:
     """True when the API refused because the account has no credit left."""
-    if not isinstance(
-        error, google_exceptions.ResourceExhausted | google_exceptions.TooManyRequests
-    ):
+    if not isinstance(error, genai_errors.APIError) or error.code != 429:
         return False
     text = str(error).lower()
     return any(marker in text for marker in BILLING_EXHAUSTED_MARKERS)
-
-
-def _convert_proto_to_dict(obj: Any) -> Any:
-    """Recursively convert protobuf/proto-plus objects to plain Python types.
-
-    Handles MapComposite, RepeatedComposite, and other proto-plus wrapper types
-    that MessageToDict doesn't fully convert.
-    """
-    # Handle None
-    if obj is None:
-        return None
-
-    # Handle protobuf Timestamp objects
-    if hasattr(obj, "ToDatetime"):
-        return obj.ToDatetime().isoformat()
-
-    # Handle protobuf Duration objects
-    if hasattr(obj, "ToTimedelta"):
-        td = obj.ToTimedelta()
-        total_seconds = int(td.total_seconds())
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-    # Handle proto-plus MapComposite (dict-like)
-    if hasattr(obj, "keys") and hasattr(obj, "items"):
-        return {k: _convert_proto_to_dict(v) for k, v in obj.items()}
-
-    # Handle proto-plus RepeatedComposite (list-like)
-    if hasattr(obj, "__iter__") and not isinstance(obj, str | bytes | dict):
-        return [_convert_proto_to_dict(item) for item in obj]
-
-    # Return primitive types as-is
-    return obj
 
 
 SYSTEM_PROMPT = """You are a helpful assistant for booking golf tee times at Northgate Country Club.
@@ -196,27 +172,40 @@ FUNCTION_DECLARATIONS = [
 
 class GeminiService:
     def __init__(self) -> None:
-        self._model: Any = None
+        self._client: genai.Client | None = None
         # monotonic() time of the last depleted-balance alert to the admin.
         # In memory only: max_instances is 1, and a restart re-alerting once
         # is harmless.
         self._last_billing_alert: float | None = None
 
     @property
-    def model(self) -> Any:
-        if self._model is None:
-            if settings.gemini_api_key:
-                genai.configure(api_key=settings.gemini_api_key)  # type: ignore[attr-defined]
-                self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
-                    model_name=settings.gemini_model,
-                    system_instruction=SYSTEM_PROMPT,
-                    tools=[{"function_declarations": FUNCTION_DECLARATIONS}],
-                )
-            else:
-                self._model = None
-        return self._model
+    def client(self) -> genai.Client | None:
+        """The Gemini client, or None when GEMINI_API_KEY is unset."""
+        if self._client is None and settings.gemini_api_key:
+            self._client = genai.Client(api_key=settings.gemini_api_key)
+        return self._client
 
-    async def _generate_with_retry(self, prompt: str) -> Any:
+    @staticmethod
+    def _request_config(timeout_s: float) -> genai_types.GenerateContentConfig:
+        """Model instructions and tools, plus this attempt's deadline.
+
+        The old SDK bound these to a GenerativeModel once; google-genai takes
+        them per call. The timeout is in milliseconds.
+        """
+        return genai_types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            tools=[
+                genai_types.Tool(
+                    function_declarations=[
+                        genai_types.FunctionDeclaration.model_validate(declaration)
+                        for declaration in FUNCTION_DECLARATIONS
+                    ]
+                )
+            ],
+            http_options=genai_types.HttpOptions(timeout=max(1, int(timeout_s * 1000))),
+        )
+
+    async def _generate_with_retry(self, prompt: str) -> genai_types.GenerateContentResponse:
         """Call the model, retrying transient failures with exponential backoff.
 
         Uses the SDK's async method rather than the blocking one: this runs on
@@ -224,7 +213,7 @@ class GeminiService:
         call must not stall the process - and retrying a blocking call would
         stall it up to three times over.
 
-        Only the exceptions in TRANSIENT_API_EXCEPTIONS are retried. Anything
+        Only errors is_transient accepts are retried. Anything
         else propagates on the first attempt, as does a transient error that
         survives the last one - the caller turns both into the honest "nothing
         was booked" reply rather than a guess.
@@ -232,6 +221,9 @@ class GeminiService:
         Attempts stop early once GEMINI_TOTAL_BUDGET is spent, so a run of slow
         responses cannot outlast the webhook waiting on it.
         """
+        client = self.client
+        if client is None:
+            raise RuntimeError("GEMINI_API_KEY is not configured")
         deadline = monotonic() + GEMINI_TOTAL_BUDGET
         last_error: Exception | None = None
 
@@ -241,12 +233,13 @@ class GeminiService:
                 break
 
             try:
-                return await self.model.generate_content_async(
-                    prompt,
-                    request_options={"timeout": min(GEMINI_REQUEST_TIMEOUT, remaining)},
+                return await client.aio.models.generate_content(
+                    model=settings.gemini_model,
+                    contents=prompt,
+                    config=self._request_config(min(GEMINI_REQUEST_TIMEOUT, remaining)),
                 )
             except TRANSIENT_API_EXCEPTIONS as e:
-                if is_billing_exhausted(e):
+                if not is_transient(e) or is_billing_exhausted(e):
                     raise
                 last_error = e
                 delay = GEMINI_RETRY_BASE_DELAY * (2**attempt)
@@ -410,7 +403,7 @@ class GeminiService:
                 logger.info("Read the request with strict_parse; Gemini not called")
                 return strict
 
-        if not self.model:
+        if not self.client:
             # Distinct from the API-error path below: this only fires when
             # GEMINI_API_KEY itself is unset (the local-dev-without-a-key case).
             # In deployed environments the key is a required Secret Manager
@@ -438,20 +431,17 @@ class GeminiService:
 
             response = await self._generate_with_retry(prompt)
 
-            if response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, "function_call"):
-                        fc = part.function_call
-                        # Use MessageToDict for protobuf objects to properly convert
-                        # nested structures (like bookings array) to Python dicts.
-                        # Fall back to dict() for plain dict objects (e.g., in tests).
-                        if hasattr(fc.args, "DESCRIPTOR"):
-                            args = MessageToDict(fc.args, preserving_proto_field_name=True)
-                        else:
-                            args = dict(fc.args)
-                        # Recursively convert any remaining proto-plus objects
-                        # (e.g., MapComposite in bookings array) to plain dicts
-                        args = _convert_proto_to_dict(args)
+            content = response.candidates[0].content if response.candidates else None
+            if content is not None and content.parts:
+                for part in content.parts:
+                    # Every google-genai Part has a function_call attribute; it
+                    # is None on a text part, so test the value, not hasattr.
+                    fc = part.function_call
+                    if fc is not None:
+                        # google-genai returns args as plain JSON types (dicts,
+                        # lists, str, numbers) with the declared snake_case keys,
+                        # so the old protobuf conversion is not needed (#133).
+                        args = dict(fc.args or {})
                         logger.info(f"Gemini parsed args: {args}")
                         return self._build_parsed_intent(args, raw_message=message)
 
