@@ -36,7 +36,8 @@ Two of them merge their own PR without the maintainer reading it first, each
 limited to named paths and gated on a green `Tests` check: the race report (one
 file under `race-reports/`, bounded in `routines/race-report.md`) and the
 scoreboard (`docs/scoreboard.json` and `docs/scoreboard.html`, bounded in
-`routines/scoreboard.md`). Every other Routine opens PRs and never merges.
+`routines/scoreboard.md`). The others never merge: tech debt and feature dev
+open PRs for the maintainer, and cost commits nothing (`routines/cost.md`).
 
 ## Two constraints
 
