@@ -5551,7 +5551,7 @@ class TestCancelAfterClubCancelSucceeds:
             mock_db.update_booking = AsyncMock(side_effect=_first_write_only())
             result = await booking_service.cancel_booking(booking.id)
         assert result is booking
-        # The stored row stays CANCELLING; the caller is told the same (#352).
+        # Reported as CANCELLING so a caller can tell it from a recorded cancel (#352).
         assert result.status == BookingStatus.CANCELLING
 
     @pytest.mark.asyncio
