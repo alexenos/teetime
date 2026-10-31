@@ -237,6 +237,28 @@ class TestBookingsEndpoints:
             assert data["status"] == "cancelled"
             assert data["booking_id"] == "abc12345"
 
+    def test_cancel_booking_unrecorded(self, test_client: TestClient) -> None:
+        """Issue #352: a club cancel that could not be recorded is not plain "cancelled"."""
+        won = TeeTimeBooking(
+            id="abc12345",
+            phone_number="+15551234567",
+            request=TeeTimeRequest(
+                requested_date=date(2025, 12, 20),
+                requested_time=time(8, 0),
+            ),
+            status=BookingStatus.SUCCESS,
+        )
+        unrecorded = won.model_copy(update={"status": BookingStatus.CANCELLING})
+
+        with patch("app.api.bookings.booking_service") as mock_service:
+            mock_service.get_booking = AsyncMock(return_value=won)
+            mock_service.cancel_booking = AsyncMock(return_value=unrecorded)
+
+            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
+
+            assert response.status_code == 200
+            assert response.json() == {"status": "unrecorded", "booking_id": "abc12345"}
+
     def test_cancel_booking_not_found(self, test_client: TestClient) -> None:
         """Test cancelling a non-existent booking."""
         with patch("app.api.bookings.booking_service") as mock_service:

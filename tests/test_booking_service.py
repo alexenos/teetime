@@ -5551,6 +5551,19 @@ class TestCancelAfterClubCancelSucceeds:
             mock_db.update_booking = AsyncMock(side_effect=_first_write_only())
             result = await booking_service.cancel_booking(booking.id)
         assert result is booking
+        # The stored row stays CANCELLING; the caller is told the same (#352).
+        assert result.status == BookingStatus.CANCELLING
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_returns_the_recorded_row_when_recorded(
+        self, booking_service: BookingService, provider: MagicMock
+    ) -> None:
+        booking = self._won()
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_booking = AsyncMock(side_effect=[booking, booking])
+            mock_db.update_booking = AsyncMock(return_value=None)
+            result = await booking_service.cancel_booking(booking.id)
+        assert result is not None
         assert result.status == BookingStatus.CANCELLED
 
 

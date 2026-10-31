@@ -2938,7 +2938,9 @@ class BookingService:
             booking_id: The unique identifier of the booking to cancel.
 
         Returns:
-            The cancelled booking if found and cancellable, None otherwise.
+            The cancelled booking if found and cancellable, None otherwise. A
+            booking the club cancelled but whose cancel could not be recorded
+            is returned with status CANCELLING, as its stored row reads.
         """
         booking = await database_service.get_booking(booking_id)
         if not booking:
@@ -2954,7 +2956,9 @@ class BookingService:
         if booking.status == BookingStatus.SUCCESS:
             outcome = await self._cancel_confirmed_booking(booking)
             if outcome is CancelOutcome.UNRECORDED:
-                # The stored row says CANCELLING until it is settled.
+                # Returned as the stored row reads, CANCELLING until it is
+                # settled, so a caller can tell it from a recorded cancel (#352).
+                booking.status = BookingStatus.CANCELLING
                 return booking
             if not outcome.club_cancelled:
                 return None

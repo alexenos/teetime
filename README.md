@@ -95,7 +95,7 @@ poetry run mypy app
 - `GET /bookings` - List bookings
 - `POST /bookings` - Create booking
 - `GET /bookings/{id}` - Get booking details
-- `DELETE /bookings/{id}` - Cancel booking
+- `DELETE /bookings/{id}` - Cancel booking (`status` is `cancelled`, or `unrecorded` when the club cancelled a won booking but the bot could not record it)
 - `POST /bookings/{id}/execute` - Execute booking (for testing)
 
 ## Environment Variables

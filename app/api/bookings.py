@@ -107,7 +107,10 @@ async def cancel_booking(booking_id: str, phone_number: str) -> dict[str, str]:
         phone_number: The phone number that must match the booking's phone number.
 
     Returns:
-        A dict with status and booking_id on success.
+        A dict with status and booking_id on success. The status is
+        "cancelled" when the cancel was recorded, and "unrecorded" when the
+        club cancelled a won booking but recording it failed: the stored row
+        stays CANCELLING until it is settled from the reservations page (#352).
 
     Raises:
         HTTPException 403: If phone_number doesn't match the booking's phone number.
@@ -129,6 +132,8 @@ async def cancel_booking(booking_id: str, phone_number: str) -> dict[str, str]:
     if not cancelled_booking:
         raise HTTPException(status_code=404, detail="Booking cannot be cancelled")
 
+    if cancelled_booking.status == BookingStatus.CANCELLING:
+        return {"status": "unrecorded", "booking_id": booking_id}
     return {"status": "cancelled", "booking_id": booking_id}
 
 
