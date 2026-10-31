@@ -83,7 +83,11 @@ class CancelOutcome(Enum):
     CANCELLED = "cancelled"
     """Cancelled on the club's site and recorded."""
     UNRECORDED = "unrecorded"
-    """Cancelled on the club's site; the booking row is left CANCELLING."""
+    """Cancelled on the club's site; recording it could not be confirmed.
+
+    The row is normally left CANCELLING, but update_booking commits before it
+    refreshes, so a write that raised may already have stored CANCELLED.
+    """
     NOT_CANCELLED = "not_cancelled"
     """The club still holds the booking."""
 
@@ -2189,7 +2193,11 @@ class BookingService:
         return CancelOutcome.UNRECORDED
 
     async def _record_cancellation(self, booking: TeeTimeBooking) -> bool:
-        """Write a club-cancelled booking's CANCELLED status, retrying once."""
+        """Write a club-cancelled booking's CANCELLED status, retrying once.
+
+        False means no write was confirmed, not that none was stored: a write
+        can commit and then raise on its refresh.
+        """
         for attempt in range(1, CANCEL_RECORD_ATTEMPTS + 1):
             try:
                 await database_service.update_booking(booking)
@@ -2938,7 +2946,12 @@ class BookingService:
             booking_id: The unique identifier of the booking to cancel.
 
         Returns:
-            The cancelled booking if found and cancellable, None otherwise.
+            The cancelled booking if found and cancellable, None otherwise. A
+            booking the club cancelled but whose cancel could not be confirmed
+            as recorded (CancelOutcome.UNRECORDED) is returned with status
+            CANCELLING. That does not say what the stored row holds: usually
+            CANCELLING until settled, possibly CANCELLED if a write committed
+            before it raised.
         """
         booking = await database_service.get_booking(booking_id)
         if not booking:
@@ -2954,7 +2967,12 @@ class BookingService:
         if booking.status == BookingStatus.SUCCESS:
             outcome = await self._cancel_confirmed_booking(booking)
             if outcome is CancelOutcome.UNRECORDED:
-                # The stored row says CANCELLING until it is settled.
+                # Returned as CANCELLING so a caller can tell it from a recorded
+                # cancel (#352). The stored status is unconfirmed: the row is
+                # normally CANCELLING until settled, but update_booking commits
+                # before it refreshes, so a failed write may already have stored
+                # CANCELLED.
+                booking.status = BookingStatus.CANCELLING
                 return booking
             if not outcome.club_cancelled:
                 return None
