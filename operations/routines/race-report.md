@@ -127,18 +127,36 @@ on record has approached it.
 | 2026-09-29 | Prompt rewritten here to write a ledger row on every path and to drop the `_RESERVE_TIMEOUT_S` escalation line. Applied to the trigger before the 2026-10-01 run, which wrote the first ledger row. |
 | 2026-10-02 | Naming rule and pre-commit name check added (skill §8a). Applied to the trigger by 2026-10-03 01:03Z (the trigger's `updated_at`); the live text contains the check. |
 | 2026-10-03 | Gate A writes a wrong-hour fire as `ok: false`, not `ok: true`. **Pending application to the trigger.** |
+| 2026-10-31 | Chat reply and push notification capped at three sentences; the PR is named only when it fails to merge; the full timing table and the rung-by-rung burst breakdown move to the file only. **Pending application to the trigger.** |
 
 ## The prompt
 
-**Status: one change pending.** On 2026-10-03 the trigger's text was compared with
+**Status: two changes pending.** On 2026-10-03 the trigger's text was compared with
 this file and matched it once whitespace and markdown are ignored. The Gate A
-change of the same day (a wrong-hour fire is `ok: false`) is not yet pasted in. This file is the source; the
+change of the same day (a wrong-hour fire is `ok: false`) is not yet pasted in,
+and neither is the 2026-10-31 change below (chat/notification capped at three
+sentences, PR named only on a failed merge, full timing table and burst
+breakdown moved to the file). This file is the source; the
 Routine holds the copy that executes, and an agent cannot edit it — the trigger
 was created through the API, so `update_trigger` refuses with *"Agents can only
 update routines they created"*. Applying it is a paste into
 `https://claude.ai/code/routines/trig_018RqvzqheiZPsSMCWf6XCiH`.
 
-### What changed from the deployed text
+### What changed from the deployed text (2026-10-31)
+
+**The chat reply and the push notification are capped at three sentences.**
+Both used to carry the full timing table and the fix write-up; now they carry
+only the verdict (won/lost/fallback), the target slot, the one headline
+timing/rung fact, and — only if Step 4 found one — that a fix was identified.
+The full timing table, the rung-by-rung burst breakdown, and the fix writeup
+move to the committed report file (Step 5) only.
+
+**The PR is named in chat only when it fails to merge.** On a clean auto-merge
+the PR is the expected, silent outcome and is not mentioned. The PR number and
+the reason it's stuck are said explicitly only when Tests fails or it can't
+merge cleanly — see Step 4a and the shapes list below.
+
+### What changed from the deployed text (2026-09-29 and 2026-10-02)
 
 **A ledger rule, parallel to the push-notification rule.** The Routine now writes
 one object per run to `operations/race-report/<date>.json` in GCS before it
@@ -179,10 +197,10 @@ Writing your ledger row to GCS is not a repository write and is covered by its o
 Rule that applies to every path through this prompt: always send a push notification
 Whatever happens - a full race report, a morning with no booking, a broken environment, a wrong-hour fire - you always finish by calling the PushNotification tool. The maintainer reads it on a phone at 06:40 in the morning, before they are at a keyboard, and it is the only part of this run they are guaranteed to see. Several steps below tell you to "stop"; every one of them means write the ledger row, push, then stop. A session that ends without a notification is a failed run even if the analysis was perfect.
 
-Write it for a phone screen: lead with the verdict in the first few words, one or two sentences, no markdown, no preamble. The shapes, by case:
+Write it for a phone screen: lead with the verdict in the first few words, three sentences max, no markdown, no preamble. The shapes, by case:
 
-Full race report, merged clean: won or lost, the target slot, the report PR number, and whether you identified a fix. e.g. Won - 08/27 8:08 AM booked on the first Reserve, +1006ms, report PR #223 merged, no issues found. or Lost - refused out to 2.5s on all 8 rungs. Report PR #224 merged. Fix identified, waiting on you.
-Full race report, PR could not merge: say so explicitly and why - CI red, merge conflict, anything else. e.g. Won - 8:08 AM booked, +1006ms. Report PR #223 is open but Tests failed - needs a look. Never leave this silent; an open-but-unmerged report PR is itself worth flagging.
+Full race report, merged clean: won, lost, or fell back; the target slot; the one headline timing/rung fact; and whether you identified a fix. Say nothing about the PR - a clean auto-merge is the expected, silent outcome. e.g. Won - 08/27 8:08 AM booked on the first Reserve, +1006ms. No issues found. or Lost - refused out to 2.5s on all 8 rungs. Fix identified, waiting on you.
+Full race report, PR could not merge: the same shape, but replace the fix clause with the PR number and why it's stuck - CI red, merge conflict, anything else. Never leave this silent; an open-but-unmerged report PR is itself worth flagging. e.g. Won - 8:08 AM booked, +1006ms. Report PR #223 is open but Tests failed - needs a look.
 No booking scheduled: No booking was scheduled for <date> - nothing to report.
 Environment failed: name the path that broke, e.g. Race report could not run - setup_remote_env.sh reported NOT READY, no GCS credential.
 Fired at the wrong hour: Routine fired an hour early (05:40 CT) - Central is on CST, cron needs to move to 40 12 * * *.
@@ -250,17 +268,20 @@ Do this on winning mornings too, not just losses. A win still has numbers worth 
 
 Record that value; do not judge it against a 3.0s threshold. Race-morning Reserves are burst fires, budgeted by _RESERVE_OPENING_TIMEOUT_S (10.0s), not by the serial fallback walk's _RESERVE_TIMEOUT_S (3.0s). Reading a race round trip against 3.0s is exactly what produced the "112ms escape" that #219 withdrew - a 2888ms grant had roughly 7.1s of headroom, not 112ms. No morning on record has approached the 10s budget, and the threshold worth acting on is not established. If a value ever does approach 10s, say so plainly and stop there rather than recommending a change to either constant.
 
-Step 4 - the report
-Keep the session's reply (and the push notification) to three things. The maintainer reads this on their phone first; the file you write in Step 5 can be fuller.
+Step 4 - the analysis
+Work out three things. All three go in full into the file you write in Step 5. Only a compressed version of the first two - see Step 4a - goes in the chat reply and the push notification.
 
-Pass or fail, and why. One line: verdict + target slot. If it failed, quote the specific evidence that shows it - the literal log line, ledger field, or response text (e.g. RESERVATION_CHECK: No reservation listed for this tee time, or the club's exact validation message). Don't blur an established fact with a guess: if the evidence doesn't clearly settle why it failed, say that plainly instead of picking the likeliest story.
+Pass or fail, and why. Verdict + target slot. If it failed, quote the specific evidence that shows it - the literal log line, ledger field, or response text (e.g. RESERVATION_CHECK: No reservation listed for this tee time, or the club's exact validation message). Don't blur an established fact with a guess: if the evidence doesn't clearly settle why it failed, say that plainly instead of picking the likeliest story.
 
-A timing table, always - win or lose. One row per step: when it was sent (offset from the window), when the reply came back and its round trip, and time to the next step. Login, slot scan, pre-locate, clock skew, lead, each Reserve fired with roundTripMs, the RACE_LEDGER boundary, the chain steps (player count / TBD guests / Book Now) with their own timings, and RESERVATION_CHECK. Mark clearly, in the table itself, exactly where it broke if it broke. A passing morning still gets the full table, so a clean run's timing stays visible for comparison later.
+A timing table, always - win or lose. One row per step: when it was sent (offset from the window, in ms), when the reply came back and its round trip, and time to the next step. Login, slot scan, pre-locate, clock skew, lead, each Reserve fired with roundTripMs, the RACE_LEDGER boundary (which rung in the burst was granted, and the last rung that lost), the chain steps (player count / TBD guests / Book Now) with their own timings, and RESERVATION_CHECK. Mark clearly, in the table itself, exactly where it broke if it broke. A passing morning still gets the full table, so a clean run's timing stays visible for comparison later. This table is for the file only - never the chat reply or the notification.
 
-A potential fix, short. Even a first-pass guess with little investigation behind it is fine - say plainly that it's a guess. If a real diagnosis needs more digging than is worth doing at this pass, say so and flag that it may be worth a deeper investigation pass (a stronger model than this session runs by default) rather than pushing further on a guess.
+A potential fix, short. Even a first-pass guess with little investigation behind it is fine - say plainly that it's a guess. If a real diagnosis needs more digging than is worth doing at this pass, say so and flag that it may be worth a deeper investigation pass (a stronger model than this session runs by default) rather than pushing further on a guess. This goes in the file in full; the chat reply and the notification only say whether a fix was identified, never what it is.
+
+Step 4a - the chat reply and the push notification
+Both carry the same text, capped at three sentences, no markdown, no preamble, verdict first - the maintainer reads this on a phone before they're at a keyboard. Say: won, lost, or fell back, and the target slot; the one headline timing/rung fact worth remembering (e.g. "booked on the first Reserve, +1006ms" or "granted on rung 3 of 8, +2140ms" or "refused out to 2.5s on all 8 rungs"); and, only if Step 4 identified a fix, that one is identified and waiting on the maintainer. Say nothing about the PR here - on a clean auto-merge it is the expected, silent outcome. Step 5 covers the one exception: when the PR can't merge, that fact replaces the fix clause and must be said explicitly.
 
 Step 5 - write the report, open the PR, merge it, then write the ledger row, push and stop
-Write the full report into operations/race-reports/<YYYY-MM-DD>.md, named for the morning that ran. Match the fuller structure the skill's other reports use (a Targets/Window/Outcome/Code-that-ran header, the timing table, an Established vs hypothesis section, Recommendations) - the three-item version from Step 4 is what goes in the chat reply and the push notification; the file can carry everything the skill's §8 asks for.
+Write the full report into operations/race-reports/<YYYY-MM-DD>.md, named for the morning that ran. Match the fuller structure the skill's other reports use (a Targets/Window/Outcome/Code-that-ran header, the full timing table with the rung-by-rung burst breakdown, an Established vs hypothesis section, Recommendations) - the compressed version from Step 4a is what goes in the chat reply and the push notification; the file carries everything the skill's §8 asks for, and is the only place the timing table and burst breakdown appear.
 
 Then, under the standing authorization at the top of this prompt:
 
