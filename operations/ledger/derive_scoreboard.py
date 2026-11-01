@@ -366,9 +366,36 @@ def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_cor
         validate(row)
     # A cost row also names the month it reports, because the seed rows for two
     # months were written on one date.
-    keys = [(r["routine"], r["date"], r.get("month")) for r in rows]
-    if len(keys) != len(set(keys)):
-        raise ValueError("two rows share a Routine and date; the ledger holds one object per run")
+    groups: dict[tuple[Any, ...], list[Row]] = {}
+    for r in rows:
+        groups.setdefault((r["routine"], r["date"], r.get("month")), []).append(r)
+    deduped: list[Row] = []
+    for key, group in groups.items():
+        if len(group) == 1:
+            deduped.append(group[0])
+            continue
+        failed = [r for r in group if r.get("ok") is False]
+        if len(failed) != 1:
+            # Anything other than "exactly one failure plus extra rows" is a
+            # genuine conflict (two successes, two failures, two seeds): refuse
+            # rather than guess.
+            raise ValueError(
+                "two rows share a Routine and date; the ledger holds one object per run"
+            )
+        # Maintainer decision, 2026-11-01: a same-day rerun after a failure does
+        # the work (files issues, opens a PR) without a second ledger row. An
+        # extra row for the same key is the rerun writing one anyway under an
+        # improvised name (operations/tech-debt/2026-10-31-rerun.json) because
+        # the object-creator grant refused to overwrite the failed row - it is
+        # dropped here rather than refused, and the failed row stands as the
+        # day's record.
+        print(
+            f"{key[0]} {key[1]}: ignored {len(group) - 1} extra row(s) sharing this "
+            "Routine and date; kept the ok:false row as the day's record",
+            file=sys.stderr,
+        )
+        deduped.append(failed[0])
+    rows = deduped
 
     if not any(r["routine"] == "race-report" for r in rows):
         # The backfill alone guarantees rows here, so none means the read

@@ -34,6 +34,24 @@ that. Append-only becomes **enforced rather than conventional** — no run can
 rewrite an earlier run's record, including its own. And two runs that overlap
 cannot clobber each other, because they are writing different objects.
 
+**A same-day rerun does not get a second row.** "One object per run" is about
+preventing clobbering, not an invitation to write one object per *invocation*.
+If a Routine's write for today is refused because an object already exists,
+that object is the day's record, whatever caused the refusal — including a run
+that failed early and was deliberately rerun once the cause was fixed. The
+rerun still does its real work (filing issues, opening a PR, whatever the
+Routine does), but it does not write a ledger row of its own, and it must not
+invent an alternate object name (`<date>-rerun.json` or similar) to get around
+the refusal: that both claims credit for a day already recorded as failed and
+produces two rows for one date, which `derive_scoreboard.py` cannot resolve
+without guessing which one is real. Say so in the run's own notification
+instead — "already recorded, rerun not written to the ledger" — and leave the
+ledger alone. (`operations/tech-debt/2026-10-31-rerun.json` is exactly this
+mistake, made before this rule was written down; `derive_scoreboard.py` treats
+an existing one-failure-plus-extra-rows group as the failed row and ignores
+the rest, so it no longer breaks the derivation, but no Routine should produce
+another one.)
+
 Reading is unaffected: the same account holds `objectViewer` bucket-wide, so a
 reader lists the prefix and reads every object under it.
 

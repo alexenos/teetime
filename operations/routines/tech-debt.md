@@ -427,6 +427,16 @@ One object per run, never an edit, per `operations/ledger/README.md`:
 gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/tech-debt/<YYYY-MM-DD>.json
 ```
 
+Write it with `gcloud storage cp --no-clobber`. The service account can create
+objects under `operations/` and cannot overwrite them. If the write is refused
+because today's object already exists — including because an earlier run today
+failed and this is a maintainer-requested rerun — that object is the day's
+record. Do the rerun's real work, but do not write a ledger row for it and do
+not invent an alternate object name (`<date>-rerun.json` or similar) to get
+around the refusal; say in the notification that the ledger already has today's
+row instead (`operations/ledger/README.md`, "A same-day rerun does not get a
+second row").
+
 The values below are invented to show the shape; the issue and PR numbers are
 not real runs.
 

@@ -162,7 +162,7 @@ Before you finish, record this run as one new object, never an edit of an existi
 
 gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/cost/<YYYY-MM>.json
 
-named for the month the row reports, which is the month field in the row and is the month before this run's date. Write it with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them. If the object already exists, say so in the final message rather than forcing it. A month with no object is indistinguishable from a month that was never checked, so a failed run writes a row too. The schema is in operations/ledger/README.md under cost.jsonl.
+named for the month the row reports, which is the month field in the row and is the month before this run's date. Write it with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them. If the object already exists, say so in the final message rather than forcing it, and do not write under an alternate name instead: that object already is the month's record (`operations/ledger/README.md`, "A same-day rerun does not get a second row"). A month with no object is indistinguishable from a month that was never checked, so a failed run writes a row too. The schema is in operations/ledger/README.md under cost.jsonl.
 
 Step 1 - set up
 

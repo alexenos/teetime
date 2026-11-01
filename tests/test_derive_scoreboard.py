@@ -177,6 +177,41 @@ def test_the_same_date_may_hold_one_row_per_routine() -> None:
         ds.derive(rows + [_quiet(RACE_START)], _ct(RACE_START, 9, 0), _no_corrections)
 
 
+def test_a_rerun_after_a_failure_does_not_get_ledger_credit() -> None:
+    # operations/tech-debt/2026-10-31.json (ok:false, label missing) plus
+    # 2026-10-31-rerun.json (ok:true, written because the object-creator grant
+    # refused to overwrite the first) must not refuse the whole derivation.
+    # The failed row stands as the day's record (maintainer decision,
+    # 2026-11-01), so the day scores as a break, not a success.
+    day = dt.date(2026, 10, 31)
+    failed = _quiet(day, "tech-debt", ok=False)
+    rerun = _quiet(day, "tech-debt")
+    rows = [_quiet(RACE_START)] + [failed, rerun]
+    now = _ct(day, 9, 0)
+    board = ds.derive(rows, now, _no_corrections)
+    assert board["streak"]["by_routine"]["tech-debt"] == 0
+    assert board["streak"]["last_failure"] == day.isoformat()
+
+
+def test_two_successful_rows_for_the_same_run_are_still_refused() -> None:
+    # No row is ok:false, so there is no rerun-after-failure shape to forgive;
+    # this is an unresolved conflict, same as before.
+    day = dt.date(2026, 10, 31)
+    rows = [_quiet(RACE_START)] + [_quiet(day, "tech-debt"), _quiet(day, "tech-debt")]
+    with pytest.raises(ValueError, match="share a Routine and date"):
+        ds.derive(rows, _ct(day, 9, 0), _no_corrections)
+
+
+def test_two_failed_rows_for_the_same_run_are_still_refused() -> None:
+    # Two ok:false rows for the same key is ambiguous too - which note is the
+    # real one? - so it still refuses rather than guessing.
+    day = dt.date(2026, 10, 31)
+    rows = [_quiet(RACE_START)]
+    rows += [_quiet(day, "tech-debt", ok=False), _quiet(day, "tech-debt", ok=False)]
+    with pytest.raises(ValueError, match="share a Routine and date"):
+        ds.derive(rows, _ct(day, 9, 0), _no_corrections)
+
+
 def test_outcome_split_counts_backfill_and_routine_races_but_not_quiet_mornings() -> None:
     before = RACE_START - dt.timedelta(days=3)
     rows = [
