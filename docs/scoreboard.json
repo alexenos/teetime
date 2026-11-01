@@ -1,21 +1,21 @@
 {
   "sample": false,
-  "generated": "2026-10-31T12:34:33Z",
+  "generated": "2026-11-01T21:01:09Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
     "first": "2026-08-13",
     "last": "2026-09-27",
-    "routine_rows": 31,
-    "routine_raced": 10,
+    "routine_rows": 32,
+    "routine_raced": 11,
     "source": "operations/ledger/backfill/race-report.jsonl"
   },
   "outcome": {
     "all_time": {
-      "mornings": 33,
-      "booked": 43,
+      "mornings": 34,
+      "booked": 45,
       "miss": 7,
-      "exact": 37,
+      "exact": 39,
       "fallback": 6
     },
     "last_4wk": {
@@ -27,26 +27,26 @@
     },
     "prior_4wk": {
       "mornings": 12,
-      "booked": 16,
+      "booked": 17,
       "miss": 4,
-      "exact": 13,
+      "exact": 14,
       "fallback": 3
     }
   },
   "streak": {
     "available": true,
     "reason": null,
-    "consecutive": 1,
-    "unverified": 1,
-    "total_ok": 54,
-    "last_failure": "2026-10-31",
-    "last_failure_reason": "tech-debt: failed",
+    "consecutive": 0,
+    "unverified": 0,
+    "total_ok": 58,
+    "last_failure": "2026-11-01",
+    "last_failure_reason": "scoreboard: failed",
     "by_routine": {
-      "race-report": 22,
-      "scoreboard": 2,
+      "race-report": 23,
+      "scoreboard": 0,
       "cost": null,
       "tech-debt": 0,
-      "feature-dev": 0
+      "feature-dev": 2
     },
     "history": [
       3,
@@ -54,13 +54,13 @@
       15,
       6,
       1,
-      9,
-      7,
+      17,
+      4,
       4
     ],
     "window": {
       "first": "2026-10-01",
-      "last": "2026-10-31"
+      "last": "2026-11-01"
     }
   },
   "cost": {
