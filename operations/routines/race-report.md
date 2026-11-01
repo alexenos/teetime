@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Trigger** | daily, `40 11 * * *` UTC (06:40 CT, ten minutes after the race) |
+| **Trigger** | daily, `CRON_TZ=America/Chicago 40 6 * * *` (06:40 CT, ten minutes after the race, fixed across DST) |
 | **Runs as** | a new Claude Code session per firing, with no prior context |
 | **Model** | `claude-sonnet-5` |
 | **Authorization** | writes the report, commits it on its own branch, opens a non-draft PR, and squash-merges it once the `Tests` check is green — no approval. Scoped to exactly one file under `operations/race-reports/`. Everything else is ask-first. |
@@ -78,18 +78,27 @@ first row it wrote is 2026-10-01 (`ok: true, raced: false`). Whether a run befor
 that date already carried the ledger rule is not established: there are no rows
 for 2026-09-28 to 09-30 either way.
 
-## Scheduled defect: fires one hour early from 2026-11-01
+## Scheduled defect: fired one hour early from 2026-11-01 — fixed
 
-Cron is evaluated in UTC. `40 11 * * *` is 06:40 CT during CDT only. US daylight
-time ends on Sunday 2026-11-01, after which 11:40 UTC is 05:40 CT — 23 minutes
-before the booking job fires at 06:28 CT and 48 minutes before the window it
-reports on.
+Cron used to be evaluated in UTC, as `40 11 * * *`, which is 06:40 CT during
+CDT only. US daylight time ended Sunday 2026-11-01, after which 11:40 UTC
+would have been 05:40 CT — 23 minutes before the booking job fires at 06:28 CT
+and 48 minutes before the window it reports on. Gate A in the prompt exists to
+detect this condition and report it rather than produce a verdict.
 
-Gate A in the prompt detects this condition and reports it rather than producing
-a verdict. It reports via push notification only.
+**Fixed by changing the cron itself, not by Gate A catching it every year.**
+The live trigger's `cron_expression` reads
+`CRON_TZ=America/Chicago 40 6 * * *` as of 2026-11-01 (`get_trigger`), the same
+timezone-aware form the other four Routines' crons use. The 2026-11-01 run
+fired at 06:41:21 CT (`last_fired_at`) and produced a report
+(`operations/race-reports/2026-11-01.md`, PR #400) — the correct hour, DST
+transition and all. Gate A stays in the prompt as a guard against a future
+misconfiguration, not because this cron needs one.
 
-Correction: change the cron to `40 12 * * *` on or before that date. Until then
-the Routine produces no data on any morning it misfires.
+Not established: exactly when or by whom the cron was changed to the
+`CRON_TZ` form — it does not match either literal-UTC value this file
+earlier proposed (`40 11` or `40 12`), so it was edited directly in the
+trigger UI rather than pasted from a version of this prompt.
 
 ## Prompt defect: the Step 3 watch line names the wrong timeout
 
@@ -126,21 +135,21 @@ on record has approached it.
 | 2026-09-22 | Renamed to "Morning Race Report", and given standing authorization to commit, open and merge the report PR. The repository-side rename landed the same day in #221 (06:40 CT); the Routine was edited at 14:58 CT to match. The two are separate edits — nothing links them but the date. |
 | 2026-09-29 | Prompt rewritten here to write a ledger row on every path and to drop the `_RESERVE_TIMEOUT_S` escalation line. Applied to the trigger before the 2026-10-01 run, which wrote the first ledger row. |
 | 2026-10-02 | Naming rule and pre-commit name check added (skill §8a). Applied to the trigger by 2026-10-03 01:03Z (the trigger's `updated_at`); the live text contains the check. |
-| 2026-10-03 | Gate A writes a wrong-hour fire as `ok: false`, not `ok: true`. **Pending application to the trigger.** |
-| 2026-10-31 | Chat reply and push notification capped at three sentences; the PR is named only when it fails to merge; the full timing table and the rung-by-rung burst breakdown move to the file only. **Pending application to the trigger.** |
+| 2026-10-03 | Gate A writes a wrong-hour fire as `ok: false`, not `ok: true`. Applied by 2026-11-01 (confirmed below). |
+| 2026-10-31 | Chat reply and push notification capped at three sentences; the PR is named only when it fails to merge; the full timing table and the rung-by-rung burst breakdown move to the file only. Applied 2026-11-01 (confirmed below). |
+| 2026-11-01 | Cron changed on the trigger directly, outside this file, from literal UTC `40 11 * * *` to `CRON_TZ=America/Chicago 40 6 * * *` — the fix for the scheduled defect below, applied before this file proposed either of its literal-UTC alternatives. |
 
 ## The prompt
 
-**Status: two changes pending.** On 2026-10-03 the trigger's text was compared with
-this file and matched it once whitespace and markdown are ignored. The Gate A
-change of the same day (a wrong-hour fire is `ok: false`) is not yet pasted in,
-and neither is the 2026-10-31 change below (chat/notification capped at three
-sentences, PR named only on a failed merge, full timing table and burst
-breakdown moved to the file). This file is the source; the
-Routine holds the copy that executes, and an agent cannot edit it — the trigger
-was created through the API, so `update_trigger` refuses with *"Agents can only
-update routines they created"*. Applying it is a paste into
-`https://claude.ai/code/routines/trig_018RqvzqheiZPsSMCWf6XCiH`.
+**Status: clean.** On 2026-11-01 the live trigger's `prompt` field was read with
+`get_trigger` and compared word for word against the text below: it matches,
+including the 2026-10-03 Gate A change and the 2026-10-31 chat/notification
+change. Both were pasted in together on or before that date. This file is the
+source; the Routine holds the copy that executes, and an agent cannot edit it
+directly — the trigger was created through the API, so `update_trigger` refuses
+with *"Agents can only update routines they created"*. Applying a future change
+is a paste into `https://claude.ai/code/routines/trig_018RqvzqheiZPsSMCWf6XCiH`,
+followed by the same word-for-word check.
 
 ### What changed from the deployed text (2026-10-31)
 
@@ -182,9 +191,10 @@ and three rivals' names (#236). The prompt now requires labels (`Member A`,
 `scripts/check_report_names.py` to pass before Step 5 commits. The rule lives in
 the skill's §8a; the prompt points at it and makes the check a gate.
 
-**The cron is unchanged**, deliberately. `40 11 * * *` is correct until
-2026-11-01; changing it now would make the Routine fire at 07:40 CT, an hour
-late, for five weeks. See the scheduled defect below.
+**The cron was unchanged at the time of this entry**, deliberately — `40 11 * * *`
+was correct until 2026-11-01, and changing it earlier would have made the
+Routine fire at 07:40 CT, an hour late, for five weeks. It has since been
+changed, by a different edit — see the scheduled defect section.
 
 ---
 
