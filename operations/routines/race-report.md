@@ -222,7 +222,7 @@ Before the push notification, record this run in the ledger. It is one new objec
 
 gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/race-report/<YYYY-MM-DD>.json
 
-named for the run date in Central Time, written with `gcloud storage cp`. The service account holds objectCreator on the operations/ prefix and nothing more, so a write that would overwrite an existing object will be refused - that is deliberate, and it means a second run on the same date must not clobber the first. If the object already exists, say so in the notification rather than forcing it.
+named for the run date in Central Time, written with `gcloud storage cp`. The service account holds objectCreator on the operations/ prefix and nothing more, so a write that would overwrite an existing object will be refused - that is deliberate, and it means a second run on the same date must not clobber the first. If the object already exists, say so in the notification rather than forcing it, and do not write under an alternate name (`<date>-rerun.json` or similar) instead: that object already is the day's record (`operations/ledger/README.md`, "A same-day rerun does not get a second row").
 
 The schema is in operations/ledger/README.md. Read it rather than inventing fields. The shape:
 

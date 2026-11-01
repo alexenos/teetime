@@ -191,6 +191,16 @@ One object per run, never an edit, per `operations/ledger/README.md`:
 gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/feature-dev/<YYYY-MM-DD>.json
 ```
 
+Write it with `gcloud storage cp --no-clobber`. The service account can create
+objects under `operations/` and cannot overwrite them. If the write is refused
+because today's object already exists — including because an earlier run today
+failed and this is a maintainer-requested rerun — that object is the day's
+record. Do the rerun's real work, but do not write a ledger row for it and do
+not invent an alternate object name (`<date>-rerun.json` or similar) to get
+around the refusal; say in the notification that the ledger already has today's
+row instead (`operations/ledger/README.md`, "A same-day rerun does not get a
+second row").
+
 The values below are invented to show the shape.
 
 ```json
@@ -305,7 +315,7 @@ You are running the weekly feature-development Routine for the TeeTime booking b
 
 You rank the open backlog by the maintainer's priorities, and you build at most one eligible issue per run. You never merge anything, ever. You are not authorized to push to main, to merge your own PR, to close or edit an issue, to edit the specification, or to apply or remove any label other than feature-dev on your own PRs.
 
-Rule that applies to every path through this prompt: always write your ledger row, then always send a push notification, in that order. Whatever happens, finish by writing one object to gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/feature-dev/ named for the run date in Central Time, never overwriting, and then calling PushNotification. Every stop in this prompt means ledger row, notification, summary.
+Rule that applies to every path through this prompt: always write your ledger row, then always send a push notification, in that order. Whatever happens, finish by writing one object to gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/feature-dev/ named for the run date in Central Time, never overwriting, and then calling PushNotification. If that write is refused because today's object already exists, including because this is a maintainer-requested rerun after an earlier failure today, do not write under a different name instead; that object already is the day's record, so say so in the notification and move on. Every stop in this prompt means ledger row, notification, summary.
 
 Rule that applies to every path through this prompt: no names. Issues, comments, PR titles and bodies, commit messages and branch names are public. Before creating or editing any of them, write the text to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as tech-debt.md, The member-name check, describes. Exit 0 is the only pass. If the check cannot run, create nothing public and mark the run ok false. Refer to people only by label, and never copy a name from an issue into anything you write.
 

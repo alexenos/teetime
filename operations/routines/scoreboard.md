@@ -249,7 +249,7 @@ Before you finish, record this run as one new object, never an edit of an existi
 
 gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard/<YYYY-MM-DD>.json
 
-named for the run date in Central Time, written with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them; if the object already exists, say so in the notification rather than forcing it. On a run that derived, the row is the file the script writes with --row (Step 3). On any other path it is {"date":"<run date CT>","routine":"scoreboard","ok":false,"note":"<what failed>"}. The schema is in operations/ledger/README.md under scoreboard.jsonl.
+named for the run date in Central Time, written with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them; if the object already exists, say so in the notification rather than forcing it, and do not write under an alternate name instead: that object already is the day's record (operations/ledger/README.md, "A same-day rerun does not get a second row"). On a run that derived, the row is the file the script writes with --row (Step 3). On any other path it is {"date":"<run date CT>","routine":"scoreboard","ok":false,"note":"<what failed>"}. The schema is in operations/ledger/README.md under scoreboard.jsonl.
 
 Rule that applies to every path through this prompt: notify on a change or a failure, and only then
 
