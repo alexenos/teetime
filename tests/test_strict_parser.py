@@ -4,10 +4,16 @@ from datetime import date, datetime, time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from google.api_core import exceptions as google_exceptions
+from google.genai import errors as genai_errors
 
 from app.services.gemini_service import GeminiService
 from app.services.strict_parser import strict_parse
+
+
+def api_error(code: int, message: str) -> genai_errors.APIError:
+    """A google-genai APIError as the SDK raises it for an HTTP failure."""
+    return genai_errors.APIError(code, {"error": {"code": code, "message": message}})
+
 
 TODAY = date(2026, 10, 28)
 
@@ -239,14 +245,14 @@ class TestGeminiFallback:
         """The 2026-10-28 request would have reached the booking flow."""
         service = GeminiService()
         with (
-            patch.object(service, "_model", MagicMock()),
+            patch.object(service, "_client", MagicMock()),
             patch("app.services.gemini_service.asyncio.sleep", AsyncMock()),
             # The message names 11/6/26; on a later real date it is in the past.
             patch("app.services.strict_parser.datetime") as mock_datetime,
         ):
             mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
-            service._model.generate_content_async = AsyncMock(
-                side_effect=google_exceptions.ResourceExhausted("credits are depleted")
+            service._client.aio.models.generate_content = AsyncMock(
+                side_effect=api_error(429, "credits are depleted")
             )
 
             parsed = await service.parse_message(
@@ -264,14 +270,14 @@ class TestGeminiFallback:
         """Strict parsing goes first; Gemini is not called for what it reads."""
         service = GeminiService()
         with (
-            patch.object(service, "_model", MagicMock()),
+            patch.object(service, "_client", MagicMock()),
             patch("app.services.strict_parser.datetime") as mock_datetime,
         ):
             mock_datetime.now.return_value = datetime(2026, 10, 28, 12, 0)
-            service._model.generate_content_async = AsyncMock()
+            service._client.aio.models.generate_content = AsyncMock()
 
             parsed = await service.parse_message("book 11/6 at 9:38am")
-            service._model.generate_content_async.assert_not_awaited()
+            service._client.aio.models.generate_content.assert_not_awaited()
 
         assert parsed.intent == "book"
         assert parsed.tee_time_request is not None
@@ -288,13 +294,13 @@ class TestGeminiFallback:
         part = MagicMock(function_call=function_call)
         response = MagicMock()
         response.candidates = [MagicMock(content=MagicMock(parts=[part]))]
-        with patch.object(service, "_model", MagicMock()):
-            service._model.generate_content_async = AsyncMock(return_value=response)
+        with patch.object(service, "_client", MagicMock()):
+            service._client.aio.models.generate_content = AsyncMock(return_value=response)
 
             await service.parse_message(
                 "book 11/6 at 9:38am", context="Current state: awaiting_slot_choice"
             )
-            service._model.generate_content_async.assert_awaited_once()
+            service._client.aio.models.generate_content.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_in_a_conversation_gemini_failing_is_not_read_strictly(self) -> None:
@@ -305,11 +311,11 @@ class TestGeminiFallback:
         """
         service = GeminiService()
         with (
-            patch.object(service, "_model", MagicMock()),
+            patch.object(service, "_client", MagicMock()),
             patch("app.services.gemini_service.asyncio.sleep", AsyncMock()),
         ):
-            service._model.generate_content_async = AsyncMock(
-                side_effect=google_exceptions.ServiceUnavailable("overloaded")
+            service._client.aio.models.generate_content = AsyncMock(
+                side_effect=api_error(503, "overloaded")
             )
 
             parsed = await service.parse_message(
@@ -329,10 +335,10 @@ class TestGeminiFallback:
         part = MagicMock(function_call=function_call)
         response = MagicMock()
         response.candidates = [MagicMock(content=MagicMock(parts=[part]))]
-        with patch.object(service, "_model", MagicMock()):
-            service._model.generate_content_async = AsyncMock(return_value=response)
+        with patch.object(service, "_client", MagicMock()):
+            service._client.aio.models.generate_content = AsyncMock(return_value=response)
 
             parsed = await service.parse_message("how do I book?")
-            service._model.generate_content_async.assert_awaited_once()
+            service._client.aio.models.generate_content.assert_awaited_once()
 
         assert parsed.intent == "help"
