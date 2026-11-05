@@ -75,6 +75,23 @@ in definition, not in performance.
 **Per request, not per morning.** 2026-09-15 was two requests, both booked.
 2026-09-17 was three requests, all Miss. Per-morning counting loses both figures.
 
+**Last miss, added 2026-11-05.** The date of the most recent morning with at
+least one Miss, scanned across all-time rather than scoped to a window - a
+window-scoped search would make the date disappear the moment it aged out of
+frame, which is the wrong failure mode for a fact whose entire point is not
+going quiet. `null` when no Miss has ever been recorded; the page shows
+nothing in that case rather than an empty field.
+
+It is not a fourth figure. It is attached to whichever of the three existing
+figures' windows currently contains its date - last 4 weeks, prior 4 weeks, or
+all time, using the same window boundaries as the Outcome split above - and
+migrates from one to the next as it ages, rather than sitting on its own line.
+Which figure is carrying it is the staleness signal; a separate "days since"
+count would be redundant with it.
+
+**Source:** the same `race-report.jsonl` rows as the rest of this section;
+no new source. `operations/ledger/derive_scoreboard.py`'s `last_miss`.
+
 ## 2. Automation streak
 
 Consecutive successful runs across the Routines, counted back from the newest row

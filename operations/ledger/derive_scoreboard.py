@@ -229,6 +229,26 @@ def split(rows: list[Row]) -> Row:
     }
 
 
+def last_miss(races: list[Row], last_start: dt.date, prior_start: dt.date) -> Row | None:
+    """The most recent morning with at least one Miss, and which window holds it.
+
+    Scanned over all-time, not scoped to a window - the point is how long it
+    has been since a miss, which a window-scoped search would hide the moment
+    the last miss aged out of it. The window a date falls in uses the same
+    half-open boundaries as ``within``: a date is in last_4wk if it is after
+    last_start, prior_4wk if after prior_start, otherwise all_time.
+    """
+    missed = [
+        r for r in races if r["raced"] and any(req["outcome"] == "miss" for req in r["requests"])
+    ]
+    if not missed:
+        return None
+    worst = max(missed, key=lambda r: r["date"])
+    date = dt.date.fromisoformat(worst["date"])
+    window = "last_4wk" if date > last_start else "prior_4wk" if date > prior_start else "all_time"
+    return {"date": worst["date"], "window": window}
+
+
 def git_corrections(reports: list[str]) -> dict[str, str]:
     """Map each report modified after the commit that added it to a note.
 
@@ -434,6 +454,7 @@ def derive(rows: list[Row], now: dt.datetime, corrections: Corrections = git_cor
             "all_time": split(races),
             "last_4wk": split(within(last_start, as_of)),
             "prior_4wk": split(within(prior_start, last_start)),
+            "last_miss": last_miss(races, last_start, prior_start),
         },
         "streak": walk(rows, now, corrections),
         "cost": cost_board(rows, races),
