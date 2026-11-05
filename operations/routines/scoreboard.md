@@ -109,6 +109,26 @@ out an hour earlier.
    includes the append failing, and a source that previously worked having stopped
    — a silent gap is the one failure mode this Routine exists to prevent.
 
+### The Tests check-run view can lag the real job
+
+Observed two mornings running. On 2026-11-04 and 2026-11-05, the scoreboard PR's
+`test` job had already completed with `conclusion: success` well before
+`pull_request_read`'s check-run view stopped reporting it as `in_progress` - on
+2026-11-05 the job finished at 15:22:45Z (it ran for about five minutes, same as
+other mornings) but the check-run view still showed `in_progress` past the
+roughly 15-minute poll budget. Both mornings the run wrote `ok:false`, left the
+PR open, and the maintainer ended up merging it by hand.
+
+Established: the job itself ran and passed quickly both times, and `actions_get`
+method `get_workflow_job`, queried directly against the job ID, showed the
+correct, already-completed state when the check-run view still did not. Not
+established: whether this is a GitHub platform lag or specific to this one tool
+path, since no other polling method has been tried on a morning this happened.
+
+The fix, in Step 4 below: near the end of the poll window, check the job
+directly through `actions_list`/`actions_get` rather than trusting the
+check-run view alone, and treat that direct result as authoritative.
+
 ### It publishes every run, not only when something changed
 
 An earlier draft had a "if nothing changed, append and stop without publishing"
@@ -210,18 +230,26 @@ morning since 2026-10-01. What remains:
 
 ## The prompt
 
-**Status: in the trigger, with one paste pending (Step 2, below).** This file is
+**Status: in the trigger, with pastes pending for Step 2 (below), the Step 4 fix
+for the Tests check-run lag, and the square-bracket placeholder rewrite below
+that replaced every `<...>` in this prompt after the 2026-11-06 paste dropped
+them all.** This file is
 the source; the trigger holds the copy that executes. Change this file in a PR
 first, then update the Routine to match. The maintainer created it in the UI, so
 treat it like the race report's: an agent should not expect to edit it.
 
-**The routines UI reads a pasted prompt as markdown.** Two effects, both seen on
-the first paste (2026-10-04): a pair of `*` is taken as emphasis and deleted,
-which turned `"$B/race-report/*.json"` into `"$B/race-report/.json"` and would
-have failed every run; and single line breaks are joined, so three commands on
-consecutive lines became one. So the prompt below has no wildcards and puts
-each command in its own paragraph. Keep it that way, and compare the live text
-with this file *including* `*` after any paste.
+**The routines UI reads a pasted prompt as markdown.** Three effects seen so
+far. On the first paste (2026-10-04): a pair of `*` is taken as emphasis and
+deleted, which turned `"$B/race-report/*.json"` into `"$B/race-report/.json"`
+and would have failed every run; and single line breaks are joined, so three
+commands on consecutive lines became one. On the 2026-11-06 paste: every
+`<...>`-bracketed placeholder (`<YYYY-MM-DD>`, `<N>`, and the rest) was silently
+dropped, read as an unrecognized HTML tag - every date, count and message
+template in the prompt came out blank. So the prompt below has no wildcards,
+puts each command in its own paragraph, and marks its placeholders with square
+brackets (`[YYYY-MM-DD]`) rather than angle brackets. Keep it that way, and
+compare the live text with this file *including* `*` and every `[...]` after
+any paste.
 
 Settings, as created: the race report's environment and repository, model
 `claude-sonnet-5-5`, tools Bash, Read, Write, Edit, Glob, Grep, WebFetch,
@@ -247,13 +275,13 @@ Writing your ledger row to GCS is not a repository write and is covered by its o
 Rule that applies to every path through this prompt: always write your ledger row
 Before you finish, record this run as one new object, never an edit of an existing one:
 
-gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard/<YYYY-MM-DD>.json
+gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard/[YYYY-MM-DD].json
 
-named for the run date in Central Time, written with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them; if the object already exists, say so in the notification rather than forcing it, and do not write under an alternate name instead: that object already is the day's record (operations/ledger/README.md, "A same-day rerun does not get a second row"). On a run that derived, the row is the file the script writes with --row (Step 3). On any other path it is {"date":"<run date CT>","routine":"scoreboard","ok":false,"note":"<what failed>"}. The schema is in operations/ledger/README.md under scoreboard.jsonl.
+named for the run date in Central Time, written with gcloud storage cp --no-clobber. The service account can create objects under operations/ and cannot overwrite them; if the object already exists, say so in the notification rather than forcing it, and do not write under an alternate name instead: that object already is the day's record (operations/ledger/README.md, "A same-day rerun does not get a second row"). On a run that derived, the row is the file the script writes with --row (Step 3). On any other path it is {"date":"[run date CT]","routine":"scoreboard","ok":false,"note":"[what failed]"}. The schema is in operations/ledger/README.md under scoreboard.jsonl.
 
 Rule that applies to every path through this prompt: notify on a change or a failure, and only then
 
-If the PushNotification tool is available, call it when a source metric changed, when the streak broke, or when anything failed - including the ledger write, and a PR that could not merge. Do not notify on a run where only the streak moved: it moves by one every day, and that is not news. Write it for a phone screen, verdict first, one or two sentences, no markdown. Shapes: Scoreboard - outcome changed: 26 of 32 booked all time, PR #260 merged. / Scoreboard - streak broke: race-report missing on 10/07. PR #261 merged. / Scoreboard could not publish - Tests failed on PR #262, left open. / Scoreboard could not run - derive_scoreboard.py: invalid ledger row: <message>. If PushNotification is not available, which is the case in this Routine as deployed, end the session with that one line as your final message instead - the Routine's own notification carries it. On a run where only the streak moved, that line is: Scoreboard - no change, streak <N>, PR #<n> merged.
+If the PushNotification tool is available, call it when a source metric changed, when the streak broke, or when anything failed - including the ledger write, and a PR that could not merge. Do not notify on a run where only the streak moved: it moves by one every day, and that is not news. Write it for a phone screen, verdict first, one or two sentences, no markdown. Shapes: Scoreboard - outcome changed: 26 of 32 booked all time, PR #260 merged. / Scoreboard - streak broke: race-report missing on 10/07. PR #261 merged. / Scoreboard could not publish - Tests failed on PR #262, left open. / Scoreboard could not run - derive_scoreboard.py: invalid ledger row: [the script's message]. If PushNotification is not available, which is the case in this Routine as deployed, end the session with that one line as your final message instead - the Routine's own notification carries it. On a run where only the streak moved, that line is: Scoreboard - no change, streak [N], PR #[n] merged.
 
 Step 1 - set up
 Establish today's date and time in Central Time: TZ=America/Chicago date '+%F %H:%M'. If mcp__Claude_Code_Remote__set_session_title is available, name the session MM/DD Scoreboard with it; if not, skip this.
@@ -286,12 +314,16 @@ python operations/ledger/derive_scoreboard.py ledger/race-report ledger/scoreboa
 
 Do not pass --now or --as-of; the script reads the clock. It validates every row before deriving anything. If it exits non-zero, publish nothing: do not hand-edit the JSON, do not edit the script, and do not drop the row it names. Write the ok:false ledger row with its message as the note, notify, and stop. A refusal is the script working - it is what stops a malformed row or a shallow clone from becoming a published number.
 
-It prints up to two lines on stderr. "source metrics changed: none", or the ones that moved - that decides the notification. "last break: <date> <routine>: <status>: <note>" when the streak has ever broken - compare its date with streak.last_failure in the previous docs/scoreboard.json (git show HEAD:docs/scoreboard.json); a newer date means the streak broke since the last publish, which is a notification. The note is for the notification and this session only; it is not on the page and must not go into the PR.
+It prints up to two lines on stderr. "source metrics changed: none", or the ones that moved - that decides the notification. "last break: [date] [routine]: [status]: [note]" when the streak has ever broken - compare its date with streak.last_failure in the previous docs/scoreboard.json (git show HEAD:docs/scoreboard.json); a newer date means the streak broke since the last publish, which is a notification. The note is for the notification and this session only; it is not on the page and must not go into the PR.
 
 Step 4 - publish
-Publish every run: the streak moves every run, so something always changed. git checkout -b scoreboard/<YYYY-MM-DD>, add only docs/scoreboard.json, commit as "Scoreboard for <YYYY-MM-DD>", push, and open a normal (non-draft) PR into main whose body is one line: the streak, and requests booked of total all time. Wait for the Tests check on the PR's head commit - poll every 30-60s, up to about 15 minutes; it installs Chrome, so it is slow. Do not wait on CodeRabbit. If Tests is green and the PR merges cleanly, squash-merge it. If Tests fails or it cannot merge, leave it open and do not touch anything else to fix it; set "ok" to false in scoreboard-row.json and add a "note" naming the PR and why it did not merge. If an earlier scoreboard PR is still open, leave it alone and mention it in the notification.
+Publish every run: the streak moves every run, so something always changed. git checkout -b scoreboard/[YYYY-MM-DD], add only docs/scoreboard.json, commit as "Scoreboard for [YYYY-MM-DD]", push, and open a normal (non-draft) PR into main whose body is one line: the streak, and requests booked of total all time. Wait for the Tests check on the PR's head commit - poll pull_request_read method get_check_runs every 30-60s, up to about 15 minutes; it installs Chrome, so it is slow. Do not wait on CodeRabbit.
+
+That check-run view has been seen lagging well behind the real job - twice, on 2026-11-04 and 2026-11-05, it kept reporting the test job as in_progress for the whole poll window after the job had actually finished and passed. So before writing the PR off as stuck, once the poll window is nearly spent: call actions_list method list_workflow_runs filtered to the PR's branch to find the newest run, then actions_get method get_workflow_job on its jobs to read their status and conclusion directly. Treat that direct result as authoritative over the check-run view - if it shows the job already completed, act on that conclusion (merge on success, leave the PR open on failure) instead of concluding Tests never finished.
+
+If Tests is green and the PR merges cleanly, squash-merge it. If Tests fails or it cannot merge, leave it open and do not touch anything else to fix it; set "ok" to false in scoreboard-row.json and add a "note" naming the PR and why it did not merge. If an earlier scoreboard PR is still open, leave it alone and mention it in the notification.
 
 Step 5 - write the ledger row, notify if the rule above says to, and stop
-gcloud storage cp --no-clobber scoreboard-row.json gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard/<YYYY-MM-DD>.json
+gcloud storage cp --no-clobber scoreboard-row.json gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/scoreboard/[YYYY-MM-DD].json
 
 One retry, then report the failure rather than losing it. Then stop. Everything else is ask-first: if the derivation or a ledger row looks wrong, describe it in the session and the notification, and leave the fix to the maintainer.
