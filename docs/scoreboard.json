@@ -1,21 +1,21 @@
 {
   "sample": false,
-  "generated": "2026-11-04T13:34:36Z",
+  "generated": "2026-11-05T15:16:09Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
     "first": "2026-08-13",
     "last": "2026-09-27",
-    "routine_rows": 35,
-    "routine_raced": 11,
+    "routine_rows": 36,
+    "routine_raced": 12,
     "source": "operations/ledger/backfill/race-report.jsonl"
   },
   "outcome": {
     "all_time": {
-      "mornings": 34,
-      "booked": 45,
+      "mornings": 35,
+      "booked": 46,
       "miss": 7,
-      "exact": 39,
+      "exact": 40,
       "fallback": 6
     },
     "last_4wk": {
@@ -36,15 +36,15 @@
   "streak": {
     "available": true,
     "reason": null,
-    "consecutive": 5,
-    "unverified": 5,
-    "total_ok": 63,
-    "last_failure": "2026-11-01",
+    "consecutive": 0,
+    "unverified": 0,
+    "total_ok": 65,
+    "last_failure": "2026-11-05",
     "last_failure_reason": "scoreboard: failed",
     "by_routine": {
-      "race-report": 26,
-      "scoreboard": 2,
-      "cost": null,
+      "race-report": 27,
+      "scoreboard": 0,
+      "cost": 1,
       "tech-debt": 0,
       "feature-dev": 2
     },
@@ -56,28 +56,26 @@
       1,
       17,
       4,
-      4
+      4,
+      5,
+      2
     ],
     "window": {
       "first": "2026-10-01",
-      "last": "2026-11-04"
+      "last": "2026-11-05"
     }
   },
   "cost": {
-    "month": "2026-09",
-    "usd": 37.17,
-    "usd_per_booking": 1.96,
-    "bookings": 19,
+    "month": "2026-10",
+    "usd": 21.2,
+    "usd_per_booking": 1.18,
+    "bookings": 18,
     "scope": "gcp_only",
     "available": true,
     "reason": null,
-    "prior_month": "2026-08",
-    "prior_usd": 71.18,
+    "prior_month": "2026-09",
+    "prior_usd": 37.17,
     "history": [
-      {
-        "month": "2025-10",
-        "usd": null
-      },
       {
         "month": "2025-11",
         "usd": null
@@ -121,6 +119,10 @@
       {
         "month": "2026-09",
         "usd": 37.17
+      },
+      {
+        "month": "2026-10",
+        "usd": 21.2
       }
     ]
   }
