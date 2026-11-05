@@ -1,6 +1,6 @@
 {
   "sample": false,
-  "generated": "2026-11-05T13:34:58Z",
+  "generated": "2026-11-05T15:16:09Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
@@ -36,10 +36,10 @@
   "streak": {
     "available": true,
     "reason": null,
-    "consecutive": 2,
-    "unverified": 2,
+    "consecutive": 0,
+    "unverified": 0,
     "total_ok": 65,
-    "last_failure": "2026-11-04",
+    "last_failure": "2026-11-05",
     "last_failure_reason": "scoreboard: failed",
     "by_routine": {
       "race-report": 27,
@@ -57,7 +57,8 @@
       17,
       4,
       4,
-      5
+      5,
+      2
     ],
     "window": {
       "first": "2026-10-01",
