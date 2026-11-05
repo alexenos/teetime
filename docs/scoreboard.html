@@ -299,7 +299,8 @@
     rows.push(["Fallback, all time", at.fallback]);
     rows.push(["Race mornings, all time", at.mornings]);
     var WINDOW_LABEL = { last_4wk: "last 4 weeks", prior_4wk: "prior 4 weeks", all_time: "all time" };
-    rows.push(["Last miss", lm ? fmtDateShort(lm.date) + " (" + WINDOW_LABEL[lm.window] + ")" : "none recorded"]);
+    rows.push(["Last miss", !("last_miss" in o) ? "not available"
+      : lm ? fmtDateShort(lm.date) + " (" + WINDOW_LABEL[lm.window] + ")" : "none recorded"]);
 
     // ---- 2. Streak ----
     var s = d.streak;
