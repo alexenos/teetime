@@ -231,6 +231,59 @@ def test_outcome_split_counts_backfill_and_routine_races_but_not_quiet_mornings(
     assert board["backfill"]["routine_raced"] == 1
 
 
+def test_last_miss_is_none_when_there_has_never_been_one() -> None:
+    board = _board([_raced(RACE_START)], NOW)
+    assert board["outcome"]["last_miss"] is None
+
+
+def test_last_miss_picks_the_most_recent_one_and_tags_its_window() -> None:
+    as_of = RACE_START + dt.timedelta(days=100)
+    rows = [
+        _raced(as_of - dt.timedelta(days=70), "miss"),  # older, must be ignored
+        _raced(as_of - dt.timedelta(days=5), "miss"),  # the actual most recent
+        _raced(as_of),
+    ]
+    board = _board(rows, _ct(as_of, 7, 30))
+    assert board["outcome"]["last_miss"] == {
+        "date": (as_of - dt.timedelta(days=5)).isoformat(),
+        "window": "last_4wk",
+    }
+
+
+def test_last_miss_in_the_prior_4_week_window() -> None:
+    as_of = RACE_START + dt.timedelta(days=100)
+    miss_day = as_of - dt.timedelta(days=40)  # 28 < 40 <= 56: prior_4wk
+    board = _board([_raced(miss_day, "miss"), _raced(as_of)], _ct(as_of, 7, 30))
+    assert board["outcome"]["last_miss"] == {"date": miss_day.isoformat(), "window": "prior_4wk"}
+
+
+def test_last_miss_older_than_both_windows_is_all_time() -> None:
+    as_of = RACE_START + dt.timedelta(days=100)
+    miss_day = as_of - dt.timedelta(days=70)  # > 56: outside both windows
+    board = _board([_raced(miss_day, "miss"), _raced(as_of)], _ct(as_of, 7, 30))
+    assert board["outcome"]["last_miss"] == {"date": miss_day.isoformat(), "window": "all_time"}
+
+
+def test_last_miss_migrates_across_windows_as_time_passes_without_a_new_miss() -> None:
+    miss_day = RACE_START + dt.timedelta(days=100)
+    rows = [_raced(miss_day, "miss")]
+
+    soon_after = _board(rows, _ct(miss_day + dt.timedelta(days=5), 7, 30))
+    assert soon_after["outcome"]["last_miss"]["window"] == "last_4wk"
+
+    a_month_later = _board(rows, _ct(miss_day + dt.timedelta(days=40), 7, 30))
+    assert a_month_later["outcome"]["last_miss"]["window"] == "prior_4wk"
+
+    much_later = _board(rows, _ct(miss_day + dt.timedelta(days=70), 7, 30))
+    assert much_later["outcome"]["last_miss"]["window"] == "all_time"
+
+    # The migration is time passing, not new data - changed_sources must not
+    # treat it as a source metric that moved (same rule as the 4-week windows
+    # themselves, which slide daily without being news).
+    assert ds.changed_sources(soon_after, a_month_later) == []
+    assert ds.changed_sources(a_month_later, much_later) == []
+
+
 def test_changed_sources_ignores_the_streak_and_the_sliding_window() -> None:
     days = _days(2)
     a = ds.derive([_raced(days[0])], _ct(days[0], 7, 30), _no_corrections)

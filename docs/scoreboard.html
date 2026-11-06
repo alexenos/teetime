@@ -199,6 +199,15 @@
         { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     } catch (e) { return iso; }
   };
+  // A bare YYYY-MM-DD has no timezone, so new Date(iso) reads it as UTC
+  // midnight - a negative-UTC-offset browser would then print the day
+  // before. Build the local date from the parts instead.
+  var fmtDateShort = function (iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+    if (!m) { return iso; }
+    var d = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+    return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  };
 
   // "2026-09" -> "Sep". Fixed names, so the label does not depend on locale or timezone.
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -248,13 +257,23 @@
     var l4t = l4.booked + l4.miss, p4t = p4.booked + p4.miss, at_t = at.booked + at.miss;
     var rNow = pct(l4.booked, l4t), rPrev = pct(p4.booked, p4t), rate = pct(at.booked, at_t);
 
+    // The most recent Miss, tagged with whichever window currently holds its
+    // date. It migrates from the last-4-weeks line to the prior-4-weeks line
+    // to the all-time line as it ages, rather than its own separate line -
+    // which window is carrying it is itself the staleness signal.
+    var lm = o.last_miss;
+    var lastMissClause = function (window) {
+      return (lm && lm.window === window) ? (", last miss " + fmtDateShort(lm.date)) : "";
+    };
+
     $("rate-hero").textContent = rNow === null ? "No data" : rNow + "%";
     var trend = (rNow === null || rPrev === null) ? null : rNow - rPrev;
     $("rate-trend").innerHTML = trend === null ? ""
       : deltaEl(trend, true) + ' <span class="nodata">vs prior 4 weeks</span>';
     $("rate-sub").textContent = l4t === 0
       ? "No requests in the last 4 weeks."
-      : l4.booked + " of " + l4t + " requests booked, across " + l4.mornings + " race mornings.";
+      : l4.booked + " of " + l4t + " requests booked, across " + l4.mornings + " race mornings"
+        + (lastMissClause("last_4wk") || ".");
     $("rate-meter").style.width = (rNow || 0) + "%";
     $("rate-meter-wrap").setAttribute("aria-label",
       rNow === null ? "No data" : rNow + " percent of requests booked in the last 4 weeks");
@@ -268,9 +287,9 @@
         + '<div class="nodata" style="margin-top:6px">' + w.booked + " of " + t + " booked, "
         + w.mornings + " mornings" + (extra || "") + '</div></div>';
     }
-    $("prior-win").innerHTML = winEl("Prior 4 weeks", rPrev, p4, p4t);
+    $("prior-win").innerHTML = winEl("Prior 4 weeks", rPrev, p4, p4t, lastMissClause("prior_4wk"));
     $("all-win").innerHTML = winEl("All time", rate, at, at_t,
-      " (" + at.exact + " exact, " + at.fallback + " fallback)");
+      " (" + at.exact + " exact, " + at.fallback + " fallback)" + lastMissClause("all_time"));
 
     rows.push(["Requests booked, last 4 weeks", l4.booked + " of " + l4t]);
     rows.push(["Trend, last 4 weeks vs prior", trend === null ? "—" : (trend > 0 ? "+" : "") + trend + " pts"]);
@@ -279,6 +298,9 @@
     rows.push(["Exact, all time", at.exact]);
     rows.push(["Fallback, all time", at.fallback]);
     rows.push(["Race mornings, all time", at.mornings]);
+    var WINDOW_LABEL = { last_4wk: "last 4 weeks", prior_4wk: "prior 4 weeks", all_time: "all time" };
+    rows.push(["Last miss", !("last_miss" in o) ? "not available"
+      : lm ? fmtDateShort(lm.date) + " (" + WINDOW_LABEL[lm.window] + ")" : "none recorded"]);
 
     // ---- 2. Streak ----
     var s = d.streak;
