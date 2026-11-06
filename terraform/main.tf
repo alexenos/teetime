@@ -48,13 +48,11 @@ locals {
     "TELEGRAM_WEBHOOK_SECRET",
   ]
 
-  # Gated the same way as the channel secrets below: CREDENTIAL_ENCRYPTION_KEY
-  # (issue #179) is added incrementally as friends are onboarded, not at first
-  # deploy, so it must not be an unconditional runtime dependency - a Cloud
-  # Run revision referencing a secret with no version fails to deploy.
-  credential_secrets = [
-    "CREDENTIAL_ENCRYPTION_KEY",
-  ]
+  # CREDENTIAL_ENCRYPTION_KEY (issue #179) is gone: member logins are encrypted
+  # with the Cloud KMS key in terraform/kms.tf, which nobody holds (#242).
+  # Dropping it from `secrets` below deletes the secret and its versions, which
+  # is the point - see "Moving logins to the KMS key" in
+  # operations/credential-encryption.md for what had to be true first.
 
   # Gated for the same reason, and deliberately NOT folded into
   # telegram_secrets: those already have versions and Telegram is live, so
@@ -89,14 +87,13 @@ locals {
     "WALDEN_PASSWORD",
     "SCHEDULER_API_KEY",
     "USER_PHONE_NUMBER",
-  ], local.discord_secrets, local.telegram_secrets, local.credential_secrets, local.admin_proxy_secrets, local.group_access_secrets)
+  ], local.discord_secrets, local.telegram_secrets, local.admin_proxy_secrets, local.group_access_secrets)
 
   # Credentials for a channel (or optional feature) that is switched off.
   # Each is withheld independently of the others.
   disabled_channel_secrets = concat(
     var.messaging_channel == "discord" ? [] : local.discord_secrets,
     var.telegram_enabled ? [] : local.telegram_secrets,
-    var.credential_store_enabled ? [] : local.credential_secrets,
     var.admin_proxy_enabled ? [] : local.admin_proxy_secrets,
     var.telegram_group_access_enabled ? [] : local.group_access_secrets,
   )
@@ -244,14 +241,14 @@ resource "google_cloud_run_v2_service" "teetime" {
     }
 
     precondition {
-      condition     = !var.admin_proxy_enabled || var.credential_store_enabled
+      condition     = !var.admin_proxy_enabled || var.credential_kms_enabled
       error_message = join(" ", [
-        "admin_proxy_enabled=true requires credential_store_enabled=true.",
+        "admin_proxy_enabled=true requires credential_kms_enabled=true.",
         "Proxy booking resolves its target from the per-friend credential",
         "store and then books under that friend's login, so without",
-        "CREDENTIAL_ENCRYPTION_KEY mounted every proxy booking fails when it",
-        "tries to decrypt one - and it fails at 06:30, days after the booking",
-        "was accepted, because nothing decrypts until the attempt runs.",
+        "CREDENTIAL_KMS_KEY every proxy booking fails when it tries to",
+        "decrypt one - and it fails at 06:30, days after the booking was",
+        "accepted, because nothing decrypts until the attempt runs.",
         "There is deliberately no shared-account fallback on this path.",
       ])
     }
