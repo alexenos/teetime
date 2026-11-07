@@ -100,12 +100,29 @@ class TestWaldenProviderParseTime:
 class TestWaldenProviderCredentials:
     """Tests for credentials validation."""
 
+    @pytest.mark.parametrize(
+        ("member_number", "password"),
+        [("", ""), ("test_member", ""), ("", "test_password")],
+    )
     def test_init_logs_warning_without_credentials(
-        self, provider: WaldenGolfProvider, caplog: pytest.LogCaptureFixture
+        self, member_number: str, password: str, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Test that init logs a warning if credentials are not configured."""
-        if not os.getenv("WALDEN_MEMBER_NUMBER") or not os.getenv("WALDEN_PASSWORD"):
-            assert "credentials not configured" in caplog.text.lower() or True
+        """A provider built with a missing credential warns that it is not configured.
+
+        Credentials are constructor arguments (#179), so the provider is built here,
+        inside caplog, rather than read from the environment.
+        """
+        with caplog.at_level(logging.WARNING, logger="app.providers.walden_provider"):
+            WaldenGolfProvider(member_number, password)
+
+        assert "credentials not configured" in caplog.text.lower()
+
+    def test_init_does_not_warn_with_credentials(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A provider built with both credentials logs no configuration warning."""
+        with caplog.at_level(logging.WARNING, logger="app.providers.walden_provider"):
+            WaldenGolfProvider("test_member", "test_password")
+
+        assert "credentials not configured" not in caplog.text.lower()
 
 
 @pytest.mark.skipif(
