@@ -3277,19 +3277,21 @@ class TestImmediateBookingDoesNotBlockReply:
 
     @pytest.mark.asyncio
     async def test_background_attempt_crash_is_contained(
-        self, booking_service: BookingService
+        self, booking_service: BookingService, caplog: pytest.LogCaptureFixture
     ) -> None:
         """An exception in the background attempt is logged, not left unretrieved."""
         with patch.object(
-            booking_service, "execute_booking", new=AsyncMock(side_effect=RuntimeError("boom"))
+            booking_service, "_run_bookings_batch", new=AsyncMock(side_effect=RuntimeError("boom"))
         ):
-            booking_service._spawn_booking_execution("orphan01")
+            booking_service._spawn_bookings_batch_execution(["orphan01"])
             assert booking_service._background_tasks
 
             # Must not raise, and must not leave the task result unretrieved.
-            await booking_service.wait_for_background_bookings()
+            with caplog.at_level(logging.ERROR):
+                await booking_service.wait_for_background_bookings()
 
         assert not booking_service._background_tasks
+        assert "Background batch booking execution failed for ['orphan01']" in caplog.text
 
     @pytest.mark.asyncio
     async def test_shutdown_wait_cancels_a_hung_attempt(
@@ -3301,12 +3303,11 @@ class TestImmediateBookingDoesNotBlockReply:
         provider, and Cloud Run allows only seconds between SIGTERM and SIGKILL.
         """
 
-        async def never_finishes(_booking_id: str) -> bool:
+        async def never_finishes(_booking_ids: list[str]) -> None:
             await asyncio.Event().wait()
-            return True
 
-        with patch.object(booking_service, "execute_booking", new=never_finishes):
-            booking_service._spawn_booking_execution("hung01")
+        with patch.object(booking_service, "_run_bookings_batch", new=never_finishes):
+            booking_service._spawn_bookings_batch_execution(["hung01"])
 
             await booking_service.wait_for_background_bookings(timeout=0.05)
 
@@ -3320,13 +3321,12 @@ class TestImmediateBookingDoesNotBlockReply:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def slow_execute(_booking_id: str) -> bool:
+        async def slow_execute(_booking_ids: list[str]) -> None:
             started.set()
             await release.wait()
-            return True
 
-        with patch.object(booking_service, "execute_booking", new=slow_execute):
-            booking_service._spawn_booking_execution("orphan01")
+        with patch.object(booking_service, "_run_bookings_batch", new=slow_execute):
+            booking_service._spawn_bookings_batch_execution(["orphan01"])
             await started.wait()
             assert len(booking_service._background_tasks) == 1
 

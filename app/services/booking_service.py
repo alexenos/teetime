@@ -2506,27 +2506,6 @@ class BookingService:
 
         return created_booking
 
-    def _spawn_booking_execution(self, booking_id: str) -> None:
-        """Run execute_booking as a tracked background task."""
-        task = asyncio.create_task(
-            self._execute_booking_in_background(booking_id),
-            name=f"execute-booking-{booking_id}",
-        )
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-    async def _execute_booking_in_background(self, booking_id: str) -> None:
-        """Execute a booking, ensuring failures are logged rather than swallowed.
-
-        execute_booking already reports its own outcome to the user and records
-        it on the booking row. This wrapper only guards against an exception
-        escaping into an unretrieved task result, where it would vanish silently.
-        """
-        try:
-            await self.execute_booking(booking_id)
-        except Exception:
-            logger.exception("Background booking execution failed for %s", booking_id)
-
     def _spawn_bookings_batch_execution(self, booking_ids: list[str]) -> None:
         """Run several already-open bookings as one tracked background task."""
         task = asyncio.create_task(
@@ -2539,9 +2518,9 @@ class BookingService:
     async def _execute_bookings_batch_in_background(self, booking_ids: list[str]) -> None:
         """Attempt a set of bookings in one session, ensuring failures are logged.
 
-        Mirrors _execute_booking_in_background: the work itself reports its own
-        outcomes, and this wrapper only stops an exception from escaping into an
-        unretrieved task result, where it would vanish silently.
+        The work itself reports its own outcomes; this wrapper only stops an
+        exception from escaping into an unretrieved task result, where it would
+        vanish silently.
         """
         try:
             await self._run_bookings_batch(booking_ids)
@@ -3042,7 +3021,7 @@ class BookingService:
         # the synchronous attribute check this replaced. It runs inside the
         # same try/except as the booking attempt itself so a lookup failure is
         # reported to the user like any other booking failure, instead of
-        # escaping to _execute_booking_in_background's bare log-and-swallow.
+        # escaping to the caller as an unreported exception.
         provider: ReservationProvider | None = None
         attempt_started = datetime.now(UTC).replace(tzinfo=None)
         try:
