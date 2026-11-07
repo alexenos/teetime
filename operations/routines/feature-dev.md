@@ -5,7 +5,8 @@ fire Saturday 2026-10-24 at 08:00 CT.** This file is the specification and the s
 of the prompt. The prompt reads it from `main`, so it must stay there: if it is
 missing the run stops and records `ok: false`. The live prompt text was compared with
 the prompt below through the triggers API on 2026-10-20 and is identical. Scope
-approved 2026-10-17, label-free design 2026-10-18; the prompt has not yet run.
+approved 2026-10-17, label-free design 2026-10-18. First ran 2026-10-24; the ledger
+holds rows for 2026-10-24, 2026-10-31 and 2026-11-07.
 
 | | |
 |---|---|
@@ -307,8 +308,8 @@ No design decisions are open.
 Paste everything inside the fence. Like the other prompts it avoids paired asterisks,
 which the routines UI would read as markdown, and keeps a blank line between every
 two lines, because the UI joins single line breaks. Compare the live text after
-pasting. **Drafted 2026-10-17, revised 2026-10-18; not pasted anywhere, and not yet
-run.**
+pasting. **Drafted 2026-10-17, revised 2026-10-18; pasted into the trigger by 2026-10-20
+(compared then, see Status), first run 2026-10-24.**
 
 ```
 You are running the weekly feature-development Routine for the TeeTime booking bot. You start with zero context; everything you need is in this repo. Read operations/routines/feature-dev.md first: it is the specification, and it governs where this prompt is silent. Then read operations/routines/tech-debt.md, sections CodeRabbit review, Every issue and every PR carries risk and verification, and The member-name check, which this Routine follows unchanged. If either file does not exist, write the ledger row with ok false and the note spec missing, notify, and stop.

@@ -253,7 +253,7 @@ appended ledger line, so what changed is visible in the diff rather than buried 
 a re-rendered page.
 
 Specified in `operations/routines/scoreboard.md` and
-`operations/routines/cost.md`. The scoreboard is deployed; the cost Routine is not.
+`operations/routines/cost.md`. Both are deployed; the cost Routine's first run was 2026-11-05.
 
 ## Current state
 
