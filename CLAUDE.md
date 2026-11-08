@@ -137,8 +137,8 @@ UTC (`operations/routines/tech-debt.md`), and cost, monthly on the 5th
 (`operations/routines/cost.md`; created 2026-10-09, `CRON_TZ=America/Chicago 0 5 5 * *`,
 first run 2026-11-05). Tech debt never
 merges; it files issues and opens a PR you merge. Feature dev ranks the backlog and builds one eligible issue
-(`operations/routines/feature-dev.md`, Saturdays 08:00 CT, created 2026-10-19, not yet
-run; its priorities are in that file, under "Choosing what to build"); it never
+(`operations/routines/feature-dev.md`, Saturdays 08:00 CT, created 2026-10-19, first
+run 2026-10-24; its priorities are in that file, under "Choosing what to build"); it never
 merges either. Auto-fix is on for the tech-debt and feature-dev triggers, so the app
 may push fixes to their PR branches after the run. The race report and scoreboard
 crons move an hour on 2026-11-01, and so does tech debt's (04:00 CDT becomes 03:00

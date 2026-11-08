@@ -7,7 +7,6 @@ designed for database persistence.
 """
 
 import logging
-from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
 
@@ -334,11 +333,6 @@ engine = create_async_engine(
 )
 
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
-        yield session
 
 
 # Columns added after the initial deployment, as (table, column, SQL type).
