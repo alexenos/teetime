@@ -132,3 +132,13 @@ def test_malformed_payload_is_a_failed_read_not_a_test_failure() -> None:
 def test_non_object_payload_is_a_failed_read() -> None:
     clock = Clock(SINCE)
     assert _wait(lambda url: [], clock, max_wait=60) == 4
+
+
+def test_null_workflow_runs_is_a_failed_read_not_an_empty_listing() -> None:
+    clock = Clock(SINCE)
+    assert _wait(lambda url: {"workflow_runs": None}, clock, max_wait=60) == 4
+
+
+def test_reads_failing_until_the_budget_is_spent_exits_4_not_2() -> None:
+    clock = Clock(SINCE + dt.timedelta(minutes=24))
+    assert _wait(_fetch_sequence(urllib.error.URLError("down")), clock) == 4

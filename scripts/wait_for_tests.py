@@ -80,7 +80,7 @@ def newest_run(payload: dict[str, Any]) -> dict[str, Any] | None:
     """
     if not isinstance(payload, dict):
         raise ValueError("Actions API payload is not an object")
-    runs: list[dict[str, Any]] = payload.get("workflow_runs") or []
+    runs: list[dict[str, Any]] = payload.get("workflow_runs", [])
     if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
         raise ValueError("Actions API workflow_runs is not a list of objects")
     if not runs:
@@ -132,6 +132,9 @@ def wait(
             print(f"FAILED ({run.get('conclusion')}): {run.get('html_url')}")
             return 1
         if current >= deadline:
+            if not read_ok:
+                print("CANNOT CHECK: every read in this call failed, and the budget is spent")
+                return 4
             print(
                 f"TIMED OUT: still unfinished at {current:%H:%M:%SZ}, "
                 f"{elapsed // 60} min after the PR opened (budget {budget})"
