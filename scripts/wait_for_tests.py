@@ -30,10 +30,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import http.client
 import json
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable
 from typing import Any
@@ -53,6 +53,7 @@ def parse_time(value: str) -> dt.datetime:
 
 
 def fetch_json(url: str) -> dict[str, Any]:
+    """GET a GitHub API URL and decode its JSON body."""
     request = urllib.request.Request(
         url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "wait-for-tests"},
@@ -63,6 +64,7 @@ def fetch_json(url: str) -> dict[str, Any]:
 
 
 def runs_url(sha: str) -> str:
+    """The Actions API listing of Tests runs for one commit, from pull_request events."""
     return (
         f"https://api.github.com/repos/{REPO}/actions/workflows/{WORKFLOW}/runs"
         f"?head_sha={sha}&event=pull_request&per_page=10"
@@ -70,14 +72,24 @@ def runs_url(sha: str) -> str:
 
 
 def newest_run(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """The most recently created run in a runs listing, or None when there is none."""
+    """The most recently created run in a runs listing, or None when there is none.
+
+    Raises ValueError on a payload of the wrong shape, so that ``wait`` treats it
+    as a failed read (exit 4) rather than crashing with exit 1, which a caller
+    would read as "Tests failed".
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("Actions API payload is not an object")
     runs: list[dict[str, Any]] = payload.get("workflow_runs") or []
+    if not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs):
+        raise ValueError("Actions API workflow_runs is not a list of objects")
     if not runs:
         return None
     return max(runs, key=lambda run: str(run.get("created_at", "")))
 
 
 def describe(run: dict[str, Any] | None) -> str:
+    """One log line's worth of a run's state."""
     if run is None:
         return "no Tests run for this commit yet"
     return (
@@ -96,6 +108,10 @@ def wait(
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
+    """Poll until Tests finishes, the budget is spent, or this call's wait runs out.
+
+    Returns the exit status documented in the module docstring.
+    """
     deadline = since + budget
     call_ends = now() + dt.timedelta(seconds=max_wait)
     read_ok = False
@@ -104,7 +120,7 @@ def wait(
         try:
             run = newest_run(fetch(runs_url(sha)))
             read_ok = True
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        except (OSError, http.client.HTTPException, ValueError) as exc:
             run = None
             print(f"{current:%H:%M:%SZ} could not read the Actions API: {exc}", flush=True)
         elapsed = int((current - since).total_seconds())
@@ -134,6 +150,7 @@ def wait(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments and run ``wait``."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--sha", required=True, help="the PR's head commit")
     parser.add_argument("--since", required=True, help="the PR's created_at, ISO-8601 UTC")

@@ -118,3 +118,17 @@ def test_since_without_timezone_exits_4() -> None:
 
 def test_parse_time_reads_github_format() -> None:
     assert wft.parse_time("2026-11-10T13:35:18Z") == SINCE
+
+
+def test_malformed_payload_is_a_failed_read_not_a_test_failure() -> None:
+    clock = Clock(SINCE)
+
+    def fetch(url: str) -> Any:
+        return {"workflow_runs": ["not a run"]}
+
+    assert _wait(fetch, clock, max_wait=60) == 4
+
+
+def test_non_object_payload_is_a_failed_read() -> None:
+    clock = Clock(SINCE)
+    assert _wait(lambda url: [], clock, max_wait=60) == 4

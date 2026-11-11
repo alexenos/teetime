@@ -251,11 +251,12 @@ morning since 2026-10-01. What remains:
 
 ## The prompt
 
-**Status: in the trigger, with pastes pending for Step 2 (below), the Step 4
-wall-clock wait (`scripts/wait_for_tests.py`, replacing #409's check-run fallback),
-and the square-bracket placeholder rewrite below
-that replaced every `<...>` in this prompt after the 2026-11-06 paste dropped
-them all.** This file is
+**Status: in the trigger, matching this file.** Compared with `get_trigger` on
+2026-11-11 at 00:20Z, after the maintainer pasted the Step 4 wall-clock wait
+(`scripts/wait_for_tests.py`). Step 2 and the square-bracket placeholders were
+already live. The first Step 4 paste also deleted the merge paragraph after it,
+and a second paste restored it, so check the paragraph either side of a pasted
+section as well as the section itself. This file is
 the source; the trigger holds the copy that executes. Change this file in a PR
 first, then update the Routine to match. The maintainer created it in the UI, so
 treat it like the race report's: an agent should not expect to edit it.
