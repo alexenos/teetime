@@ -192,6 +192,38 @@ resource "google_artifact_registry_repository" "teetime" {
   description   = "Docker repository for TeeTime application"
   format        = "DOCKER"
 
+  # Every deploy pushes a ~1GB Chromium image tagged with its commit SHA, and
+  # before this nothing deleted one. October 2026 billed USD 9.02 for this
+  # repository's storage, rising through the month, against USD 9.54 for Cloud
+  # SQL.
+  #
+  # KEEP outranks DELETE, so the net rule is: an image survives if it is one of
+  # the ten newest, or younger than seven days. The newest is what the service
+  # and both jobs run - the racer and observer pull it fresh every morning, so
+  # it must never go - and the other nine are the rollback path.
+  #
+  # Dry run first: Artifact Registry logs what the policy would delete without
+  # deleting it. A follow-up PR sets this to false once those logs show only
+  # superseded images selected.
+  cleanup_policy_dry_run = true
+
+  cleanup_policies {
+    id     = "keep-recent-versions"
+    action = "KEEP"
+    most_recent_versions {
+      keep_count = 10
+    }
+  }
+
+  cleanup_policies {
+    id     = "delete-older-than-7d"
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "604800s"
+    }
+  }
+
   depends_on = [google_project_service.apis]
 }
 
