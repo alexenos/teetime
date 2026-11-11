@@ -109,25 +109,46 @@ out an hour earlier.
    includes the append failing, and a source that previously worked having stopped
    — a silent gap is the one failure mode this Routine exists to prevent.
 
-### The Tests check-run view can lag the real job
+### Tests was never stuck: the session lost track of time
 
-Observed two mornings running. On 2026-11-04 and 2026-11-05, the scoreboard PR's
-`test` job had already completed with `conclusion: success` well before
-`pull_request_read`'s check-run view stopped reporting it as `in_progress` - on
-2026-11-05 the job finished at 15:22:45Z (it ran for about five minutes, same as
-other mornings) but the check-run view still showed `in_progress` past the
-roughly 15-minute poll budget. Both mornings the run wrote `ok:false`, left the
-PR open, and the maintainer ended up merging it by hand.
+Five mornings (2026-11-04, 11-05, 11-08, 11-09, 11-10) wrote `ok:false` with a
+note saying Tests was still `in_progress` after 15 to 30 minutes. #409 read the
+first two as the check-run view lagging the real job, and moved the wait to
+`actions_get`. The next three failed the same way through `actions_get`.
 
-Established: the job itself ran and passed quickly both times, and `actions_get`
-method `get_workflow_job`, queried directly against the job ID, showed the
-correct, already-completed state when the check-run view still did not. Not
-established: whether this is a GitHub platform lag or specific to this one tool
-path, since no other polling method has been tried on a morning this happened.
+Established, from the GCS object write times and the Actions runs:
 
-The fix, in Step 4 below: near the end of the poll window, check the job
-directly through `actions_list`/`actions_get` rather than trusting the
-check-run view alone, and treat that direct result as authoritative.
+| Date | PR opened | Ledger row written | Tests run finished |
+|---|---|---|---|
+| 11-04 | 13:35:20Z | 13:37:22Z | 13:40:51Z |
+| 11-05 | 13:35:42Z | 13:37:38Z | 13:40:54Z |
+| 11-08 | 13:34:59Z | 13:37:43Z | 13:40:19Z |
+| 11-09 | 13:35:12Z | 13:37:37Z | 13:40:36Z |
+| 11-10 | 13:35:18Z | 13:39:44Z | 13:39:41Z |
+
+Every run gave up 2 to 4.5 minutes after opening its PR, before a job that takes
+about five minutes (every `Tests` run on a PR since 2026-10-31 took 4.5 to 5.5)
+could finish. The API reported `in_progress` because the job was in progress.
+
+The mechanism, from the 2026-11-10 transcript: foreground `sleep` is blocked, so
+the session started `sleep 180` or `sleep 240` in the background, called
+`ReadNotifications` (which does not carry background-task completions), got
+nothing, and polled again 10 to 20 seconds later. It counted each poll as one
+full sleep, so six polls in about four minutes read to it as "~30 minutes", and
+it said "genuine hang". It never read the clock. The job finished three seconds
+before it wrote the row; it merged the PR seconds after.
+
+Why only this Routine: it is the only one whose `ok` depends on waiting for CI.
+The race report writes its ledger row about one minute into its run, before it
+opens a PR (object times 12:41Z, PRs at about 12:47Z), so a wait it cuts short
+does not reach the ledger. Not established: whether the race report's own CI wait
+has the same defect, since its PRs have merged and no transcript was read.
+
+The fix, in Step 4: `scripts/wait_for_tests.py` does the waiting and keeps the
+clock. It polls the public Actions API itself, and measures the budget from the
+PR's `created_at` against the system clock, so neither a poll count nor a
+repeated call can shorten or stretch it. A session's own sense of elapsed time is
+never evidence that CI is stuck.
 
 ### It publishes every run, not only when something changed
 
@@ -230,10 +251,12 @@ morning since 2026-10-01. What remains:
 
 ## The prompt
 
-**Status: in the trigger, with pastes pending for Step 2 (below), the Step 4 fix
-for the Tests check-run lag, and the square-bracket placeholder rewrite below
-that replaced every `<...>` in this prompt after the 2026-11-06 paste dropped
-them all.** This file is
+**Status: in the trigger, matching this file.** Compared with `get_trigger` on
+2026-11-11 at 00:20Z, after the maintainer pasted the Step 4 wall-clock wait
+(`scripts/wait_for_tests.py`). Step 2 and the square-bracket placeholders were
+already live. The first Step 4 paste also deleted the merge paragraph after it,
+and a second paste restored it, so check the paragraph either side of a pasted
+section as well as the section itself. This file is
 the source; the trigger holds the copy that executes. Change this file in a PR
 first, then update the Routine to match. The maintainer created it in the UI, so
 treat it like the race report's: an agent should not expect to edit it.
@@ -317,9 +340,13 @@ Do not pass --now or --as-of; the script reads the clock. It validates every row
 It prints up to two lines on stderr. "source metrics changed: none", or the ones that moved - that decides the notification. "last break: [date] [routine]: [status]: [note]" when the streak has ever broken - compare its date with streak.last_failure in the previous docs/scoreboard.json (git show HEAD:docs/scoreboard.json); a newer date means the streak broke since the last publish, which is a notification. The note is for the notification and this session only; it is not on the page and must not go into the PR.
 
 Step 4 - publish
-Publish every run: the streak moves every run, so something always changed. git checkout -b scoreboard/[YYYY-MM-DD], add only docs/scoreboard.json, commit as "Scoreboard for [YYYY-MM-DD]", push, and open a normal (non-draft) PR into main whose body is one line: the streak, and requests booked of total all time. Wait for the Tests check on the PR's head commit - poll pull_request_read method get_check_runs every 30-60s, up to about 15 minutes; it installs Chrome, so it is slow. Do not wait on CodeRabbit.
+Publish every run: the streak moves every run, so something always changed. git checkout -b scoreboard/[YYYY-MM-DD], add only docs/scoreboard.json, commit as "Scoreboard for [YYYY-MM-DD]", push, and open a normal (non-draft) PR into main whose body is one line: the streak, and requests booked of total all time. Wait for the Tests run on the PR's head commit with the script below; it polls the GitHub Actions API, measures time on the system clock from when the PR was opened, and allows 25 minutes. Use the PR's head sha and its created_at from the create call. Run it as an ordinary foreground command with a 10-minute timeout, not in the background and not with sleep:
 
-That check-run view has been seen lagging well behind the real job - twice, on 2026-11-04 and 2026-11-05, it kept reporting the test job as in_progress for the whole poll window after the job had actually finished and passed. So before writing the PR off as stuck, once the poll window is nearly spent: call actions_list method list_workflow_runs filtered to the PR's branch to find the newest run, then actions_get method get_workflow_job on its jobs to read their status and conclusion directly. Treat that direct result as authoritative over the check-run view - if it shows the job already completed, act on that conclusion (merge on success, leave the PR open on failure) instead of concluding Tests never finished.
+python3 scripts/wait_for_tests.py --sha [head sha] --since [PR created_at]
+
+Exit 0: Tests passed. Exit 1: Tests finished and did not pass. Exit 3: still running and the budget is not spent - run the same command again, unchanged, as many times as it returns 3. Exit 2: the 25 minutes since the PR opened are spent and Tests has not finished. Exit 4: the script could not read the API - fall back to pull_request_read method get_check_runs, and check the time with date -u before each poll. Its last line is the verdict; quote it in any note.
+
+Never decide that Tests is stuck from your own estimate of how long you have waited. Do not count polls or sleeps as minutes: in this Routine a background sleep does not pause you, and on five mornings that made four real minutes read as thirty. Only exit 2, or a date -u reading 25 minutes after created_at, establishes a timeout. Write the ledger row after the merge decision, never before it. Do not wait on CodeRabbit.
 
 If Tests is green and the PR merges cleanly, squash-merge it. If Tests fails or it cannot merge, leave it open and do not touch anything else to fix it; set "ok" to false in scoreboard-row.json and add a "note" naming the PR and why it did not merge. If an earlier scoreboard PR is still open, leave it alone and mention it in the notification.
 
