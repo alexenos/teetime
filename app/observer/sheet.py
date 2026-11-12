@@ -51,6 +51,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from app.providers import walden_date_selection, walden_sheet_grid
 from app.providers.wait_helper import WaitStrategy
+from app.providers.walden_consent import click_past_overlay, hide_consent_banner
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_sheet_grid import GridSlot
 
@@ -152,6 +153,7 @@ def create_driver() -> webdriver.Chrome:
         "Page.addScriptToEvaluateOnNewDocument",
         {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
     )
+    hide_consent_banner(driver)
     return driver
 
 
@@ -173,10 +175,8 @@ def log_in(driver: webdriver.Chrome, member_number: str, password: str) -> bool:
         password_input.send_keys(password)
 
         current_url = driver.current_url
-        # A real .click() fails with ElementClickIntercepted when a cookie-
-        # consent banner (ccBanner) overlaps the button; dispatch via JS.
         submit_button = driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button)
-        driver.execute_script("arguments[0].click();", submit_button)
+        click_past_overlay(driver, submit_button, log_prefix="OBSERVER")
 
         try:
             wait.until(expected_conditions.url_changes(current_url))

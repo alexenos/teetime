@@ -19,6 +19,8 @@ class LoginSelectors:
     member_input_name: str = "_com_liferay_login_web_portlet_LoginPortlet_login"
     password_input_name: str = "_com_liferay_login_web_portlet_LoginPortlet_password"
     submit_button: str = 'button[type="submit"]'
+    # Cookie-consent banner, first seen 2026-11-12, overlapping the submit button.
+    consent_banner: str = "#ccBanner"
 
 
 @dataclass(frozen=True)
