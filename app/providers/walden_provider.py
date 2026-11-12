@@ -41,6 +41,7 @@ from app.providers.base import (
     ReservationProvider,
 )
 from app.providers.wait_helper import WaitStrategy
+from app.providers.walden_consent import click_past_overlay, hide_consent_banner
 from app.providers.walden_dom_schema import DOM
 from app.providers.walden_http import PrimeFacesSession, visible_text
 from app.providers.walden_http_booker import (
@@ -852,6 +853,7 @@ class WaldenGolfProvider(ReservationProvider):
             """
             },
         )
+        hide_consent_banner(driver)
 
         return driver
 
@@ -930,7 +932,7 @@ class WaldenGolfProvider(ReservationProvider):
 
             submit_button = driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button)
             current_url = driver.current_url
-            submit_button.click()
+            click_past_overlay(driver, submit_button, log_prefix="LOGIN")
 
             try:
                 wait.until(expected_conditions.url_changes(current_url))
@@ -946,13 +948,17 @@ class WaldenGolfProvider(ReservationProvider):
                 f"Login failed ({'Walden rejected the login' if self._login_rejected else 'not a rejection'}). "
                 f"Still on URL: {driver.current_url}"
             )
+            if not self._login_rejected:
+                self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
 
         except TimeoutException as e:
             logger.error(f"Login timeout: {e}")
+            self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
         except WebDriverException as e:
             logger.error(f"Login WebDriver error: {e}")
+            self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
 
     async def book_tee_time(
