@@ -949,16 +949,16 @@ class WaldenGolfProvider(ReservationProvider):
                 f"Still on URL: {driver.current_url}"
             )
             if not self._login_rejected:
-                self._capture_diagnostic_info(driver, "login_failed")
+                self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
 
         except TimeoutException as e:
             logger.error(f"Login timeout: {e}")
-            self._capture_diagnostic_info(driver, "login_failed")
+            self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
         except WebDriverException as e:
             logger.error(f"Login WebDriver error: {e}")
-            self._capture_diagnostic_info(driver, "login_failed")
+            self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
 
     async def book_tee_time(

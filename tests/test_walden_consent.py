@@ -100,6 +100,19 @@ class TestRacerLogin:
     def provider(self) -> WaldenGolfProvider:
         return WaldenGolfProvider("member", "password")
 
+    @pytest.fixture
+    def racer_task(self, monkeypatch: pytest.MonkeyPatch) -> str:
+        monkeypatch.setenv("CLOUD_RUN_EXECUTION", "teetime-racer-abc12")
+        monkeypatch.setenv("CLOUD_RUN_TASK_INDEX", "3")
+        return "teetime-racer-abc12_3"
+
+    @staticmethod
+    def _captured_context(capture: MagicMock, driver: MagicMock) -> str:
+        capture.assert_called_once()
+        captured_driver, context = capture.call_args.args
+        assert captured_driver is driver
+        return str(context)
+
     def test_logs_in_past_an_intercepted_submit(self, provider: WaldenGolfProvider) -> None:
         driver = _driver()
         submit = MagicMock()
@@ -111,7 +124,9 @@ class TestRacerLogin:
 
         driver.execute_script.assert_called_once_with("arguments[0].click();", submit)
 
-    def test_a_webdriver_failure_captures_the_page(self, provider: WaldenGolfProvider) -> None:
+    def test_a_webdriver_failure_captures_the_page(
+        self, provider: WaldenGolfProvider, racer_task: str
+    ) -> None:
         driver = _driver()
         driver.find_element.side_effect = WebDriverException("gone")
 
@@ -121,7 +136,11 @@ class TestRacerLogin:
         ):
             assert provider._perform_login(driver) is False
 
-        capture.assert_called_once_with(driver, "login_failed")
+        context = self._captured_context(capture, driver)
+        # Every racer task logs in at the same scheduled second, so the prefix
+        # must carry the task or a sibling's upload is refused (2026-09-15).
+        assert context.startswith("login_failed_")
+        assert context.endswith(f"_{racer_task}")
 
     def test_a_rejected_password_captures_nothing(self, provider: WaldenGolfProvider) -> None:
         driver = _driver(LOGIN_URL)
@@ -136,7 +155,7 @@ class TestRacerLogin:
         capture.assert_not_called()
 
     def test_a_failure_that_is_not_a_rejection_captures_the_page(
-        self, provider: WaldenGolfProvider
+        self, provider: WaldenGolfProvider, racer_task: str
     ) -> None:
         driver = _driver(LOGIN_URL)
 
@@ -147,7 +166,11 @@ class TestRacerLogin:
         ):
             assert provider._perform_login(driver) is False
 
-        capture.assert_called_once_with(driver, "login_failed")
+        context = self._captured_context(capture, driver)
+        # Every racer task logs in at the same scheduled second, so the prefix
+        # must carry the task or a sibling's upload is refused (2026-09-15).
+        assert context.startswith("login_failed_")
+        assert context.endswith(f"_{racer_task}")
 
 
 class TestObserverLogin:
