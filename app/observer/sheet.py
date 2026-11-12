@@ -173,7 +173,10 @@ def log_in(driver: webdriver.Chrome, member_number: str, password: str) -> bool:
         password_input.send_keys(password)
 
         current_url = driver.current_url
-        driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button).click()
+        # A real .click() fails with ElementClickIntercepted when a cookie-
+        # consent banner (ccBanner) overlaps the button; dispatch via JS.
+        submit_button = driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button)
+        driver.execute_script("arguments[0].click();", submit_button)
 
         try:
             wait.until(expected_conditions.url_changes(current_url))

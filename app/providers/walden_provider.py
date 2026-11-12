@@ -930,7 +930,10 @@ class WaldenGolfProvider(ReservationProvider):
 
             submit_button = driver.find_element(By.CSS_SELECTOR, DOM.LOGIN.submit_button)
             current_url = driver.current_url
-            submit_button.click()
+            # A real .click() fails with ElementClickIntercepted when a cookie-
+            # consent banner (ccBanner) overlaps the button; dispatch the click
+            # via JS instead, as elsewhere in this file for obscured elements.
+            driver.execute_script("arguments[0].click();", submit_button)
 
             try:
                 wait.until(expected_conditions.url_changes(current_url))
