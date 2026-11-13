@@ -227,6 +227,21 @@ resource "google_artifact_registry_repository" "teetime" {
   depends_on = [google_project_service.apis]
 }
 
+# Record Artifact Registry writes, so the cleanup policy's runs are visible.
+# Deleting versions, dry run included, is a DATA_WRITE operation, which Cloud
+# Audit Logs does not keep unless asked: on 2026-11-12, a day after #425
+# applied the policy, Logging held no BatchDeleteVersions entry of any kind.
+# DATA_READ is left off on purpose - it would log every image pull by the
+# service, racer and observer.
+resource "google_project_iam_audit_config" "artifact_registry" {
+  project = var.project_id
+  service = "artifactregistry.googleapis.com"
+
+  audit_log_config {
+    log_type = "DATA_WRITE"
+  }
+}
+
 resource "google_secret_manager_secret" "secrets" {
   for_each = toset(local.secrets)
 
