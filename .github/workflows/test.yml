@@ -137,3 +137,35 @@ jobs:
 
       - name: Check code formatting with Ruff
         run: poetry run ruff format --check .
+
+  # cloudbuild.yaml runs `terraform apply -auto-approve` on every merge to main,
+  # so before this job a malformed terraform change was first caught by the
+  # pipeline that applies it (#229, item 1). fmt and validate need no
+  # credentials and no state: init skips the GCS backend and only fetches
+  # providers. The version matches the hashicorp/terraform image cloudbuild.yaml
+  # applies with; tests/test_terraform_ci.py fails if the two drift apart.
+  terraform:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.6.0"
+          terraform_wrapper: false
+
+      - name: Check terraform formatting
+        run: terraform fmt -check -recursive -diff
+
+      - name: Initialize terraform without a backend
+        run: terraform init -backend=false -input=false
+
+      - name: Validate terraform
+        run: terraform validate -no-color
