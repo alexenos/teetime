@@ -36,9 +36,29 @@ def _commands(job: dict[str, Any]) -> list[str]:
     return [step["run"] for step in job["steps"] if "run" in step]
 
 
+def _terraform_image_versions(cloudbuild_text: str) -> set[str]:
+    """The tag of every ``hashicorp/terraform`` step image in a Cloud Build config.
+
+    Every step is inspected, and a tag that is not a version (``latest``, or no
+    tag at all) fails rather than being skipped: skipping it would let one step
+    drift away from the version CI checks with while the comparison still passed.
+    """
+    config = yaml.safe_load(cloudbuild_text)
+    versions: set[str] = set()
+    for step in config.get("steps", []):
+        image = str(step.get("name", ""))
+        if not image.startswith("hashicorp/terraform"):
+            continue
+        _, _, tag = image.partition(":")
+        assert re.fullmatch(
+            r"\d+\.\d+(\.\d+)?", tag
+        ), f"cloudbuild.yaml step image {image!r} does not pin a terraform version"
+        versions.add(tag)
+    return versions
+
+
 def _cloudbuild_terraform_versions() -> set[str]:
-    text = _CLOUDBUILD.read_text(encoding="utf-8")
-    return set(re.findall(r"hashicorp/terraform:([0-9][0-9.]*)", text))
+    return _terraform_image_versions(_CLOUDBUILD.read_text(encoding="utf-8"))
 
 
 def _major_minor(version: str) -> str:
@@ -91,3 +111,17 @@ def test_the_version_comparison_reads_major_and_minor() -> None:
     assert _major_minor("1.10.3") == "1.10"
     with pytest.raises(AssertionError):
         _major_minor("latest")
+
+
+def test_every_cloud_build_terraform_step_is_read() -> None:
+    pinned = "steps:\n  - name: 'hashicorp/terraform:1.6'\n  - name: 'hashicorp/terraform:1.6'\n"
+    assert _terraform_image_versions(pinned) == {"1.6"}
+    mixed = "steps:\n  - name: 'hashicorp/terraform:1.6'\n  - name: 'hashicorp/terraform:1.7'\n"
+    assert _terraform_image_versions(mixed) == {"1.6", "1.7"}
+
+
+@pytest.mark.parametrize("unpinned", ["hashicorp/terraform:latest", "hashicorp/terraform"])
+def test_an_unpinned_terraform_step_fails_rather_than_being_skipped(unpinned: str) -> None:
+    config = f"steps:\n  - name: 'hashicorp/terraform:1.6'\n  - name: '{unpinned}'\n"
+    with pytest.raises(AssertionError, match="does not pin a terraform version"):
+        _terraform_image_versions(config)
