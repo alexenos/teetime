@@ -202,8 +202,9 @@ resource "google_artifact_registry_repository" "teetime" {
   # and both jobs run - the racer and observer pull it fresh every morning, so
   # it must never go - and the other nine are the rollback path.
   #
-  # #425 applied this in dry run on 2026-11-11; the dry-run logs were checked
-  # against the image list before this was set to false (see that PR's body).
+  # #425 applied this in dry run on 2026-11-11. Once #431 turned on DATA_WRITE
+  # audit logs, the dry-run BatchDeleteVersions entries were checked against
+  # the image list before #427 set this to false; the result is in #427's body.
   cleanup_policy_dry_run = false
 
   cleanup_policies {
