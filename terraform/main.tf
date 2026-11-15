@@ -202,10 +202,10 @@ resource "google_artifact_registry_repository" "teetime" {
   # and both jobs run - the racer and observer pull it fresh every morning, so
   # it must never go - and the other nine are the rollback path.
   #
-  # Dry run first: Artifact Registry logs what the policy would delete without
-  # deleting it. A follow-up PR sets this to false once those logs show only
-  # superseded images selected.
-  cleanup_policy_dry_run = true
+  # #425 applied this in dry run on 2026-11-11. Once #431 turned on DATA_WRITE
+  # audit logs, the dry-run BatchDeleteVersions entries were checked against
+  # the image list before #427 set this to false; the result is in #427's body.
+  cleanup_policy_dry_run = false
 
   cleanup_policies {
     id     = "keep-recent-versions"
