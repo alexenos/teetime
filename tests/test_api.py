@@ -1,57 +1,14 @@
 """
 Tests for API endpoints in app/api/.
 
-These tests verify the FastAPI endpoints for health checks, bookings,
-and Twilio webhooks using the TestClient.
+These tests verify the FastAPI endpoints for health checks and Twilio
+webhooks using the TestClient, and pin the set of routes the app exposes.
 """
 
-from datetime import date, datetime, time, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
-import pytz
 from fastapi.testclient import TestClient
-
-from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
-from app.services.credential_service import WaldenCredentials
-
-
-@pytest.fixture(autouse=True)
-def requester_has_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give every requester a Walden login of their own.
-
-    POST /bookings/ goes through the same create_booking as a chat message, so
-    it now refuses a requester with no login on file - there is no shared
-    account to fall back on. Without this the credential lookup would reach a
-    real database and these endpoint tests would fail on connection errors
-    rather than on anything they are testing.
-    """
-
-    async def _credential(phone_number: str) -> WaldenCredentials:
-        return WaldenCredentials(member_number=f"member-{phone_number}", password="pw")
-
-    monkeypatch.setattr(
-        "app.services.booking_service.credential_service.get_dedicated_credentials",
-        _credential,
-    )
-
-
-def _future_date(days_ahead: int = 30) -> date:
-    """
-    Get a date in the future relative to today in CT timezone.
-
-    Using a large offset (default 30 days) ensures the booking's execution time
-    (7 days before the requested date) is always in the future, avoiding the
-    immediate execution path without needing to mock datetime.
-    """
-    tz = pytz.timezone("America/Chicago")
-    today_ct = datetime.now(tz).date()
-    return today_ct + timedelta(days=days_ahead)
-
-
-def _future_date_str(days_ahead: int = 30) -> str:
-    """Get a future date as an ISO format string for API requests."""
-    return _future_date(days_ahead).isoformat()
 
 
 @pytest.fixture
@@ -85,264 +42,52 @@ class TestHealthEndpoints:
         assert "endpoints" in data
         assert data["endpoints"]["health"] == "/health"
         assert data["endpoints"]["webhooks"] == "/webhooks/twilio/sms"
-        assert data["endpoints"]["bookings"] == "/bookings"
+        assert "bookings" not in data["endpoints"]
 
 
-class TestBookingsEndpoints:
-    """Tests for booking CRUD endpoints."""
+class TestRouteSurface:
+    """The app exposes only the routes something actually calls (#127).
 
-    def test_create_booking(self, test_client: TestClient) -> None:
-        """Test creating a new booking via POST /bookings/."""
-        future_date = _future_date_str()
-        request_data = {
-            "phone_number": "+15551234567",
-            "requested_date": future_date,
-            "requested_time": "08:00:00",
-            "num_players": 4,
-            "fallback_window_minutes": 30,
+    The ``/bookings`` REST router was never authenticated, on a service whose
+    invoker role is granted to ``allUsers``, and nothing in the bot called it:
+    members book through the messaging webhook, and the race is started by
+    Cloud Scheduler through ``/jobs``. Pinning the full set means a router
+    added later is a deliberate, reviewed change rather than a quiet one.
+    """
+
+    def _routes(self) -> set[tuple[str, str]]:
+        from fastapi.routing import APIRoute
+
+        from app.main import app
+
+        return {
+            (method, route.path)
+            for route in app.routes
+            if isinstance(route, APIRoute)
+            for method in route.methods
         }
 
-        with patch("app.services.booking_service.database_service") as mock_db:
+    def test_no_bookings_routes(self) -> None:
+        assert not [path for _, path in self._routes() if path.startswith("/bookings")]
 
-            async def create_booking_side_effect(
-                booking: TeeTimeBooking,
-            ) -> TeeTimeBooking:
-                return booking
+    def test_bookings_paths_are_not_found(self, test_client: TestClient) -> None:
+        assert test_client.get("/bookings/").status_code == 404
+        assert test_client.post("/bookings/", json={}).status_code == 404
+        assert test_client.post("/bookings/abc12345/execute").status_code == 404
+        assert test_client.delete("/bookings/abc12345").status_code == 404
 
-            mock_db.get_bookings = AsyncMock(return_value=[])
-            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
-            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
-
-            response = test_client.post("/bookings/", json=request_data)
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["phone_number"] == "+15551234567"
-            assert data["requested_date"] == future_date
-            assert data["requested_time"] == "08:00:00"
-            assert data["num_players"] == 4
-            assert data["status"] == "scheduled"
-            assert data["id"] is not None
-
-    def test_create_booking_default_players(self, test_client: TestClient) -> None:
-        """Test creating a booking with default num_players."""
-        request_data = {
-            "phone_number": "+15551234567",
-            "requested_date": _future_date_str(),
-            "requested_time": "09:00:00",
+    def test_the_route_set_is_pinned(self) -> None:
+        assert self._routes() == {
+            ("GET", "/health"),
+            ("GET", "/"),
+            ("POST", "/webhooks/twilio/sms"),
+            ("POST", "/webhooks/twilio/status"),
+            ("POST", "/webhooks/telegram"),
+            ("POST", "/jobs/execute-due-bookings"),
+            ("POST", "/jobs/purge-expired"),
+            ("GET", "/onboarding/walden"),
+            ("POST", "/onboarding/walden"),
         }
-
-        with patch("app.services.booking_service.database_service") as mock_db:
-
-            async def create_booking_side_effect(
-                booking: TeeTimeBooking,
-            ) -> TeeTimeBooking:
-                return booking
-
-            mock_db.get_bookings = AsyncMock(return_value=[])
-            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
-            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
-
-            response = test_client.post("/bookings/", json=request_data)
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["num_players"] == 4
-
-    def test_list_bookings_empty(self, test_client: TestClient) -> None:
-        """Test listing bookings when none exist."""
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_bookings = AsyncMock(return_value=[])
-            mock_service.get_live_bookings_on = AsyncMock(return_value=[])
-
-            response = test_client.get("/bookings/")
-
-            assert response.status_code == 200
-            assert response.json() == []
-
-    def test_list_bookings_with_filter(self, test_client: TestClient) -> None:
-        """Test listing bookings with phone_number filter."""
-        sample_booking = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.SCHEDULED,
-        )
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_bookings = AsyncMock(return_value=[sample_booking])
-
-            response = test_client.get("/bookings/?phone_number=%2B15551234567")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data) == 1
-            assert data[0]["phone_number"] == "+15551234567"
-
-    def test_get_booking_exists(self, test_client: TestClient) -> None:
-        """Test getting an existing booking."""
-        sample_booking = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.SCHEDULED,
-        )
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=sample_booking)
-
-            response = test_client.get("/bookings/abc12345")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["id"] == "abc12345"
-            assert data["phone_number"] == "+15551234567"
-
-    def test_get_booking_not_found(self, test_client: TestClient) -> None:
-        """Test getting a non-existent booking."""
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=None)
-
-            response = test_client.get("/bookings/nonexistent")
-
-            assert response.status_code == 404
-            assert response.json()["detail"] == "Booking not found"
-
-    def test_cancel_booking_success(self, test_client: TestClient) -> None:
-        """Test cancelling a booking."""
-        sample_booking = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.CANCELLED,
-        )
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=sample_booking)
-            mock_service.cancel_booking = AsyncMock(return_value=sample_booking)
-
-            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["status"] == "cancelled"
-            assert data["booking_id"] == "abc12345"
-
-    def test_cancel_booking_unrecorded(self, test_client: TestClient) -> None:
-        """Issue #352: a club cancel that could not be recorded is not plain "cancelled"."""
-        won = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.SUCCESS,
-        )
-        unrecorded = won.model_copy(update={"status": BookingStatus.CANCELLING})
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=won)
-            mock_service.cancel_booking = AsyncMock(return_value=unrecorded)
-
-            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
-
-            assert response.status_code == 200
-            assert response.json() == {"status": "unrecorded", "booking_id": "abc12345"}
-
-    def test_cancel_booking_not_found(self, test_client: TestClient) -> None:
-        """Test cancelling a non-existent booking."""
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=None)
-
-            response = test_client.delete("/bookings/nonexistent?phone_number=%2B15551234567")
-
-            assert response.status_code == 404
-            assert "not found" in response.json()["detail"]
-
-    def test_cancel_booking_unauthorized(self, test_client: TestClient) -> None:
-        """Test cancelling a booking with wrong phone number."""
-        sample_booking = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.SCHEDULED,
-        )
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=sample_booking)
-
-            response = test_client.delete("/bookings/abc12345?phone_number=%2B15559999999")
-
-            assert response.status_code == 403
-            assert "Unauthorized" in response.json()["detail"]
-
-    def test_cancel_booking_cannot_cancel(self, test_client: TestClient) -> None:
-        """Test 404 when booking exists and phone matches but status is not cancellable."""
-        failed_booking = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.FAILED,
-        )
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=failed_booking)
-            mock_service.cancel_booking = AsyncMock(return_value=None)
-
-            response = test_client.delete("/bookings/abc12345?phone_number=%2B15551234567")
-
-            assert response.status_code == 404
-            assert "cannot be cancelled" in response.json()["detail"]
-
-    def test_execute_booking_success(self, test_client: TestClient) -> None:
-        """Test executing a booking."""
-        sample_booking = TeeTimeBooking(
-            id="abc12345",
-            phone_number="+15551234567",
-            request=TeeTimeRequest(
-                requested_date=date(2025, 12, 20),
-                requested_time=time(8, 0),
-            ),
-            status=BookingStatus.SUCCESS,
-            confirmation_number="CONF123",
-        )
-
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=sample_booking)
-            mock_service.execute_booking = AsyncMock(return_value=True)
-
-            response = test_client.post("/bookings/abc12345/execute")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["success"] is True
-            assert data["booking_id"] == "abc12345"
-
-    def test_execute_booking_not_found(self, test_client: TestClient) -> None:
-        """Test executing a non-existent booking."""
-        with patch("app.api.bookings.booking_service") as mock_service:
-            mock_service.get_booking = AsyncMock(return_value=None)
-
-            response = test_client.post("/bookings/nonexistent/execute")
-
-            assert response.status_code == 404
-            assert response.json()["detail"] == "Booking not found"
 
 
 class TestGetExternalUrl:
@@ -478,95 +223,6 @@ class TestWebhookEndpoints:
 
         assert response.status_code == 200
         assert response.json()["status"] == "received"
-
-
-class TestBookingsEndpointsIntegration:
-    """Integration tests for booking endpoints using mocked database service."""
-
-    def test_create_and_get_booking(self, test_client: TestClient) -> None:
-        """Test creating and then retrieving a booking."""
-        request_data = {
-            "phone_number": "+15559999999",
-            "requested_date": _future_date_str(),
-            "requested_time": "10:00:00",
-            "num_players": 2,
-        }
-
-        created_booking = None
-
-        with patch("app.services.booking_service.database_service") as mock_db:
-
-            async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
-                nonlocal created_booking
-                created_booking = booking
-                return booking
-
-            mock_db.get_bookings = AsyncMock(return_value=[])
-            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
-            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
-
-            create_response = test_client.post("/bookings/", json=request_data)
-            assert create_response.status_code == 200
-            booking_id = create_response.json()["id"]
-
-        with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_booking = AsyncMock(return_value=created_booking)
-
-            get_response = test_client.get(f"/bookings/{booking_id}")
-            assert get_response.status_code == 200
-            data = get_response.json()
-            assert data["id"] == booking_id
-            assert data["phone_number"] == "+15559999999"
-            assert data["num_players"] == 2
-
-    def test_create_and_cancel_booking(self, test_client: TestClient) -> None:
-        """Test creating and then cancelling a booking."""
-        phone_number = "+15558888888"
-        request_data = {
-            "phone_number": phone_number,
-            "requested_date": _future_date_str(),
-            "requested_time": "11:00:00",
-        }
-
-        created_booking = None
-
-        with patch("app.services.booking_service.database_service") as mock_db:
-
-            async def create_booking_side_effect(booking: TeeTimeBooking) -> TeeTimeBooking:
-                nonlocal created_booking
-                created_booking = booking
-                return booking
-
-            mock_db.get_bookings = AsyncMock(return_value=[])
-            mock_db.get_live_bookings_on = AsyncMock(return_value=[])
-            mock_db.create_booking = AsyncMock(side_effect=create_booking_side_effect)
-
-            create_response = test_client.post("/bookings/", json=request_data)
-            assert create_response.status_code == 200
-            booking_id = create_response.json()["id"]
-
-        with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_booking = AsyncMock(return_value=created_booking)
-            assert created_booking is not None
-            # Cancelling is a conditional UPDATE (cancel_pending_booking), not
-            # update_booking on the row that was read.
-            cancelled_booking = created_booking.model_copy(
-                update={"status": BookingStatus.CANCELLED}
-            )
-            mock_db.cancel_pending_booking = AsyncMock(return_value=cancelled_booking)
-
-            cancel_response = test_client.delete(
-                f"/bookings/{booking_id}?phone_number=%2B15558888888"
-            )
-            assert cancel_response.status_code == 200
-            assert cancel_response.json()["status"] == "cancelled"
-
-        with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_booking = AsyncMock(return_value=cancelled_booking)
-
-            get_response = test_client.get(f"/bookings/{booking_id}")
-            assert get_response.status_code == 200
-            assert get_response.json()["status"] == "cancelled"
 
 
 class TestStartupSettlesCancellations:

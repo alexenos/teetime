@@ -92,11 +92,10 @@ poetry run mypy app
 - `POST /jobs/purge-expired` - Apply the data-retention purge
 - `GET`/`POST /onboarding/walden` - Member setup page, where a member enters their own
   Walden login (not in the OpenAPI schema)
-- `GET /bookings` - List bookings
-- `POST /bookings` - Create booking
-- `GET /bookings/{id}` - Get booking details
-- `DELETE /bookings/{id}` - Cancel booking (`status` is `cancelled`, or `unrecorded` when the club cancelled a won booking but the bot could not confirm it recorded that)
-- `POST /bookings/{id}/execute` - Execute booking (for testing)
+
+There is no REST API for bookings. Members book, list and cancel through the
+messaging channel. The `/bookings` routes, which had no authentication and which
+nothing in the bot called, were removed in #127.
 
 ## Environment Variables
 

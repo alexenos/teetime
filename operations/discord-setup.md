@@ -39,7 +39,8 @@ Discord gateway (a persistent WebSocket), so the service must run with
    a channel → **Copy Channel ID** and put it in `DISCORD_CHANNEL_ID`. Replies
    already follow the conversation on their own (see below), so this is only the
    destination for notifications with no conversation behind them — bookings
-   made through the REST API, and any created before this behavior existed.
+   made through the REST API before it was removed (#127), and any created
+   before this behavior existed.
    Make sure the bot has **Send Messages** and **View Channels** permission
    wherever you talk to it.
 
@@ -67,7 +68,7 @@ everything stays in the DM.
 This works because the channel of each incoming message is recorded on your
 session and copied onto any booking it creates, so the notification can find
 its way back long after the request. Bookings with no channel recorded (the
-REST API, SMS, or bookings made before this existed) fall back to
+since-removed REST API, SMS, or bookings made before this existed) fall back to
 `DISCORD_CHANNEL_ID`, and to a DM if that is unset.
 
 For Cloud Run, add the two secrets and set

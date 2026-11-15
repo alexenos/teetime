@@ -961,167 +961,6 @@ class WaldenGolfProvider(ReservationProvider):
             self._capture_diagnostic_info(driver, f"login_failed_{_race_run_id()}")
             return False
 
-    async def book_tee_time(
-        self,
-        target_date: date,
-        target_time: time,
-        num_players: int,
-        fallback_window_minutes: int = 32,
-        tee_time_interval_minutes: int = 8,
-    ) -> BookingResult:
-        """
-        Book a tee time at Northgate Country Club.
-
-        This method runs the entire booking workflow in a background thread:
-        1. Creates a new WebDriver instance
-        2. Logs in to the member portal
-        3. Navigates to the tee time booking page
-        4. Selects the Northgate course and target date
-        5. Finds the requested time slot (or nearest available within fallback window)
-        6. Clicks Reserve, selects player count, and confirms the booking
-        7. Closes the WebDriver
-
-        The async interface is genuinely non-blocking - all Selenium operations
-        run in a dedicated thread via asyncio.to_thread().
-
-        Args:
-            target_date: The date to book (should be 7 days in advance for new bookings)
-            target_time: The preferred tee time
-            num_players: Number of players (1-4)
-            fallback_window_minutes: If exact time unavailable, try times within this window
-
-        Returns:
-            BookingResult with success status, booked time, and confirmation details
-        """
-        return await asyncio.to_thread(
-            self._book_tee_time_sync,
-            target_date,
-            target_time,
-            num_players,
-            fallback_window_minutes,
-            tee_time_interval_minutes,
-        )
-
-    def _book_tee_time_sync(
-        self,
-        target_date: date,
-        target_time: time,
-        num_players: int,
-        fallback_window_minutes: int,
-        tee_time_interval_minutes: int = 8,
-    ) -> BookingResult:
-        """
-        Synchronous booking implementation with full driver lifecycle.
-
-        Creates driver, performs booking, and ensures cleanup in finally block.
-        """
-        # Calculate time range for logging
-        target_minutes = target_time.hour * 60 + target_time.minute
-        earliest_minutes = max(0, target_minutes - fallback_window_minutes)
-        latest_minutes = min(24 * 60 - 1, target_minutes + fallback_window_minutes)
-        earliest_time = time(earliest_minutes // 60, earliest_minutes % 60)
-        latest_time = time(latest_minutes // 60, latest_minutes % 60)
-
-        # An ad-hoc booking is untimed, but untimed is not the same as slow. The
-        # fast chain is opt-in here (issue #124) so this path can exercise the
-        # JS/direct-HTTP chain off-race; with the flag off it runs exactly the
-        # Selenium flow it always has.
-        use_fast_js = settings.walden_fast_booking_immediate
-
-        logger.info(
-            f"BOOKING_DEBUG: === STARTING BOOKING ATTEMPT === "
-            f"date={target_date} ({target_date.strftime('%A')}), "
-            f"requested_time={target_time.strftime('%H:%M')}, "
-            f"time_range={earliest_time.strftime('%H:%M')}-{latest_time.strftime('%H:%M')}, "
-            f"players={num_players}, fallback_window={fallback_window_minutes}min, "
-            f"mode={'fast chain' if use_fast_js else 'Selenium'}"
-            f"{' (direct HTTP enabled)' if use_fast_js and settings.walden_direct_http_booking else ''}"
-        )
-        driver = self._create_driver()
-        try:
-            logger.debug("BOOKING_DEBUG: Step 1/5 - Logging in to Walden Golf")
-            if not self._perform_login(driver):
-                logger.error("BOOKING_DEBUG: Login failed")
-                return BookingResult(
-                    success=False,
-                    error_message=self.login_failure_message(),
-                )
-            logger.debug("BOOKING_DEBUG: Login successful")
-
-            logger.debug("BOOKING_DEBUG: Step 2/5 - Navigating to tee time booking page")
-            driver.get(self.TEE_TIME_URL)
-
-            wait = WebDriverWait(driver, 15)
-            wait.until(expected_conditions.presence_of_element_located((By.CSS_SELECTOR, "form")))
-            logger.debug(f"BOOKING_DEBUG: Tee time page loaded. URL: {driver.current_url}")
-
-            logger.debug("BOOKING_DEBUG: Step 3/5 - Selecting course and date")
-            if not self._select_course_sync(driver, self.NORTHGATE_COURSE_NAME):
-                logger.error("BOOKING_DEBUG: Course selection/verification failed")
-                return BookingResult(
-                    success=False,
-                    error_message=(
-                        f"Failed to select or verify {self.NORTHGATE_COURSE_NAME} course. "
-                        f"The booking may have been attempted on the wrong course. "
-                        f"Please verify the course selection manually."
-                    ),
-                )
-            if not self._select_date_sync(driver, target_date):
-                logger.error("BOOKING_DEBUG: Date selection failed")
-                return BookingResult(
-                    success=False,
-                    error_message=(
-                        f"Failed to select date {target_date.strftime('%m/%d/%Y')}. "
-                        f"Cannot proceed with booking - would search wrong date."
-                    ),
-                )
-
-            wait.until(
-                expected_conditions.presence_of_element_located(
-                    (
-                        By.CSS_SELECTOR,
-                        DOM.SLOT_DISCOVERY.page_loaded,
-                    )
-                )
-            )
-            logger.debug("BOOKING_DEBUG: Course and date selection complete")
-
-            logger.debug("BOOKING_DEBUG: Step 4/5 - Finding and booking time slot")
-            result = self._find_and_book_time_slot_sync(
-                driver,
-                target_time,
-                num_players,
-                fallback_window_minutes,
-                tee_time_interval_minutes=tee_time_interval_minutes,
-                use_fast_js=use_fast_js,
-                target_date=target_date,
-            )
-
-            logger.info(
-                f"BOOKING_DEBUG: Step 5/5 - Booking result: success={result.success}, "
-                f"booked_time={result.booked_time}, confirmation={result.confirmation_number}, "
-                f"error={result.error_message}"
-            )
-            return result
-
-        except TimeoutException as e:
-            logger.error(f"BOOKING_DEBUG: Booking timeout exception: {e}")
-            self._capture_diagnostic_info(driver, "booking_timeout")
-            return BookingResult(
-                success=False,
-                error_message=f"Booking timeout: {str(e)}",
-            )
-        except WebDriverException as e:
-            logger.error(f"BOOKING_DEBUG: Booking WebDriver exception: {e}")
-            self._capture_diagnostic_info(driver, "booking_webdriver_error")
-            return BookingResult(
-                success=False,
-                error_message=f"Booking error: {str(e)}",
-            )
-        finally:
-            logger.debug("BOOKING_DEBUG: === BOOKING ATTEMPT COMPLETE - Closing driver ===")
-            driver.quit()
-
     async def book_multiple_tee_times(
         self,
         target_date: date,
@@ -3952,8 +3791,9 @@ class WaldenGolfProvider(ReservationProvider):
             # Staging parses live markup, so a malformed page can surface as
             # almost anything. Nothing has reached the server yet, so every
             # failure here is recoverable by the JS chain - and none of it may
-            # escape into _book_tee_time_sync, which handles only WebDriver
-            # errors and would raise instead of returning a BookingResult.
+            # escape into _book_multiple_tee_times_sync, whose per-booking
+            # handler would report the attempt as failed instead of letting the
+            # JS chain rescue it.
             logger.warning(
                 "DIRECT_HTTP: Could not stage direct booking (%s: %s); using the JS chain",
                 type(e).__name__,
@@ -6762,22 +6602,6 @@ class MockWaldenProvider(ReservationProvider):
 
     async def login(self) -> bool:
         return True
-
-    async def book_tee_time(
-        self,
-        target_date: date,
-        target_time: time,
-        num_players: int,
-        fallback_window_minutes: int = 32,
-        tee_time_interval_minutes: int = 8,
-    ) -> BookingResult:
-        await asyncio.sleep(0.5)
-
-        return BookingResult(
-            success=True,
-            booked_time=target_time,
-            confirmation_number=f"MOCK-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-        )
 
     async def book_multiple_tee_times(
         self,
