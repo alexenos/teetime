@@ -3146,9 +3146,6 @@ class BookingService:
             requester_handle=booking.requester_handle,
         )
 
-    async def get_pending_bookings(self) -> list[TeeTimeBooking]:
-        return await database_service.get_bookings(status=BookingStatus.SCHEDULED)
-
     async def get_due_bookings(self, current_time: datetime) -> list[TeeTimeBooking]:
         """
         Get all scheduled bookings that are due for execution.
