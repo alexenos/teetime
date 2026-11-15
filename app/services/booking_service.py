@@ -185,14 +185,6 @@ RACE_FREEZE_MESSAGE = (
 # later, meant for something else, would cancel a booking.
 REPLACE_QUESTION_TTL = timedelta(minutes=30)
 
-# Statuses that hold, or are about to hold, a member's one round for the day.
-LIVE_BOOKING_STATUSES = (
-    BookingStatus.PENDING,
-    BookingStatus.SCHEDULED,
-    BookingStatus.IN_PROGRESS,
-    BookingStatus.SUCCESS,
-)
-
 # Replies that settle a pending booking confirmation without asking the LLM
 # what they mean. The bot just printed the bookings and asked for a "yes", so
 # a bare "yes" needs no interpretation - and sending it to Gemini
