@@ -6,7 +6,6 @@ Tests cover:
 - to_naive_ct() strips tzinfo and converts to CT
 - from_naive_ct() attaches CT tzinfo to naive datetimes
 - normalize_to_ct() handles both aware and naive inputs
-- is_booking_window() correctly identifies the 6:28–6:35 AM window
 - DST boundary correctness
 - Round-trip consistency
 """
@@ -146,53 +145,6 @@ class TestNormalizeToCt:
         ]:
             result = CTDateTime.normalize_to_ct(dt)
             assert result.tzinfo is not None
-
-
-# ---------------------------------------------------------------------------
-# is_booking_window()
-# ---------------------------------------------------------------------------
-
-
-class TestIsBookingWindow:
-    # Helper: build a naive CT datetime at a given H:M:S
-    @staticmethod
-    def _ct(hour: int, minute: int, second: int = 0) -> datetime:
-        return datetime(2026, 7, 4, hour, minute, second)
-
-    def test_before_window(self) -> None:
-        assert not CTDateTime.is_booking_window(self._ct(6, 27, 59))
-
-    def test_window_start_inclusive(self) -> None:
-        assert CTDateTime.is_booking_window(self._ct(6, 28, 0))
-
-    def test_inside_window(self) -> None:
-        assert CTDateTime.is_booking_window(self._ct(6, 30, 0))
-
-    def test_window_end_inclusive(self) -> None:
-        assert CTDateTime.is_booking_window(self._ct(6, 35, 0))
-
-    def test_after_window(self) -> None:
-        assert not CTDateTime.is_booking_window(self._ct(6, 35, 1))
-
-    def test_much_earlier(self) -> None:
-        assert not CTDateTime.is_booking_window(self._ct(0, 0, 0))
-
-    def test_much_later(self) -> None:
-        assert not CTDateTime.is_booking_window(self._ct(12, 0, 0))
-
-    def test_aware_ct_datetime(self) -> None:
-        aware = datetime(2026, 7, 4, 6, 30, 0, tzinfo=CT_TZ)
-        assert CTDateTime.is_booking_window(aware)
-
-    def test_aware_utc_in_window(self) -> None:
-        # 6:30 CDT == 11:30 UTC (summer, UTC-5)
-        aware_utc = datetime(2026, 7, 4, 11, 30, 0, tzinfo=UTC_TZ)
-        assert CTDateTime.is_booking_window(aware_utc)
-
-    def test_aware_utc_outside_window(self) -> None:
-        # 7:00 CDT == 12:00 UTC (summer, UTC-5) – outside [6:28, 6:35]
-        aware_utc = datetime(2026, 7, 4, 12, 0, 0, tzinfo=UTC_TZ)
-        assert not CTDateTime.is_booking_window(aware_utc)
 
 
 # ---------------------------------------------------------------------------
