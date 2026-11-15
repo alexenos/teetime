@@ -291,7 +291,7 @@ resource "google_cloud_run_v2_service" "teetime" {
     }
 
     precondition {
-      condition     = !var.admin_proxy_enabled || var.credential_store_enabled
+      condition = !var.admin_proxy_enabled || var.credential_store_enabled
       error_message = join(" ", [
         "admin_proxy_enabled=true requires credential_store_enabled=true.",
         "Proxy booking resolves its target from the per-friend credential",
@@ -304,7 +304,7 @@ resource "google_cloud_run_v2_service" "teetime" {
     }
 
     precondition {
-      condition     = !var.telegram_group_access_enabled || var.telegram_enabled
+      condition = !var.telegram_group_access_enabled || var.telegram_enabled
       error_message = join(" ", [
         "telegram_group_access_enabled=true requires telegram_enabled=true.",
         "Group membership is read from Telegram with the bot's token, and",
