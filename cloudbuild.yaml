@@ -1,13 +1,39 @@
 steps:
-  # Build the container image
+  # Fetch the previous image so the build below can reuse its layers (#424).
+  # Without it every build re-ran apt-get, which does not produce the same bytes
+  # twice, so each deploy stored its own ~1GB Chromium layer. A missing image
+  # (first build, or one the cleanup policy removed) is not an error: the build
+  # then runs in full.
   - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
     args:
-      - 'build'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA'
-      - '-t'
-      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest'
-      - '.'
+      - '-c'
+      - 'docker pull ${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest || exit 0'
+
+  # Build the container image.
+  #
+  # DOCKER_BUILDKIT=1 pins the builder. This step's Docker client is 20.10.24,
+  # which otherwise uses the legacy builder, and neither builder reuses a cache
+  # the other wrote. BUILDKIT_INLINE_CACHE=1 writes cache metadata into the
+  # pushed image so the next build can match against it.
+  #
+  # CHROMIUM_REFRESH is the ISO week, e.g. 2026-W47 ($$ keeps the shell's $ from
+  # Cloud Build substitution). It rebuilds the apt-get layer once a week so
+  # Chromium does not go stale; see the Dockerfile.
+  - name: 'gcr.io/cloud-builders/docker'
+    entrypoint: 'bash'
+    env:
+      - 'DOCKER_BUILDKIT=1'
+    args:
+      - '-c'
+      - |
+        docker build \
+          --cache-from ${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          --build-arg CHROMIUM_REFRESH=$$(date -u +%G-W%V) \
+          -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:$COMMIT_SHA \
+          -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/teetime/teetime:latest \
+          .
 
   # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
