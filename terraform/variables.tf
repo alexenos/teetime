@@ -188,27 +188,6 @@ variable "telegram_enabled" {
   default     = true
 }
 
-variable "credential_store_enabled" {
-  description = <<-EOT
-    Expose CREDENTIAL_ENCRYPTION_KEY to the running service.
-
-    On: friends are being onboarded with their own Walden logins (issue #179),
-    and a stored row is unreadable without this key mounted. Nothing decrypts
-    until a booking actually runs, so a missing key does not fail the deploy -
-    it fails the 06:30 attempt, days after the request was accepted.
-
-    Ordering still matters when re-creating this project from scratch: Terraform
-    creates the secret empty, and a Cloud Run revision referencing a secret with
-    no version fails to deploy, so the CREDENTIAL_ENCRYPTION_KEY version has to
-    exist BEFORE this is true (see README.md) - the same failure mode as
-    telegram_enabled below. With no credential rows stored, the single global
-    WALDEN_MEMBER_NUMBER/WALDEN_PASSWORD account keeps working exactly as
-    before, unaffected by this flag.
-  EOT
-  type        = bool
-  default     = true
-}
-
 variable "telegram_group_access_enabled" {
   description = <<-EOT
     Expose TELEGRAM_MEMBERS_CHAT_ID to the running service, so that anyone in
@@ -222,11 +201,11 @@ variable "telegram_group_access_enabled" {
     REQUIRES telegram_enabled = true (enforced by a precondition on the Cloud
     Run service).
 
-    Ordering matters for the same mechanical reason as credential_store_enabled
-    and admin_proxy_enabled: Terraform creates the secret empty, and a Cloud Run
-    revision referencing a secret with no version fails to deploy. Set up the
-    group and add the TELEGRAM_MEMBERS_CHAT_ID version BEFORE setting this to
-    true - see "Members group" in operations/telegram-setup.md.
+    Ordering matters for the same mechanical reason as admin_proxy_enabled:
+    Terraform creates the secret empty, and a Cloud Run revision referencing a
+    secret with no version fails to deploy. Set up the group and add the
+    TELEGRAM_MEMBERS_CHAT_ID version BEFORE setting this to true - see
+    "Members group" in operations/telegram-setup.md.
 
     Off, the allowlist is the only way in, exactly as before.
 
@@ -250,8 +229,9 @@ variable "credential_kms_enabled" {
 
     On, new logins are written with KMS; logins already stored with the Fernet
     key keep decrypting with it until they are re-entered. See "Moving logins
-    to the KMS key" in operations/credential-encryption.md for the rest of the
-    migration, ending with deleting CREDENTIAL_ENCRYPTION_KEY.
+    to the KMS key" in operations/credential-encryption.md. The Fernet key it
+    replaced, CREDENTIAL_ENCRYPTION_KEY, has been retired: KMS is now the only
+    way member logins are read in production.
 
     Off, everything works exactly as before this change.
 
@@ -268,12 +248,12 @@ variable "admin_proxy_enabled" {
     designated Telegram account book on a friend's behalf (issue #185):
     "for @alex book 9/12 at 8a".
 
-    REQUIRES credential_store_enabled = true (enforced by a precondition on
+    REQUIRES credential_kms_enabled = true (enforced by a precondition on
     the Cloud Run service). Proxy booking resolves its target from the
     per-friend credential store and books under that friend's login, so
-    without CREDENTIAL_ENCRYPTION_KEY mounted every proxy booking fails when
-    it tries to decrypt one - at 06:30, days after the booking was accepted,
-    since nothing decrypts until the attempt runs.
+    without CREDENTIAL_KMS_KEY every proxy booking fails when it tries to
+    decrypt one - at 06:30, days after the booking was accepted, since
+    nothing decrypts until the attempt runs.
 
     On: TELEGRAM_ADMIN_USER_ID has an enabled version, and the admin books on
     behalf of family members who each hold their own Walden membership.
@@ -284,10 +264,9 @@ variable "admin_proxy_enabled" {
     admin cannot book for itself unless it is also a target in the credential
     store.
 
-    Ordering matters when re-creating this from scratch, for the same mechanical
-    reason as credential_store_enabled above: Terraform creates the secret
-    empty, and a Cloud Run revision referencing a secret with no version fails
-    to deploy. Create the TELEGRAM_ADMIN_USER_ID version BEFORE setting this
+    Ordering matters when re-creating this from scratch: Terraform creates the
+    secret empty, and a Cloud Run revision referencing a secret with no version
+    fails to deploy. Create the TELEGRAM_ADMIN_USER_ID version BEFORE setting this
     to true.
 
     The admin ID must ALSO be in TELEGRAM_ALLOWED_USER_IDS - the allowlist is

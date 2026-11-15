@@ -291,8 +291,8 @@ timeout, a changed page) is not marked.
 that number, extra members race after the window opens.
 
 **Needs:** `TELEGRAM_WEBHOOK_BASE_URL` set to an `https://` URL (terraform
-fills in the service URL), and `CREDENTIAL_ENCRYPTION_KEY` mounted to encrypt
-the login. Turn on group access ("Members group" above) only once this has
+fills in the service URL), and `credential_kms_enabled` on so the login is
+encrypted with the KMS key. Turn on group access ("Members group" above) only once this has
 shipped. Until then, the welcome message's link leads nowhere useful.
 
 **Not verified against a real Telegram client:**
@@ -322,11 +322,9 @@ requires the friend to have a row and requires nothing of the admin's own accoun
 which has no Walden login at all, by design, and is refused one if anything
 tries to look it up.
 
-**Prerequisite: the per-friend credential store must be on**
-(`credential_store_enabled = true`, with a versioned
-`CREDENTIAL_ENCRYPTION_KEY`). Proxy booking always books under a friend's stored
-login and never falls back to the shared account, so without the decryption key
-mounted every proxy booking fails — at 6:30, days after it was accepted, since
+**Prerequisite: KMS must be on** (`credential_kms_enabled = true`). Proxy
+booking always books under a friend's stored login and never falls back to the
+shared account, so without the KMS key every proxy booking fails — at 6:30, days after it was accepted, since
 nothing decrypts until the attempt runs. Terraform enforces this with a
 precondition rather than letting it deploy.
 
