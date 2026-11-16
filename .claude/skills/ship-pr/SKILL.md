@@ -625,10 +625,20 @@ still reads `SUCCESS`. The image tag is the full commit sha (`cloudbuild.yaml`,
 
 ```bash
 gcloud run services describe teetime --region=us-central1 \
-  --format='value(spec.template.spec.containers[0].image)'
+  --format='value(spec.template.spec.containers[0].image,status.latestCreatedRevisionName,status.latestReadyRevisionName,status.traffic[].revisionName,status.traffic[].percent)'
 ```
 
-The tag should be the merge commit, or a commit merged after it
+That image is the revision *template*, not necessarily what receives traffic.
+It describes what is serving only when all traffic is on the latest ready
+revision, and that revision is also the latest one created. Check that first:
+the traffic entries name a single revision at `100`, and all three revision
+names agree. If they do not, the new revision failed to become ready, or
+traffic is pinned elsewhere: report that as a failed deploy. (Terraform sets no
+`traffic` block, so the default is all traffic on the latest revision. A
+revision reports its image by digest, not tag, which is why the template's tag
+is used.)
+
+Then the tag should be the merge commit, or a commit merged after it
 (`git merge-base --is-ancestor <merge-sha> <tag-sha>` after a fetch). An older
 commit means this merge's code is not serving: report that as a failed deploy.
 That check covers the `teetime` service. The racer and observer jobs take the
@@ -643,7 +653,7 @@ Every command above was checked on 2026-11-15 with the session account. Build
 `4de2b92b` (#447) logs `HEAD is now at <short-sha> <title>` in its fetch step,
 with the build id in `resource.labels.build_id`. `describe` returned `SUCCESS`.
 The build's last log line, after the image push, is `DONE`. `run services
-describe` returned an image tagged with the full sha of `main`'s head.
+describe` returned an image tagged with the full sha of `main`'s head, with all traffic on the latest ready revision.
 
 ## 10. Report
 
