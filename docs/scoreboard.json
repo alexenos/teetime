@@ -1,12 +1,12 @@
 {
   "sample": false,
-  "generated": "2026-11-15T13:35:03Z",
+  "generated": "2026-11-16T13:33:55Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
     "first": "2026-08-13",
     "last": "2026-09-27",
-    "routine_rows": 46,
+    "routine_rows": 47,
     "routine_raced": 15,
     "source": "operations/ledger/backfill/race-report.jsonl"
   },
@@ -40,14 +40,14 @@
   "streak": {
     "available": true,
     "reason": null,
-    "consecutive": 11,
-    "unverified": 11,
-    "total_ok": 85,
+    "consecutive": 13,
+    "unverified": 13,
+    "total_ok": 87,
     "last_failure": "2026-11-10",
     "last_failure_reason": "scoreboard: failed",
     "by_routine": {
-      "race-report": 37,
-      "scoreboard": 4,
+      "race-report": 38,
+      "scoreboard": 5,
       "cost": 1,
       "tech-debt": 2,
       "feature-dev": 4
@@ -69,7 +69,7 @@
     ],
     "window": {
       "first": "2026-10-01",
-      "last": "2026-11-15"
+      "last": "2026-11-16"
     }
   },
   "cost": {
