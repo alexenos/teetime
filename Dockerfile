@@ -2,8 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Rebuilt once a week, and otherwise reused from the previous image (#424).
+# cloudbuild.yaml builds with --cache-from the last pushed image, so this layer,
+# and every later layer whose inputs are unchanged, keeps its digest and is
+# stored once in Artifact Registry instead of once per deploy. CHROMIUM_REFRESH
+# is the ISO week, so the first deploy of a new week re-runs apt-get and picks up
+# Chromium and security updates; later deploys that week reuse it. A newer
+# python:3.11-slim base also rebuilds it, since every layer depends on the base.
+ARG CHROMIUM_REFRESH=unset
+
 # Install Chrome/Chromium and dependencies for headless Selenium
-RUN apt-get update && apt-get install -y \
+RUN echo "Chromium refresh: ${CHROMIUM_REFRESH}" && apt-get update && apt-get install -y \
     curl \
     wget \
     gnupg \

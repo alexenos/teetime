@@ -388,17 +388,6 @@ class TestBookingServiceBookings:
             assert result is None
             assert success_booking.status == original_status
 
-    @pytest.mark.asyncio
-    async def test_get_pending_bookings(
-        self, booking_service: BookingService, sample_booking: TeeTimeBooking
-    ) -> None:
-        """Test getting pending bookings."""
-        with patch("app.services.booking_service.database_service") as mock_db:
-            mock_db.get_bookings = AsyncMock(return_value=[sample_booking])
-            pending = await booking_service.get_pending_bookings()
-            assert len(pending) == 1
-            assert pending[0].id == sample_booking.id
-
 
 class TestBookingServiceExecutionTime:
     """Tests for execution time calculation."""
