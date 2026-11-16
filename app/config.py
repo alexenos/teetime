@@ -199,10 +199,11 @@ class Settings(BaseSettings):
     # falls back to the JS chain; a failure after it is reported without a
     # browser retry, because the slot may already be held.
     #
-    # On, paired with walden_fast_booking_immediate below, because the only way
-    # to exercise this against the live site is to run it there. Ad-hoc
-    # bookings are the safe place to find out - a lost slot on a Tuesday
-    # afternoon costs nothing, a lost 6:30 race costs the tee time.
+    # On, because the only way to exercise this against the live site is to
+    # run it there. Ad-hoc bookings are the safe place to find out - a lost
+    # slot on a Tuesday afternoon costs nothing, a lost 6:30 race costs the tee
+    # time. Ad-hoc bookings run the same batch path as the race (as a batch of
+    # one), so this and walden_fast_booking_batch cover both.
     walden_direct_http_booking: bool = True
 
     # Re-render the tee sheet at 6:30:00 and fire Reserve against that render,
@@ -236,13 +237,11 @@ class Settings(BaseSettings):
     # fast are independent, and conflating them left the fast chain reachable
     # only from the scheduled batch job. See issue #124.
     #
-    # Batch (the 6:30 race) defaults on - that is what it was built for.
+    # Defaults on - that is what it was built for. It covers ad-hoc bookings
+    # too: they run through the same batch path as a batch of one. The
+    # separate walden_fast_booking_immediate flag went with the single-booking
+    # path it governed (#127).
     walden_fast_booking_batch: bool = True
-    # Ad-hoc bookings (a date inside the 7-day window, booked on the spot) are
-    # on so the chain gets exercised off-race, where losing the slot costs
-    # nothing. Set this and walden_direct_http_booking to false together to put
-    # ad-hoc bookings back on the original Selenium flow.
-    walden_fast_booking_immediate: bool = True
 
     # Seconds an ad-hoc booking waits before firing Reserve, instead of firing
     # as soon as the sheet is staged.

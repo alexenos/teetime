@@ -896,58 +896,72 @@ class TestWaldenProviderCourseSelection:
 
 
 class TestWaldenProviderDateSelectionFailure:
-    """Tests for booking failure when date selection fails."""
+    """A booking fails with a clear error when date selection fails.
 
-    def test_book_tee_time_fails_on_date_selection_failure(
-        self, provider: WaldenGolfProvider
-    ) -> None:
-        """Test that booking fails with clear error when date selection fails."""
+    Driven through the batch path, which every booking now takes: ad-hoc
+    bookings run as a batch of one (#127).
+    """
+
+    @staticmethod
+    def _book_once(provider: WaldenGolfProvider) -> BookingResult:
         from datetime import date, time
 
-        target_date = date(2026, 2, 1)
-        target_time = time(8, 58)
+        from app.providers.base import BatchBookingRequest
 
-        with patch.object(provider, "_create_driver") as mock_create:
-            mock_driver = MagicMock()
-            mock_create.return_value = mock_driver
+        batch = provider._book_multiple_tee_times_sync(
+            date(2026, 2, 1),
+            [
+                BatchBookingRequest(
+                    booking_id="adhoc",
+                    target_time=time(8, 58),
+                    num_players=4,
+                    fallback_window_minutes=32,
+                )
+            ],
+            None,
+        )
+        assert len(batch.results) == 1
+        return batch.results[0].result
 
-            with patch.object(provider, "_perform_login", return_value=True):
-                with patch.object(provider, "_select_course_sync", return_value=True):
-                    with patch.object(provider, "_select_date_sync", return_value=False):
-                        result = provider._book_tee_time_sync(target_date, target_time, 4, 32)
+    def test_booking_fails_on_date_selection_failure(self, provider: WaldenGolfProvider) -> None:
+        """The member is told which date could not be selected, and nothing is booked."""
+        with (
+            patch.object(provider, "_create_driver", return_value=MagicMock()),
+            patch.object(provider, "_perform_login", return_value=True),
+            patch.object(provider, "_select_course_sync", return_value=True),
+            patch.object(provider, "_select_date_sync", return_value=False),
+            patch.object(provider, "_find_and_book_time_slot_sync") as mock_book,
+            patch("app.providers.walden_provider.WebDriverWait"),
+        ):
+            result = self._book_once(provider)
 
-                        assert result.success is False
-                        assert "Failed to select date" in result.error_message
-                        assert "02/01/2026" in result.error_message
+        assert result.success is False
+        assert result.error_message is not None
+        assert "Failed to select date" in result.error_message
+        assert "02/01/2026" in result.error_message
+        mock_book.assert_not_called()
 
-    def test_book_tee_time_proceeds_on_date_selection_success(
-        self, provider: WaldenGolfProvider
-    ) -> None:
-        """Test that booking proceeds when date selection succeeds."""
-        from datetime import date, time
+    def test_booking_proceeds_on_date_selection_success(self, provider: WaldenGolfProvider) -> None:
+        """With the date selected, the slot is booked."""
+        from datetime import time
 
-        from app.providers.base import BookingResult
+        with (
+            patch.object(provider, "_create_driver", return_value=MagicMock()),
+            patch.object(provider, "_perform_login", return_value=True),
+            patch.object(provider, "_select_course_sync", return_value=True),
+            patch.object(provider, "_select_date_sync", return_value=True),
+            patch.object(provider, "_scroll_to_load_all_slots"),
+            patch.object(
+                provider,
+                "_find_and_book_time_slot_sync",
+                return_value=BookingResult(success=True, booked_time=time(8, 58)),
+            ) as mock_book,
+            patch("app.providers.walden_provider.WebDriverWait"),
+        ):
+            result = self._book_once(provider)
 
-        target_date = date(2026, 2, 1)
-        target_time = time(8, 58)
-
-        with patch.object(provider, "_create_driver") as mock_create:
-            mock_driver = MagicMock()
-            mock_create.return_value = mock_driver
-
-            with patch.object(provider, "_perform_login", return_value=True):
-                with patch.object(provider, "_select_course_sync", return_value=True):
-                    with patch.object(provider, "_select_date_sync", return_value=True):
-                        with patch.object(
-                            provider,
-                            "_find_and_book_time_slot_sync",
-                            return_value=BookingResult(success=True, booked_time=target_time),
-                        ) as mock_book:
-                            result = provider._book_tee_time_sync(target_date, target_time, 4, 32)
-
-                            # Verify _find_and_book_time_slot_sync was called
-                            mock_book.assert_called_once()
-                            assert result.success is True
+        mock_book.assert_called_once()
+        assert result.success is True
 
 
 class TestWaldenDOMSchema:
@@ -3050,8 +3064,8 @@ class TestDirectHttpBookingWiring:
     def test_book_failure_is_reported_not_raised(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An escape here would reach _book_tee_time_sync, which only handles
-        WebDriver errors, and raise instead of returning a BookingResult."""
+        """An escape here would reach the batch's per-booking handler, which
+        reports a generic error instead of the phase the failure happened in."""
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         booker, session = self._patch_booker(monkeypatch, None)
         booker.book.side_effect = DirectHttpError("exploded")
@@ -3907,12 +3921,15 @@ class TestBookingPathDefaults:
     # Field name -> shipped default. Uppercased, each is also its env var name.
     FLAG_DEFAULTS = {
         "walden_direct_http_booking": True,
-        "walden_fast_booking_immediate": True,
         "walden_fast_booking_batch": True,
     }
 
     def test_direct_chain_is_on_for_both_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Direct HTTP plus the ad-hoc fast path: the off-race validation setup.
+        """Direct HTTP plus the fast chain: the off-race validation setup.
+
+        Ad-hoc bookings run the batch path as a batch of one, so these two
+        cover them as well as the race (#127 removed the separate
+        walden_fast_booking_immediate flag along with the single path).
 
         Ad-hoc bookings are the safe place to meet the live site - a lost slot
         on a Tuesday afternoon costs nothing, a lost 6:30 race costs the tee
@@ -3935,12 +3952,15 @@ class TestBookingPathDefaults:
 
 
 class TestImmediateBookingFastPath:
-    """Tests for routing an ad-hoc booking through the fast/direct chain.
+    """An untimed booking runs the fast/direct chain with its fallback rules.
 
-    A date inside the 7-day window books inline, and that path could not reach
-    the fast JS chain or direct HTTP at all - so the least-verified code in the
-    repo could only ever be exercised during a live 6:30 race. These tests pin
-    the routing, and that the flag-off behavior is untouched.
+    Ad-hoc bookings run the batch path as a batch of one, and the untimed
+    retry (``_retry_blocked_untimed``) fires one with ``execute_at=None``. These
+    tests pin the chain semantics on that untimed batch: direct HTTP end to
+    end, the JS chain when direct HTTP is off, the fallback to JS before
+    Reserve is submitted, and no browser retry after it.
+
+    They used to drive the separate single-booking shell, removed in #127.
     """
 
     SLOT = dict(TestDirectHttpBookingWiring.SLOT)
@@ -3951,7 +3971,7 @@ class TestImmediateBookingFastPath:
         monkeypatch: pytest.MonkeyPatch,
         driver: MagicMock | None = None,
     ) -> MagicMock:
-        """Stub login/navigation so _book_tee_time_sync reaches slot booking."""
+        """Stub login/navigation so an untimed batch reaches slot booking."""
         import app.providers.walden_provider as walden_module
 
         class DummyWait:
@@ -3962,6 +3982,7 @@ class TestImmediateBookingFastPath:
                 return None
 
         monkeypatch.setattr(walden_module, "WebDriverWait", DummyWait)
+        monkeypatch.setattr(settings, "walden_fast_booking_batch", True)
 
         driver = driver or MagicMock()
         monkeypatch.setattr(provider, "_create_driver", lambda: driver)
@@ -3971,43 +3992,25 @@ class TestImmediateBookingFastPath:
         monkeypatch.setattr(provider, "_scroll_to_load_all_slots", MagicMock())
         return driver
 
-    def test_flag_off_keeps_todays_selenium_flow(
-        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The default must not change what an ad-hoc booking does."""
-        from app.providers.base import BookingResult
+    @staticmethod
+    def _book_once(provider: WaldenGolfProvider) -> BookingResult:
+        """Book one tee time the way an ad-hoc booking does: an untimed batch of one."""
+        from app.providers.base import BatchBookingRequest
 
-        monkeypatch.setattr(settings, "walden_fast_booking_immediate", False)
-        # On even with the fast path off: the direct chain must stay unreachable
-        # from a flow that never enters the fast branch.
-        monkeypatch.setattr(settings, "walden_direct_http_booking", True)
-        self._drive(provider, monkeypatch)
-
-        find_and_book = MagicMock(return_value=BookingResult(success=True, booked_time=time(8, 42)))
-        monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", find_and_book)
-
-        result = provider._book_tee_time_sync(date(2026, 2, 10), time(8, 42), 4, 32)
-
-        assert result.success is True
-        assert find_and_book.call_args.kwargs["use_fast_js"] is False
-
-    def test_flag_on_routes_through_the_fast_chain_untimed(
-        self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Fast, but still untimed - there is no window left to wait for."""
-        from app.providers.base import BookingResult
-
-        monkeypatch.setattr(settings, "walden_fast_booking_immediate", True)
-        self._drive(provider, monkeypatch)
-
-        find_and_book = MagicMock(return_value=BookingResult(success=True, booked_time=time(8, 42)))
-        monkeypatch.setattr(provider, "_find_and_book_time_slot_sync", find_and_book)
-
-        provider._book_tee_time_sync(date(2026, 2, 10), time(8, 42), 4, 32)
-
-        kwargs = find_and_book.call_args.kwargs
-        assert kwargs["use_fast_js"] is True
-        assert kwargs.get("execute_at_timestamp_ms") is None
+        batch = provider._book_multiple_tee_times_sync(
+            date(2026, 2, 10),
+            [
+                BatchBookingRequest(
+                    booking_id="adhoc",
+                    target_time=time(8, 42),
+                    num_players=4,
+                    fallback_window_minutes=32,
+                )
+            ],
+            None,
+        )
+        assert len(batch.results) == 1
+        return batch.results[0].result
 
     def test_immediate_booking_runs_the_direct_http_chain_end_to_end(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
@@ -4019,7 +4022,6 @@ class TestImmediateBookingFastPath:
         """
         from app.providers.walden_http_booker import DirectBookingResult
 
-        monkeypatch.setattr(settings, "walden_fast_booking_immediate", True)
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
 
         driver = MagicMock()
@@ -4055,7 +4057,7 @@ class TestImmediateBookingFastPath:
         fast_chain = MagicMock()
         monkeypatch.setattr(provider, "_execute_fast_booking_chain_js", fast_chain)
 
-        result = provider._book_tee_time_sync(date(2026, 2, 10), time(8, 42), 4, 32)
+        result = self._book_once(provider)
 
         assert result.success is True
         assert result.confirmation_number == "12345"
@@ -4068,7 +4070,6 @@ class TestImmediateBookingFastPath:
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Fast and direct are separate questions; the JS chain is the fast default."""
-        monkeypatch.setattr(settings, "walden_fast_booking_immediate", True)
         monkeypatch.setattr(settings, "walden_direct_http_booking", False)
         self._drive(provider, monkeypatch)
 
@@ -4095,7 +4096,7 @@ class TestImmediateBookingFastPath:
             provider, "_extract_confirmation_number", MagicMock(return_value="ABC123")
         )
 
-        result = provider._book_tee_time_sync(date(2026, 2, 10), time(8, 42), 4, 32)
+        result = self._book_once(provider)
 
         assert result.success is True
         fast_chain.assert_called_once()
@@ -4108,7 +4109,6 @@ class TestImmediateBookingFastPath:
         """Fallback semantics must survive the new routing."""
         from app.providers.walden_http_booker import DirectBookingResult
 
-        monkeypatch.setattr(settings, "walden_fast_booking_immediate", True)
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         self._drive(provider, monkeypatch)
 
@@ -4142,7 +4142,7 @@ class TestImmediateBookingFastPath:
             provider, "_extract_confirmation_number", MagicMock(return_value="ABC123")
         )
 
-        result = provider._book_tee_time_sync(date(2026, 2, 10), time(8, 42), 4, 32)
+        result = self._book_once(provider)
 
         assert result.success is True
         fast_chain.assert_called_once()
@@ -4153,7 +4153,6 @@ class TestImmediateBookingFastPath:
         """Reserve was accepted; a browser retry would race our own booking."""
         from app.providers.walden_http_booker import DirectBookingResult
 
-        monkeypatch.setattr(settings, "walden_fast_booking_immediate", True)
         monkeypatch.setattr(settings, "walden_direct_http_booking", True)
         self._drive(provider, monkeypatch)
 
@@ -4176,7 +4175,7 @@ class TestImmediateBookingFastPath:
         monkeypatch.setattr(provider, "_execute_fast_booking_chain_js", fast_chain)
         monkeypatch.setattr(provider, "_capture_diagnostic_info", MagicMock())
 
-        result = provider._book_tee_time_sync(date(2026, 2, 10), time(8, 42), 4, 32)
+        result = self._book_once(provider)
 
         assert result.success is False
         assert result.error_message is not None

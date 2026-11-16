@@ -832,10 +832,10 @@ class TestJobsIntegration:
         await engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_execute_booking_transitions_to_in_progress_before_provider(
+    async def test_execute_bookings_batch_transitions_to_in_progress_before_provider(
         self,
     ) -> None:
-        """Test that execute_booking sets status to IN_PROGRESS before calling provider.
+        """Test that execute_bookings_batch sets IN_PROGRESS before calling provider.
 
         This verifies the idempotency claim in the docstring: bookings are transitioned
         to IN_PROGRESS before execution, so retries won't re-execute started bookings.
@@ -844,7 +844,7 @@ class TestJobsIntegration:
         from sqlalchemy.orm import sessionmaker
 
         from app.models.database import Base
-        from app.providers.base import BookingResult
+        from app.providers.base import BatchBookingItemResult, BatchBookingResult, BookingResult
         from app.services.booking_service import BookingService
         from app.services.database_service import DatabaseService
 
@@ -860,10 +860,18 @@ class TestJobsIntegration:
             nonlocal status_during_provider_call
             booking = await db_service.get_booking("test-idempotency")
             status_during_provider_call = booking.status if booking else None
-            return BookingResult(
-                success=True,
-                booked_time=time(8, 0),
-                confirmation_number="CONF123",
+            return BatchBookingResult(
+                results=[
+                    BatchBookingItemResult(
+                        booking_id="test-idempotency",
+                        result=BookingResult(
+                            success=True,
+                            booked_time=time(8, 0),
+                            confirmation_number="CONF123",
+                        ),
+                    )
+                ],
+                total_succeeded=1,
             )
 
         with patch("app.services.database_service.AsyncSessionLocal", test_session_local):
@@ -889,12 +897,12 @@ class TestJobsIntegration:
                     booking_svc = BookingService()
 
                     mock_provider = AsyncMock()
-                    mock_provider.book_tee_time = capture_status_provider
+                    mock_provider.book_multiple_tee_times = capture_status_provider
                     booking_svc.set_reservation_provider(mock_provider)
 
-                    result = await booking_svc.execute_booking("test-idempotency")
+                    results = await booking_svc.execute_bookings_batch([booking], execute_at=None)
 
-                    assert result is True
+                    assert [r.success for _, r in results] == [True]
                     assert status_during_provider_call == BookingStatus.IN_PROGRESS
 
                     final_booking = await db_service.get_booking("test-idempotency")

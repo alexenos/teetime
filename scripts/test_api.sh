@@ -15,7 +15,9 @@
 
 # Configuration
 BASE_URL="${1:-https://teetime-746475271596.us-central1.run.app}"
-TEST_PHONE="+17132011357"
+# A fictional number in the 555-01xx range reserved for examples. Real numbers
+# must never be written into this public repository (CLAUDE.md).
+TEST_PHONE="+15555550100"
 
 # Colors for output
 RED='\033[0;31m'
@@ -28,9 +30,6 @@ NC='\033[0m' # No Color
 PASSED=0
 FAILED=0
 SKIPPED=0
-
-# Store created booking ID for cleanup
-CREATED_BOOKING_ID=""
 
 print_header() {
     echo ""
@@ -151,107 +150,26 @@ else
 fi
 
 # ============================================
-# 2. Bookings CRUD Endpoints
+# 2. Removed Endpoints
 # ============================================
 
-print_header "2. Bookings CRUD Endpoints"
+print_header "2. Removed Endpoints"
 
-print_test "GET /bookings/ - List Bookings (empty or with data)"
-response=$(curl -sL -w "\n%{http_code}" "$BASE_URL/bookings/" 2>/dev/null)
-http_code=$(echo "$response" | tail -n1)
-body=$(echo "$response" | sed '$d')
-
-if [ "$http_code" = "200" ]; then
-    print_pass "List bookings returned successfully"
-    echo "Response: $body"
-else
-    print_fail "Expected status 200, got $http_code"
-    echo "Response: $body"
-fi
-
-# Calculate a date 8 days from now for testing
-FUTURE_DATE=$(date -d "+8 days" +%Y-%m-%d 2>/dev/null || date -v+8d +%Y-%m-%d 2>/dev/null)
-if [ -z "$FUTURE_DATE" ]; then
-    # Fallback for systems without GNU date
-    FUTURE_DATE="2025-12-29"
-fi
-
-print_test "POST /bookings/ - Create Booking"
-create_body=$(cat <<EOF
-{
-    "phone_number": "$TEST_PHONE",
-    "requested_date": "$FUTURE_DATE",
-    "requested_time": "08:00:00",
-    "num_players": 4,
-    "fallback_window_minutes": 30
-}
-EOF
-)
-
-response=$(curl -sL -w "\n%{http_code}" -X POST "$BASE_URL/bookings/" \
-    -H "Content-Type: application/json" \
-    -d "$create_body" 2>/dev/null)
-http_code=$(echo "$response" | tail -n1)
-body=$(echo "$response" | sed '$d')
-
-if [ "$http_code" = "200" ]; then
-    print_pass "Booking created successfully"
-    echo "Response: $body"
-    
-    # Extract booking ID for later tests
-    CREATED_BOOKING_ID=$(echo "$body" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-    if [ -n "$CREATED_BOOKING_ID" ]; then
-        print_info "Created booking ID: $CREATED_BOOKING_ID"
-    fi
-else
-    print_fail "Expected status 200, got $http_code"
-    echo "Response: $body"
-fi
-
-if [ -n "$CREATED_BOOKING_ID" ]; then
-    print_test "GET /bookings/{id} - Get Specific Booking"
-    response=$(curl -sL -w "\n%{http_code}" "$BASE_URL/bookings/$CREATED_BOOKING_ID" 2>/dev/null)
+# The /bookings REST router was removed in #127: it had no authentication on a
+# publicly invokable service, and nothing in the bot called it.
+for path in "/bookings/" "/bookings/nonexistent123"; do
+    print_test "GET $path - Removed (should be 404)"
+    response=$(curl -sL -w "\n%{http_code}" "$BASE_URL$path" 2>/dev/null)
     http_code=$(echo "$response" | tail -n1)
     body=$(echo "$response" | sed '$d')
-    
-    if [ "$http_code" = "200" ]; then
-        print_pass "Retrieved booking successfully"
-        echo "Response: $body"
+
+    if [ "$http_code" = "404" ]; then
+        print_pass "$path is not served"
     else
-        print_fail "Expected status 200, got $http_code"
+        print_fail "Expected status 404, got $http_code (the bookings API is reachable!)"
         echo "Response: $body"
     fi
-else
-    print_skip "GET /bookings/{id} - No booking ID available"
-fi
-
-print_test "GET /bookings/?phone_number=$TEST_PHONE - Filter by Phone"
-# URL encode the phone number (+ becomes %2B)
-ENCODED_PHONE=$(echo "$TEST_PHONE" | sed 's/+/%2B/g')
-response=$(curl -sL -w "\n%{http_code}" "$BASE_URL/bookings/?phone_number=$ENCODED_PHONE" 2>/dev/null)
-http_code=$(echo "$response" | tail -n1)
-body=$(echo "$response" | sed '$d')
-
-if [ "$http_code" = "200" ]; then
-    print_pass "Filtered bookings returned successfully"
-    echo "Response: $body"
-else
-    print_fail "Expected status 200, got $http_code"
-    echo "Response: $body"
-fi
-
-print_test "GET /bookings/nonexistent - Get Non-existent Booking"
-response=$(curl -sL -w "\n%{http_code}" "$BASE_URL/bookings/nonexistent123" 2>/dev/null)
-http_code=$(echo "$response" | tail -n1)
-body=$(echo "$response" | sed '$d')
-
-if [ "$http_code" = "404" ]; then
-    print_pass "Correctly returned 404 for non-existent booking"
-    echo "Response: $body"
-else
-    print_fail "Expected status 404, got $http_code"
-    echo "Response: $body"
-fi
+done
 
 # ============================================
 # 3. Webhook Endpoints (Security Tests)
@@ -262,7 +180,7 @@ print_header "3. Webhook Endpoints (Security Tests)"
 print_test "POST /webhooks/twilio/sms - Without Signature (should fail)"
 response=$(curl -sL -w "\n%{http_code}" -X POST "$BASE_URL/webhooks/twilio/sms" \
     -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "From=$TEST_PHONE&To=+15559876543&Body=test" 2>/dev/null)
+    -d "From=$TEST_PHONE&To=+15555550101&Body=test" 2>/dev/null)
 http_code=$(echo "$response" | tail -n1)
 body=$(echo "$response" | sed '$d')
 
@@ -307,33 +225,6 @@ if [ "$http_code" = "401" ]; then
 else
     print_fail "Expected status 401, got $http_code"
     echo "Response: $body"
-fi
-
-# ============================================
-# 5. Cleanup - Cancel Test Booking
-# ============================================
-
-print_header "5. Cleanup"
-
-if [ -n "$CREATED_BOOKING_ID" ]; then
-    print_test "DELETE /bookings/{id} - Cancel Test Booking"
-    # URL encode the phone number (+ becomes %2B)
-    ENCODED_PHONE=$(echo "$TEST_PHONE" | sed 's/+/%2B/g')
-    response=$(curl -sL -w "\n%{http_code}" -X DELETE \
-        "$BASE_URL/bookings/$CREATED_BOOKING_ID?phone_number=$ENCODED_PHONE" 2>/dev/null)
-    http_code=$(echo "$response" | tail -n1)
-    body=$(echo "$response" | sed '$d')
-    
-    if [ "$http_code" = "200" ]; then
-        print_pass "Test booking cancelled successfully"
-        echo "Response: $body"
-    else
-        print_fail "Expected status 200, got $http_code"
-        echo "Response: $body"
-        print_info "You may need to manually clean up booking ID: $CREATED_BOOKING_ID"
-    fi
-else
-    print_skip "No test booking to clean up"
 fi
 
 # ============================================

@@ -70,18 +70,6 @@ class ReservationProvider(ABC):
         pass
 
     @abstractmethod
-    async def book_tee_time(
-        self,
-        target_date: date,
-        target_time: time,
-        num_players: int,
-        fallback_window_minutes: int = 32,
-        tee_time_interval_minutes: int = 8,
-    ) -> BookingResult:
-        """Book a tee time for the specified date and time."""
-        pass
-
-    @abstractmethod
     async def get_available_times(self, target_date: date) -> list[time]:
         """Get available tee times for a given date."""
         pass

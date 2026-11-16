@@ -2401,14 +2401,14 @@ class BookingService:
         """
         Create a new booking record and schedule it for execution.
 
-        This is the public API for creating bookings, used by both the SMS
-        conversation flow and the REST API.
+        This is the public API for creating bookings, used by the messaging
+        conversation flow.
 
         If the calculated execution time is in the past (i.e., the booking window
         has already opened), the attempt starts immediately in the background
         rather than being scheduled for later. This call returns as soon as the
         record is created, with the booking in IN_PROGRESS; the outcome is
-        reported to the user by execute_booking when the attempt finishes.
+        reported to the user by the batch execution when the attempt finishes.
 
         Multi-player bookings (2+ players) are rejected if the tee time is within
         48 hours, because the Walden Golf website disables TBD guest placeholders
@@ -2419,10 +2419,10 @@ class BookingService:
             request: The tee time request details.
             origin_channel_id: Discord channel or Telegram chat this booking was
                 requested in, so the success/failure notification replies there.
-                None for SMS and REST API callers.
+                None for SMS callers.
             channel: Messaging channel this booking was requested over, so its
-                notification days later goes back over the same one. None for
-                REST API callers, which fall back to MESSAGING_CHANNEL.
+                notification days later goes back over the same one. None
+                falls back to MESSAGING_CHANNEL.
             requester_handle: Ready-to-prepend mention of who requested this
                 booking, so its result notification days later says who it
                 was for. None for a private conversation or a channel with no
@@ -2484,10 +2484,11 @@ class BookingService:
                 # batch of one, and every race behaviour - fallback ranking, the
                 # clock probe, refresh-at-window, the sweep ladder, the precision
                 # wait, the race ledger - is gated on `execute_at` being set,
-                # which only the batch path supplies. Routed through
-                # execute_booking instead, an ad-hoc booking took a path that
-                # structurally could not be timed: book_tee_time has no
-                # execute_at parameter, so all six switched off and the 08-14
+                # which only the batch path supplies. Routed through the old
+                # single-booking path instead (execute_booking and
+                # book_tee_time, removed in #127), an ad-hoc booking could not
+                # be timed: that path had no execute_at parameter, so all six
+                # switched off and the 08-14
                 # ad-hoc booking ran untimed with walden_adhoc_execute_delay_s
                 # set to 90. That left the machinery deciding the only booking
                 # that matters exercised once a day, unobserved.
@@ -2984,91 +2985,6 @@ class BookingService:
         the same examples.
         """
         return help_message()
-
-    async def execute_booking(self, booking_id: str) -> bool:
-        """
-        Execute a scheduled booking by attempting to reserve on the club website.
-
-        This method is called by the scheduler at the reservation open time
-        (6:30am CT, 7 days before the requested date). It:
-        1. Retrieves the booking record
-        2. Updates status to IN_PROGRESS
-        3. Calls the reservation provider to book on the club website
-        4. Updates status to SUCCESS or FAILED based on result
-        5. Sends SMS notification to the user
-
-        Args:
-            booking_id: The unique identifier of the booking to execute.
-
-        Returns:
-            True if the booking was successful, False otherwise.
-        """
-        booking = await self.get_booking(booking_id)
-        if not booking:
-            return False
-
-        # _provider_for resolves this requester's credential from the database
-        # and can therefore raise (a DB error, or a decryption failure if
-        # CREDENTIAL_ENCRYPTION_KEY changed since the row was written) - unlike
-        # the synchronous attribute check this replaced. It runs inside the
-        # same try/except as the booking attempt itself so a lookup failure is
-        # reported to the user like any other booking failure, instead of
-        # escaping to the caller as an unreported exception.
-        provider: ReservationProvider | None = None
-        attempt_started = datetime.now(UTC).replace(tzinfo=None)
-        try:
-            provider = await self._provider_for(booking.phone_number)
-            if not provider:
-                booking.status = BookingStatus.FAILED
-                booking.error_message = "Reservation provider not configured"
-                await database_service.update_booking(booking)
-
-                await self._try_notify_booking_result(
-                    booking,
-                    BookingResult(success=False, error_message="System not configured for booking"),
-                )
-                return False
-
-            booking.status = BookingStatus.IN_PROGRESS
-            await database_service.update_booking(booking)
-
-            async with self._browser_slot_held(f"booking {booking.id}"):
-                result = await provider.book_tee_time(
-                    target_date=booking.request.requested_date,
-                    target_time=booking.request.requested_time,
-                    num_players=booking.request.num_players,
-                    fallback_window_minutes=booking.request.fallback_window_minutes,
-                )
-
-            if result.success:
-                booking.status = BookingStatus.SUCCESS
-                booking.actual_booked_time = result.booked_time
-                booking.confirmation_number = result.confirmation_number
-                await database_service.update_booking(booking)
-
-                await self._try_notify_booking_result(booking, result)
-                return True
-            else:
-                booking.status = BookingStatus.FAILED
-                booking.error_message = result.error_message
-                await database_service.update_booking(booking)
-                await self._record_login_rejection(booking.phone_number, [result], attempt_started)
-
-                await self._try_notify_booking_result(booking, result)
-                return False
-
-        except Exception as e:
-            booking.status = BookingStatus.FAILED
-            booking.error_message = str(e)
-            await database_service.update_booking(booking)
-
-            await self._try_notify_booking_result(
-                booking, BookingResult(success=False, error_message=str(e))
-            )
-            return False
-        finally:
-            if provider is not None:
-                await self._release_provider(provider)
 
     async def _record_login_rejection(
         self, phone_number: str, results: list[BookingResult], attempt_started: datetime

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from app.api import bookings, health, jobs, onboarding, webhooks
+from app.api import health, jobs, onboarding, webhooks
 from app.config import settings
 from app.log_safety import silence_wire_loggers
 from app.models.database import init_db
@@ -190,6 +190,5 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(webhooks.router)
-app.include_router(bookings.router)
 app.include_router(jobs.router)
 app.include_router(onboarding.router)

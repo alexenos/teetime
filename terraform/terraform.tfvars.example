@@ -54,4 +54,3 @@ log_level = "DEBUG"
 walden_direct_http_booking    = true
 walden_refresh_view_at_window = true
 walden_fast_booking_batch     = true
-walden_fast_booking_immediate = true

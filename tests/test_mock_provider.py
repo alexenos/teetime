@@ -9,6 +9,7 @@ from datetime import date, time, timedelta
 
 import pytest
 
+from app.providers.base import BatchBookingRequest
 from app.providers.walden_provider import MockWaldenProvider
 
 
@@ -28,58 +29,33 @@ class TestMockWaldenProviderLogin:
         assert result is True
 
 
-class TestMockWaldenProviderBookTeeTime:
-    """Tests for the book_tee_time method."""
+class TestMockWaldenProviderBookMultipleTeeTimes:
+    """Tests for book_multiple_tee_times, the only booking method (#127)."""
+
+    @staticmethod
+    def _requests(*times: time) -> list[BatchBookingRequest]:
+        return [
+            BatchBookingRequest(booking_id=f"booking-{i}", target_time=t, num_players=4)
+            for i, t in enumerate(times)
+        ]
 
     @pytest.mark.asyncio
-    async def test_book_tee_time_success(self, mock_provider: MockWaldenProvider) -> None:
-        """Test successful booking."""
-        target_date = date.today() + timedelta(days=7)
-        target_time = time(8, 0)
-
-        result = await mock_provider.book_tee_time(
-            target_date=target_date,
-            target_time=target_time,
-            num_players=4,
-            fallback_window_minutes=30,
-        )
-
-        assert result.success is True
-        assert result.booked_time == target_time
-        assert result.confirmation_number is not None
-        assert result.confirmation_number.startswith("MOCK-")
-        assert result.error_message is None
-
-    @pytest.mark.asyncio
-    async def test_book_tee_time_different_times(self, mock_provider: MockWaldenProvider) -> None:
-        """Test booking at different times."""
-        target_date = date.today() + timedelta(days=7)
-
-        for hour in [7, 8, 9, 10, 14, 17]:
-            target_time = time(hour, 0)
-            result = await mock_provider.book_tee_time(
-                target_date=target_date,
-                target_time=target_time,
-                num_players=4,
-            )
-            assert result.success is True
-            assert result.booked_time == target_time
-
-    @pytest.mark.asyncio
-    async def test_book_tee_time_different_player_counts(
+    async def test_every_request_succeeds_at_its_time(
         self, mock_provider: MockWaldenProvider
     ) -> None:
-        """Test booking with different player counts."""
         target_date = date.today() + timedelta(days=7)
-        target_time = time(8, 0)
+        requests = self._requests(time(7, 0), time(8, 30), time(14, 0))
 
-        for num_players in [1, 2, 3, 4]:
-            result = await mock_provider.book_tee_time(
-                target_date=target_date,
-                target_time=target_time,
-                num_players=num_players,
-            )
-            assert result.success is True
+        batch = await mock_provider.book_multiple_tee_times(target_date, requests)
+
+        assert batch.total_succeeded == 3
+        assert [item.booking_id for item in batch.results] == [r.booking_id for r in requests]
+        assert all(item.result.success for item in batch.results)
+        assert [item.result.booked_time for item in batch.results] == [
+            time(7, 0),
+            time(8, 30),
+            time(14, 0),
+        ]
 
 
 class TestMockWaldenProviderGetAvailableTimes:
@@ -154,45 +130,31 @@ class TestMockWaldenProviderConfirmationNumbers:
 
     @pytest.mark.asyncio
     async def test_confirmation_number_format(self, mock_provider: MockWaldenProvider) -> None:
-        """Test that confirmation numbers have the expected format."""
+        """Confirmation numbers start with MOCK- and carry the booking id prefix."""
         target_date = date.today() + timedelta(days=7)
-        target_time = time(8, 0)
+        requests = [
+            BatchBookingRequest(booking_id="abcdef123456", target_time=time(8, 0), num_players=4)
+        ]
 
-        result = await mock_provider.book_tee_time(
-            target_date=target_date,
-            target_time=target_time,
-            num_players=4,
-        )
+        batch = await mock_provider.book_multiple_tee_times(target_date, requests)
 
-        assert result.confirmation_number is not None
-        assert result.confirmation_number.startswith("MOCK-")
-        assert len(result.confirmation_number) > 5
+        confirmation = batch.results[0].result.confirmation_number
+        assert confirmation is not None
+        assert confirmation.startswith("MOCK-")
+        assert confirmation.endswith("-abcdef12")
 
     @pytest.mark.asyncio
     async def test_confirmation_numbers_are_distinct(
         self, mock_provider: MockWaldenProvider
     ) -> None:
-        """Test that each booking gets a distinct confirmation number."""
-        import asyncio
-
+        """Each booking in a batch gets a distinct confirmation number."""
         target_date = date.today() + timedelta(days=7)
-        target_time = time(8, 0)
+        requests = [
+            BatchBookingRequest(booking_id=f"booking{i}-id", target_time=time(8, 0), num_players=4)
+            for i in range(3)
+        ]
 
-        confirmation_numbers: list[str] = []
-        for _ in range(3):
-            result = await mock_provider.book_tee_time(
-                target_date=target_date,
-                target_time=target_time,
-                num_players=4,
-            )
-            assert result.confirmation_number is not None
-            assert result.confirmation_number.startswith("MOCK-")
-            confirmation_numbers.append(result.confirmation_number)
-            # Sleep 1 second to ensure timestamp-based IDs are different
-            # (MockWaldenProvider uses second-precision timestamps)
-            await asyncio.sleep(1.0)
+        batch = await mock_provider.book_multiple_tee_times(target_date, requests)
 
-        # Verify all confirmation numbers are distinct
-        assert (
-            len(set(confirmation_numbers)) == 3
-        ), f"Expected 3 distinct confirmation numbers, got: {confirmation_numbers}"
+        numbers = [item.result.confirmation_number for item in batch.results]
+        assert len(set(numbers)) == 3, numbers

@@ -16,6 +16,5 @@ async def root() -> dict[str, str | dict[str, str]]:
         "endpoints": {
             "health": "/health",
             "webhooks": "/webhooks/twilio/sms",
-            "bookings": "/bookings",
         },
     }
