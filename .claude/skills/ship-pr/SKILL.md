@@ -604,9 +604,19 @@ gcloud logging read "resource.type=\"build\" AND resource.labels.build_id=\"<bui
   --freshness=1d --format="value(timestamp,textPayload)"
 ```
 
-The first query was checked against live logs on 2026-11-15: each build logs
-`HEAD is now at <short-sha> <title>` in its fetch step, with the build id in
-`resource.labels.build_id`. The build takes a few minutes, so wait in the
+Then read that build's final status. `Apply complete` is not the end of the
+build: `cloudbuild.yaml` declares `images:`, which Cloud Build pushes after the
+steps, and a failed push fails the build after the apply line:
+
+```bash
+gcloud builds describe <build_id> --region=us-central1 --format='value(status,statusDetail)'
+```
+
+Anything other than `SUCCESS` is a failed deploy. All three commands were
+checked against live logs on 2026-11-15, on build `4de2b92b` (#447): each build
+logs `HEAD is now at <short-sha> <title>` in its fetch step, with the build id
+in `resource.labels.build_id`; `describe` returned `SUCCESS` for the session
+account; and the build's last log line, after the image push, is `DONE`. The build takes a few minutes, so wait in the
 background (§4) rather than in the foreground. No build for the merge sha, or
 no apply line in it, means `main` may hold code that is not deployed: tell the
 user at once.
