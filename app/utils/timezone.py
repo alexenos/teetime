@@ -16,14 +16,6 @@ from zoneinfo import ZoneInfo
 
 _CT_TZ = ZoneInfo("America/Chicago")
 
-# Booking window: Cloud Scheduler triggers at 6:28am so the system can log in
-# before the reservation page opens at 6:30am. The window is considered "open"
-# from 6:28am until 6:35am to give a small buffer for retries.
-_BOOKING_WINDOW_START_HOUR = 6
-_BOOKING_WINDOW_START_MINUTE = 28
-_BOOKING_WINDOW_END_HOUR = 6
-_BOOKING_WINDOW_END_MINUTE = 35
-
 
 class CTDateTime:
     """
@@ -108,34 +100,3 @@ class CTDateTime:
         if dt.tzinfo is not None:
             return dt.astimezone(cls.CT_TZ)
         return dt.replace(tzinfo=cls.CT_TZ)
-
-    @classmethod
-    def is_booking_window(cls, dt: datetime) -> bool:
-        """
-        Return True if ``dt`` falls within the 6:28–6:35 AM CT booking window.
-
-        The booking window begins at 6:28 AM (when Cloud Scheduler triggers)
-        and ends at 6:35 AM (a small buffer past the 6:30 AM reservation open
-        time). Both endpoints are inclusive.
-
-        Args:
-            dt: A timezone-aware or naive datetime to check. Naive datetimes
-                are treated as CT.
-
-        Returns:
-            True if the time component of ``dt`` (in CT) is in [6:28, 6:35].
-        """
-        ct_dt = cls.normalize_to_ct(dt)
-        window_start = ct_dt.replace(
-            hour=_BOOKING_WINDOW_START_HOUR,
-            minute=_BOOKING_WINDOW_START_MINUTE,
-            second=0,
-            microsecond=0,
-        )
-        window_end = ct_dt.replace(
-            hour=_BOOKING_WINDOW_END_HOUR,
-            minute=_BOOKING_WINDOW_END_MINUTE,
-            second=0,
-            microsecond=0,
-        )
-        return window_start <= ct_dt <= window_end
