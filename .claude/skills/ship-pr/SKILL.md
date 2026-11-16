@@ -1,6 +1,6 @@
 ---
 name: ship-pr
-description: Review a branch with /code-review, open a PR, have CodeRabbit review it, resolve every finding from both, then merge once CI is green. Use when the user says to ship a PR, create a PR and handle the review, respond to review comments, address CodeRabbit feedback, or asks what the bot said about a PR.
+description: Review a branch with /code-review, open a PR, have CodeRabbit review it and resolve every finding from both; when the maintainer asked to ship it, merge once the gates hold. Questions about a review never merge. Use when the user says to ship a PR, create a PR and handle the review, respond to review comments, address CodeRabbit feedback, or asks what the bot said about a PR.
 ---
 
 # Ship a PR through review
@@ -21,12 +21,14 @@ gates hold. If a gate fails, the condition is not met, so you stop and report.
 
 Nothing else counts as that decision. A session where this skill loaded
 because of a question ("what did the bot say on #N?", "respond to the review
-comments") does steps 5 to 7 and stops without merging. The Routines that read
-this file (tech debt, feature dev) never merge, whatever §9 says.
+comments") does steps 5 to 8, pushing fixes if there are any, and stops
+without merging. The Routines that read this file (tech debt, feature dev)
+never merge, whatever §9 says.
 
 This repo reviews every PR with **CodeRabbit** (a GitHub App, so it does not
-appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`,
-`lint`, and `test`.
+appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`
+plus the `test.yml` jobs: `test`, `lint` and `terraform` (fmt and validate,
+#441). Read the live list from `gh pr checks <N>` rather than from this line.
 
 **CodeRabbit never reviews this repo on its own. You have to ask, every time.**
 Do not wait for a review that is not coming; do not re-derive this each session.
@@ -330,21 +332,26 @@ git checkout -b fix/<short-slug> && git push -u origin fix/<short-slug>
 ## 2. Review it locally with `/code-review high`
 
 Before opening the PR, commit the work and run the `code-review` skill at
-level `high` on the branch, so it covers every commit since `main` rather than
-only uncommitted changes:
+level `high`. The review must cover every commit since `main`:
 
 ```
 /code-review high <branch>
 ```
+
+**Make it diff against `origin/main...HEAD`.** The code-review skill's default
+range is `@{upstream}...HEAD`, and §1's `git push -u` has already made the
+upstream `origin/<branch>`. So once the branch is pushed, the default range is
+empty. Run `git fetch origin main` first, and if the review starts from the
+upstream range, use `git diff origin/main...HEAD` in its place.
 
 `high` is fixed here on purpose. Do not raise it to `max` or `ultra`: those are
 the expensive levels and the skill reserves them for an explicit ask. Do not
 pass `--fix` or `--comment`. Fixes go through the judgement in §6, and the PR
 thread is CodeRabbit's.
 
-If it reports nothing to review, check the target before believing it. An
-empty diff usually means the review looked at the working tree after
-everything was committed, not that the branch is clean.
+If it reports nothing to review, check the range before believing it: if
+`git diff --stat origin/main...HEAD` is not empty, the review looked at the
+wrong range, and a clean result means nothing.
 
 Treat each finding exactly as §6 says to treat a CodeRabbit one: verify it
 against the code, fix what is real with the test that would have caught it,
@@ -539,9 +546,10 @@ these hold, checked against the PR as it is now, not as you remember it:
   the issue comments and check that nothing has gone unanswered since your
   last read.
 - **CodeRabbit has reviewed the head.** The sha in its latest review, or its
-  "No actionable comments" summary (top of this file), equals
-  `gh pr view <N> --json headRefOid`. A review of an earlier commit does not
-  count.
+  "No actionable comments" summary (top of this file), is the current head:
+  `gh pr view <N> --json headRefOid`. CodeRabbit writes a short sha
+  (`up to <short-sha>`) and `headRefOid` is the full 40 characters, so compare
+  by prefix, not equality. A review of an earlier commit does not count.
 - **No CodeRabbit review, no merge.** If it stays rate-limited past the
   three-refusal stop in the rate-limit steps above, or past the three-round
   stop in §8, report and leave the PR open. `/code-review` alone is not enough
@@ -562,8 +570,13 @@ commits are disabled), naming the sha you checked so a late push cannot slip
 in unreviewed:
 
 ```bash
-gh pr merge <N> --squash --delete-branch --match-head-commit <full-head-sha>
+gh pr merge <N> --squash --match-head-commit <full-head-sha>
 ```
+
+Leave out `--delete-branch`. The repo deletes head branches on merge
+(`delete_branch_on_merge`), and in a worktree the flag's local `git checkout
+main` fails because `main` is checked out in the primary checkout. The merge
+has already happened by then, but the command exits non-zero.
 
 On the web, `mcp__github__merge_pull_request` with `merge_method: squash`.
 
