@@ -19,6 +19,14 @@ merge `docs/scoreboard.json` and `docs/scoreboard.html`, on the same terms — t
 two paths, a green `Tests` check, nothing else. It is defined in
 `operations/routines/scoreboard.md`. That Routine is deployed as of 2026-10-04.
 
+**Invoking `/ship-pr` is the maintainer's merge decision** (2026-11-15). It is
+not an exception to the rule above: it is the maintainer deciding in advance,
+conditional on the reviews finishing. The session merges that PR once
+`/code-review` and CodeRabbit have both reviewed it, every finding is answered,
+CodeRabbit's review covers the head sha, and every check is green. The gates are
+in `.claude/skills/ship-pr/` §9. The skill loading for some other reason, such as
+a question about a review, is not that decision. No Routine has it.
+
 A commit touching only `operations/`, `docs/`, `.claude/`, `CLAUDE.md`, `tests/` or
 `scripts/` does
 not redeploy: the Cloud Build trigger sets
@@ -146,7 +154,8 @@ CST); feature-dev's is in Chicago time and does not. A prompt pasted into the
 routines UI is read as markdown and loses paired `*`; compare the live text
 after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
 the PR check-ins are not Routines; they are maintainer-invoked and push only to
-their own open PR.
+their own open PR. When the maintainer invokes `ship-pr` to ship a PR, it also
+merges that PR once its §9 gates hold.
 
 `docs/**` has been live in `ignored_files` since #220's apply on 2026-09-27, so a
 scoreboard publish does not rebuild the service.
@@ -155,8 +164,9 @@ scoreboard publish does not rebuild the service.
 
 - `.claude/skills/race-report/` — morning diagnosis, and what its evidence
   establishes
-- `.claude/skills/ship-pr/` — opening a PR, triggering CodeRabbit (which does
-  not review this repository automatically), and processing the review.
+- `.claude/skills/ship-pr/` — a local `/code-review high` pass, then opening
+  the PR, triggering CodeRabbit (which does not review this repository
+  automatically), processing its review, and merging once the gates hold.
   `.coderabbit.yaml` excludes `operations/race-reports/**` from review (#223).
 
 ## Writing conventions

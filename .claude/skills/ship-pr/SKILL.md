@@ -1,13 +1,34 @@
 ---
 name: ship-pr
-description: Open a PR, wait for CodeRabbit and CI, then work through the review comments. Use when the user says to create a PR and handle the review, respond to review comments, address CodeRabbit feedback, or asks what the bot said about a PR.
+description: Review a branch with /code-review, open a PR, have CodeRabbit review it and resolve every finding from both; when the maintainer asked to ship it, merge once the gates hold. Questions about a review never merge. Use when the user says to ship a PR, create a PR and handle the review, respond to review comments, address CodeRabbit feedback, or asks what the bot said about a PR.
 ---
 
 # Ship a PR through review
 
+Two reviews, in order, then a merge:
+
+1. **`/code-review high`, locally, before the PR exists** (§2). Resolve its
+   findings and commit the result. CodeRabbit's hourly quota then goes on code
+   that has already been cleaned up.
+2. **CodeRabbit, on the open PR** (§3 to §8). Resolve its findings.
+3. **Merge** (§9), only when every gate there holds. If one does not, stop and
+   report; do not merge.
+
+**When the maintainer types `/ship-pr`, or asks you to ship a PR, that is their
+merge decision**, made in advance and conditional on the reviews finishing.
+You do not ask again before merging. You carry out the decision once §9's
+gates hold. If a gate fails, the condition is not met, so you stop and report.
+
+Nothing else counts as that decision. A session where this skill loaded
+because of a question ("what did the bot say on #N?", "respond to the review
+comments") does steps 5 to 8, pushing fixes if there are any, and stops
+without merging. The Routines that read this file (tech debt, feature dev)
+never merge, whatever §9 says.
+
 This repo reviews every PR with **CodeRabbit** (a GitHub App, so it does not
-appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`,
-`lint`, and `test`.
+appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`
+plus the `test.yml` jobs: `test`, `lint` and `terraform` (fmt and validate,
+#441). Read the live list from `gh pr checks <N>` rather than from this line.
 
 **CodeRabbit never reviews this repo on its own. You have to ask, every time.**
 Do not wait for a review that is not coming; do not re-derive this each session.
@@ -86,6 +107,7 @@ the automation below has to work on either. The ones this skill needs:
 | `gh api .../pulls/<N>/comments` | `mcp__github__pull_request_read` method `get_review_comments` |
 | `gh api .../pulls/<N>/comments/<ID>/replies` | `mcp__github__add_reply_to_pull_request_comment` |
 | `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
+| `gh pr merge <N> --squash` | `mcp__github__merge_pull_request`, `merge_method: squash` |
 | `gh api repos/{o}/{r} --jq .stargazers_count` | `mcp__github__search_repositories`, below |
 
 The star count needs care. `mcp__github__search_repositories` returns a result
@@ -121,7 +143,7 @@ it appears when every commit in range has already been reviewed, since
 CodeRabbit is incremental. Read "Review triggered" as the start of a wait, not
 the end of one; the summary comment then shows *"Currently processing new
 changes in this PR"* while it runs, and findings arrive afterwards as inline
-review comments ("## 4. Read the review properly"). On #217 that gap was about
+review comments ("## 5. Read the review properly"). On #217 that gap was about
 six minutes.
 
 **The first wording is provisional; read the reply twice.** The command reply
@@ -136,7 +158,7 @@ reads "Review finished." after an edit when the review landed (step 3).
 
 **2. Classify the reply.** Three outcomes, and they need different waits:
 
-- **Ack, as above** → triggered. Go to "## 3. Wait" below and poll for
+- **Ack, as above** → triggered. Go to "## 4. Wait" below and poll for
   findings.
 - **A reply naming a wait** → the common case when it refuses, and the one
   that needs no guessing. See step 3.
@@ -307,7 +329,43 @@ Never commit to `main` — a commit there redeploys to Cloud Run. Branch first.
 git checkout -b fix/<short-slug> && git push -u origin fix/<short-slug>
 ```
 
-## 2. Open it
+## 2. Review it locally with `/code-review high`
+
+Before opening the PR, commit the work and run the `code-review` skill at
+level `high`. The review must cover every commit since `main`:
+
+```
+/code-review high <branch>
+```
+
+**Make it diff against `origin/main...HEAD`.** The code-review skill's default
+range is `@{upstream}...HEAD`, and §1's `git push -u` has already made the
+upstream `origin/<branch>`. So once the branch is pushed, the default range is
+empty. Run `git fetch origin main` first, and if the review starts from the
+upstream range, use `git diff origin/main...HEAD` in its place.
+
+`high` is fixed here on purpose. Do not raise it to `max` or `ultra`: those are
+the expensive levels and the skill reserves them for an explicit ask. Do not
+pass `--fix` or `--comment`. Fixes go through the judgement in §6, and the PR
+thread is CodeRabbit's.
+
+If it reports nothing to review, check the range before believing it: if
+`git diff --stat origin/main...HEAD` is not empty, the review looked at the
+wrong range, and a clean result means nothing.
+
+Treat each finding exactly as §6 says to treat a CodeRabbit one: verify it
+against the code, fix what is real with the test that would have caught it,
+and write down what you declined and why. Nobody else sees these findings, so
+the record goes in the PR body (§3) under a short "Local review" heading:
+fixed, declined with the reason, deferred with the follow-up, and the sha the
+review covered. One pass. Do not re-run it on its own fixes, or on fixes for
+CodeRabbit findings; CodeRabbit reviews those next. Work that is not a fix for
+a finding, added after this pass, is not covered by it: run §2 again on that
+range before §9.
+
+Run the local gate (§8) and commit before going on.
+
+## 3. Open it
 
 `gh pr create` with a heredoc body. What makes these PRs reviewable:
 
@@ -330,7 +388,7 @@ git checkout -b fix/<short-slug> && git push -u origin fix/<short-slug>
   `operations/features.md`. Say in the PR body that a README change redeploys:
   `README.md` is outside the Cloud Build `ignored_files` list.
 
-## 3. Wait
+## 4. Wait
 
 Poll rather than sleeping in the foreground. Pass `run_in_background: true` to
 the Bash tool — the loop itself is an ordinary foreground loop, the tool is what
@@ -367,10 +425,10 @@ progress` after the review comment was already posted, and cleared only on a
 later event. Trust the review text over the status badge, but do not call the
 PR done until the status itself settles.
 
-## 4. Read the review properly
+## 5. Read the review properly
 
 Inline comments do not appear in `gh pr view --json comments`. That field only
-holds issue-level comments. Fetch both, and **project `id`** — step 6 needs it
+holds issue-level comments. Fetch both, and **project `id`** — step 7 needs it
 to reply, and re-fetching just to get it is pure friction:
 
 ```bash
@@ -401,7 +459,7 @@ Three mechanics worth knowing:
   `PYTHONIOENCODING=utf-8` or strip to ASCII; this console is cp1252 and will
   raise `UnicodeEncodeError` on the severity emoji.
 
-## 5. Judge each comment before acting
+## 6. Judge each comment before acting
 
 The reviewer is a tool, not an authority. For each finding, decide:
 
@@ -431,7 +489,7 @@ plausible-looking and environment-blind. On #145 the suggested timezone handling
 queried the wrong five hours and found nothing. Verify, then commit what you
 verified, and leave a note saying why the obvious version was rejected.
 
-## 6. Reply
+## 7. Reply
 
 Reply to each substantive finding. Inline replies thread properly:
 
@@ -445,7 +503,7 @@ Group the response: what you fixed, what you're deferring and why, what you
 think is wrong and why. One comment covering several findings beats a thread
 per nit.
 
-## 7. Push fixes and re-verify
+## 8. Push fixes and re-verify
 
 Run the full local gate before pushing — CI is slower than you are:
 
@@ -471,10 +529,134 @@ re-review a push on its own here - the same two rules at the top of this file
 suppress it every time, not just on the first round. Name the new head sha in
 the trigger comment, and run the rate-limit loop again if it is refused.
 
-## 8. Report, and stop
+New findings on the re-review get the same treatment, §5 to §8. Stop after
+**three CodeRabbit rounds** on one PR: each round costs an hour of the shared
+quota. If the third still leaves findings open, report and do not merge.
 
-Summarize for the user: what the review caught that was real, what you pushed
-back on, and what state the PR is in.
+A round that ends in replies only, with no push, needs no new trigger: the
+head sha has already been reviewed.
 
-**Do not merge.** Merging to `main` deploys this service. That call is the
-user's, always, unless they have explicitly said to merge in this session.
+## 9. Merge
+
+Merging to `main` deploys the service, and a change under `terraform/` applies
+infrastructure (CLAUDE.md, Constraints). The maintainer made the merge
+decision by invoking `/ship-pr` (top of this file). Carry it out when **all** of
+these hold, checked against the PR as it is now, not as you remember it:
+
+- **Every finding is resolved.** From both reviews, each one is fixed, declined
+  with a reply that says why, or deferred to a filed issue. "Resolved" means
+  answered, not agreed with. Re-fetch the top-level inline comments (§5) and
+  the issue comments and check that nothing has gone unanswered since your
+  last read.
+- **CodeRabbit has reviewed the head.** The sha in its latest review, or its
+  "No actionable comments" summary (top of this file), is the current head:
+  `gh pr view <N> --json headRefOid`. CodeRabbit writes a short sha
+  (`up to <short-sha>`) and `headRefOid` is the full 40 characters, so compare
+  by prefix, not equality. A review of an earlier commit does not count.
+- **No CodeRabbit review, no merge.** If it stays rate-limited past the
+  three-refusal stop in the rate-limit steps above, or past the three-round
+  stop in §8, report and leave the PR open. `/code-review` alone is not enough
+  to merge.
+- **Every check is green on the head sha**, `CodeRabbit` included (it lags; §4),
+  and the PR is not a draft and has no conflicts:
+
+  ```bash
+  gh pr checks <N>
+  gh pr view <N> --json isDraft,mergeable,mergeStateStatus,headRefOid
+  ```
+
+  `mergeable` must be `MERGEABLE`. `UNKNOWN` means GitHub is still computing,
+  so re-read it; do not merge on it.
+
+Then squash-merge, the repo's convention (`main` reads `Title (#N)`; merge
+commits are disabled), naming the sha you checked so a late push cannot slip
+in unreviewed:
+
+```bash
+gh pr merge <N> --squash --match-head-commit <full-head-sha>
+```
+
+Leave out `--delete-branch`. The repo deletes head branches on merge
+(`delete_branch_on_merge`), and in a worktree the flag's local `git checkout
+main` fails because `main` is checked out in the primary checkout. The merge
+has already happened by then, but the command exits non-zero.
+
+On the web, `mcp__github__merge_pull_request` with `merge_method: squash`, and
+pin the head the same way: the REST merge endpoint takes a `sha` and returns 409
+if the head has moved. Check the tool's schema for a parameter that passes it
+and set it to the full head sha you checked. If the tool has none, do not merge
+from the web; report that the head could not be pinned. (Not verified which
+name the MCP tool uses, if any; read the schema rather than this file.)
+
+If any gate fails, do not merge, and do not work around it with `--admin` or
+auto-merge. Report which gate failed.
+
+**After a merge that builds**, meaning anything outside the `ignored_files`
+paths in CLAUDE.md, confirm the build applied rather than assuming it. A
+timestamp is not enough: another merge's build can finish in the same window
+and print its own `Apply complete`. Find this merge's build by its commit, then
+read that build's apply line:
+
+```bash
+gcloud logging read "resource.type=\"build\" AND textPayload:\"HEAD is now at <merge-short-sha>\"" \
+  --freshness=1d --limit=1 --format="value(resource.labels.build_id)"
+gcloud logging read "resource.type=\"build\" AND resource.labels.build_id=\"<build_id>\" AND textPayload:\"Apply complete\"" \
+  --freshness=1d --format="value(timestamp,textPayload)"
+```
+
+Then read that build's final status. `Apply complete` is not the end of the
+build: `cloudbuild.yaml` declares `images:`, which Cloud Build pushes after the
+steps, and a failed push fails the build after the apply line:
+
+```bash
+gcloud builds describe <build_id> --region=us-central1 --format='value(status,statusDetail)'
+```
+
+`QUEUED`, `PENDING` and `WORKING` mean it is still running: re-read in the
+background (§4) until the status is terminal. `SUCCESS` is a good build; any
+other terminal status (`FAILURE`, `INTERNAL_ERROR`, `TIMEOUT`, `CANCELLED`,
+`EXPIRED`) is a failed deploy. If it is still running after about 20 minutes,
+report that as a timeout, not as a failure.
+
+Last, read what is serving. Builds are not serialized, so an older merge's
+build that finishes later can apply its image over this one, and this build
+still reads `SUCCESS`. The image tag is the full commit sha (`cloudbuild.yaml`,
+`container_image`):
+
+```bash
+gcloud run services describe teetime --region=us-central1 \
+  --format='value(spec.template.spec.containers[0].image,status.latestCreatedRevisionName,status.latestReadyRevisionName,status.traffic[].revisionName,status.traffic[].percent)'
+```
+
+That image is the revision *template*, not necessarily what receives traffic.
+It describes what is serving only when all traffic is on the latest ready
+revision, and that revision is also the latest one created. Check that first:
+the traffic entries name a single revision at `100`, and all three revision
+names agree. If they do not, the new revision failed to become ready, or
+traffic is pinned elsewhere: report that as a failed deploy. (Terraform sets no
+`traffic` block, so the default is all traffic on the latest revision. A
+revision reports its image by digest, not tag, which is why the template's tag
+is used.)
+
+Then the tag should be the merge commit, or a commit merged after it
+(`git merge-base --is-ancestor <merge-sha> <tag-sha>` after a fetch). An older
+commit means this merge's code is not serving: report that as a failed deploy.
+That check covers the `teetime` service. The racer and observer jobs take the
+same `var.container_image` (`terraform/racer.tf`, `terraform/observer.tf`), so
+they are not checked separately.
+
+No build for the merge sha, no apply line, a failed status, or an older image
+serving all mean `main` may hold code that is not deployed: tell the user at
+once.
+
+Every command above was checked on 2026-11-15 with the session account. Build
+`4de2b92b` (#447) logs `HEAD is now at <short-sha> <title>` in its fetch step,
+with the build id in `resource.labels.build_id`. `describe` returned `SUCCESS`.
+The build's last log line, after the image push, is `DONE`. `run services
+describe` returned an image tagged with the full sha of `main`'s head, with all traffic on the latest ready revision.
+
+## 10. Report
+
+Summarize for the user: what each review caught that was real, what you pushed
+back on, whether it merged, and if it did not, which gate stopped it. For a
+merge that builds, include the apply line or say that you could not find it.
