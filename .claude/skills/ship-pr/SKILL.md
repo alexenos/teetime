@@ -357,8 +357,11 @@ Treat each finding exactly as §6 says to treat a CodeRabbit one: verify it
 against the code, fix what is real with the test that would have caught it,
 and write down what you declined and why. Nobody else sees these findings, so
 the record goes in the PR body (§3) under a short "Local review" heading:
-fixed, declined with the reason, deferred with the follow-up. One pass. Do not
-re-run it on its own fixes; CodeRabbit reviews those next.
+fixed, declined with the reason, deferred with the follow-up, and the sha the
+review covered. One pass. Do not re-run it on its own fixes, or on fixes for
+CodeRabbit findings; CodeRabbit reviews those next. Work that is not a fix for
+a finding, added after this pass, is not covered by it: run §2 again on that
+range before §9.
 
 Run the local gate (§8) and commit before going on.
 
@@ -578,17 +581,35 @@ Leave out `--delete-branch`. The repo deletes head branches on merge
 main` fails because `main` is checked out in the primary checkout. The merge
 has already happened by then, but the command exits non-zero.
 
-On the web, `mcp__github__merge_pull_request` with `merge_method: squash`.
+On the web, `mcp__github__merge_pull_request` with `merge_method: squash`, and
+pin the head the same way: the REST merge endpoint takes a `sha` and returns 409
+if the head has moved. Check the tool's schema for a parameter that passes it
+and set it to the full head sha you checked. If the tool has none, do not merge
+from the web; report that the head could not be pinned. (Not verified which
+name the MCP tool uses, if any; read the schema rather than this file.)
 
 If any gate fails, do not merge, and do not work around it with `--admin` or
 auto-merge. Report which gate failed.
 
 **After a merge that builds**, meaning anything outside the `ignored_files`
-paths in CLAUDE.md, confirm the build applied rather than assuming it. Read the
-log query in CLAUDE.md for an `Apply complete` line after the merge time. The
-build takes a few minutes, so wait in the background (§4) rather than in the
-foreground. A failed build means `main` holds code that is not deployed: tell
-the user at once.
+paths in CLAUDE.md, confirm the build applied rather than assuming it. A
+timestamp is not enough: another merge's build can finish in the same window
+and print its own `Apply complete`. Find this merge's build by its commit, then
+read that build's apply line:
+
+```bash
+gcloud logging read "resource.type=\"build\" AND textPayload:\"HEAD is now at <merge-short-sha>\"" \
+  --freshness=1d --limit=1 --format="value(resource.labels.build_id)"
+gcloud logging read "resource.type=\"build\" AND resource.labels.build_id=\"<build_id>\" AND textPayload:\"Apply complete\"" \
+  --freshness=1d --format="value(timestamp,textPayload)"
+```
+
+The first query was checked against live logs on 2026-11-15: each build logs
+`HEAD is now at <short-sha> <title>` in its fetch step, with the build id in
+`resource.labels.build_id`. The build takes a few minutes, so wait in the
+background (§4) rather than in the foreground. No build for the merge sha, or
+no apply line in it, means `main` may hold code that is not deployed: tell the
+user at once.
 
 ## 10. Report
 
