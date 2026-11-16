@@ -612,14 +612,38 @@ steps, and a failed push fails the build after the apply line:
 gcloud builds describe <build_id> --region=us-central1 --format='value(status,statusDetail)'
 ```
 
-Anything other than `SUCCESS` is a failed deploy. All three commands were
-checked against live logs on 2026-11-15, on build `4de2b92b` (#447): each build
-logs `HEAD is now at <short-sha> <title>` in its fetch step, with the build id
-in `resource.labels.build_id`; `describe` returned `SUCCESS` for the session
-account; and the build's last log line, after the image push, is `DONE`. The build takes a few minutes, so wait in the
-background (§4) rather than in the foreground. No build for the merge sha, or
-no apply line in it, means `main` may hold code that is not deployed: tell the
-user at once.
+`QUEUED`, `PENDING` and `WORKING` mean it is still running: re-read in the
+background (§4) until the status is terminal. `SUCCESS` is a good build; any
+other terminal status (`FAILURE`, `INTERNAL_ERROR`, `TIMEOUT`, `CANCELLED`,
+`EXPIRED`) is a failed deploy. If it is still running after about 20 minutes,
+report that as a timeout, not as a failure.
+
+Last, read what is serving. Builds are not serialized, so an older merge's
+build that finishes later can apply its image over this one, and this build
+still reads `SUCCESS`. The image tag is the full commit sha (`cloudbuild.yaml`,
+`container_image`):
+
+```bash
+gcloud run services describe teetime --region=us-central1 \
+  --format='value(spec.template.spec.containers[0].image)'
+```
+
+The tag should be the merge commit, or a commit merged after it
+(`git merge-base --is-ancestor <merge-sha> <tag-sha>` after a fetch). An older
+commit means this merge's code is not serving: report that as a failed deploy.
+That check covers the `teetime` service. The racer and observer jobs take the
+same `var.container_image` (`terraform/racer.tf`, `terraform/observer.tf`), so
+they are not checked separately.
+
+No build for the merge sha, no apply line, a failed status, or an older image
+serving all mean `main` may hold code that is not deployed: tell the user at
+once.
+
+Every command above was checked on 2026-11-15 with the session account. Build
+`4de2b92b` (#447) logs `HEAD is now at <short-sha> <title>` in its fetch step,
+with the build id in `resource.labels.build_id`. `describe` returned `SUCCESS`.
+The build's last log line, after the image push, is `DONE`. `run services
+describe` returned an image tagged with the full sha of `main`'s head.
 
 ## 10. Report
 
