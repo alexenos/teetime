@@ -4,8 +4,9 @@ How each thing the service runs is kept current, and who is told when one has a
 known vulnerability. Research for #446, 2026-11-15.
 
 **Status: recommendations 1–3 adopted by the maintainer on 2026-11-16; 4–6 not
-adopted for now** (see Decision, at the end). As of that date, nothing described
-here is switched on.
+adopted for now** (see Decision, at the end). Dependabot alerts and security
+updates are on, as of 2026-11-17. Grouping and version updates take effect when
+`.github/dependabot.yml` merges.
 
 ## What was found on 2026-11-15
 
@@ -16,10 +17,12 @@ Established, by running the tools below on this date:
   `GET /repos/alexenos/teetime/dependabot/alerts` returns 403, "Dependabot alerts
   are disabled for this repository". Secret scanning and push protection are on.
   The repository is public, so none of this was ever reporting anything.
-- **15 of the 74 packages in the image have published advisories, 110 distinct
+- **15 of the 74 packages in the image have published advisories, 103 distinct
   in all.** `pip-audit 2.10.1`, run against every pin in `poetry.lock` with
   `--no-deps --disable-pip`, against both the PyPI and the OSV databases (same
-  packages from each). Three more are dev-only (pygments, pytest, soupsieve).
+  packages from each). Three more packages are dev-only (pygments, pytest,
+  soupsieve), with 10 advisories between them, for 113 across the whole lock.
+  Counts are distinct advisory ids per package, from the OSV run.
 
   | Package (locked) | In the image because | Highest GHSA severity | Clears all at |
   |---|---|---|---|
@@ -147,16 +150,25 @@ checked for each one.
 
 ### Per surface
 
-| Surface | Mechanism | Cadence |
+"With 1–3" is what is in place under the decision below; "If 4–6 are adopted"
+is what the deferred recommendations would add.
+
+| Surface | With 1–3 (adopted) | If 4–6 are adopted |
 |---|---|---|
-| Python packages | Dependabot security PRs, a weekly grouped version PR, then osv-scanner in CI | as published / weekly |
+| Python packages | Dependabot security PRs as published, one grouped; a weekly grouped version PR | osv-scanner blocking in CI (4) |
 | Poetry 1.7.1 | left alone; #153 and #386 decide it | — |
-| Base image tag | Artifact Registry scanning shows its CVEs; the tag moves in the EOL review | quarterly |
-| Debian packages, Chromium | the weekly `CHROMIUM_REFRESH` rebuild (#444), plus Artifact Registry scanning to see them | weekly |
-| Terraform providers | EOL review; a major move is a deliberate PR. A `.terraform.lock.hcl` is a separate decision | quarterly |
-| Terraform CLI | EOL review; `tests/test_terraform_ci.py` keeps both pins in step | quarterly |
-| GitHub Actions | Dependabot, monthly, grouped | monthly |
+| Base image tag | **nothing**: the floating tag picks up rebuilds, never a new Python minor | Artifact Registry scanning shows its CVEs (5); the tag moves in the quarterly EOL review (6) |
+| Debian packages, Chromium | the weekly `CHROMIUM_REFRESH` rebuild (#444), **unwatched**: no scan sees them | Artifact Registry scanning (5) |
+| Terraform providers | **nothing**; a major move is a deliberate PR. A `.terraform.lock.hcl` is a separate decision | quarterly EOL review (6) |
+| Terraform CLI | **nothing**; `tests/test_terraform_ci.py` keeps both pins in step | quarterly EOL review (6) |
+| GitHub Actions | Dependabot: security PRs grouped, version updates monthly, grouped | — |
 | Cloud Build builders | left floating; Google maintains `cloud-builders/docker`, and the terraform image moves with the CLI | — |
+
+**Each Actions update redeploys.** `.github/**` is not in the Cloud Build
+`ignored_files`, so merging a Dependabot PR that touches only
+`.github/workflows/` rebuilds the image, redeploys, and runs `terraform apply`.
+Merging one outside 06:20–06:45 CT on race mornings keeps that harmless. Adding
+`.github/**` to the filter is a terraform change, left to its own PR.
 
 ## Decision
 
@@ -183,5 +195,7 @@ validates against the SchemaStore `dependabot-2.0` schema.
 The maintainer turned the repository settings on before 2026-11-17T00:17Z. The
 API reports `dependabot_security_updates: enabled`, there are at least 100 open
 alerts, and the first security PRs (#451, #452) opened at 00:17Z and 00:18Z, one
-per package, because the grouping config had not merged yet. Clearing the existing
-backlog of 110 advisories is a separate piece of work, outside this decision.
+per package, because the grouping config had not merged yet.
+
+Clearing the existing backlog of 103 image advisories is a separate piece of work,
+outside this decision.

@@ -36,7 +36,12 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 1
+    # .github/** is not in Cloud Build's ignored_files, so merging any of these
+    # redeploys. Keep the merge outside 06:20-06:45 CT.
     groups:
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
       actions:
         applies-to: version-updates
         patterns: ["*"]
