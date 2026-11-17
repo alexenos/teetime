@@ -530,3 +530,22 @@ def test_a_missing_weekly_tech_debt_run_breaks_the_streak() -> None:
     assert streak["last_failure"] == "2026-10-10"
     ok = _quiet(dt.date(2026, 10, 10), routine="tech-debt")
     assert _board(rows + [ok], now)["streak"]["by_routine"]["tech-debt"] == 1
+
+
+def test_a_tuesday_tech_debt_row_validates_and_is_not_walked() -> None:
+    # The Tuesday Dependabot run writes routine "tech-debt" with run "dependabot"
+    # (operations/routines/tech-debt.md, Tuesday: Dependabot PRs). SCHEDULES knows
+    # tech debt as Saturdays only, so such a row must validate and score nothing:
+    # a failed Tuesday run neither breaks nor extends the streak.
+    tuesday = dt.date(2026, 10, 13)
+    assert tuesday.weekday() == 1
+    saturday = _quiet(dt.date(2026, 10, 10), routine="tech-debt")
+    now = _ct(dt.date(2026, 10, 14), 9, 0)
+    rows = [_quiet(d) for d in (RACE_START + dt.timedelta(days=i) for i in range(14))]
+    base = _board(rows + [saturday], now)["streak"]
+    for ok in (True, False):
+        row = _quiet(tuesday, routine="tech-debt", ok=ok) | {"run": "dependabot"}
+        ds.validate(row)
+        streak = _board(rows + [saturday, row], now)["streak"]
+        assert streak["by_routine"]["tech-debt"] == base["by_routine"]["tech-debt"] == 1
+        assert streak["last_failure"] == base["last_failure"]

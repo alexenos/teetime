@@ -207,3 +207,12 @@ per package, because the grouping config had not merged yet.
 
 Clearing the existing backlog of 103 image advisories is a separate piece of work,
 outside this decision.
+
+**2026-11-17, maintainer: recommendation 3 is replaced.** The maintainer wants
+a code review before every merge, not a manual merge for its own sake. The
+tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
+10:00 run. It reviews open Dependabot PRs with Claude and with CodeRabbit, and
+merges at most one a week. Only lockfile or workflow paths, no majors, the head sha
+reviewed by both, every check green. This is CLAUDE.md's third merge exception,
+bounded in `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs). Majors,
+and anything that fails a gate, still wait for the maintainer.

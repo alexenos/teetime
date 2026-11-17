@@ -19,6 +19,14 @@ merge `docs/scoreboard.json` and `docs/scoreboard.html`, on the same terms — t
 two paths, a green `Tests` check, nothing else. It is defined in
 `operations/routines/scoreboard.md`. That Routine is deployed as of 2026-10-04.
 
+A third exception was **granted on 2026-11-17**: the tech-debt Routine's
+Tuesday run may squash-merge **one Dependabot PR per run**. The PR may change
+only `poetry.lock`, `pyproject.toml` or `.github/workflows/`, with no major
+version change. Claude and CodeRabbit must both have reviewed its head sha, and
+every check must be green on that sha. It is defined in
+`operations/routines/tech-debt.md` (Tuesday: Dependabot PRs) and nowhere else.
+**Not deployed:** the Tuesday trigger does not exist yet.
+
 **Invoking `/ship-pr` is the maintainer's merge decision** (2026-11-15). It is
 not an exception to the rule above: it is the maintainer deciding in advance,
 conditional on the reviews finishing. The session merges that PR once
@@ -143,8 +151,10 @@ Five Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
 scoreboard, daily at `30 12 * * *` UTC, tech debt, Saturdays at `0 9 * * 6`
 UTC (`operations/routines/tech-debt.md`), and cost, monthly on the 5th
 (`operations/routines/cost.md`; created 2026-10-09, `CRON_TZ=America/Chicago 0 5 5 * *`,
-first run 2026-11-05). Tech debt never
-merges; it files issues and opens a PR you merge. Feature dev ranks the backlog and builds one eligible issue
+first run 2026-11-05). Tech debt's Saturday run never
+merges; it files issues and opens a PR you merge. A Tuesday run at 13:00 CT, which
+reviews Dependabot PRs and merges at most one under the third exception above, is
+specified there but not yet created. Feature dev ranks the backlog and builds one eligible issue
 (`operations/routines/feature-dev.md`, Saturdays 08:00 CT, created 2026-10-19, first
 run 2026-10-24; its priorities are in that file, under "Choosing what to build"); it never
 merges either. Auto-fix is on for the tech-debt and feature-dev triggers, so the app

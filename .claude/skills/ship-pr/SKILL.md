@@ -23,7 +23,10 @@ Nothing else counts as that decision. A session where this skill loaded
 because of a question ("what did the bot say on #N?", "respond to the review
 comments") does steps 5 to 8, pushing fixes if there are any, and stops
 without merging. The Routines that read this file (tech debt, feature dev)
-never merge, whatever §9 says.
+never merge their own PRs, whatever §9 says. The one exception is tech debt's
+Tuesday run. It merges a Dependabot PR under its own bounded authority
+(`operations/routines/tech-debt.md`, Tuesday: Dependabot PRs), using §9's gates
+and deploy check, and never through this skill's merge decision.
 
 This repo reviews every PR with **CodeRabbit** (a GitHub App, so it does not
 appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`
