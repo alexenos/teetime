@@ -3,8 +3,9 @@
 How each thing the service runs is kept current, and who is told when one has a
 known vulnerability. Research for #446, 2026-11-15.
 
-**Status: recommendation. The maintainer's decision is not yet recorded** (see
-Decision, at the end). Nothing described here is switched on.
+**Status: recommendations 1–3 adopted by the maintainer on 2026-11-16; 4–6 not
+adopted for now** (see Decision, at the end). As of that date, nothing described
+here is switched on.
 
 ## What was found on 2026-11-15
 
@@ -159,6 +160,22 @@ checked for each one.
 
 ## Decision
 
-Not yet made. To record here: which of recommendations 1–6 are adopted, and on
-what date. If a Routine or bot gains new authority, write that authority down in
-`operations/routines/` like the others.
+**2026-11-16, maintainer: adopt 1–3 now.**
+
+- **Adopted:** Dependabot alerts and security updates, grouped per ecosystem (1);
+  weekly grouped Python version updates and monthly grouped Actions updates, with
+  Docker and Terraform version updates off (2); no auto-merge (3).
+- **Not adopted for now:** the blocking CI audit (4), Artifact Registry scanning
+  (5) and the quarterly end-of-life review (6). They are deferred, not rejected.
+  Until 5 is adopted, nothing shows CVEs in the Debian and Chromium packages.
+  Until 6 is adopted, Terraform 1.6, the google provider 5.x and Python 3.11's
+  end of life have no scheduled check.
+
+Dependabot gains no merge authority: its PRs go through the maintainer like any
+other, so it adds no entry to `operations/routines/` or the CLAUDE.md merge
+exceptions. Turning on alerts and security updates is a repository setting that
+the maintainer changes. Version updates take effect once a
+`.github/dependabot.yml` merges.
+
+Not yet done: the settings change and the config file. Clearing the existing
+backlog of 110 advisories is a separate piece of work, outside this decision.
