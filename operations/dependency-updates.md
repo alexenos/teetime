@@ -215,8 +215,8 @@ a code review before every merge, not a manual merge for its own sake.
 **Not yet active:** the Tuesday trigger does not exist until the maintainer
 creates it in the routines UI after the spec merges; until then nothing reviews or
 merges Dependabot PRs automatically. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
-10:00 run. It reviews open Dependabot PRs with Claude and with CodeRabbit, and
-merges at most one a week. Only lockfile or workflow paths, no majors, the head sha
-reviewed by both, every check green. This is CLAUDE.md's third merge exception,
+10:00 run. It reviews open Dependabot PRs with Claude, and with CodeRabbit when
+a PR touches `.github/workflows/`. It merges at most one a week. Only lockfile or
+workflow paths, no majors, the head sha reviewed, every check green. This is CLAUDE.md's third merge exception,
 bounded in `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs). Majors,
 and anything that fails a gate, still wait for the maintainer.
