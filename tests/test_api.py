@@ -64,25 +64,28 @@ class TestRouteSurface:
         pin honest on both shapes. The OpenAPI schema is not a substitute: it
         omits the ``include_in_schema=False`` onboarding routes.
 
-        A prefix passed to ``include_router(prefix=...)`` would not appear in
-        these paths (an ``APIRouter(prefix=...)`` does). None is used today;
-        adding one changes this set anyway, so the test still catches it.
+        A prefix passed to ``include_router(prefix=...)`` lives on the wrapper's
+        ``include_context``, not on the original routes, so the walk carries
+        it down. Without it, one router included twice under different
+        prefixes would collapse to one set of paths and pass the pin.
         """
         from fastapi.routing import APIRoute
         from starlette.routing import BaseRoute
 
         from app.main import app
 
-        def walk(routes: list[BaseRoute]) -> set[tuple[str, str]]:
+        def walk(routes: list[BaseRoute], prefix: str) -> set[tuple[str, str]]:
             found: set[tuple[str, str]] = set()
             for route in routes:
                 if isinstance(route, APIRoute):
-                    found.update((method, route.path) for method in route.methods)
+                    found.update((method, prefix + route.path) for method in route.methods)
                 elif (included := getattr(route, "original_router", None)) is not None:
-                    found |= walk(included.routes)
+                    # Fail rather than guess if the wrapper's shape changes.
+                    include_prefix = route.include_context.prefix  # type: ignore[attr-defined]
+                    found |= walk(included.routes, prefix + include_prefix)
             return found
 
-        return walk(app.routes)
+        return walk(app.routes, "")
 
     def test_no_bookings_routes(self) -> None:
         assert not [path for _, path in self._routes() if path.startswith("/bookings")]
