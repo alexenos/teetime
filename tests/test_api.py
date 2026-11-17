@@ -56,16 +56,52 @@ class TestRouteSurface:
     """
 
     def _routes(self) -> set[tuple[str, str]]:
+        """Every (method, path) the app serves, including hidden routes.
+
+        Established, by reading the locked fastapi 0.163.1 ``fastapi/routing.py``
+        and by listing ``app.router.routes``: ``include_router`` no longer copies
+        a router's routes into ``app.routes``. It adds one ``_IncludedRouter``
+        per included router, holding the original as ``original_router`` and
+        any ``include_router(prefix=...)`` on ``include_context.prefix``. 0.115.14
+        did copy them. Not established: which release in between changed it.
+
+        The walk carries inclusion prefixes down, so one router included twice
+        under different prefixes does not collapse to one set of paths. It
+        fails closed: any route that is neither an ``APIRoute``, an included
+        router, nor one of FastAPI's own docs routes (``Mount``, a plain
+        ``add_route``, a websocket) raises, rather than escaping the pin.
+
+        The OpenAPI schema is not a substitute: it omits the
+        ``include_in_schema=False`` onboarding routes.
+        """
         from fastapi.routing import APIRoute
+        from starlette.routing import BaseRoute, Route
 
         from app.main import app
 
-        return {
-            (method, route.path)
-            for route in app.routes
-            if isinstance(route, APIRoute)
-            for method in route.methods
+        docs_paths = {
+            app.openapi_url,
+            app.docs_url,
+            app.redoc_url,
+            app.swagger_ui_oauth2_redirect_url,
         }
+
+        def walk(routes: list[BaseRoute], prefix: str) -> set[tuple[str, str]]:
+            found: set[tuple[str, str]] = set()
+            for route in routes:
+                if isinstance(route, APIRoute):
+                    found.update((method, prefix + route.path) for method in route.methods)
+                elif (included := getattr(route, "original_router", None)) is not None:
+                    # Direct access: a change in the wrapper's shape fails here.
+                    include_prefix = route.include_context.prefix  # type: ignore[attr-defined]
+                    found |= walk(included.routes, prefix + include_prefix)
+                elif type(route) is Route and not prefix and route.path in docs_paths:
+                    continue
+                else:
+                    raise AssertionError(f"unrecognised route, not pinned: {route!r}")
+            return found
+
+        return walk(app.routes, "")
 
     def test_no_bookings_routes(self) -> None:
         assert not [path for _, path in self._routes() if path.startswith("/bookings")]
