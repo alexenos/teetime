@@ -177,5 +177,7 @@ exceptions. Turning on alerts and security updates is a repository setting that
 the maintainer changes. Version updates take effect once a
 `.github/dependabot.yml` merges.
 
-Not yet done: the settings change and the config file. Clearing the existing
+`.github/dependabot.yml` was added in the same change as this decision. It
+validates against the SchemaStore `dependabot-2.0` schema. Not yet done: the
+settings change. Clearing the existing
 backlog of 110 advisories is a separate piece of work, outside this decision.

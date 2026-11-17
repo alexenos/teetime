@@ -1,0 +1,42 @@
+# Dependabot: recommendations 1-3 of operations/dependency-updates.md, adopted
+# 2026-11-16 (#446). Every PR goes through the maintainer; none auto-merges.
+# A merge to main deploys and applies terraform.
+#
+# Not configured on purpose: docker (the python:3.11-slim base) and terraform
+# (the google provider). Both are major-version moves made deliberately.
+version: 2
+updates:
+  # "pip" is Dependabot's ecosystem for Poetry as well; it re-locks with Poetry v2.
+  - package-ecosystem: pip
+    directory: /
+    # Tuesday, away from the Saturday Routines' PRs and the 06:28 CT race.
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "10:00"
+      timezone: America/Chicago
+    # Version updates wait a week after a release. Security updates do not.
+    cooldown:
+      default-days: 7
+    # The weekly group plus one major at a time. Security PRs have a separate,
+    # fixed limit of 10 that this does not change.
+    open-pull-requests-limit: 2
+    groups:
+      python-security:
+        applies-to: security-updates
+        patterns: ["*"]
+      # Majors fall outside this group and arrive as their own PR.
+      python-weekly:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns: ["*"]
