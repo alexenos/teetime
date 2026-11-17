@@ -111,6 +111,8 @@ Points from the same pages that matter here:
 2. **Version updates: one weekly PR for Python, monthly for Actions, nothing else.**
    `pip` weekly, all minor and patch updates in one group; `github-actions`
    monthly, one group; `docker` and `terraform` at `open-pull-requests-limit: 0`.
+   Python's `open-pull-requests-limit: 2` caps version-update PRs in total, so
+   majors, which fall outside the group, are limited in number, not serialized.
    The base image and the provider are major-version moves that need a human
    (the next section).
 3. **No auto-merge.** Every Dependabot PR goes through the maintainer like any
@@ -142,8 +144,10 @@ A same-day fix and deploy, not the weekly batch, when **all** of these hold:
 - it is reachable from the webhook (fastapi, starlette, python-multipart,
   uvicorn, twilio) or the racer (selenium, urllib3, Chromium, chromedriver).
 
-Who is told: Dependabot alerts email repository admins by default, so the
-maintainer. A same-day deploy still avoids 06:20–06:45 CT on race mornings.
+Who is told: GitHub "sends notifications about new alerts by email to people
+with write, maintain, or admin permissions" by default ("Configuring
+notifications for Dependabot alerts"), so the maintainer, unless their own
+notification settings turn it off. A same-day deploy still avoids 06:20–06:45 CT on race mornings.
 On that bar, the starlette and python-multipart findings above qualify,
 provided one of their HIGH advisories has a network vector; that was not
 checked for each one.

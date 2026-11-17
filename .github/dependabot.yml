@@ -18,8 +18,10 @@ updates:
     # Version updates wait a week after a release. Security updates do not.
     cooldown:
       default-days: 7
-    # The weekly group plus one major at a time. Security PRs have a separate,
-    # fixed limit of 10 that this does not change.
+    # At most two version-update PRs open at once, of any kind: usually the
+    # weekly group plus one major, but two open majors would hold the weekly
+    # group back until one closes. 1 would let a single major block the weekly
+    # group indefinitely. Security PRs have a separate, fixed limit of 10.
     open-pull-requests-limit: 2
     groups:
       python-security:
