@@ -5,17 +5,26 @@
 prompt. It must be on `main` before that fire, because the prompt reads it from
 there; if it is missing the run stops and records `ok: false`.
 
+**Tuesday run: drafted 2026-11-17, not deployed.** It reviews and merges
+Dependabot PRs under a bounded exception granted by the maintainer on 2026-11-17
+(§ Tuesday: Dependabot PRs). Until its trigger exists, nothing below about Tuesday
+is live, and the Saturday run is unchanged.
+
 | | |
 |---|---|
-| **Trigger** | weekly, Saturday, `0 9 * * 6` UTC (04:00 CDT) |
-| **Deployed as** | a Routine (scheduled trigger), "🧹 TeeTime Tech Debt", `trig_017T2ZQXKLuhXg1dJjhGgh73`, in the same environment as the scoreboard Routine (`env_01MDpUqqDJRTVhqkh1hnrxgK`) |
+| **Trigger** | Saturday: weekly, `0 9 * * 6` UTC (04:00 CDT, 03:00 CST). Tuesday: weekly, `CRON_TZ=America/Chicago 0 13 * * 2` (13:00 CT), a second trigger, **not yet created** |
+| **Deployed as** | a Routine (scheduled trigger), "🧹 TeeTime Tech Debt", `trig_017T2ZQXKLuhXg1dJjhGgh73`, in the same environment as the scoreboard Routine (`env_01MDpUqqDJRTVhqkh1hnrxgK`). The Tuesday trigger is separate, with its own prompt (§ The Tuesday prompt) |
 | **Runs as** | a new Claude Code session per firing, with no prior context |
 | **Model** | not set on the trigger, so the account default applies. The scoreboard trigger pins `claude-sonnet-5`; this one does not |
-| **Authorization** | reads the repository and GitHub. Creates and edits issues and labels. Pushes one branch and opens one PR, triggers CodeRabbit on it and answers its findings. Writes one ledger object to GCS. **Never merges.** |
-| **Emits** | GitHub issues (the findings), at most one PR per run, and one ledger object per run at `operations/tech-debt/<YYYY-MM-DD>.json` in GCS |
+| **Authorization** | Saturday: reads the repository and GitHub. Creates and edits issues and labels. Pushes one branch and opens one PR, triggers CodeRabbit on it and answers its findings. Writes one ledger object to GCS. **Never merges.** Tuesday: reviews open Dependabot PRs and **squash-merges at most one per run** that passes every gate in § Tuesday: Dependabot PRs. Never pushes to a Dependabot branch |
+| **Emits** | Saturday: GitHub issues (the findings), at most one PR per run. Tuesday: review comments on Dependabot PRs, at most one merge. Both: one ledger object per run at `operations/tech-debt/<YYYY-MM-DD>.json` in GCS |
 | **Owns** | the tech-debt backlog (as GitHub issues) and its own run metadata |
 
 ## What it does
+
+This section and everything up to § Tuesday: Dependabot PRs describe the
+**Saturday** run. The Tuesday run does one different job, described in that
+section.
 
 Three jobs in one run, in order.
 
@@ -203,8 +212,10 @@ backed-up maintainer is not buried; it is a count, not a quality judgment.
 | trigger CodeRabbit on its own PR, and reply to its findings there | trigger or reply on any other PR |
 | write one object to the `operations/tech-debt/` prefix in GCS | edit another Routine's file or ledger |
 
-This is not a standing authorization to write to `main`. CLAUDE.md names two
-exceptions and this is not a third. A fix PR touching a path outside the Cloud
+This table is the Saturday run's. It is not a standing authorization to write
+to `main`. The Saturday run never merges. The Tuesday run's merge authority is
+CLAUDE.md's third exception, bounded in § Tuesday: Dependabot PRs and nowhere
+else. It covers only PRs opened by Dependabot, never this Routine's own PRs. A fix PR touching a path outside the Cloud
 Build `ignored_files` list rebuilds and redeploys the service when the maintainer
 merges it, and that is the maintainer's decision. The list is read from
 `terraform/main.tf` on each run, not copied here, because it changes: #280 added
@@ -512,7 +523,228 @@ One or two sentences, no markdown, labels not names. For example:
   missing at the start of each run (Step 1 of the prompt), so no manual step is
   needed, but it makes the first run's GitHub write access the first thing tested.
 
+## Tuesday: Dependabot PRs
+
+**Status: drafted 2026-11-17, not deployed.** Granted by the maintainer on
+2026-11-17 as CLAUDE.md's third merge exception. This section is the whole of
+that exception. Nothing here widens what the Saturday run may do.
+
+Dependabot opens PRs on Tuesday at 10:00 CT (`.github/dependabot.yml`): one
+grouped Python security PR, one grouped weekly minor/patch PR, majors one per
+PR, and GitHub Actions security and monthly PRs
+(`operations/dependency-updates.md`). Nothing merges them. The Tuesday run, at
+13:00 CT, reviews every open one, merges at most one that passes every gate, and
+leaves the rest for the maintainer with a comment saying why.
+
+**Why 13:00 CT on Tuesday.** It is three hours after Dependabot's run, so the
+week's PRs exist. It is far from the 06:28 CT race, so the deploy a merge causes
+lands with almost a day before the next race, which is the only end-to-end
+check of the booking path. The maintainer has that afternoon and evening to read
+the notification and revert.
+
+### Scope: what may be merged
+
+A Dependabot PR is **eligible** only when all of these hold:
+
+- **Author** `dependabot[bot]` (shown as `app/dependabot` by `gh`), base `main`,
+  not a draft.
+- **Paths:** every changed file is `poetry.lock`, `pyproject.toml`, or a file
+  under `.github/workflows/`. Anything else, including `.github/dependabot.yml`,
+  makes it ineligible.
+- **No major version change.** For every dependency the PR changes (read from
+  the `poetry.lock` diff, or the `uses:` refs for Actions), the major version is
+  unchanged. For a `0.y.z` version the minor counts as the major, because semver
+  allows breaking changes there: `0.115.x` to `0.116.0` is a major change.
+  A security PR that needs a major is not eligible either. The maintainer takes
+  majors.
+
+  **Expect most weekly groups to be held at first.** Dependabot's
+  `update-types: [minor, patch]` puts a `0.y` minor bump in the weekly group, and
+  many main-group packages are `0.x` (fastapi, uvicorn, httpx, python-multipart,
+  starlette). One such bump makes the whole group ineligible. The rule stays
+  anyway, because those are the changes semver allows to break. If the ledger shows
+  groups held for this reason week after week, split `0.y` minors into their own
+  group in `.github/dependabot.yml` rather than loosening this rule.
+
+Everything else gets the review and a comment, and waits for the maintainer.
+
+### The two reviews
+
+**Claude's review, by the run's own session.** On a lockfile bump this is the one
+that matters: CodeRabbit sees mostly hashes. For each package the PR changes:
+
+- Read the release notes or changelog between the old and new versions, from the
+  PR body (Dependabot includes them) or the upstream repository.
+- Note removed or renamed APIs, changed defaults, a raised minimum Python, and new
+  transitive dependencies.
+- Grep `app/` for imports of the package and for every API the notes say changed.
+- Say whether the package is on the race path: anything `app/` imports on the
+  path the racer or observer jobs execute, directly or through selenium. Read that
+  from `app/` on each run rather than from a list here. selenium, urllib3 and
+  httpx are examples, not the definition.
+
+The verdict is **merge** or **hold**. It is posted as one comment on the PR before
+any merge, so the reasoning is on the record, and it names the head sha it covered.
+A hold names its reason.
+
+**CodeRabbit's review.** Trigger it on the PR's head sha and judge its findings,
+following `.claude/skills/ship-pr/SKILL.md` (trigger, rate limits, reading the
+review, judging each comment). One round. The Routine never pushes to a Dependabot
+branch, so a finding cannot be fixed here:
+
+| Judgment | Action |
+|---|---|
+| Wrong, or not applicable to this repository | reply with the evidence; does not block |
+| Real | reply; the verdict becomes **hold** and the comment says what the maintainer must decide |
+
+The quota is one review an hour, shared. If CodeRabbit refuses, read the wait it
+names. If the session can schedule a wake-up, retry once then. If not, or if the
+retry is refused, that PR is **not merged** this run. No review, no merge.
+
+Review at most two PRs per run, in this order: Python security group, Actions
+security group, Python weekly group, Actions monthly group, then single-dependency
+PRs (majors). Eligible PRs come before ineligible ones within that order. The rest
+wait a week; the notification says how many.
+
+### The gates
+
+Merge only when **every** one holds, read fresh at the moment of merging, not
+from memory:
+
+1. **Eligible**, as above.
+2. **Claude's verdict is merge**, and it is posted on the PR for the head sha.
+3. **CodeRabbit reviewed the head sha** (compare by prefix: it writes a short sha)
+   and every finding has a reply. None was judged real.
+4. **Every check green on the head sha**: `test`, `lint`, `terraform` and any other
+   `test.yml` job (`gh pr checks <N>`). None pending, none failing. The `CodeRabbit`
+   check is not this gate: it reads "skipping" when it reviewed nothing. Gate 3
+   is the review gate.
+5. **Mergeable:** `mergeable` is `MERGEABLE`, not `UNKNOWN` (re-read on `UNKNOWN`).
+6. **The head has not moved** since the reviews began, **and the base is
+   effectively current.** Dependabot rebases PRs on its own. If the head moved,
+   the reviews no longer cover it: no merge this run. The checks ran against
+   `main` as it was then. Run `git fetch origin main` first, then list the
+   commits on `main` since the PR's merge base
+   (`git log --no-renames --name-only --format= <merge-base>..origin/main`;
+   `--no-renames` lists both sides of a rename, so a CI input moved into
+   `operations/race-reports/` still shows its old path). If any of them touches a file
+   outside `operations/race-reports/`, the merged result was never tested: comment
+   `@dependabot rebase` and do not merge this run. Only race reports are exempt,
+   because nothing in CI reads them. Every other path can change a check's result,
+   even where it deploys nothing: `test.yml` reads `operations/coverage-ratchet.txt`,
+   the tests read `operations/features.md` and the published
+   `docs/scoreboard.json`, and run `operations/ledger/derive_scoreboard.py`. So the
+   daily scoreboard publish blocks too. A PR older than the morning's publish waits
+   for Dependabot's rebase.
+   Do this check last, immediately before `gh pr merge`. `--match-head-commit`
+   pins the head but nothing pins the base, so a commit landing in the seconds
+   between this check and the merge is a gap this gate narrows and cannot close.
+7. **The live deploy is healthy:** the most recent Cloud Build, whichever commit it
+   built, finished `SUCCESS`. Not the build for `main`'s head: a commit touching
+   only `ignored_files` paths has no build, and the daily scoreboard and race-report
+   merges are such commits, so `main`'s head usually has none. Do not stack a merge
+   on a broken deploy.
+8. **Time:** between 08:00 and 20:00 CT on the run day. That keeps the deploy
+   well clear of the 06:28 CT race.
+9. **First merge of this run.** At most one merge per run. Each one deploys, and two
+   lockfile PRs conflict once one merges; Dependabot rebases the other for next week.
+
+If any gate fails, do not merge, and do not work around it with `--admin`,
+auto-merge or a push. Comment which gate failed.
+
+### The merge, and after it
+
+Squash-merge pinned to the sha the gates were checked against:
+
+```bash
+gh pr merge <N> --squash --match-head-commit <full-head-sha>
+```
+
+Then confirm the deploy exactly as ship-pr §9 "After a merge that builds" does:
+find the build by the merge commit, read its `Apply complete` line and final
+status, then read what Cloud Run is serving. A merge touching only
+`.github/workflows/` deploys too, until `.github/**` is in `ignored_files` (#454).
+Read the list fresh from `terraform/main.tf`.
+
+**If the deploy did not succeed**, or an older image is serving, notify at once
+that `main` may hold code that is not deployed. **Do not revert.** A revert is a
+merge to `main` outside this exception. The maintainer decides.
+
+### What else the Tuesday run may do on a Dependabot PR
+
+- Comment `@dependabot rebase`, once per PR per run, when the PR conflicts with
+  `main` and Dependabot has not already rebased it.
+- Comment `@dependabot close`, with the reason, when every version the PR
+  proposes is already at or below what `main` locks. That is a superseded PR, like
+  #451 and #452 after #453.
+- No other `@dependabot` command: not `ignore`, not `merge`, not `recreate`.
+
+| Can (Tuesday) | Cannot (Tuesday) |
+|---|---|
+| read the repository, GitHub, Cloud Build and Cloud Run state, and the ledgers | push to any branch, open a PR, or file an issue |
+| trigger CodeRabbit on Dependabot PRs and reply to its findings there | merge anything not opened by Dependabot, or more than one PR per run |
+| comment on Dependabot PRs: the verdict, gate failures, the two commands above | revert, or touch `main` any way except the one merge |
+| squash-merge one PR that passes every gate | merge a major, a PR touching another path, or a PR whose head moved |
+| write one ledger object under `operations/tech-debt/` | change the Dependabot config, labels or repository settings |
+
+Every comment is public and goes through the member-name check (§ The member-name
+check) first. Dependabot's own text is not this Routine's to check.
+
+**Auto-fix must be off on the Tuesday trigger.** It pushes to a PR's branch, and a
+push to a Dependabot branch makes Dependabot stop updating that PR.
+
+### Ledger row, notification
+
+Same prefix and write rule as Saturday (§ The ledger row), with a `run` field. The
+values are invented to show the shape:
+
+```json
+{"date":"2026-11-24","routine":"tech-debt","run":"dependabot","ok":true,
+ "dependabot":{"open":3,"reviewed":[
+     {"pr":460,"eligible":true,"coderabbit":"reviewed","verdict":"merge"},
+     {"pr":461,"eligible":false,"reason":"major","coderabbit":"rate_limited","verdict":"hold"}],
+   "merged":{"pr":460,"merge_sha":"25015aa","build":"SUCCESS","serving":true},
+   "closed_superseded":[451],"waiting":0}}
+```
+
+`merged` is `null` when nothing merged. `ok` is false when a check could not run,
+a deploy failed after a merge, or the name check could not run. A run that merged
+nothing because no PR passed is `ok: true`.
+
+**Not scored on the scoreboard.** `SCHEDULES` in
+`operations/ledger/derive_scoreboard.py` knows tech debt as Saturdays only, so a
+Tuesday row is read, validated, and not walked. A missed Tuesday run does not
+break the streak. Adding it needs a weekday-set schedule there, plus its tests.
+
+Notify every run, one or two sentences, no markdown, for example:
+
+- `Tech debt Tuesday - merged Dependabot #460 (Python weekly, 6 packages), deployed and serving; watch tomorrow's race. #461 is a major and waits for you.`
+- `Tech debt Tuesday - no merge: CodeRabbit rate limited on #460. 2 Dependabot PRs open.`
+- `Tech debt Tuesday - merged #460 but the build failed; main may hold undeployed code. Not reverted.`
+
+### Accepted, and not established
+
+**Accepted by the maintainer:** a dependency update that passes every gate can
+still break a race. Only a race checks booking end to end. The cost is bounded at
+one race per bad merge: one merge a week, no majors, a 7-day cooldown in
+Dependabot, and an afternoon merge so the maintainer can revert before the next
+06:28 CT.
+
+**Not established until the first runs:**
+
+- Whether a Routine session can merge: its GitHub access must allow merging PRs
+  and commenting on Dependabot's. Merging a PR that changes `.github/workflows/`
+  also needs the `workflows` permission; without it an Actions PR merge is refused,
+  and the run must record that as a gate failure, not an error.
+- Whether it can schedule a wake-up for a CodeRabbit retry (open item below).
+- Whether the browser integration tests in CI catch a Selenium or urllib3 break
+  before the race does. #217 made them blocking; that is all that is known.
+- How long the review of two PRs takes at the quota.
+
 ## The prompt
+
+This is the **Saturday** trigger's prompt. The Tuesday trigger's is § The Tuesday
+prompt, below.
 
 ```
 You are running the weekly tech-debt Routine for the TeeTime booking bot. You start with zero context; everything you need is in this repo. Read operations/routines/tech-debt.md first: it is the specification, and it governs where this prompt is silent. If that file does not exist, write the ledger row with ok false and the note spec missing, notify, and stop.
@@ -554,6 +786,35 @@ Step 5 - ledger row, then notification, then summary.
 Last, as the final message of this session, print the summary: a heading with the date, then New this week and Found again, still open, each issue on one line as the title linked to the issue followed by a dash and one sentence saying what it is, then one line for the fix PR with its risk, or why there is none, then any category that was skipped and why. If there is nothing, print Nothing new, nothing open to fix. Do not post the summary to GitHub. Use labels, never names.
 ```
 
+## The Tuesday prompt
+
+Paste into the Tuesday trigger only. It contains no asterisks, because the routines
+UI strips paired ones.
+
+```
+You are running the Tuesday Dependabot run of the tech-debt Routine for the TeeTime booking bot. You start with zero context. Read operations/routines/tech-debt.md first, the section Tuesday: Dependabot PRs above all: it is the specification and it governs where this prompt is silent. If that file or that section does not exist, write the ledger row with ok false and the note spec missing, notify, and stop.
+
+Your job: review every open Dependabot PR, and squash-merge at most one that passes every gate in the spec. Merging to main deploys the live service and applies terraform, so the gates are not optional and you check each one fresh, immediately before merging. You never push to any branch, never open a PR, never file an issue, never revert, and never merge anything not opened by Dependabot. If you are unsure whether a gate holds, it does not hold.
+
+Rule that applies to every path through this prompt: always write your ledger row, then always send a push notification, in that order. Write one object to gs://gen-lang-client-0822973627-teetime-debug-artifacts/operations/tech-debt/ named for the run date in Central Time, with gcloud storage cp --no-clobber, never overwriting, with routine tech-debt and run dependabot, in the shape the spec shows. Then call PushNotification. Every stop in this prompt means ledger row, push, stop.
+
+Rule that applies to every path through this prompt: no names. Every comment you post is public. Before posting one, write it to a file and run scripts/check_report_names.py against it with --labels ~/.teetime/labels.json, reading the labels from MEMBER_PSEUDONYM_LABELS as .claude/skills/race-report/SKILL.md section 8a describes. Exit 0 is the only pass. Exit 1 means replace the named lines with labels and recheck. Exit 2 means it could not check: do not post, record ok false with a note, notify, stop.
+
+Step 1 - set up. Get the date and time with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh; only READY is a pass, otherwise ok false, notify, stop. If the Central Time clock is before 08:00 or after 20:00, review but do not merge anything this run.
+
+Step 2 - list. List open PRs whose author is dependabot[bot] with their changed files, head sha, labels and bodies. If there are none, record that, notify, stop. For each one whose every proposed version is already at or below what main's poetry.lock or workflows pin, comment @dependabot close with that reason. For each one that conflicts with main and that Dependabot has not already rebased, comment @dependabot rebase once and skip it this run.
+
+Step 3 - classify. For each remaining PR decide eligibility exactly as the spec's Scope says: author, base main, not a draft; every changed file is poetry.lock, pyproject.toml, or under .github/workflows/; and no dependency's major version changes, where for a 0.y.z version a change of y counts as major. Read versions from the poetry.lock diff or the uses: refs, not from the PR title. Order the PRs as the spec orders them and take the first two. The rest wait; count them.
+
+Step 4 - review each of those two. First your own review: read the release notes between the old and new version of every changed package, grep app/ for its imports and for each API the notes say changed, and decide whether it is on the race path by reading what the racer and observer code imports. Post one comment with your verdict, merge or hold, the head sha it covers, and the reasons, after the name check. An ineligible PR is always hold, with its reason. Then CodeRabbit: read .claude/skills/ship-pr/SKILL.md and follow its sections on triggering, rate limits, reading the review and judging each comment. Post @coderabbitai review - new commit <short sha>, wait until its reply has stopped changing for 30 seconds, then poll for findings for up to 20 minutes. If it refuses, schedule one retry at the time it names plus two minutes if you can; otherwise that PR is not merged this run. Judge each finding on its reasoning. Reply to each on its own thread, after the name check. A finding that is wrong or does not apply gets the evidence. A finding that is real makes the verdict hold; say what the maintainer must decide. Never push a fix: you have no branch to push to.
+
+Step 5 - merge at most one. Take the first PR whose verdict is merge. Immediately before merging, check every gate in the spec again, fresh: eligible; your verdict posted for the current head; CodeRabbit reviewed the current head sha, compared by prefix, and every finding has a reply and none was real; gh pr checks shows every check passing on the head, with the CodeRabbit check not counting as a review; mergeable is MERGEABLE, re-read if UNKNOWN; the head sha equals the one you reviewed; every commit on main since the PR's merge base touches only files under operations/race-reports/, listed with git log --no-renames --name-only so a rename shows both paths, after running git fetch origin main, and checked last, immediately before the merge command, otherwise comment @dependabot rebase and do not merge; the most recent Cloud Build, whichever commit it built, finished SUCCESS, because a docs-only commit on main has no build of its own; the clock rule from Step 1. If every gate holds, run gh pr merge <N> --squash --match-head-commit <full head sha>. If any gate fails, do not merge, do not use --admin or auto-merge, and comment which gate failed. Never merge a second PR in the same run.
+
+Step 6 - after a merge, confirm the deploy exactly as ship-pr section 9 After a merge that builds describes: find the build by the merge commit, read its Apply complete line, wait for its final status, then read what Cloud Run serves and check it is the merge commit or later with all traffic on the latest ready revision. If anything there fails, the notification says at once that main may hold code that is not deployed. Do not revert.
+
+Step 7 - ledger row, then notification, then summary. The notification is one or two sentences, no markdown, labels not names: what merged and whether it is serving, or why nothing merged, and how many Dependabot PRs still wait for the maintainer. If something merged, say to watch the next race. Last, as the final message of the session, list each PR reviewed on one line: its number linked, eligible or not, the verdict, and the reason.
+```
+
 ## Deploying it
 
 Who does each step. **You** means a manual step only the maintainer can do;
@@ -578,3 +839,14 @@ before the first scheduled fire, Saturday 2026-10-10 04:00 CDT (09:00Z).**
 | 8 | Labels | Automatic: the Routine creates any that are missing at the start of each run |
 | 9 | `operations/features.md`, the feature manifest. Without it `td:legacy-feature` is skipped, which is allowed, so this does not block deploying | **Drafted 2026-10-15 (#287).** **You** decide each status: **Confirmed 2026-10-18:** every row carries the date you confirmed it; a row a session adds later says `proposed` until you date it |
 | 10 | Watch the first run, Saturday 2026-10-10 at 04:00 CDT. It is the first test of: GitHub write access, the 15-issue cap, the name check, the session summary, and whether a Routine session can schedule a wake-up for a CodeRabbit retry | **You** (Claude can review the result) |
+
+### Deploying the Tuesday run
+
+| # | Step | Who |
+|---|---|---|
+| T1 | Merge this spec, so the prompt finds § Tuesday: Dependabot PRs on `main`. It touches only `operations/`, `.claude/` and `CLAUDE.md`, so it does not deploy | **You** |
+| T2 | Create a second trigger in the routines UI: same repository and environment as the Saturday one, cron `CRON_TZ=America/Chicago 0 13 * * 2`, **Auto-fix off**, the prompt from § The Tuesday prompt | **You** |
+| T3 | Compare the live prompt with this file through the triggers API, since a paste can lose text | Claude |
+| T4 | The trigger's GitHub access must allow merging PRs, merging PRs that change workflow files (the `workflows` permission), and commenting on Dependabot's. The Saturday run never needed to merge | **You** |
+| T5 | Record the trigger id and the first fire date here, change the Tuesday **Status** above, and update CLAUDE.md's Routine list | Claude, in a PR |
+| T6 | Watch the first run. It is the first test of: merge access, a CodeRabbit retry by wake-up, the gates read fresh, and the deploy check after a merge | **You** (Claude can review the result) |

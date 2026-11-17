@@ -4,7 +4,9 @@ How each thing the service runs is kept current, and who is told when one has a
 known vulnerability. Research for #446, 2026-11-15.
 
 **Status: recommendations 1–3 adopted by the maintainer on 2026-11-16; 4–6 not
-adopted for now** (see Decision, at the end). Dependabot alerts and security
+adopted for now. On 2026-11-17, 3 (no auto-merge) was replaced by a reviewed,
+gated weekly merge by the tech-debt Routine's Tuesday run** (see Decision, at the
+end). Dependabot alerts and security
 updates are on, as of 2026-11-17. Grouping and version updates take effect when
 `.github/dependabot.yml` merges.
 
@@ -115,7 +117,7 @@ Points from the same pages that matter here:
    majors, which fall outside the group, are limited in number, not serialized.
    The base image and the provider are major-version moves that need a human
    (the next section).
-3. **No auto-merge.** Every Dependabot PR goes through the maintainer like any
+3. **No auto-merge** (replaced 2026-11-17; see Decision). Every Dependabot PR goes through the maintainer like any
    other. Merging one deploys and applies terraform. Granting a merge exception
    would be a third entry beside the race report and scoreboard in CLAUDE.md;
    this recommends against it, because a Python update is exactly what breaks the
@@ -207,3 +209,14 @@ per package, because the grouping config had not merged yet.
 
 Clearing the existing backlog of 103 image advisories is a separate piece of work,
 outside this decision.
+
+**2026-11-17, maintainer: recommendation 3 is replaced.** The maintainer wants
+a code review before every merge, not a manual merge for its own sake.
+**Not yet active:** the Tuesday trigger does not exist until the maintainer
+creates it in the routines UI after the spec merges; until then nothing reviews or
+merges Dependabot PRs automatically. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
+10:00 run. It reviews open Dependabot PRs with Claude and with CodeRabbit, and
+merges at most one a week. Only lockfile or workflow paths, no majors, the head sha
+reviewed by both, every check green. This is CLAUDE.md's third merge exception,
+bounded in `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs). Majors,
+and anything that fails a gate, still wait for the maintainer.

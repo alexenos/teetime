@@ -237,6 +237,20 @@ The values are invented to show the shape. `ran: false` with `reason:
 "no_manifest"` is a skipped category, not a failed one. A run that finds
 nothing and fixes nothing is `ok: true`.
 
+The Tuesday run (Dependabot review and merge, specified 2026-11-17, not yet
+deployed) writes to the same prefix, marked `"run":"dependabot"`. Its shape and
+meaning are in `operations/routines/tech-debt.md`, Tuesday: Dependabot PRs:
+
+```json
+{"date":"2026-11-24","routine":"tech-debt","run":"dependabot","ok":true,
+ "dependabot":{"open":2,"reviewed":[{"pr":460,"eligible":true,"coderabbit":"reviewed","verdict":"merge"}],
+               "merged":{"pr":460,"merge_sha":"25015aa","build":"SUCCESS","serving":true},
+               "closed_superseded":[],"waiting":0}}
+```
+
+The scoreboard validates these rows and does not walk them: `SCHEDULES` knows tech
+debt as Saturdays only.
+
 ## Write path
 
 Rows are written to GCS, not committed to the repository:
