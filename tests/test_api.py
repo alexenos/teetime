@@ -56,16 +56,33 @@ class TestRouteSurface:
     """
 
     def _routes(self) -> set[tuple[str, str]]:
+        """Every (method, path) the app serves, including hidden routes.
+
+        Somewhere between FastAPI 0.115 and 0.163, ``include_router`` stopped
+        copying a router's routes into ``app.routes``; it adds one wrapper per
+        included router, holding the original as ``original_router``. Walking into it keeps the
+        pin honest on both shapes. The OpenAPI schema is not a substitute: it
+        omits the ``include_in_schema=False`` onboarding routes.
+
+        A prefix passed to ``include_router(prefix=...)`` would not appear in
+        these paths (an ``APIRouter(prefix=...)`` does). None is used today;
+        adding one changes this set anyway, so the test still catches it.
+        """
         from fastapi.routing import APIRoute
+        from starlette.routing import BaseRoute
 
         from app.main import app
 
-        return {
-            (method, route.path)
-            for route in app.routes
-            if isinstance(route, APIRoute)
-            for method in route.methods
-        }
+        def walk(routes: list[BaseRoute]) -> set[tuple[str, str]]:
+            found: set[tuple[str, str]] = set()
+            for route in routes:
+                if isinstance(route, APIRoute):
+                    found.update((method, route.path) for method in route.methods)
+                elif (included := getattr(route, "original_router", None)) is not None:
+                    found |= walk(included.routes)
+            return found
+
+        return walk(app.routes)
 
     def test_no_bookings_routes(self) -> None:
         assert not [path for _, path in self._routes() if path.startswith("/bookings")]
