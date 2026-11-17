@@ -623,7 +623,8 @@ from memory:
 6. **The head has not moved** since the reviews began, **and the base is
    effectively current.** Dependabot rebases PRs on its own. If the head moved,
    the reviews no longer cover it: no merge this run. The checks ran against
-   `main` as it was then, so list the commits on `main` since the PR's merge base
+   `main` as it was then. Run `git fetch origin main` first, then list the
+   commits on `main` since the PR's merge base
    (`git log --no-renames --name-only --format= <merge-base>..origin/main`;
    `--no-renames` lists both sides of a rename, so a CI input moved into
    `operations/race-reports/` still shows its old path). If any of them touches a file
@@ -635,6 +636,9 @@ from memory:
    `docs/scoreboard.json`, and run `operations/ledger/derive_scoreboard.py`. So the
    daily scoreboard publish blocks too. A PR older than the morning's publish waits
    for Dependabot's rebase.
+   Do this check last, immediately before `gh pr merge`. `--match-head-commit`
+   pins the head but nothing pins the base, so a commit landing in the seconds
+   between this check and the merge is a gap this gate narrows and cannot close.
 7. **The live deploy is healthy:** the most recent Cloud Build, whichever commit it
    built, finished `SUCCESS`. Not the build for `main`'s head: a commit touching
    only `ignored_files` paths has no build, and the daily scoreboard and race-report
@@ -804,7 +808,7 @@ Step 3 - classify. For each remaining PR decide eligibility exactly as the spec'
 
 Step 4 - review each of those two. First your own review: read the release notes between the old and new version of every changed package, grep app/ for its imports and for each API the notes say changed, and decide whether it is on the race path by reading what the racer and observer code imports. Post one comment with your verdict, merge or hold, the head sha it covers, and the reasons, after the name check. An ineligible PR is always hold, with its reason. Then CodeRabbit: read .claude/skills/ship-pr/SKILL.md and follow its sections on triggering, rate limits, reading the review and judging each comment. Post @coderabbitai review - new commit <short sha>, wait until its reply has stopped changing for 30 seconds, then poll for findings for up to 20 minutes. If it refuses, schedule one retry at the time it names plus two minutes if you can; otherwise that PR is not merged this run. Judge each finding on its reasoning. Reply to each on its own thread, after the name check. A finding that is wrong or does not apply gets the evidence. A finding that is real makes the verdict hold; say what the maintainer must decide. Never push a fix: you have no branch to push to.
 
-Step 5 - merge at most one. Take the first PR whose verdict is merge. Immediately before merging, check every gate in the spec again, fresh: eligible; your verdict posted for the current head; CodeRabbit reviewed the current head sha, compared by prefix, and every finding has a reply and none was real; gh pr checks shows every check passing on the head, with the CodeRabbit check not counting as a review; mergeable is MERGEABLE, re-read if UNKNOWN; the head sha equals the one you reviewed; every commit on main since the PR's merge base touches only files under operations/race-reports/, listed with git log --no-renames --name-only so a rename shows both paths, otherwise comment @dependabot rebase and do not merge; the most recent Cloud Build, whichever commit it built, finished SUCCESS, because a docs-only commit on main has no build of its own; the clock rule from Step 1. If every gate holds, run gh pr merge <N> --squash --match-head-commit <full head sha>. If any gate fails, do not merge, do not use --admin or auto-merge, and comment which gate failed. Never merge a second PR in the same run.
+Step 5 - merge at most one. Take the first PR whose verdict is merge. Immediately before merging, check every gate in the spec again, fresh: eligible; your verdict posted for the current head; CodeRabbit reviewed the current head sha, compared by prefix, and every finding has a reply and none was real; gh pr checks shows every check passing on the head, with the CodeRabbit check not counting as a review; mergeable is MERGEABLE, re-read if UNKNOWN; the head sha equals the one you reviewed; every commit on main since the PR's merge base touches only files under operations/race-reports/, listed with git log --no-renames --name-only so a rename shows both paths, after running git fetch origin main, and checked last, immediately before the merge command, otherwise comment @dependabot rebase and do not merge; the most recent Cloud Build, whichever commit it built, finished SUCCESS, because a docs-only commit on main has no build of its own; the clock rule from Step 1. If every gate holds, run gh pr merge <N> --squash --match-head-commit <full head sha>. If any gate fails, do not merge, do not use --admin or auto-merge, and comment which gate failed. Never merge a second PR in the same run.
 
 Step 6 - after a merge, confirm the deploy exactly as ship-pr section 9 After a merge that builds describes: find the build by the merge commit, read its Apply complete line, wait for its final status, then read what Cloud Run serves and check it is the merge commit or later with all traffic on the latest ready revision. If anything there fails, the notification says at once that main may hold code that is not deployed. Do not revert.
 
