@@ -145,9 +145,13 @@ A same-day fix and deploy, not the weekly batch, when **all** of these hold:
   uvicorn, twilio) or the racer (selenium, urllib3, Chromium, chromedriver).
 
 Who is told: GitHub "sends notifications about new alerts by email to people
-with write, maintain, or admin permissions" by default ("Configuring
-notifications for Dependabot alerts"), so the maintainer, unless their own
-notification settings turn it off. A same-day deploy still avoids 06:20–06:45 CT on race mornings.
+with write, maintain, or admin permissions" ("Configuring notifications for
+Dependabot alerts"), and only those who watch the repository with "All
+Activity" or a custom setting that includes "Security alerts" ("Managing
+security notifications"). So the maintainer, provided both hold. Not verified:
+the maintainer's watch setting. Reading it needs the `notifications` scope,
+which the session's `gh` token does not have. Check it under the repository's
+Watch menu. A same-day deploy still avoids 06:20–06:45 CT on race mornings.
 On that bar, the starlette and python-multipart findings above qualify,
 provided one of their HIGH advisories has a network vector; that was not
 checked for each one.
