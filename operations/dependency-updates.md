@@ -178,6 +178,10 @@ the maintainer changes. Version updates take effect once a
 `.github/dependabot.yml` merges.
 
 `.github/dependabot.yml` was added in the same change as this decision. It
-validates against the SchemaStore `dependabot-2.0` schema. Not yet done: the
-settings change. Clearing the existing
+validates against the SchemaStore `dependabot-2.0` schema.
+
+The maintainer turned the repository settings on before 2026-11-17T00:17Z. The
+API reports `dependabot_security_updates: enabled`, there are at least 100 open
+alerts, and the first security PRs (#451, #452) opened at 00:17Z and 00:18Z, one
+per package, because the grouping config had not merged yet. Clearing the existing
 backlog of 110 advisories is a separate piece of work, outside this decision.
