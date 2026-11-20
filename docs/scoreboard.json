@@ -1,36 +1,36 @@
 {
   "sample": false,
-  "generated": "2026-11-19T13:34:45Z",
+  "generated": "2026-11-20T13:34:27Z",
   "definitions": "v1",
   "backfill": {
     "rows": 23,
     "first": "2026-08-13",
     "last": "2026-09-27",
-    "routine_rows": 50,
-    "routine_raced": 15,
+    "routine_rows": 51,
+    "routine_raced": 16,
     "source": "operations/ledger/backfill/race-report.jsonl"
   },
   "outcome": {
     "all_time": {
-      "mornings": 38,
-      "booked": 50,
+      "mornings": 39,
+      "booked": 51,
       "miss": 8,
-      "exact": 44,
+      "exact": 45,
       "fallback": 6
     },
     "last_4wk": {
       "mornings": 8,
-      "booked": 13,
+      "booked": 12,
       "miss": 1,
-      "exact": 13,
+      "exact": 12,
       "fallback": 0
     },
     "prior_4wk": {
       "mornings": 9,
       "booked": 16,
       "miss": 1,
-      "exact": 14,
-      "fallback": 2
+      "exact": 15,
+      "fallback": 1
     },
     "last_miss": {
       "date": "2026-11-12",
@@ -40,14 +40,14 @@
   "streak": {
     "available": true,
     "reason": null,
-    "consecutive": 19,
-    "unverified": 19,
-    "total_ok": 93,
+    "consecutive": 21,
+    "unverified": 21,
+    "total_ok": 95,
     "last_failure": "2026-11-10",
     "last_failure_reason": "scoreboard: failed",
     "by_routine": {
-      "race-report": 41,
-      "scoreboard": 8,
+      "race-report": 42,
+      "scoreboard": 9,
       "cost": 1,
       "tech-debt": 2,
       "feature-dev": 4
@@ -69,7 +69,7 @@
     ],
     "window": {
       "first": "2026-10-01",
-      "last": "2026-11-19"
+      "last": "2026-11-20"
     }
   },
   "cost": {
