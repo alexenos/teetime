@@ -237,8 +237,8 @@ The values are invented to show the shape. `ran: false` with `reason:
 "no_manifest"` is a skipped category, not a failed one. A run that finds
 nothing and fixes nothing is `ok: true`.
 
-The Tuesday run (Dependabot review and merge, specified 2026-11-17, not yet
-deployed) writes to the same prefix, marked `"run":"dependabot"`. Its shape and
+The Tuesday run (Dependabot review and merge, specified 2026-11-17, first fired
+2026-11-17) writes to the same prefix, marked `"run":"dependabot"`. Its shape and
 meaning are in `operations/routines/tech-debt.md`, Tuesday: Dependabot PRs:
 
 ```json
