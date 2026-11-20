@@ -588,6 +588,11 @@ gh api --paginate \
         | [.name, .conclusion, .created_at] | @tsv'
 ```
 
+The window is exact: capture the run's start time once, in UTC, and keep only runs
+whose `created_at` is at or after that time minus seven days and before it. The
+date in the query is a coarse bound so pagination stays short; it admits runs from
+earlier on the first day, which the timestamp filter then drops.
+
 Established 2026-11-20 from the API: a pip run at 16:06Z on 2026-11-17
 (10:06 CT), `pip in / for uvicorn, pydantic, … - Update #1712353872`, `success`,
 and no Dependabot PR created after it. Two runs that night failed (`pip in /. for
@@ -615,7 +620,9 @@ Dependabot failing.
 - **`open_alerts`:** the count of open Dependabot alerts, or `null` if the
   session cannot read them. Open alerts with no matching PR mean a security
   update failed, as soupsieve's and pytest's did.
-- **`ok`:** `weekly_pip_check` is `success` and `failures` is empty.
+- **`ok`:** `weekly_pip_check` is `success` and no `pip` run in the window failed.
+  Failed Actions runs stay in `failures` as evidence but do not make `ok` false,
+  for the reason below.
 
 `upstream.ok` judges Dependabot, not this Routine, and does not change the row's
 own `ok`. A Routine that correctly reports a broken Dependabot ran well. The
@@ -894,7 +901,7 @@ Rule that applies to every path through this prompt: you cannot send commands to
 
 Step 1 - set up. Get the date and time with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh; only READY is a pass, otherwise ok false, notify, stop. If the Central Time clock is before 08:00 or after 20:00, review but do not merge anything this run.
 
-Step 2 - did Dependabot do its job. List Dependabot's update runs for the seven days ending now, as the spec's section Did Dependabot do its job shows: the GitHub Actions runs on path dynamic/dependabot/dependabot-updates, with name, conclusion and created time, filtered to the window by created date and read across every page. Record them raw in the upstream section. weekly_pip_check is the result of a pip run created today between 09:45 and 12:45 Central Time, or missing if there is none. failures lists every run whose conclusion is not success. Record the Dependabot PRs created in the window as prs_opened, and older ones whose head commit is dated in the window as prs_updated. Record the count of open Dependabot alerts as open_alerts, or null if you cannot read them. upstream ok is true only when weekly_pip_check is success and failures is empty. This judges Dependabot, not you: it never makes your own ok false.
+Step 2 - did Dependabot do its job. Capture the current time in UTC once; the window is the seven days ending at it. List Dependabot's update runs in that window, as the spec's section Did Dependabot do its job shows: the GitHub Actions runs on path dynamic/dependabot/dependabot-updates, with name, conclusion and created time, queried by created date and read across every page, then kept only when created_at is at or after the window start and before the captured time. Record them raw in the upstream section. weekly_pip_check is the result of a pip run created today between 09:45 and 12:45 Central Time, or missing if there is none. failures lists every run whose conclusion is not success. Record the Dependabot PRs created in the window as prs_opened, and older ones whose head commit is dated in the window as prs_updated. Record the count of open Dependabot alerts as open_alerts, or null if you cannot read them. upstream ok is true only when weekly_pip_check is success and no run whose name starts with pip failed in the window; failed github_actions runs stay in failures but do not make it false. This judges Dependabot, not you: it never makes your own ok false.
 
 Step 3 - list. List open PRs whose author is dependabot[bot] with their changed files, head sha, created time, labels and bodies. Record how many are open and the age in days of the oldest. If there are none, still count every Dependabot PR for totals as Step 8 describes, then write the ledger row, notify, and stop. For each one whose every proposed version is already at or below what main's poetry.lock or workflows pin, comment that it is superseded and list it as superseded. For each one that conflicts with main, comment that it needs a rebase and list it as rebase_needed. Skip both kinds this run.
 
