@@ -251,7 +251,16 @@ morning since 2026-10-01. What remains:
 
 ## The prompt
 
-**Status: in the trigger, matching this file.** Compared with `get_trigger` on
+**Status: the trigger lags this file by one change, from 2026-11-20.** The
+sixth prefix, `operations/dependabot` (its `mkdir` entry, its `rsync`, its
+first-run rule, and `ledger/dependabot` in the derive command), was added for tech
+debt's Tuesday run. The live prompt still has five until it is updated after this
+merges, which must happen before the 2026-11-24 13:00 CT run
+(`operations/routines/tech-debt.md`, Deploying the Tuesday run, T7). Until then the
+scoreboard never sees a `dependabot` row and reports every Tuesday from 2026-11-24 as
+missing. Change this line back once the live text matches.
+
+Before that change, it matched: compared with `get_trigger` on
 2026-11-11 at 00:20Z, after the maintainer pasted the Step 4 wall-clock wait
 (`scripts/wait_for_tests.py`). Step 2 and the square-bracket placeholders were
 already live. The first Step 4 paste also deleted the merge paragraph after it,

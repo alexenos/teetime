@@ -239,13 +239,15 @@ The values are invented to show the shape. `ran: false` with `reason:
 nothing and fixes nothing is `ok: true`.
 
 The Tuesday run's first row, 2026-11-17, is in this prefix, marked
-`"run":"dependabot"`, in an earlier shape:
+`"run":"dependabot"`, in an earlier shape (the real row, `note` abridged):
 
 ```json
-{"date":"2026-11-24","routine":"tech-debt","run":"dependabot","ok":true,
- "dependabot":{"open":2,"reviewed":[{"pr":460,"eligible":true,"coderabbit":"reviewed","verdict":"merge"}],
-               "merged":{"pr":460,"merge_sha":"25015aa","build":"SUCCESS","serving":true},
-               "closed_superseded":[],"waiting":0}}
+{"date":"2026-11-17","routine":"tech-debt","run":"dependabot","ok":true,
+ "dependabot":{"open":4,"reviewed":[
+   {"pr":456,"eligible":true,"coderabbit":"skipped_no_seat","verdict":"merge","gates_failed":[3,6],"rebase_requested":true},
+   {"pr":458,"eligible":false,"reason":"major","coderabbit":"not_triggered","verdict":"hold"}],
+  "merged":null,"closed_superseded":[],"waiting":2},
+ "note":"(abridged)"}
 ```
 
 The scoreboard validates it and does not walk it: `SCHEDULES` knows tech debt as

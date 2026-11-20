@@ -215,8 +215,8 @@ a code review before every merge, not a manual merge for its own sake.
 **Active since 2026-11-17** (trigger `trig_01B7t9YdZT2448xsSwu6zD7e`).
 **2026-11-20, maintainer:** Claude's review is enough. CodeRabbit skips bot PRs
 without a seat, so requiring it meant nothing could ever merge. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
-10:00 run. It reviews open Dependabot PRs with Claude and with CodeRabbit, and
+10:00 run. It reviews open Dependabot PRs with Claude (and with CodeRabbit, until 2026-11-20), and
 merges at most one a week. Only lockfile or workflow paths, no majors, the head sha
-reviewed by both, every check green. This is CLAUDE.md's third merge exception,
+reviewed (by both until 2026-11-20, by Claude since), every check green. This is CLAUDE.md's third merge exception,
 bounded in `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs). Majors,
 and anything that fails a gate, still wait for the maintainer.

@@ -578,20 +578,27 @@ row's `upstream` section.
 
 **Where the evidence is.** Each Dependabot update job is a GitHub Actions run on
 the path `dynamic/dependabot/dependabot-updates`, public and readable without
-special permission:
+special permission. Pages builds share the `dynamic` event, so bound the query by
+date and paginate (35 dynamic runs in the seven days to 2026-11-20):
 
 ```bash
-gh api 'repos/alexenos/teetime/actions/runs?event=dynamic&per_page=100' \
+gh api --paginate \
+  'repos/alexenos/teetime/actions/runs?event=dynamic&per_page=100&created=>=<window start, YYYY-MM-DD>' \
   --jq '.workflow_runs[] | select(.path=="dynamic/dependabot/dependabot-updates")
         | [.name, .conclusion, .created_at] | @tsv'
 ```
 
-Established 2026-11-20 from the API: the scheduled weekly check ran at
-16:06Z on 2026-11-17 (10:06 CT, against the configured 10:00), as
-`pip in / for uvicorn, pydantic, … - Update #1712353872`, `success`. It opened no
-new PR: the open group PR #458 already covered those packages. Two security
-update runs that night failed (`pip in /. for soupsieve`, `pip in /. for
-pytest`), so neither fix arrived as a PR.
+Established 2026-11-20 from the API: a pip run at 16:06Z on 2026-11-17
+(10:06 CT), `pip in / for uvicorn, pydantic, … - Update #1712353872`, `success`,
+and no Dependabot PR created after it. Two runs that night failed (`pip in /. for
+soupsieve`, `pip in /. for pytest`), and no PR exists for either package.
+
+Hypothesis, from timing alone: the 16:06Z run was the scheduled weekly check
+(configured for 10:00 CT), and it refreshed group PR #458 rather than opening a
+new one. Nothing in the API labels a run as scheduled. The `weekly_pip_check`
+rule below rests on this; if a Tuesday with no PR activity ever shows no pip run
+in its window, check whether the schedule fires outside it before reading it as
+Dependabot failing.
 
 **What it records.**
 
@@ -887,9 +894,9 @@ Rule that applies to every path through this prompt: you cannot send commands to
 
 Step 1 - set up. Get the date and time with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh; only READY is a pass, otherwise ok false, notify, stop. If the Central Time clock is before 08:00 or after 20:00, review but do not merge anything this run.
 
-Step 2 - did Dependabot do its job. List Dependabot's update runs for the seven days ending now, as the spec's section Did Dependabot do its job shows: the GitHub Actions runs on path dynamic/dependabot/dependabot-updates, with name, conclusion and created time. Record them raw in the upstream section. weekly_pip_check is the result of a pip run created today between 09:45 and 12:45 Central Time, or missing if there is none. failures lists every run whose conclusion is not success. Record the Dependabot PRs created in the window as prs_opened, and older ones whose head commit is dated in the window as prs_updated. Record the count of open Dependabot alerts as open_alerts, or null if you cannot read them. upstream ok is true only when weekly_pip_check is success and failures is empty. This judges Dependabot, not you: it never makes your own ok false.
+Step 2 - did Dependabot do its job. List Dependabot's update runs for the seven days ending now, as the spec's section Did Dependabot do its job shows: the GitHub Actions runs on path dynamic/dependabot/dependabot-updates, with name, conclusion and created time, filtered to the window by created date and read across every page. Record them raw in the upstream section. weekly_pip_check is the result of a pip run created today between 09:45 and 12:45 Central Time, or missing if there is none. failures lists every run whose conclusion is not success. Record the Dependabot PRs created in the window as prs_opened, and older ones whose head commit is dated in the window as prs_updated. Record the count of open Dependabot alerts as open_alerts, or null if you cannot read them. upstream ok is true only when weekly_pip_check is success and failures is empty. This judges Dependabot, not you: it never makes your own ok false.
 
-Step 3 - list. List open PRs whose author is dependabot[bot] with their changed files, head sha, created time, labels and bodies. Record how many are open and the age in days of the oldest. If there are none, record that, notify, stop. For each one whose every proposed version is already at or below what main's poetry.lock or workflows pin, comment that it is superseded and list it as superseded. For each one that conflicts with main, comment that it needs a rebase and list it as rebase_needed. Skip both kinds this run.
+Step 3 - list. List open PRs whose author is dependabot[bot] with their changed files, head sha, created time, labels and bodies. Record how many are open and the age in days of the oldest. If there are none, still count every Dependabot PR for totals as Step 8 describes, then write the ledger row, notify, and stop. For each one whose every proposed version is already at or below what main's poetry.lock or workflows pin, comment that it is superseded and list it as superseded. For each one that conflicts with main, comment that it needs a rebase and list it as rebase_needed. Skip both kinds this run.
 
 Step 4 - classify. For each remaining PR decide eligibility exactly as the spec's Scope says: author, base main, not a draft; every changed file is poetry.lock, pyproject.toml, or under .github/workflows/; and no dependency's major version changes, where for a 0.y.z version a change of y counts as major. Read versions from the poetry.lock diff or the uses: refs, not from the PR title. Order the PRs as the spec orders them and take the first two. The rest wait; count them.
 
