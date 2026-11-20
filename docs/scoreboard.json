@@ -50,7 +50,8 @@
       "scoreboard": 9,
       "cost": 1,
       "tech-debt": 2,
-      "feature-dev": 4
+      "feature-dev": 4,
+      "dependabot": null
     },
     "history": [
       3,

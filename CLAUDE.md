@@ -22,10 +22,11 @@ two paths, a green `Tests` check, nothing else. It is defined in
 A third exception was **granted on 2026-11-17**: the tech-debt Routine's
 Tuesday run may squash-merge **one Dependabot PR per run**. The PR may change
 only `poetry.lock`, `pyproject.toml` or `.github/workflows/`, with no major
-version change. Claude and CodeRabbit must both have reviewed its head sha, and
-every check must be green on that sha. It is defined in
+version change. Claude must have reviewed its head sha (CodeRabbit too when it
+will, which it does not for a bot without a seat; relaxed 2026-11-20), and every
+check must be green on that sha. It is defined in
 `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs) and nowhere else.
-**Not deployed:** the Tuesday trigger does not exist yet.
+Deployed 2026-11-17.
 
 **Invoking `/ship-pr` is the maintainer's merge decision** (2026-11-15). It is
 not an exception to the rule above: it is the maintainer deciding in advance,
@@ -148,19 +149,20 @@ Measurement, and the Routines that run on a schedule: `operations/`.
   login, and the migration off the hand-made Fernet key
 
 Five Routines are deployed: the race report, daily at `40 11 * * *` UTC, the
-scoreboard, daily at `30 12 * * *` UTC, tech debt, Saturdays at `0 9 * * 6`
-UTC (`operations/routines/tech-debt.md`), and cost, monthly on the 5th
+scoreboard, daily at `30 12 * * *` UTC, tech debt, Saturdays at
+`CRON_TZ=America/Chicago 0 4 * * 6` (`operations/routines/tech-debt.md`), and cost, monthly on the 5th
 (`operations/routines/cost.md`; created 2026-10-09, `CRON_TZ=America/Chicago 0 5 5 * *`,
 first run 2026-11-05). Tech debt's Saturday run never
-merges; it files issues and opens a PR you merge. A Tuesday run at 13:00 CT, which
-reviews Dependabot PRs and merges at most one under the third exception above, is
-specified there but not yet created. Feature dev ranks the backlog and builds one eligible issue
+merges; it files issues and opens a PR you merge. Its Tuesday run, a second
+trigger at `CRON_TZ=America/Chicago 0 13 * * 2` with Auto-fix off, checks that
+Dependabot ran, reviews its PRs and merges at most one under the third exception
+above; it writes its own ledger, `operations/dependabot/`. Feature dev ranks the backlog and builds one eligible issue
 (`operations/routines/feature-dev.md`, Saturdays 08:00 CT, created 2026-10-19, first
 run 2026-10-24; its priorities are in that file, under "Choosing what to build"); it never
 merges either. Auto-fix is on for the tech-debt and feature-dev triggers, so the app
 may push fixes to their PR branches after the run. The race report and scoreboard
-crons move an hour on 2026-11-01, and so does tech debt's (04:00 CDT becomes 03:00
-CST); feature-dev's is in Chicago time and does not. A prompt pasted into the
+crons move an hour on 2026-11-01; tech debt's and feature-dev's are in Chicago
+time and do not. A prompt pasted into the
 routines UI is read as markdown and loses paired `*`; compare the live text
 after any paste (`operations/routines/scoreboard.md`, The prompt). `ship-pr` and
 the PR check-ins are not Routines; they are maintainer-invoked and push only to

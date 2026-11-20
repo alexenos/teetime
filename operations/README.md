@@ -39,9 +39,9 @@ file under `race-reports/`, bounded in `routines/race-report.md`) and the
 scoreboard (`docs/scoreboard.json` and `docs/scoreboard.html`, bounded in
 `routines/scoreboard.md`). The others never merge their own: tech debt and
 feature dev open PRs for the maintainer, and cost commits nothing
-(`routines/cost.md`). Tech debt's Tuesday run, specified but not yet created, may
+(`routines/cost.md`). Tech debt's Tuesday run, deployed 2026-11-17, may
 merge one Dependabot PR a week. It is limited to lockfile and workflow paths and
-no majors, and gated on a Claude and a CodeRabbit review of the head plus green
+no majors, and gated on Claude's review of the head (CodeRabbit's too when it will review a bot's PR) plus green
 checks (`routines/tech-debt.md`, Tuesday: Dependabot PRs).
 
 ## Two constraints
@@ -65,7 +65,7 @@ diagnosis; it applies equally to operating material.
 |---|---|
 | Race report Routine | deployed; fires daily since 2026-08-20; 23 reports, 2026-08-13 to 2026-09-25; merging its own since 2026-09-22 |
 | Scoreboard Routine | documented as deployed 2026-10-04 (`routines/scoreboard.md`, CLAUDE.md); `docs/**` is documented as in the deploy filter since the 2026-09-27 apply (CLAUDE.md). Live trigger and build log not checked for this table |
-| Tech debt Routine | documented as deployed (CLAUDE.md); Saturdays at `0 9 * * 6` UTC (`routines/tech-debt.md`); never merges, files issues and opens a PR. Tuesday run (Dependabot review, one merge) specified 2026-11-17, trigger not created |
+| Tech debt Routine | Saturdays at `CRON_TZ=America/Chicago 0 4 * * 6` (`routines/tech-debt.md`); never merges, files issues and opens a PR. Tuesday run, deployed 2026-11-17: checks Dependabot ran, reviews its PRs, merges at most one; own ledger `operations/dependabot/`, scored from 2026-11-24. Both triggers read from the triggers API on 2026-11-17 |
 | Cost Routine | documented as created 2026-10-09, monthly on the 5th, first run 2026-11-05 (`routines/cost.md`, CLAUDE.md); billing export documented as on |
 | Feature dev Routine | documented as created 2026-10-19, Saturdays 08:00 CT (`routines/feature-dev.md`, CLAUDE.md); never merges, builds one issue and opens a PR. Ledger objects exist in GCS for 2026-10-24 and 2026-10-31 |
 | Scoreboard page | written, at `https://alexenos.github.io/teetime/scoreboard.html`, showing the outcome split **backfilled** from the race reports, flagged on the page itself; streak and cost unavailable |

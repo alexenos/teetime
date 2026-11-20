@@ -121,8 +121,9 @@ is `null` and shown as "no scored run yet". That is not a streak of 0, which wou
 mean a failure.
 
 The Routines walked are the race report (daily), the scoreboard (daily), cost
-(monthly, from 2026-11-05), tech debt (weekly, Saturdays, from 2026-10-10) and
-feature-dev (weekly, Saturdays, from 2026-10-24).
+(monthly, from 2026-11-05), tech debt (weekly, Saturdays, from 2026-10-10),
+feature-dev (weekly, Saturdays, from 2026-10-24) and dependabot, tech debt's
+Tuesday review of Dependabot PRs (weekly, Tuesdays, from 2026-11-24).
 A weekly or monthly Routine contributes one run per period, so a missed Saturday
 breaks the streak like a missed morning does. `SCHEDULES` in
 `operations/ledger/derive_scoreboard.py` is the list.
