@@ -212,11 +212,12 @@ outside this decision.
 
 **2026-11-17, maintainer: recommendation 3 is replaced.** The maintainer wants
 a code review before every merge, not a manual merge for its own sake.
-**Not yet active:** the Tuesday trigger does not exist until the maintainer
-creates it in the routines UI after the spec merges; until then nothing reviews or
-merges Dependabot PRs automatically. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
+**Active since 2026-11-17:** the Tuesday trigger first fired that day (trigger id
+not yet recorded). The CodeRabbit waiver for lockfile-only PRs, below, takes effect
+only once the amended prompt is pasted into the trigger (`tech-debt.md`, step T7);
+until then the live run still requires CodeRabbit on every PR. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
 10:00 run. It reviews open Dependabot PRs with Claude, and with CodeRabbit when
-a PR touches `.github/workflows/`. It merges at most one a week. Only lockfile or
-workflow paths, no majors, the head sha reviewed, every check green. This is CLAUDE.md's third merge exception,
+a PR touches `.github/workflows/`. It merges at most one a week. Only `poetry.lock`,
+`pyproject.toml` or workflow paths, no majors, the head sha reviewed, every check green. This is CLAUDE.md's third merge exception,
 bounded in `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs). Majors,
 and anything that fails a gate, still wait for the maintainer.

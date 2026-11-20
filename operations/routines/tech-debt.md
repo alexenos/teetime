@@ -863,4 +863,5 @@ before the first scheduled fire, Saturday 2026-10-10 04:00 CDT (09:00Z).**
 | T3 | Compare the live prompt with this file through the triggers API, since a paste can lose text | Claude |
 | T4 | The trigger's GitHub access must allow merging PRs, merging PRs that change workflow files (the `workflows` permission), and commenting on Dependabot's. The Saturday run never needed to merge | **You** |
 | T5 | Record the trigger id and the first fire date here, change the Tuesday **Status** above, and update CLAUDE.md's Routine list | Claude, in a PR |
+| T7 | After the 2026-11-17 amendment (no CodeRabbit review for lockfile-only PRs) merges, paste the amended § The Tuesday prompt into the trigger and compare the live text (T3). Until then the live run still requires CodeRabbit on every PR, which Dependabot PRs cannot get without a seat | **You** |
 | T6 | Watch the first run. It is the first test of: merge access, a CodeRabbit retry by wake-up, the gates read fresh, and the deploy check after a merge | **You** (Claude can review the result) |
