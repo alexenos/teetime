@@ -1014,6 +1014,134 @@ class TestBookingServiceIntentHandling:
             # Session state should be reset to IDLE
             assert sample_session.state == ConversationState.IDLE
 
+    # _handle_cancellation_selection's other replies (#415).
+
+    @staticmethod
+    def _cancellable(
+        session: UserSession,
+        booking_id: str,
+        on: date,
+        at: time,
+        status: BookingStatus = BookingStatus.SCHEDULED,
+    ) -> TeeTimeBooking:
+        return TeeTimeBooking(
+            id=booking_id,
+            phone_number=session.phone_number,
+            request=TeeTimeRequest(requested_date=on, requested_time=at, num_players=4),
+            status=status,
+        )
+
+    @staticmethod
+    def _reply(raw: str, on: date | None = None, at: time | None = None) -> ParsedIntent:
+        """A reply to "which booking?", with the date and time the parser found, if any."""
+        request = (
+            TeeTimeRequest(requested_date=on, requested_time=at, num_players=4)
+            if on is not None and at is not None
+            else None
+        )
+        return ParsedIntent(intent="book", raw_message=raw, tee_time_request=request)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_with_nothing_left_to_cancel(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Bookings that finished or were cancelled meanwhile leave nothing to pick."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+        gone = [
+            self._cancellable(
+                sample_session, "done1", date(2025, 12, 20), time(8, 0), BookingStatus.CANCELLED
+            ),
+            self._cancellable(
+                sample_session, "done2", date(2025, 12, 21), time(9, 0), BookingStatus.FAILED
+            ),
+        ]
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=gone)
+            reply = await booking_service._handle_cancellation_selection(
+                sample_session, self._reply("1")
+            )
+        assert reply == "You don't have any bookings to cancel."
+        assert sample_session.state == ConversationState.IDLE
+        assert sample_session.pending_cancellation_id is None
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_number_out_of_range(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """A number past the end of the list matches nothing, and the question stays open."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+        bookings = [
+            self._cancellable(sample_session, "b1", date(2025, 12, 20), time(8, 0)),
+            self._cancellable(sample_session, "b2", date(2025, 12, 21), time(9, 0)),
+        ]
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=bookings)
+            reply = await booking_service._handle_cancellation_selection(
+                sample_session, self._reply("9")
+            )
+        assert reply.startswith("I couldn't match that to a booking.")
+        assert sample_session.state == ConversationState.AWAITING_CANCELLATION_SELECTION
+        assert sample_session.pending_cancellation_id is None
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_same_date_is_settled_by_time(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Two bookings on one date: the time picks one."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+        day = date(2025, 12, 20)
+        bookings = [
+            self._cancellable(sample_session, "early", day, time(8, 0)),
+            self._cancellable(sample_session, "late", day, time(10, 30)),
+        ]
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=bookings)
+            reply = await booking_service._handle_cancellation_selection(
+                sample_session, self._reply("the 10:30 on the 20th", day, time(10, 30))
+            )
+        assert sample_session.pending_cancellation_id == "late"
+        assert "10:30 AM" in reply
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_two_at_the_same_time_asks_for_the_number(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Date and time both match two bookings: only the number can say which."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+        day = date(2025, 12, 20)
+        bookings = [
+            self._cancellable(sample_session, "first", day, time(8, 0)),
+            self._cancellable(sample_session, "second", day, time(8, 0)),
+        ]
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=bookings)
+            reply = await booking_service._handle_cancellation_selection(
+                sample_session, self._reply("the 8am on the 20th", day, time(8, 0))
+            )
+        assert reply.startswith("You have multiple bookings at that time.")
+        assert sample_session.state == ConversationState.AWAITING_CANCELLATION_SELECTION
+        assert sample_session.pending_cancellation_id is None
+
+    @pytest.mark.asyncio
+    async def test_cancellation_selection_same_date_no_time_match_asks_for_the_number(
+        self, booking_service: BookingService, sample_session: UserSession
+    ) -> None:
+        """Two bookings on the date and neither at the time given: ask by number."""
+        sample_session.state = ConversationState.AWAITING_CANCELLATION_SELECTION
+        day = date(2025, 12, 20)
+        bookings = [
+            self._cancellable(sample_session, "early", day, time(8, 0)),
+            self._cancellable(sample_session, "late", day, time(10, 30)),
+        ]
+        with patch("app.services.booking_service.database_service") as mock_db:
+            mock_db.get_bookings = AsyncMock(return_value=bookings)
+            reply = await booking_service._handle_cancellation_selection(
+                sample_session, self._reply("the one on the 20th", day, time(9, 0))
+            )
+        assert reply.startswith("You have multiple bookings on December 20.")
+        assert sample_session.state == ConversationState.AWAITING_CANCELLATION_SELECTION
+        assert sample_session.pending_cancellation_id is None
+
     @pytest.mark.parametrize(
         ("state", "reply"),
         [
@@ -4734,6 +4862,107 @@ class TestSameDayReplacement:
             reply = await booking_service._handle_replace_reply(session, "yes")
         assert "haven't changed anything" in reply
         db.create_booking.assert_not_called()
+
+    # _apply_replacement's refusals (#472): each leaves the held booking alone.
+
+    @pytest.mark.asyncio
+    async def test_yes_changes_nothing_if_the_held_booking_has_gone(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        """The booking the question was about no longer exists by the time of the yes."""
+        db.get_booking.return_value = None
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with self._now():
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert reply == "That booking has changed, so I haven't changed anything."
+        assert session.state == ConversationState.IDLE
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_yes_during_the_race_changes_nothing(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        """A yes that lands between 6:28 and 6:35 is declined, not acted on."""
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with self._now(6, 30):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert "between 6:28 and 6:35 AM CT" in reply
+        assert session.state == ConversationState.IDLE
+        assert session.pending_request is None
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_yes_changes_nothing_once_the_held_booking_is_being_attempted(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        """Between the question and the yes, the held booking moved past replaceable."""
+        db.get_booking.return_value = self._held(BookingStatus.IN_PROGRESS)
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with self._now():
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert reply == (
+            f"Your existing booking is now {BookingStatus.IN_PROGRESS.value}, "
+            "so I haven't changed anything."
+        )
+        assert session.state == ConversationState.IDLE
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_yes_changes_nothing_if_the_new_request_is_invalid(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        """Validation runs before anything is cancelled, and its reason is passed on."""
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(
+                BookingService,
+                "_validate_booking_request",
+                AsyncMock(side_effect=ValueError("That date is too far ahead.")),
+            ),
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        assert reply == "That date is too far ahead.\nI haven't changed your existing booking."
+        assert session.state == ConversationState.IDLE
+        db.cancel_pending_booking.assert_not_called()
+        db.create_booking.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_new_booking_that_fails_after_the_cancel_says_both(
+        self, booking_service: BookingService, db: MagicMock
+    ) -> None:
+        """The one branch where the member loses a booking: say it was cancelled.
+
+        The old booking is cancelled first, then the new one is created. If that
+        creation fails, the member has neither, and the reply must say the old
+        one is gone rather than imply nothing changed.
+        """
+        session = self._session(time(8, 0), ConversationState.AWAITING_REPLACE_CONFIRMATION)
+        session.pending_replace_booking_id = "held0001"
+        with (
+            self._now(),
+            patch.object(
+                BookingService,
+                "create_booking",
+                AsyncMock(side_effect=ValueError("You already have a booking that day.")),
+            ) as create,
+        ):
+            reply = await booking_service._handle_replace_reply(session, "yes")
+        db.cancel_pending_booking.assert_awaited_once_with("held0001")
+        create.assert_awaited_once()
+        assert reply == (
+            "I cancelled your 09:23 AM booking but couldn't book the new time: "
+            "You already have a booking that day."
+        )
+        assert "haven't changed" not in reply
+        assert session.state == ConversationState.IDLE
 
     @pytest.mark.asyncio
     async def test_no_does_nothing(self, booking_service: BookingService, db: MagicMock) -> None:
