@@ -120,11 +120,6 @@ resource "google_cloud_run_v2_job" "observer" {
           }
         }
 
-        env {
-          name  = "TIMEZONE"
-          value = var.timezone
-        }
-
         # The observer measures its offsets from the *stated* window - 06:30:00.000
         # CT - rather than the racer's aiming point, so its timestamps are an
         # independent reference frame that the racer's ledger can be checked against.
