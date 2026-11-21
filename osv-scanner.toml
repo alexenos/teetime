@@ -1,0 +1,16 @@
+# Reviewed exceptions for the osv-scanner CI job (.github/workflows/test.yml, audit;
+# #487). The job fails on any advisory in poetry.lock that is not listed here.
+#
+# Every entry needs an `id`, a `reason` and an `effectiveUntil` date
+# (tests/test_osv_scanner_config.py). Past that date the exception lapses and CI
+# fails again, so it is looked at again rather than forgotten. Ignoring an id
+# also ignores its aliases.
+
+[[IgnoredVulns]]
+id = "GHSA-6w46-j5rx-g56g"
+effectiveUntil = 2027-02-21
+reason = """pytest <9.0.3: predictable /tmp/pytest-of-{user} directories let another local \
+user on the same machine cause a denial of service or possibly gain privileges. pytest is a \
+dev dependency: it is not in the image (Dockerfile installs without dev) and runs only on \
+single-user machines and ephemeral CI runners. The fix is pytest 9, a major version, which \
+pytest-asyncio 0.24 does not allow (pytest<9); moving both is #492."""
