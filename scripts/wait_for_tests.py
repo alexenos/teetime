@@ -58,7 +58,7 @@ def fetch_json(url: str) -> dict[str, Any]:
         url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "wait-for-tests"},
     )
-    with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310 - fixed https URL
+    with urllib.request.urlopen(request, timeout=20) as response:
         result: dict[str, Any] = json.load(response)
         return result
 

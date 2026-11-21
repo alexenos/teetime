@@ -516,7 +516,7 @@ class GeminiService:
             # skip the alert for an hour while saying the admin was told.
             self._last_billing_alert = previous
             raise
-        except Exception:  # noqa: BLE001 - see docstring
+        except Exception:  # see docstring
             logger.exception("Could not alert the admin about the Gemini balance")
             self._last_billing_alert = previous
             return False
