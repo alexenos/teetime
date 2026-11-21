@@ -5,7 +5,7 @@ the specification and the source of the prompt.
 
 | | |
 |---|---|
-| **Trigger** | daily, `30 12 * * *` UTC (07:30 CT) |
+| **Trigger** | daily, 07:30 CT, kept across the 2026-11-01 DST change (see Shares the DST defect). Was `30 12 * * *` UTC; the live cron was not read when this row was updated, so whether it is a Chicago-time form or `30 13 * * *` UTC is not established |
 | **Deployed as** | a Routine (scheduled trigger), "TeeTime Scoreboard", `trig_01PBT2QSyBigfseoVtjuZ9ck` |
 | **Model** | `claude-sonnet-5-5` |
 | **Authorization** | reads every ledger, writes `docs/scoreboard.json`, appends to its own ledger. **Requires a repository write — see below.** |
@@ -192,6 +192,20 @@ of a re-rendered page, so what changed is visible in the diff.
 not. See `operations/scoreboard.md`.
 
 ## Shares the DST defect
+
+**Resolved, by observation (2026-11-21).** The scoreboard has not fired at 06:30 CT
+since the change: its ledger objects in `operations/scoreboard/` land near 12:40Z
+through 2026-10-31 (07:40 CDT) and near 13:40Z from 2026-11-03 (07:40 CST). A literal
+`30 12 * * *` UTC cron would have moved to 06:40 CST, so the trigger's cron was changed
+around 2026-11-01. Not established: to what. A Chicago-time form, as the race report's
+was (`operations/routines/race-report.md`, 2026-11-01), and the literal `30 13 * * *` UTC
+this section proposed both fit every run time since; they differ only at the March DST
+change, when `30 13` UTC would move to 08:30 CDT. Read the live `cron_expression` before
+then. Also not established: who changed it. The prompt below still
+describes the UTC cron in its hour gate; that gate still passes at 07:30 CT, so the
+text is stale but harmless, and it is left matching the deployed prompt.
+
+The original analysis:
 
 `30 12 * * *` UTC is 07:30 CT during CDT only. After 2026-11-01 it fires at 06:30
 CT — during the race, and before the report it depends on has merged. The
