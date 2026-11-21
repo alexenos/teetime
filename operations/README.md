@@ -40,8 +40,9 @@ scoreboard (`docs/scoreboard.json` and `docs/scoreboard.html`, bounded in
 `routines/scoreboard.md`). The others never merge their own: tech debt and
 feature dev open PRs for the maintainer, and cost commits nothing
 (`routines/cost.md`). Tech debt's Tuesday run, deployed 2026-11-17, may
-merge one Dependabot PR a week. It is limited to lockfile and workflow paths and
-no majors, and gated on Claude's review of the head (CodeRabbit's too when it will review a bot's PR) plus green
+merge one Dependabot PR a week. It is limited to `poetry.lock`, `pyproject.toml`
+and workflow paths and no majors, and gated on Claude's review of the head
+(CodeRabbit's findings count only if it reviews, which it does not for a bot without a seat) plus green
 checks (`routines/tech-debt.md`, Tuesday: Dependabot PRs).
 
 ## Two constraints
