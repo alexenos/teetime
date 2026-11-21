@@ -616,7 +616,11 @@ resource "google_cloudbuild_trigger" "deploy_main" {
   # are checked by the GitHub Actions `Tests` check, not by this build. If app/
   # ever imports from scripts/ (today a few docstrings only mention it), or a job
   # runs a script, remove scripts/** here or that change will not deploy.
-  ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md", "tests/**", "scripts/**"]
+  # .github/ (the Tests workflow and dependabot.yml) is skipped for the same
+  # reason (#454): GitHub Actions reads it, and nothing in the image does.
+  # Without it every Dependabot Actions bump rebuilt, redeployed and ran
+  # terraform apply. If the image or a job ever reads .github/, remove it here.
+  ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md", "tests/**", "scripts/**", ".github/**"]
 
   filename        = "cloudbuild.yaml"
   service_account = google_service_account.cloud_build.id
