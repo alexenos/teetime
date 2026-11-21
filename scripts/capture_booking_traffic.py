@@ -86,7 +86,7 @@ def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> None:
                     "Network.getRequestPostData", {"requestId": request_id}
                 )
                 req["postData"] = body.get("postData")
-            except Exception:  # body may be gone; fine
+            except Exception:  # noqa: BLE001 - best effort: the body may be gone; fine
                 pass
 
 
