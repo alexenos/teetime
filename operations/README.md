@@ -14,6 +14,7 @@ Not in `docs/`, which is served publicly as GitHub Pages.
 | [`features.md`](features.md) | Feature manifest the tech-debt Routine judges legacy code against |
 | [`ledger/`](ledger/) | One ledger per Routine: did it run, and what did it measure |
 | [`retention.md`](retention.md) | How long each store keeps data, and what enforces it |
+| [`versioning.md`](versioning.md) | Semantic Versioning: which part a PR bumps, and where the version lives |
 | [`dependency-updates.md`](dependency-updates.md) | How each dependency is kept current, and what counts as urgent (#446) |
 | [`race-reports/`](race-reports/) | One report per race morning |
 | `hypotheses/`, `*-setup.md`, `design-*.md` | Runbooks and design notes, moved here from the public site by #221 |

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from app import __version__
 from app.api import health, jobs, onboarding, webhooks
 from app.config import settings
 from app.log_safety import silence_wire_loggers
@@ -176,7 +177,7 @@ async def _reconcile_after_startup(discord_gateway: "DiscordGateway | None") -> 
 app = FastAPI(
     title="TeeTime",
     description="Golf tee time reservation assistant with SMS interface",
-    version="0.2.0",
+    version=__version__,
     lifespan=lifespan,
 )
 

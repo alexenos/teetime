@@ -378,6 +378,11 @@ Run the local gate (§8) and commit before going on.
 - **State the accepted costs.** Regressions in latency, UX, or reliability that
   the change knowingly buys. A reviewer who finds one you didn't name assumes
   you missed it.
+- **Bump the version** in `app/__init__.py` if the PR deploys (anything outside
+  the `ignored_files` paths in CLAUDE.md): MAJOR for a breaking change (a
+  command removed or changed in meaning), MINOR for a feature, PATCH for
+  anything else. Not `pyproject.toml`, and not on a Dependabot PR
+  (`operations/versioning.md`).
 - **Update `operations/features.md`** if the PR adds, retires or deletes a feature
   (a new module under `app/`, a switched-off channel, a removal). The manifest
   test fails the PR otherwise; a removal also moves the row to the Removed table.
