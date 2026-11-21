@@ -25,8 +25,9 @@ comments") does steps 5 to 8, pushing fixes if there are any, and stops
 without merging. The Routines that read this file (tech debt, feature dev)
 never merge their own PRs, whatever §9 says. The one exception is tech debt's
 Tuesday run. It merges a Dependabot PR under its own bounded authority
-(`operations/routines/tech-debt.md`, Tuesday: Dependabot PRs), using §9's gates
-and deploy check, and never through this skill's merge decision.
+(`operations/routines/tech-debt.md`, Tuesday: Dependabot PRs). Its gates are
+its own, not §9's: it needs no CodeRabbit review, since CodeRabbit skips bot PRs.
+It uses §9's deploy check after a merge, and never this skill's merge decision.
 
 This repo reviews every PR with **CodeRabbit** (a GitHub App, so it does not
 appear in `.github/workflows/` — only `test.yml` does). Checks are `CodeRabbit`

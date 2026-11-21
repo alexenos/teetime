@@ -549,3 +549,32 @@ def test_a_tuesday_tech_debt_row_validates_and_is_not_walked() -> None:
         streak = _board(rows + [saturday, row], now)["streak"]
         assert streak["by_routine"]["tech-debt"] == base["by_routine"]["tech-debt"] == 1
         assert streak["last_failure"] == base["last_failure"]
+
+
+def test_weekly_dependabot_dates_start_on_2026_11_24_at_13_00() -> None:
+    # The first Tuesday run with its own ledger. 2026-11-17 is before the start, so
+    # the run that wrote into the tech-debt ledger is not counted as missing here.
+    before = ds.scheduled_dates("dependabot", [], _ct(dt.date(2026, 11, 24), 13, 40))
+    assert before == []
+    dates = ds.scheduled_dates("dependabot", [], _ct(dt.date(2026, 12, 1), 14, 0))
+    assert dates == [dt.date(2026, 11, 24), dt.date(2026, 12, 1)]
+    assert all(d.weekday() == 1 for d in dates)
+
+
+def test_a_missing_dependabot_run_breaks_the_streak_and_a_present_one_scores() -> None:
+    rows = [_quiet(RACE_START)]
+    now = _ct(dt.date(2026, 11, 24), 14, 0)
+    assert _board(rows, now)["streak"]["by_routine"]["dependabot"] == 0
+    ok = _quiet(dt.date(2026, 11, 24), routine="dependabot")
+    assert _board(rows + [ok], now)["streak"]["by_routine"]["dependabot"] == 1
+
+
+def test_a_dependabot_row_with_upstream_broken_still_scores_ok() -> None:
+    # upstream.ok judges Dependabot, not the Routine (tech-debt.md, Did Dependabot
+    # do its job), so only the row's own ok reaches the streak.
+    row = _quiet(dt.date(2026, 11, 24), routine="dependabot") | {
+        "upstream": {"ok": False, "weekly_pip_check": "missing"}
+    }
+    ds.validate(row)
+    now = _ct(dt.date(2026, 11, 24), 14, 0)
+    assert _board([_quiet(RACE_START), row], now)["streak"]["by_routine"]["dependabot"] == 1

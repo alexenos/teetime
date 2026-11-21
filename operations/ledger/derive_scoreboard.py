@@ -79,6 +79,12 @@ SCHEDULES = {
     # cron is in Chicago time, so unlike the UTC crons above it has no DST shift and
     # `fires` never needs editing.
     "feature-dev": Schedule(fires=dt.time(8, 0), start=dt.date(2026, 10, 24), every_days=7),
+    # Weekly, Tuesday 13:00 CT (`CRON_TZ=America/Chicago 0 13 * * 2`): tech debt's
+    # Tuesday run, which reviews and merges Dependabot PRs and writes its own ledger
+    # under operations/dependabot/ (operations/routines/tech-debt.md, Tuesday:
+    # Dependabot PRs). Its first run, 2026-11-17, wrote into the tech-debt ledger
+    # instead, so it is scored from the first run with its own ledger, 2026-11-24.
+    "dependabot": Schedule(fires=dt.time(13, 0), start=dt.date(2026, 11, 24), every_days=7),
 }
 
 # A run is scored only once it has had time to finish. Reports have merged 8

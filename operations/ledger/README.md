@@ -10,6 +10,7 @@ did that run succeed, and what did it measure.
 | `operations/cost/` | cost | the month's spend |
 | `operations/tech-debt/` | tech debt | the week's scan coverage, fix attempt and review outcome |
 | `operations/feature-dev/` | feature dev | the week's ranking, build attempt and review outcome |
+| `operations/dependabot/` | tech debt's Tuesday run | whether Dependabot did its own work, and the week's review and merge of its PRs |
 
 The `.jsonl` files in this directory are empty and exist to make the set visible
 in the repository. The data is in GCS, one object per run. `backfill/` is the
@@ -237,19 +238,33 @@ The values are invented to show the shape. `ran: false` with `reason:
 "no_manifest"` is a skipped category, not a failed one. A run that finds
 nothing and fixes nothing is `ok: true`.
 
-The Tuesday run (Dependabot review and merge, specified 2026-11-17, first fired
-2026-11-17) writes to the same prefix, marked `"run":"dependabot"`. Its shape and
-meaning are in `operations/routines/tech-debt.md`, Tuesday: Dependabot PRs:
+The Tuesday run's first row, 2026-11-17, is in this prefix, marked
+`"run":"dependabot"`, in an earlier shape (the real row, `note` abridged):
 
 ```json
-{"date":"2026-11-24","routine":"tech-debt","run":"dependabot","ok":true,
- "dependabot":{"open":2,"reviewed":[{"pr":460,"eligible":true,"coderabbit":"reviewed","verdict":"merge"}],
-               "merged":{"pr":460,"merge_sha":"25015aa","build":"SUCCESS","serving":true},
-               "closed_superseded":[],"waiting":0}}
+{"date":"2026-11-17","routine":"tech-debt","run":"dependabot","ok":true,
+ "dependabot":{"open":4,"reviewed":[
+   {"pr":456,"eligible":true,"coderabbit":"skipped_no_seat","verdict":"merge","gates_failed":[3,6],"rebase_requested":true},
+   {"pr":458,"eligible":false,"reason":"major","coderabbit":"not_triggered","verdict":"hold"}],
+  "merged":null,"closed_superseded":[],"waiting":2},
+ "note":"(abridged)"}
 ```
 
-The scoreboard validates these rows and does not walk them: `SCHEDULES` knows tech
-debt as Saturdays only.
+The scoreboard validates it and does not walk it: `SCHEDULES` knows tech debt as
+Saturdays only. Later Tuesday rows are in their own ledger, below.
+
+## `dependabot.jsonl`
+
+One row per Tuesday run of tech debt's Dependabot review, from 2026-11-24, at
+`operations/dependabot/<YYYY-MM-DD>.json` with `"routine":"dependabot"`. The full
+schema is in `operations/routines/tech-debt.md`, Tuesday: Dependabot PRs. Two
+parts answer two different questions:
+
+- **`upstream`:** did Dependabot do its own work this week (its update runs, from
+  the Actions API). `upstream.ok` judges Dependabot and is not scored.
+- **The rest:** what the Routine reviewed, held and merged, and how old the oldest
+  waiting Dependabot PR is. The row's own `ok` judges the Routine and is scored
+  weekly, Tuesdays 13:00 CT.
 
 ## Write path
 
