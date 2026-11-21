@@ -1,5 +1,9 @@
 [tool.poetry]
 name = "teetime"
+# Frozen: not the application's version, and never bumped. The app version is
+# app.__version__ (operations/versioning.md). The Dockerfile copies this file
+# before `poetry install`, so editing it on every deploy would bust the cached
+# dependency layer (#424). tests/test_version.py pins it.
 version = "1.0.0"
 description = "Golf tee time reservation application with SMS interface and LLM-powered natural language understanding"
 authors = ["Devin AI <devin@cognition.ai>"]

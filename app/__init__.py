@@ -1,5 +1,5 @@
-# The application's version. Semantic Versioning; operations/versioning.md says
-# which part a PR bumps. Must equal [tool.poetry] version in pyproject.toml:
-# tests/test_version.py fails otherwise. The image installs with --no-root, so
-# importlib.metadata cannot supply it at runtime; this constant does.
+# The application's version, and the only place it is bumped. Semantic
+# Versioning; operations/versioning.md says which part a PR bumps. pyproject.toml
+# carries a frozen version that is not bumped, to keep the Docker dependency
+# layer cached (#424).
 __version__ = "1.0.0"

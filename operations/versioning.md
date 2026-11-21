@@ -10,7 +10,7 @@ no versions beyond `0.2.0`, which had not changed since the project began.
 |---|---|---|
 | MAJOR | A change that breaks how members or the maintainer use the bot: a command removed or changed in meaning, a channel dropped | `1.4.2` → `2.0.0` |
 | MINOR | A new feature: a new row in `operations/features.md`, or new behaviour a member can see | `1.4.2` → `1.5.0` |
-| PATCH | A fix, a tech-debt change, or a dependency change | `1.4.2` → `1.4.3` |
+| PATCH | A fix, a tech-debt change, a dependency change, or any other change that deploys (`README.md`, `terraform/`, config) | `1.4.2` → `1.4.3` |
 
 The parts after the bumped one reset to zero. A PR that does more than one of
 these bumps only the highest, once.
@@ -28,31 +28,35 @@ That covers the race report and scoreboard Routines, which never bump.
 
 **Exception: Dependabot PRs do not bump.** The tech-debt Routine's Tuesday run
 merges them as Dependabot opened them (`operations/routines/tech-debt.md`), and
-pushing a bump onto one would change the PR it reviewed. Their changes ride in
-the version of the next PR that bumps.
+pushing a bump onto one would change the PR it reviewed. A Dependabot merge
+still redeploys, under the unchanged version, so one version can name more than
+one deployed build. The image tag is the commit sha (`cloudbuild.yaml`); use it
+when the exact build matters.
 
 ## Where it lives
 
-Two places, which `tests/test_version.py` requires to be equal:
+`app/__init__.py`, `__version__`. `app/main.py` (FastAPI) and the `/` route in
+`app/api/health.py` read it. A bump changes that one line.
 
-- `pyproject.toml`, `[tool.poetry] version`
-- `app/__init__.py`, `__version__`, which `app/main.py` (FastAPI) and the `/`
-  route in `app/api/health.py` read
-
-The constant exists because the image installs with `poetry install --no-root`
-(`Dockerfile`), so `importlib.metadata` has no `teetime` package to read at
-runtime.
+`pyproject.toml` also has a `version`, which Poetry requires. It is frozen at
+`1.0.0` and never bumped, and `tests/test_version.py` fails if it changes. The
+`Dockerfile` copies `pyproject.toml` before `poetry install`, so editing it on
+every deploy would rebuild the cached dependency layer that #424 keeps between
+deploys. Reading the version from package metadata is not an option either: the
+image installs with `--no-root`, so there is no `teetime` package to read.
 
 ## Two PRs open at once
 
 Two PRs branched from the same `main` both bump from the same version and
-conflict on those two lines. Whichever merges second updates its branch from
+conflict on that line. Whichever merges second updates its branch from
 `main` and bumps again from the new version. The version on `main` is always
-the version that deployed last.
+the version of the last PR that bumped it.
 
 ## Not yet done
 
 - No git tags. Nothing tags a release when a merge deploys.
-- Nothing enforces the bump. `tests/test_version.py` checks the two places
-  agree, not that a deploying PR changed them. A check comparing the PR's
-  version with `main`'s would need the base branch in CI.
+- Nothing in CI enforces the bump. `.claude/skills/ship-pr/` §3 asks for it
+  when a PR is opened. A CI check comparing the PR's version with `main`'s
+  would need the base branch in CI.
+- The feature-dev and tech-debt Routines learn the rule from `CLAUDE.md` and
+  the ship-pr skill, not from their trigger prompts. Not yet observed in a run.
