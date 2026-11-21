@@ -2733,6 +2733,33 @@ class TestCountdownIsNotAVerdict:
 # ---------------------------------------------------------------------------
 
 
+# Where the probe clock starts: a whole second plus 123ms, so the Date header
+# ticks part-way between two probes rather than exactly on one.
+_PROBE_CLOCK_START_MS = 1_800_000_000_123
+
+
+@pytest.fixture
+def probe_clock(monkeypatch: pytest.MonkeyPatch) -> "ThreadClock":
+    """Run ``measure_clock_skew`` on a fake clock (#435).
+
+    The probe loop runs until ``time_module.monotonic()`` passes a 5s budget,
+    and a mock transport answers instantly, so on the real clock every test
+    that measured skew spent the whole 5s waiting. On a ``ThreadClock`` each
+    0.02s sleep between probes moves the clock without waiting, so the same
+    5s of probing takes milliseconds. The mock ``Date`` headers read the same
+    clock through ``probe_now``, so the header ticks over exactly where the
+    probes say it does instead of where the real clock happened to be.
+    """
+    clock = ThreadClock(_PROBE_CLOCK_START_MS)
+    monkeypatch.setattr(walden_http, "time_module", clock)
+    return clock
+
+
+def probe_now() -> float:
+    """The clock ``walden_http`` is reading: the real one, or ``probe_clock``."""
+    return walden_http.time_module.time()
+
+
 def clock_handler(offset_s: float) -> Callable[[httpx.Request], httpx.Response]:
     """A site whose clock runs ``offset_s`` ahead of ours.
 
@@ -2743,7 +2770,7 @@ def clock_handler(offset_s: float) -> Callable[[httpx.Request], httpx.Response]:
 
     def handler(request: httpx.Request) -> httpx.Response:
         """Mock transport handler stamping the site's own clock."""
-        server_now = time_module.time() + offset_s
+        server_now = probe_now() + offset_s
         return httpx.Response(
             200, headers={"Date": email.utils.formatdate(server_now, usegmt=True)}
         )
@@ -2759,6 +2786,7 @@ class TestClockProbeTarget:
     all 16 samples were dropped and the Reserve went out with no lead at all.
     """
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_a_cheap_static_asset_is_preferred_over_the_tee_sheet(self) -> None:
         """The probes must not land on the page that takes 1.6s to render."""
         seen: list[str] = []
@@ -2766,7 +2794,7 @@ class TestClockProbeTarget:
         def handler(request: httpx.Request) -> httpx.Response:
             seen.append(request.url.path)
             return httpx.Response(
-                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+                200, headers={"Date": email.utils.formatdate(probe_now(), usegmt=True)}
             )
 
         session = make_session(FormState.from_html(TEE_SHEET), handler)
@@ -2776,6 +2804,7 @@ class TestClockProbeTarget:
         assert set(seen) == {"/o/frontend-css-web/main.css"}
         assert "/group/pages/book-a-tee-time" not in seen
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_an_unusable_asset_falls_through_to_the_next(self) -> None:
         """One missing asset must not put the probes back on the tee sheet."""
         seen: list[str] = []
@@ -2786,7 +2815,7 @@ class TestClockProbeTarget:
             if request.url.path == "/o/frontend-css-web/main.css":
                 return httpx.Response(200)
             return httpx.Response(
-                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+                200, headers={"Date": email.utils.formatdate(probe_now(), usegmt=True)}
             )
 
         session = make_session(FormState.from_html(TEE_SHEET), handler)
@@ -2805,7 +2834,7 @@ class TestClockProbeTarget:
             if request.url.path.startswith(("/o/", "/favicon")):
                 return httpx.Response(404)
             return httpx.Response(
-                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+                200, headers={"Date": email.utils.formatdate(probe_now(), usegmt=True)}
             )
 
         session = make_session(FormState.from_html(TEE_SHEET), handler)
@@ -2890,6 +2919,7 @@ class TestSuppressProbeRequestLog:
 class TestClockProbeLogSuppression:
     """measure_clock_skew's use of the filter, end to end."""
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_probe_requests_are_not_logged(self, caplog: pytest.LogCaptureFixture) -> None:
         """The ~100 identical HEAD probes must not each produce a log line.
 
@@ -2912,6 +2942,7 @@ class TestClockProbeLogSuppression:
         ]
         assert len(httpx_main_css_lines) <= 1
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_unrelated_httpx_logging_during_the_loop_survives(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -2933,7 +2964,7 @@ class TestClockProbeLogSuppression:
                 "OK",
             )
             return httpx.Response(
-                200, headers={"Date": email.utils.formatdate(time_module.time(), usegmt=True)}
+                200, headers={"Date": email.utils.formatdate(probe_now(), usegmt=True)}
             )
 
         session = make_session(FormState.from_html(TEE_SHEET), handler)
@@ -2943,6 +2974,7 @@ class TestClockProbeLogSuppression:
 
         assert any("other-thread/reserve" in record.getMessage() for record in caplog.records)
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_filter_is_removed_after_the_call(self) -> None:
         """No suppression must leak past the call that added it."""
         session = make_session(FormState.from_html(TEE_SHEET), clock_handler(0.05))
@@ -2956,6 +2988,7 @@ class TestClockProbeLogSuppression:
 class TestClockSkew:
     """Measuring how far ahead the club's clock is, and how far away it is."""
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_offset_is_read_from_where_the_date_header_ticks(self) -> None:
         """A one-second header still locates a boundary to within a probe gap."""
         session = make_session(FormState.from_html(TEE_SHEET), clock_handler(0.4))
@@ -2969,6 +3002,7 @@ class TestClockSkew:
         assert skew.transitions >= 1
         assert session.clock_skew is skew
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_a_clock_behind_ours_reads_negative(self) -> None:
         """The lead must be able to come out smaller, not only larger."""
         session = make_session(FormState.from_html(TEE_SHEET), clock_handler(-0.4))
@@ -2978,9 +3012,10 @@ class TestClockSkew:
         assert skew is not None
         assert -550 < skew.offset_ms < -250
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_a_frozen_date_header_is_not_a_measurement(self) -> None:
         """A cache serving one Date says nothing about the origin's clock."""
-        frozen = email.utils.formatdate(time_module.time(), usegmt=True)
+        frozen = email.utils.formatdate(probe_now(), usegmt=True)
         session = make_session(
             FormState.from_html(TEE_SHEET),
             lambda request: httpx.Response(200, headers={"Date": frozen}),
@@ -2988,6 +3023,7 @@ class TestClockSkew:
 
         assert session.measure_clock_skew() is None
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_a_missing_date_header_is_not_a_measurement(self) -> None:
         """Nothing to read is reported as nothing, not as zero skew."""
         session = make_session(
@@ -3003,6 +3039,7 @@ class TestClockSkew:
 
         assert ClockSkew(offset_ms=250, one_way_ms=200, probes=9, transitions=2).lead_ms == 450
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_the_tick_is_pinned_tightly_enough_to_aim_at(self) -> None:
         """The bracket bounds the offset, and so any aim taken from it.
 
@@ -3029,6 +3066,7 @@ class TestArrivalLead:
         """A booker over a handler, with nothing staged - only the lead matters."""
         return DirectHttpBooker(make_session(FormState.from_html(TEE_SHEET), handler))
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_a_measured_skew_becomes_the_lead(self) -> None:
         """The whole point: send early by what the measurement says."""
         booker = self._booker(clock_handler(0.4))
@@ -3037,6 +3075,7 @@ class TestArrivalLead:
 
         assert 250 < booker._lead_ms < 560
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_an_unmeasurable_clock_sends_unled(self) -> None:
         """Being late is recoverable; guessing early is what is not."""
         booker = self._booker(lambda request: httpx.Response(200, headers={}))
@@ -3045,6 +3084,7 @@ class TestArrivalLead:
 
         assert booker._lead_ms == 0.0
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_a_probe_failure_does_not_break_staging(self) -> None:
         """Staging must never be what loses a booking."""
 
@@ -3058,6 +3098,7 @@ class TestArrivalLead:
 
         assert booker._lead_ms == 0.0
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_an_implausible_measurement_is_clamped(self) -> None:
         """A bad measurement is unbounded in the direction that hurts."""
         from app.providers.walden_http_booker import _MAX_ARRIVAL_LEAD_MS
@@ -3117,6 +3158,7 @@ class TestReviewFindings:
             "Mon, 01 Jan 2026 12:34:56 -0000"
         )
 
+    @pytest.mark.usefixtures("probe_clock")
     def test_an_unbelievable_offset_is_discarded_not_clamped(self) -> None:
         """Clamping a nonsense reading turns it into a confident wrong answer.
 
