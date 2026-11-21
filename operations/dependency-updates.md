@@ -216,9 +216,8 @@ a code review before every merge, not a manual merge for its own sake.
 **Active since 2026-11-17** (trigger `trig_01B7t9YdZT2448xsSwu6zD7e`).
 **2026-11-20, maintainer:** Claude's review is enough, for lockfile and workflow
 PRs alike. CodeRabbit skips bot PRs without a seat, so requiring it meant nothing
-could ever merge. This takes effect only once the amended prompt is in the live
-trigger (`tech-debt.md`, step T7); until then the live run still requires
-CodeRabbit on every PR. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
+could ever merge. The amended prompt has been in the live trigger since
+2026-11-21 (`tech-debt.md`, step T7), so the first run under it is 2026-11-24. The tech-debt Routine gains a Tuesday run, at 13:00 CT, three hours after Dependabot's
 10:00 run. It reviews open Dependabot PRs with Claude (and with CodeRabbit, until 2026-11-20), and
 merges at most one a week. Only `poetry.lock`, `pyproject.toml` or workflow paths, no majors, the head sha
 reviewed (by both until 2026-11-20, by Claude since), every check green. This is CLAUDE.md's third merge exception,
