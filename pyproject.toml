@@ -70,7 +70,6 @@ external = ["V"]
 "app/providers/walden_date_selection.py" = ["BLE001"]  # #369
 "app/services/booking_service.py" = ["BLE001"]  # #370
 "app/providers/twilio_provider.py" = ["BLE001"]  # #371
-"tests/test_async_chain_integration.py" = ["BLE001"]  # #377
 
 [tool.mypy]
 python_version = "3.11"
