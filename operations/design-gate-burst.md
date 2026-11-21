@@ -1,7 +1,9 @@
 # Design: a variable burst around a measured gate
 
-**Status:** implemented (2026-09-25), not yet deployed. Replaces the six-member
-burst aimed at +1030.
+**Status:** deployed. Merged in #226 on 2026-09-26 at 10:05 CT and first raced on
+2026-09-27 (`operations/race-reports/2026-09-27.md`). Replaced the six-member burst
+aimed at +1030. The spacing changed on 2026-10-17 (`.claude/skills/race-report/`
+§7g); the numbers below were not re-checked against the deployed values.
 **Companions:** `operations/race-reports/2026-09-25.md`,
 `operations/design-observer-and-fanout.md`
 
