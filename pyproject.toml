@@ -70,10 +70,6 @@ external = ["V"]
 "app/providers/walden_date_selection.py" = ["BLE001"]  # #369
 "app/services/booking_service.py" = ["BLE001"]  # #370
 "app/providers/twilio_provider.py" = ["BLE001"]  # #371
-"scripts/capture_html_snapshots.py" = ["BLE001"]  # #373
-"scripts/fetch_debug_artifacts.py" = ["BLE001"]  # #374
-"scripts/measure_server_clock.py" = ["BLE001"]  # #375
-"scripts/validate_selectors.py" = ["BLE001"]  # #376
 "tests/test_async_chain_integration.py" = ["BLE001"]  # #377
 
 [tool.mypy]

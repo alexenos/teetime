@@ -196,7 +196,7 @@ def capture_snapshots():
                 if elements:
                     print(f"  Found {len(elements)} elements matching: {selector}")
                     course_selected = True
-            except Exception:  # intentionally catching all selector errors
+            except Exception:  # noqa: BLE001 - a failing selector is skipped; the next is tried
                 continue
 
         if not course_selected:
@@ -228,7 +228,7 @@ def capture_snapshots():
                 elements = driver.find_elements(By.CSS_SELECTOR, selector)
                 if elements:
                     print(f"  Found {len(elements)} elements matching: {selector}")
-            except Exception:  # intentionally catching all selector errors
+            except Exception:  # noqa: BLE001 - a failing selector is skipped; the next is tried
                 continue
 
         save_snapshot(
