@@ -4,6 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from selenium.common.exceptions import WebDriverException
@@ -13,7 +14,11 @@ _spec = importlib.util.spec_from_file_location("capture_booking_traffic", _PATH)
 assert _spec is not None and _spec.loader is not None
 cbt = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = cbt
-_spec.loader.exec_module(cbt)
+# The script calls load_dotenv() at import. Unpatched, a developer's .env would
+# land in os.environ for every test collected after this one.
+with patch("dotenv.load_dotenv") as _load_dotenv:
+    _spec.loader.exec_module(cbt)
+_IMPORT_LOADED_DOTENV = _load_dotenv.called
 
 
 def _sent(request_id: str, method: str = "POST", post_data: str | None = None) -> dict[str, Any]:
@@ -93,6 +98,28 @@ def test_the_error_type_is_kept_not_its_message() -> None:
 
     assert events[0]["params"]["request"]["postDataError"] == "RuntimeError"
     assert "hunter2" not in repr(events)
+
+
+def test_importing_the_script_here_does_not_load_dotenv() -> None:
+    """The patch above intercepted the script's import-time load_dotenv()."""
+    assert _IMPORT_LOADED_DOTENV
+
+
+@pytest.mark.parametrize("reply", [{}, {"postData": ""}, {"postData": None}])
+def test_an_empty_reply_counts_as_a_failure_not_a_fetch(reply: dict[str, Any]) -> None:
+    """A reply with no body recovered nothing, so it must not read as fetched."""
+
+    class EmptyDriver:
+        def execute_cdp_cmd(self, cmd: str, params: dict[str, Any]) -> dict[str, Any]:
+            return reply
+
+    events = [_sent("x")]
+
+    counts = cbt.fetch_post_bodies(EmptyDriver(), events)
+
+    assert counts == {"attempted": 1, "fetched": 0, "failed": 1}
+    assert events[0]["params"]["request"]["postDataError"] == "empty"
+    assert "postData" not in events[0]["params"]["request"]
 
 
 @pytest.mark.parametrize(

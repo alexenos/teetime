@@ -78,8 +78,9 @@ def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> dict[str,
 
     A body that cannot be fetched does not stop the capture, but it is counted,
     and the error's type is kept on that request as ``postDataError`` (#474). A
-    body the browser has already dropped and a dead CDP session both raise
-    here; without the count they would leave the same silent gap in the output.
+    reply with no body is counted the same way, as ``"empty"``. Which errors
+    Chrome raises here for a body it has dropped, and for a lost session, has
+    not been observed; the type name may not tell them apart.
 
     Returns:
         ``{"attempted": n, "fetched": n, "failed": n}``.
@@ -100,7 +101,12 @@ def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> dict[str,
                 counts["failed"] += 1
                 req["postDataError"] = type(exc).__name__
                 continue
-            req["postData"] = body.get("postData")
+            post_data = (body or {}).get("postData")
+            if not post_data:
+                counts["failed"] += 1
+                req["postDataError"] = "empty"
+                continue
+            req["postData"] = post_data
             counts["fetched"] += 1
     return counts
 
@@ -196,11 +202,11 @@ def main() -> None:
     finally:
         driver.quit()
 
-    print(describe_post_body_fetch(snapshot["post_body_fetch"]))
     out = OUTPUT_DIR / f"traffic_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     out.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
     out.chmod(0o600)  # best effort; no-op semantics on Windows, effective on POSIX
     print(f"\nWrote {len(events)} network events to {out}")
+    print(describe_post_body_fetch(snapshot["post_body_fetch"]))
     print("Grep for 'reserve_button' and 'javax.faces.ViewState' to find the booking POSTs.")
 
 
