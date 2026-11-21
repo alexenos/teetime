@@ -11,6 +11,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The Poetry both jobs install. It must equal the Dockerfile's pin
+# (tests/test_poetry_pin.py), and it is part of the venv cache key, so moving it
+# rebuilds the venv under the new Poetry instead of restoring the old one (#153).
+env:
+  POETRY_VERSION: "2.4.3"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -27,7 +33,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.4.3
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
 
@@ -36,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          key: venv-${{ runner.os }}-poetry-${{ env.POETRY_VERSION }}-${{ hashFiles('**/poetry.lock') }}
 
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
@@ -117,7 +123,7 @@ jobs:
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
-          version: 2.4.3
+          version: ${{ env.POETRY_VERSION }}
           virtualenvs-create: true
           virtualenvs-in-project: true
 
@@ -126,7 +132,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          key: venv-${{ runner.os }}-poetry-${{ env.POETRY_VERSION }}-${{ hashFiles('**/poetry.lock') }}
 
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'

@@ -11,7 +11,8 @@ readme = "README.md"
 # The project is named teetime but the code lives in app/, so Poetry has no
 # package to install for the root project. Poetry 1.8+ - the Dockerfile and CI
 # pin 2.4.3 (#153) - makes that a hard error in the CI "Install project" step
-# (`poetry install`); 1.7.1 only warned. Naming the real package fixes it (#152).
+# (`poetry install`); 1.7.1 only warned. Naming the real package fixes it (#152):
+# verified exit 0 on 1.7.1 and 2.3.3 (#152), and on 2.4.3 in CI (#153).
 packages = [{ include = "app" }]
 
 [tool.poetry.dependencies]
