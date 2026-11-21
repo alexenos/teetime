@@ -587,7 +587,6 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./teetime.db"
 
-    timezone: str = "America/Chicago"
     booking_open_hour: int = 6
     booking_open_minute: int = 30
     days_in_advance: int = 7

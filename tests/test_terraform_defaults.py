@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
+from app.utils.timezone import CTDateTime
 
 _TERRAFORM = Path(__file__).resolve().parent.parent / "terraform"
 
@@ -237,3 +238,21 @@ def test_nothing_deployed_depends_on_scripts() -> None:
         for line in (_REPO / name).read_text(encoding="utf-8").splitlines():
             code = line.split("#", 1)[0]
             assert not re.search(r"\bscripts/", code), f"{name} uses scripts/: {line.strip()}"
+
+
+def test_the_scheduler_time_zone_is_the_apps_ct(defaults: dict[str, str]) -> None:
+    """``var.timezone`` sets only the Cloud Scheduler crons' zone, and must be CT (#468).
+
+    The app fixes CT in ``app/utils/timezone.py`` and reads no time-zone setting.
+    If the scheduler's zone drifted from it, the 06:27 and 06:28 triggers would
+    fire at the wrong hour while every computed run time still said 06:30.
+    """
+    assert _as_python(defaults["timezone"]) == str(CTDateTime.CT_TZ)
+    for tf in _TERRAFORM.glob("*.tf"):
+        text = tf.read_text(encoding="utf-8")
+        assert not re.search(r"\bTIMEZONE\b", text), f"{tf.name} sets an env var nothing reads"
+
+
+def test_the_app_reads_no_time_zone_setting() -> None:
+    """``Settings.timezone`` had no reader and was removed (#468); keep it gone."""
+    assert "timezone" not in Settings.model_fields
