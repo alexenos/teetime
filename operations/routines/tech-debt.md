@@ -608,7 +608,13 @@ Dependabot failing.
 **What it records.**
 
 - **`weekly_pip_check`:** a `pip in` run created on this Tuesday between 09:45
-  and 12:45 CT. Its result is `success`, `failure`, or `missing`.
+  and 12:45 CT. Its result is `success`, `failure`, `missing`, or `ambiguous`.
+  It is `ambiguous` when more than one `pip in` run falls in those three hours,
+  since nothing tells the scheduled one from a security update that ran beside
+  it. One run is taken as the scheduled check. That is the hypothesis above, and
+  it has a known blind spot: a security update alone in those three hours, on a
+  Tuesday the schedule did not fire, reads as `success`. Security updates follow
+  advisories, not the schedule, so this needs both at once; it is not ruled out.
 - **`runs`:** every Dependabot update run in the window, name, result and time.
   Run names are not a documented format. A version check has appeared both as
   `pip in /. - Update #N` and as `pip in / for <package list> - Update #N`, and a
@@ -621,6 +627,8 @@ Dependabot failing.
   session cannot read them. Open alerts with no matching PR mean a security
   update failed, as soupsieve's and pytest's did.
 - **`ok`:** `weekly_pip_check` is `success` and no `pip` run in the window failed.
+  It is `null`, unknown, when `weekly_pip_check` is `ambiguous` and no `pip` run
+  failed.
   Failed Actions runs stay in `failures` as evidence but do not make `ok` false,
   for the reason below.
 
@@ -901,7 +909,7 @@ Rule that applies to every path through this prompt: you cannot send commands to
 
 Step 1 - set up. First, before anything else, capture the current time in UTC once with date -u; call it the run time. Get the date and time with TZ=America/Chicago date. Run bash scripts/setup_remote_env.sh; only READY is a pass, otherwise ok false, notify, stop. If the Central Time clock is before 08:00 or after 20:00, review but do not merge anything this run.
 
-Step 2 - did Dependabot do its job. The window is the seven days ending at the run time captured in Step 1; do not capture it again. List Dependabot's update runs in that window, as the spec's section Did Dependabot do its job shows: the GitHub Actions runs on path dynamic/dependabot/dependabot-updates, with name, conclusion and created time, queried by created date and read across every page, then kept only when created_at is at or after seven days before the run time and before the run time. Record them raw in the upstream section. weekly_pip_check is the result of a pip run created today between 09:45 and 12:45 Central Time, or missing if there is none. failures lists every run whose conclusion is not success. Record the Dependabot PRs created in the window as prs_opened, and older ones whose head commit is dated in the window as prs_updated. Record the count of open Dependabot alerts as open_alerts, or null if you cannot read them. upstream ok is true only when weekly_pip_check is success and no run whose name starts with pip failed in the window; failed github_actions runs stay in failures but do not make it false. This judges Dependabot, not you: it never makes your own ok false.
+Step 2 - did Dependabot do its job. The window is the seven days ending at the run time captured in Step 1; do not capture it again. List Dependabot's update runs in that window, as the spec's section Did Dependabot do its job shows: the GitHub Actions runs on path dynamic/dependabot/dependabot-updates, with name, conclusion and created time, queried by created date and read across every page, then kept only when created_at is at or after seven days before the run time and before the run time. Record them raw in the upstream section. weekly_pip_check is the result of the pip run created today between 09:45 and 12:45 Central Time, missing if there is none, or ambiguous if there is more than one, because nothing identifies which of them is the scheduled check. failures lists every run whose conclusion is not success. Record the Dependabot PRs created in the window as prs_opened, and older ones whose head commit is dated in the window as prs_updated. Record the count of open Dependabot alerts as open_alerts, or null if you cannot read them. upstream ok is true only when weekly_pip_check is success and no run whose name starts with pip failed in the window, null when weekly_pip_check is ambiguous and no pip run failed, and false otherwise; failed github_actions runs stay in failures but do not make it false. This judges Dependabot, not you: it never makes your own ok false.
 
 Step 3 - list. List open PRs whose author is dependabot[bot] with their changed files, head sha, created time, labels and bodies. Record how many are open and the age in days of the oldest. If there are none, still count every Dependabot PR for totals as Step 8 describes, then write the ledger row, notify, and stop. For each one whose every proposed version is already at or below what main's poetry.lock or workflows pin, comment that it is superseded and list it as superseded. For each one that conflicts with main, comment that it needs a rebase and list it as rebase_needed. Skip both kinds this run.
 
