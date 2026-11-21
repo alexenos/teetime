@@ -7,7 +7,8 @@ transition day:
 1. ``BookingService._calculate_execution_time`` stores the run time as naive CT.
 2. The racer and observer build "this morning's 06:30" with ``_window_instant``.
 3. That window, made naive by ``CTDateTime.to_naive_ct``, is the cutoff the
-   database compares stored run times against.
+   database compares stored run times against: ``get_due_bookings`` for the
+   observer, ``claim_next_due_group`` for the racer.
 
 If any step used UTC or a fixed offset instead of ``America/Chicago``, a booking
 whose window opens on a transition day would run an hour early or late, or not
@@ -22,6 +23,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.models.database import Base
 from app.models.schemas import BookingStatus, TeeTimeBooking, TeeTimeRequest
 from app.observer import run as observer_run
@@ -49,6 +51,17 @@ TARGETS = [
     pytest.param(SPRING_FORWARD + timedelta(days=3), id="opens-before-spring-forward-plays-after"),
     pytest.param(SPRING_FORWARD + timedelta(days=14), id="opens-week-after-spring-forward"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _club_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the window these tests assume: 7 days ahead, opening at 06:30 CT.
+
+    The code reads them from settings, which a local .env can override.
+    """
+    monkeypatch.setattr(settings, "days_in_advance", 7)
+    monkeypatch.setattr(settings, "booking_open_hour", 6)
+    monkeypatch.setattr(settings, "booking_open_minute", 30)
 
 
 @pytest.fixture
@@ -121,12 +134,19 @@ class TestDueOnTransitionDay:
         )
 
         window = racer_run._window_instant(_ct(day, 6, 28))
-        due = await database_service.get_due_bookings(CTDateTime.to_naive_ct(window))
+        cutoff = CTDateTime.to_naive_ct(window)
+
+        # A minute early finds nothing, so the stored time is not an hour off
+        # in either direction. This is also the observer's query.
+        minute_early = CTDateTime.to_naive_ct(window - timedelta(minutes=1))
+        assert await database_service.get_due_bookings(minute_early) == []
+        due = await database_service.get_due_bookings(cutoff)
         assert [b.id for b in due] == [f"dst{day:%m%d}"]
 
-        day_before = racer_run._window_instant(_ct(day - timedelta(days=1), 6, 28))
-        early = await database_service.get_due_bookings(CTDateTime.to_naive_ct(day_before))
-        assert early == []
+        # The racer's own query, which claims the group.
+        assert await database_service.claim_next_due_group(minute_early) == []
+        claimed = await database_service.claim_next_due_group(cutoff)
+        assert [b.id for b in claimed] == [f"dst{day:%m%d}"]
 
 
 class TestWallTimesThatAreNotOneInstant:

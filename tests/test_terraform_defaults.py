@@ -248,9 +248,15 @@ def test_the_scheduler_time_zone_is_the_apps_ct(defaults: dict[str, str]) -> Non
     fire at the wrong hour while every computed run time still said 06:30.
     """
     assert _as_python(defaults["timezone"]) == str(CTDateTime.CT_TZ)
+    zones = []
     for tf in _TERRAFORM.glob("*.tf"):
         text = tf.read_text(encoding="utf-8")
         assert not re.search(r"\bTIMEZONE\b", text), f"{tf.name} sets an env var nothing reads"
+        zones += [(tf.name, v) for v in re.findall(r"^\s*time_zone\s*=\s*(\S+)", text, re.M)]
+    assert zones, "no Cloud Scheduler time_zone found"
+    assert all(v == "var.timezone" for _, v in zones), zones
+    deploy_sh = (_REPO / "deploy.sh").read_text(encoding="utf-8")
+    assert "TIMEZONE" not in deploy_sh, "deploy.sh sets an env var nothing reads"
 
 
 def test_the_app_reads_no_time_zone_setting() -> None:
