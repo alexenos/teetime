@@ -47,10 +47,15 @@ image installs with `--no-root`, so there is no `teetime` package to read.
 
 ## Two PRs open at once
 
-Two PRs branched from the same `main` both bump from the same version and
-conflict on that line. Whichever merges second updates its branch from
-`main` and bumps again from the new version. The version on `main` is always
-the version of the last PR that bumped it.
+Two PRs branched from the same `main` both bump from the same version. If
+they bump to different values they conflict on that line. If they bump to the
+same value (both `1.0.0` → `1.0.1`), git merges the identical lines with no
+conflict, and the second PR would deploy under the first one's version.
+
+So whichever merges second, conflict or not, updates its branch from `main`
+and compares: if its version is not ahead of `main`'s, it bumps again from
+`main`'s. The version on `main` is then always the version of the last PR
+that bumped it.
 
 ## Not yet done
 

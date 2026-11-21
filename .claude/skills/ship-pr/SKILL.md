@@ -379,7 +379,8 @@ Run the local gate (§8) and commit before going on.
   the change knowingly buys. A reviewer who finds one you didn't name assumes
   you missed it.
 - **Bump the version** in `app/__init__.py` if the PR deploys (anything outside
-  the `ignored_files` paths in CLAUDE.md): MINOR for a feature, PATCH for
+  the `ignored_files` paths in CLAUDE.md): MAJOR for a breaking change (a
+  command removed or changed in meaning), MINOR for a feature, PATCH for
   anything else. Not `pyproject.toml`, and not on a Dependabot PR
   (`operations/versioning.md`).
 - **Update `operations/features.md`** if the PR adds, retires or deletes a feature
