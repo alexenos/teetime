@@ -110,7 +110,7 @@ def test_selector(soup: BeautifulSoup, selector: str) -> tuple[int, list[str]]:
             tag = el.name
             samples.append(f"<{tag} class='{class_str}'>{text}...")
         return len(elements), samples
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - a selector error is reported as a result, not raised
         return -1, [f"ERROR: {e}"]
 
 
