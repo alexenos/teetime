@@ -3098,6 +3098,36 @@ class TestArrivalLead:
 
         assert booker._lead_ms == 0.0
 
+    def test_the_flight_out_is_measured_and_added_to_the_lead(
+        self, probe_clock: "ThreadClock"
+    ) -> None:
+        """A round trip that takes time shows up as one-way time, and in the lead.
+
+        On ``probe_clock`` a mock answers in no time at all, so every other test
+        here measures a one-way time of zero. This server takes 40ms of the fake
+        clock each way and stamps its Date in between, as a real one does on
+        arrival, so the probe's midpoint is still when the stamp was taken.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """A site 0.4s ahead of us and 40ms away, on the fake clock."""
+            probe_clock.sleep(0.04)
+            server_now = probe_now() + 0.4
+            probe_clock.sleep(0.04)
+            return httpx.Response(
+                200, headers={"Date": email.utils.formatdate(server_now, usegmt=True)}
+            )
+
+        booker = self._booker(handler)
+
+        booker._stage_arrival_lead()
+
+        skew = booker.session.clock_skew
+        assert skew is not None
+        assert skew.one_way_ms == pytest.approx(40, abs=1)
+        assert 350 < skew.offset_ms < 450
+        assert booker._lead_ms == pytest.approx(skew.offset_ms + skew.one_way_ms)
+
     @pytest.mark.usefixtures("probe_clock")
     def test_an_implausible_measurement_is_clamped(self) -> None:
         """A bad measurement is unbounded in the direction that hurts."""
