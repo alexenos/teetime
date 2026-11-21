@@ -193,6 +193,26 @@ def test_the_deploy_filter_skips_tests_and_scripts() -> None:
     entries = set(re.findall(r'"([^"]+)"', match.group(1)))
     assert {"operations/**", "docs/**", ".claude/**", "CLAUDE.md"} <= entries
     assert {"tests/**", "scripts/**"} <= entries
+    assert ".github/**" in entries, "Actions and Dependabot config would redeploy (#454)"
+
+
+def test_nothing_deployed_reads_dot_github() -> None:
+    """``.github/**`` is out of the deploy filter only while nothing deployed reads it (#454).
+
+    A change the filter skips never reaches the image. So if app/, the Dockerfile
+    or the build ever used a file under ``.github/``, that change would land on
+    ``main`` and not on the live service.
+    """
+    offenders = [
+        str(path.relative_to(_REPO))
+        for path in (_REPO / "app").rglob("*.py")
+        if ".github" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"app/ references .github/: {offenders}"
+    for name in ("Dockerfile", "cloudbuild.yaml"):
+        for line in (_REPO / name).read_text(encoding="utf-8").splitlines():
+            code = line.split("#", 1)[0]
+            assert ".github" not in code, f"{name} uses .github/: {line.strip()}"
 
 
 def test_nothing_deployed_depends_on_scripts() -> None:

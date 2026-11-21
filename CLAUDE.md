@@ -36,10 +36,10 @@ CodeRabbit's review covers the head sha, and every check is green. The gates are
 in `.claude/skills/ship-pr/` §9. The skill loading for some other reason, such as
 a question about a review, is not that decision. No Routine has it.
 
-A commit touching only `operations/`, `docs/`, `.claude/`, `CLAUDE.md`, `tests/` or
-`scripts/` does
+A commit touching only `operations/`, `docs/`, `.claude/`, `CLAUDE.md`, `tests/`,
+`scripts/` or `.github/` does
 not redeploy: the Cloud Build trigger sets
-`ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md", "tests/**", "scripts/**"]`
+`ignored_files = ["operations/**", "docs/**", ".claude/**", "CLAUDE.md", "tests/**", "scripts/**", ".github/**"]`
 (`terraform/main.tf`). The filter applies only when every changed file matches,
 so a commit that also touches app code still deploys. A filter entry is live only
 once the merge that adds it has applied; check the build log, below. The merge
@@ -51,7 +51,7 @@ deploys the image and reconciles infrastructure. An infrastructure change is liv
 once it merges and the build succeeds — there is no separate manual apply.
 
 The exception is a commit the filter above suppresses: a change touching only
-`operations/`, `docs/`, `.claude/`, `CLAUDE.md`, `tests/` or `scripts/` fires no build, so it also
+`operations/`, `docs/`, `.claude/`, `CLAUDE.md`, `tests/`, `scripts/` or `.github/` fires no build, so it also
 applies no terraform. A
 terraform change always touches `terraform/`, so it always builds.
 

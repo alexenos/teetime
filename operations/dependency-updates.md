@@ -174,11 +174,12 @@ is what the deferred recommendations would add.
 | GitHub Actions | Dependabot: security PRs grouped, version updates monthly, grouped | — |
 | Cloud Build builders | left floating; Google maintains `cloud-builders/docker`, and the terraform image moves with the CLI | — |
 
-**Each Actions update redeploys.** `.github/**` is not in the Cloud Build
-`ignored_files`, so merging a Dependabot PR that touches only
-`.github/workflows/` rebuilds the image, redeploys, and runs `terraform apply`.
-Merging one outside 06:20–06:45 CT on race mornings keeps that harmless. Adding
-`.github/**` to the filter is a terraform change, left to its own PR.
+**Actions updates do not redeploy, once #454 has applied.** `.github/**` is in
+the Cloud Build `ignored_files` (#454), so merging a Dependabot PR that touches
+only `.github/` fires no build. Before that merge's apply, such a merge rebuilt
+the image, redeployed and ran `terraform apply`. Check the build log for the
+apply that adds the entry before relying on it (CLAUDE.md, Constraints). A PR
+that also touches `poetry.lock` or `pyproject.toml` still deploys.
 
 ## Decision
 
