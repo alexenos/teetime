@@ -41,6 +41,27 @@ def provider() -> WaldenGolfProvider:
     return WaldenGolfProvider("test_member", "test_password")
 
 
+@pytest.fixture
+def no_settle_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every ``WebDriverWait`` in the provider a zero timeout (#471).
+
+    After the fast JS chain, ``_find_and_book_time_slot_sync`` waits up to 5s for
+    the URL to show a confirmation. A ``MagicMock`` driver's URL never does, so
+    each test that reaches that block spent the full 5s of wall clock in it.
+    With a zero timeout ``until`` still evaluates its condition once, so every
+    branch is the one the 5s wait took: the URL check times out, and the
+    element check, which a mock driver satisfies at once, returns.
+    """
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    import app.providers.walden_provider as walden_module
+
+    def immediate(driver: Any, timeout: float, *args: Any, **kwargs: Any) -> WebDriverWait:
+        return WebDriverWait(driver, 0, *args, **kwargs)
+
+    monkeypatch.setattr(walden_module, "WebDriverWait", immediate)
+
+
 class TestWaldenProviderParseTime:
     """Tests for the _parse_time method."""
 
@@ -2196,6 +2217,7 @@ class TestPrecisionWait:
 class TestFindAndBookFastJS:
     """Tests for the fast JS path in _find_and_book_time_slot_sync."""
 
+    @pytest.mark.usefixtures("no_settle_wait")
     def test_fast_js_finds_and_books_exact_match(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2416,6 +2438,7 @@ class TestTimedModeSlotRescan:
         monkeypatch.setattr(walden_module, "_SLOT_RESCAN_INTERVAL_S", 0.01)
         monkeypatch.setattr(walden_module, "_SLOT_RESCAN_GRACE_MS", 200)
 
+    @pytest.mark.usefixtures("no_settle_wait")
     def test_empty_prewindow_scan_retries_until_slot_appears(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3090,6 +3113,7 @@ class TestDirectHttpBookingWiring:
 
         assert provider._try_direct_http_booking(MagicMock(), self.SLOT, 4, None) is None
 
+    @pytest.mark.usefixtures("no_settle_wait")
     def test_js_chain_runs_when_direct_path_declines(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3227,6 +3251,7 @@ class TestDirectHttpBookingWiring:
         assert result.error_message is not None
         assert "did not confirm" in result.error_message
 
+    @pytest.mark.usefixtures("no_settle_wait")
     def test_direct_result_short_circuits_the_js_chain(
         self, provider: WaldenGolfProvider, monkeypatch: pytest.MonkeyPatch
     ) -> None:
