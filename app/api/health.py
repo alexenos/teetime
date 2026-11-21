@@ -1,5 +1,7 @@
 from fastapi import APIRouter
 
+from app import __version__
+
 router = APIRouter(tags=["health"])
 
 
@@ -12,7 +14,7 @@ async def health_check() -> dict[str, str]:
 async def root() -> dict[str, str | dict[str, str]]:
     return {
         "service": "TeeTime - Golf Reservation Assistant",
-        "version": "0.2.0",
+        "version": __version__,
         "endpoints": {
             "health": "/health",
             "webhooks": "/webhooks/twilio/sms",

@@ -107,6 +107,14 @@ The booking job fires at 06:28 CT. The club's window nominally opens at
 A booking is confirmed by `RESERVATION_CHECK`. `phase=complete, success=True`
 does not establish that a tee time was reserved.
 
+## Versioning
+
+Semantic Versioning, `1.0.0` as of 2026-11-21. Every PR that deploys bumps the
+version in the PR: MINOR for a feature, PATCH for a fix, tech debt or a
+dependency change. Dependabot PRs and PRs touching only ignored paths do not.
+The version is in `pyproject.toml` and `app/__init__.py`, which must agree.
+Detail: `operations/versioning.md`.
+
 ## Pre-push checks
 
 ```bash
