@@ -22,7 +22,8 @@ dependency changes as PATCH is this project's convention, not part of the spec.
 
 The bump goes in the PR, not after the merge. A PR deploys when it changes a
 file outside the paths the Cloud Build trigger ignores (`operations/`, `docs/`,
-`.claude/`, `CLAUDE.md`, `tests/`, `scripts/`; see `CLAUDE.md`, Constraints).
+`.claude/`, `CLAUDE.md`, `tests/`, `scripts/`, `.github/`; see `CLAUDE.md`,
+Constraints).
 A PR that touches only those paths does not deploy and does not bump.
 That covers the race report and scoreboard Routines, which never bump.
 
