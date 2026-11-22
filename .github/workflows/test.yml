@@ -152,6 +152,11 @@ jobs:
   audit:
     runs-on: ubuntu-latest
 
+    # It reads the lockfile and runs a downloaded binary, so its token gets
+    # read-only contents and is not left in the checkout's git config.
+    permissions:
+      contents: read
+
     env:
       OSV_SCANNER_VERSION: v2.7.1
       OSV_SCANNER_SHA256: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
@@ -159,6 +164,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install osv-scanner
         run: |

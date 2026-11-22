@@ -24,6 +24,14 @@ def _ignored() -> list[dict]:
     return tomllib.loads(CONFIG.read_text(encoding="utf-8")).get("IgnoredVulns", [])
 
 
+def test_ignored_vulns_is_the_only_kind_of_exception() -> None:
+    # PackageOverrides can also suppress findings (ignore a whole package, or
+    # override its license), with no reason or expiry for the tests below to check.
+    # Any other top-level key is refused until a test holds it to the same policy.
+    keys = set(tomllib.loads(CONFIG.read_text(encoding="utf-8")))
+    assert keys <= {"IgnoredVulns"}, f"unreviewed exception kinds: {keys - {'IgnoredVulns'}}"
+
+
 def test_every_exception_has_an_id_a_reason_and_an_expiry() -> None:
     for entry in _ignored():
         assert entry.get("id"), entry
@@ -65,6 +73,14 @@ def test_the_audit_job_pins_and_checksums_the_binary() -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", str(env.get("OSV_SCANNER_SHA256", "")))
     runs = "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
     assert "sha256sum -c" in runs
+
+
+def test_the_audit_job_runs_with_a_read_only_token() -> None:
+    job = _audit_job()
+    assert job.get("permissions") == {"contents": "read"}
+    for step in job.get("steps", []):
+        if str(step.get("uses", "")).startswith("actions/checkout"):
+            assert step.get("with", {}).get("persist-credentials") is False
 
 
 def test_the_audit_job_scans_poetry_lock_with_the_exceptions_file() -> None:
