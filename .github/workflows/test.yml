@@ -144,6 +144,39 @@ jobs:
       - name: Check code formatting with Ruff
         run: poetry run ruff format --check .
 
+  # Known vulnerabilities in poetry.lock fail the build (#487, recommendation 4 in
+  # operations/dependency-updates.md). Reviewed exceptions, each with a reason and an
+  # expiry, are in .github/osv-scanner.toml. The binary is pinned and checksummed rather
+  # than fetched as latest; Dependabot does not update it, so a bump is a
+  # deliberate edit of both values below. Exit 128 (no packages found) fails too.
+  audit:
+    runs-on: ubuntu-latest
+
+    # It reads the lockfile and runs a downloaded binary, so its token gets
+    # read-only contents and is not left in the checkout's git config.
+    permissions:
+      contents: read
+
+    env:
+      OSV_SCANNER_VERSION: v2.7.1
+      OSV_SCANNER_SHA256: fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        run: |
+          curl -fsSL -o osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+
+      - name: Scan poetry.lock for known vulnerabilities
+        run: ./osv-scanner scan source --lockfile=poetry.lock --config=.github/osv-scanner.toml
+
   # cloudbuild.yaml runs `terraform apply -auto-approve` on every merge to main,
   # so before this job a malformed terraform change was first caught by the
   # pipeline that applies it (#229, item 1). fmt and validate need no

@@ -223,3 +223,37 @@ merges at most one a week. Only `poetry.lock`, `pyproject.toml` or workflow path
 reviewed (by both until 2026-11-20, by Claude since), every check green. This is CLAUDE.md's third merge exception,
 bounded in `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs). Majors,
 and anything that fails a gate, still wait for the maintainer.
+
+**2026-11-21, maintainer: adopt 4, take the free variant of 5, and file all three.**
+Recommendation 4 is #487, 5 is #488 (a weekly `osv-scanner scan image`, not
+Artifact Registry scanning), and 6 is #489.
+
+**4 is in place** with #487's PR, from its merge. A Tests job, `audit`, runs
+osv-scanner v2.7.1 on `poetry.lock` and fails on any advisory that
+`.github/osv-scanner.toml` does not list (under `.github/` so that renewing an
+exception does not redeploy). The binary is pinned and checked against its
+published SHA-256; Dependabot does not update it. Each exception there needs a
+reason and an `effectiveUntil` date no more than six months out
+(`tests/test_osv_scanner_config.py`); once the date passes, CI fails again. The
+Tuesday Dependabot run reads `audit` as one more check under its gate 4.
+
+Accepted cost: a new advisory with no fixed release, or an OSV API outage, turns
+`audit` red on every PR, Dependabot's included, so the Tuesday run merges nothing
+until it clears. When `audit` fails on a package a PR does not touch, the fix is a
+maintainer PR that updates the package or adds a reviewed exception, not a
+change to the PR that failed.
+
+The backlog it would have failed on, all in development dependencies, was cleared
+in the same change:
+
+- Pygments 2.19.2 → 2.21.0.
+- soupsieve 2.8.3 → 4.1.3. Every soupsieve 4 release requires Python ≥ 3.11.5,
+  and the project allowed any 3.11 (`^3.11`), so Poetry could not resolve it.
+  That is the likely reason Dependabot's soupsieve security updates failed,
+  inferred from the constraint rather than from Dependabot's log. The floor is
+  now `>=3.11.5,<4.0`. The image's `python:3.11-slim` and CI's `3.11` both
+  resolve to the newest 3.11 release, so neither runs below it.
+- pytest stays at 8.4.2 under one reviewed exception, `GHSA-6w46-j5rx-g56g`
+  (predictable `/tmp/pytest-of-{user}`; it needs another local user on the same
+  machine). It expires on 2027-02-21. The fix, pytest 9, needs pytest-asyncio 1.x,
+  because 0.24 caps pytest below 9. Moving both is #492, not part of #487.
