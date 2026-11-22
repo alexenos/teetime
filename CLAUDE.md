@@ -23,7 +23,7 @@ A third exception was **granted on 2026-11-17**: the tech-debt Routine's
 Tuesday run may squash-merge **one Dependabot PR per run**. The PR may change
 only `poetry.lock`, `pyproject.toml` or `.github/workflows/`, with no major
 version change. Claude must have reviewed its head sha (CodeRabbit too when it
-will, which it does not for a bot without a seat; relaxed 2026-11-20, live once step T7 updates the trigger's prompt), and every
+will, which it does not for a bot without a seat; relaxed 2026-11-20, live in the trigger since 2026-11-21), and every
 check must be green on that sha. It is defined in
 `operations/routines/tech-debt.md` (Tuesday: Dependabot PRs) and nowhere else.
 Deployed 2026-11-17.

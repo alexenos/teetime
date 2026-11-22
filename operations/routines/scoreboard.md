@@ -265,14 +265,14 @@ morning since 2026-10-01. What remains:
 
 ## The prompt
 
-**Status: the trigger lags this file by one change, from 2026-11-20.** The
-sixth prefix, `operations/dependabot` (its `mkdir` entry, its `rsync`, its
-first-run rule, and `ledger/dependabot` in the derive command), was added for tech
-debt's Tuesday run. The live prompt still has five until it is updated after this
-merges, which must happen before the 2026-11-24 13:00 CT run
-(`operations/routines/tech-debt.md`, Deploying the Tuesday run, T7). Until then the
-scoreboard never sees a `dependabot` row and reports every Tuesday from 2026-11-24 as
-missing. Change this line back once the live text matches.
+**Status: the live trigger matches this file.** The maintainer pasted the
+version with the sixth prefix, `operations/dependabot`, on 2026-11-21 (trigger
+updated 12:46Z), for tech debt's Tuesday run (`operations/routines/tech-debt.md`,
+Deploying the Tuesday run, T7). Claude compared it through the triggers API the
+same day: the `mkdir` entry, the sixth `rsync`, its first-run rule and
+`ledger/dependabot` in the derive command are live, and so are `docs/**` and
+`30 12 * * *`; this was read, not diffed line by line. The 13:33Z run that morning
+wrote `ok: true` with `dependabot: null`, as expected before the first Tuesday row.
 
 Before that change, it matched: compared with `get_trigger` on
 2026-11-11 at 00:20Z, after the maintainer pasted the Step 4 wall-clock wait
