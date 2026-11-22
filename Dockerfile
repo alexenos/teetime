@@ -45,7 +45,7 @@ RUN echo "Chromium refresh: ${CHROMIUM_REFRESH}" && apt-get update && apt-get in
 ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 ENV CHROME_BIN=/usr/bin/chromium
 
-RUN pip install poetry==1.7.1
+RUN pip install poetry==2.4.3
 
 COPY pyproject.toml poetry.lock* ./
 

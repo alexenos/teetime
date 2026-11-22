@@ -72,7 +72,7 @@ From the documentation, read 2026-11-15:
 | Surface | Dependabot | Renovate | pip-audit / osv-scanner in CI | Artifact Registry scanning |
 |---|---|---|---|---|
 | Python packages, `poetry.lock` | yes: "Dependabot supports Poetry v2" (ecosystem `pip`) | `poetry` manager | pip-audit: needs a requirements list; osv-scanner reads `poetry.lock` and `uv.lock` directly | yes, Python listed |
-| Poetry itself (`1.7.1` pin) | no | no (a regex manager could) | no | no |
+| Poetry itself (`2.4.3` pin, #153) | no | no (a regex manager could) | no | no |
 | `FROM python:3.11-slim` | ecosystem `docker`, parses SemVer tags; digest tracking not documented on the page read | `dockerfile` | osv-scanner can scan the built image | sees the result, not the tag |
 | Debian packages and Chromium (`apt-get`) | **no** | **no** manager listed | osv-scanner `scan image` reads `/var/lib/dpkg/status` | **yes**, Debian 11–15 listed |
 | Terraform providers | ecosystem `terraform`, Terraform `>= 0.13, <= 1.15.x` | `terraform` | no | no |
@@ -166,7 +166,7 @@ is what the deferred recommendations would add.
 | Surface | With 1–3 (adopted) | If 4–6 are adopted |
 |---|---|---|
 | Python packages | Dependabot security PRs as published, one grouped; a weekly grouped version PR | osv-scanner blocking in CI (4) |
-| Poetry 1.7.1 | left alone; #153 and #386 decide it | — |
+| Poetry 2.4.3 | **nothing**: a deliberate PR moves it; `tests/test_poetry_pin.py` keeps the Dockerfile and CI pins in step. #386 (uv) is open | — |
 | Base image tag | **nothing**: the floating tag picks up rebuilds, never a new Python minor | Artifact Registry scanning shows its CVEs (5); the tag moves in the quarterly EOL review (6) |
 | Debian packages, Chromium | the weekly `CHROMIUM_REFRESH` rebuild (#444), **unwatched**: no scan sees them | Artifact Registry scanning (5) |
 | Terraform providers | **nothing**; a major move is a deliberate PR. A `.terraform.lock.hcl` is a separate decision | quarterly EOL review (6) |

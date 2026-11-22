@@ -61,7 +61,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --memory 1Gi \
     --cpu 1 \
     --timeout 300 \
-    --set-env-vars "TIMEZONE=America/Chicago,BOOKING_OPEN_HOUR=6,BOOKING_OPEN_MINUTE=30,DAYS_IN_ADVANCE=7"
+    --set-env-vars "BOOKING_OPEN_HOUR=6,BOOKING_OPEN_MINUTE=30,DAYS_IN_ADVANCE=7"
 
 # Get the service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" --region "${REGION}" --format="value(status.url)")

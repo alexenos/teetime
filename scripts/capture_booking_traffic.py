@@ -73,21 +73,55 @@ def redact_body(url: str, body: str | None) -> str | None:
     return _SENSITIVE_PARAM_RE.sub(r"\1=<redacted>", body)
 
 
-def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> None:
-    """Ask CDP for request POST data of interesting requests (best effort)."""
+def fetch_post_bodies(driver: webdriver.Chrome, events: list[dict]) -> dict[str, int]:
+    """Ask CDP for the body of each POST the log left without one (best effort).
+
+    A body that cannot be fetched does not stop the capture, but it is counted,
+    and the error's type is kept on that request as ``postDataError`` (#474). A
+    reply with no body is counted the same way, as ``"empty"``. Which errors
+    Chrome raises here for a body it has dropped, and for a lost session, has
+    not been observed; the type name may not tell them apart.
+
+    Returns:
+        ``{"attempted": n, "fetched": n, "failed": n}``.
+    """
+    counts = {"attempted": 0, "fetched": 0, "failed": 0}
     for ev in events:
         if ev.get("method") != "Network.requestWillBeSent":
             continue
         req = ev.get("params", {}).get("request", {})
         if req.get("method") == "POST" and not req.get("postData"):
             request_id = ev["params"].get("requestId")
+            counts["attempted"] += 1
             try:
                 body = driver.execute_cdp_cmd(
                     "Network.getRequestPostData", {"requestId": request_id}
                 )
-                req["postData"] = body.get("postData")
-            except Exception:  # noqa: BLE001 - best effort: the body may be gone; fine
-                pass
+            except Exception as exc:  # noqa: BLE001 - best effort; counted and reported
+                counts["failed"] += 1
+                req["postDataError"] = type(exc).__name__
+                continue
+            post_data = (body or {}).get("postData")
+            if not post_data:
+                counts["failed"] += 1
+                req["postDataError"] = "empty"
+                continue
+            req["postData"] = post_data
+            counts["fetched"] += 1
+    return counts
+
+
+def describe_post_body_fetch(counts: dict[str, int]) -> str:
+    """One line for the operator: how many missing POST bodies were recovered."""
+    if counts["attempted"] == 0:
+        return "POST bodies: none were missing from the log."
+    line = f"POST bodies: fetched {counts['fetched']} of {counts['attempted']} missing from the log"
+    if counts["failed"]:
+        line += (
+            f"; {counts['failed']} could not be fetched and are absent from this "
+            "capture (see postDataError on those requests)"
+        )
+    return line + "."
 
 
 def sanitize_events(events: list[dict]) -> None:
@@ -152,7 +186,7 @@ def main() -> None:
         except KeyboardInterrupt:
             print("Stopping early.")
         drain_performance_log(driver, events)
-        fetch_post_bodies(driver, events)
+        post_body_fetch = fetch_post_bodies(driver, events)
         sanitize_events(events)
 
         snapshot = {
@@ -162,6 +196,7 @@ def main() -> None:
             "cookies": [{**cookie, "value": "<redacted>"} for cookie in driver.get_cookies()],
             "current_url": driver.current_url,
             "viewstates_on_final_page": extract_viewstates(driver),
+            "post_body_fetch": post_body_fetch,
             "network_events": events,
         }
     finally:
@@ -171,6 +206,7 @@ def main() -> None:
     out.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
     out.chmod(0o600)  # best effort; no-op semantics on Windows, effective on POSIX
     print(f"\nWrote {len(events)} network events to {out}")
+    print(describe_post_body_fetch(snapshot["post_body_fetch"]))
     print("Grep for 'reserve_button' and 'javax.faces.ViewState' to find the booking POSTs.")
 
 
