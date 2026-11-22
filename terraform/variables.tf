@@ -98,7 +98,10 @@ variable "cloud_run_min_instances" {
 }
 
 variable "timezone" {
-  description = "Timezone for the application"
+  # Read only by the Cloud Scheduler jobs' time_zone, so their crons are in CT.
+  # The app does not read it: app/utils/timezone.py fixes CT as America/Chicago
+  # (#468), and tests/test_terraform_defaults.py keeps the two in step.
+  description = "Time zone of the Cloud Scheduler crons; must match CTDateTime.CT_TZ"
   type        = string
   default     = "America/Chicago"
 }

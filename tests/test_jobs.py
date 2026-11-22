@@ -182,7 +182,6 @@ class TestOIDCAuthentication:
             mock_settings.oidc_audience = "https://test.run.app"
             mock_settings.scheduler_api_key = ""
             mock_settings.scheduler_service_account = "scheduler@project.iam.gserviceaccount.com"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
                 mock_verify.return_value = {"email": "scheduler@project.iam.gserviceaccount.com"}
@@ -209,7 +208,6 @@ class TestOIDCAuthentication:
             mock_settings.oidc_audience = "https://test.run.app"
             mock_settings.scheduler_api_key = ""
             mock_settings.scheduler_service_account = ""
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
                 mock_verify.return_value = {"email": "any@project.iam.gserviceaccount.com"}
@@ -230,7 +228,6 @@ class TestOIDCAuthentication:
             mock_settings.oidc_audience = "https://test.run.app/"
             mock_settings.scheduler_api_key = ""
             mock_settings.scheduler_service_account = ""
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.id_token.verify_oauth2_token") as mock_verify:
                 mock_verify.return_value = {"email": "scheduler@project.iam.gserviceaccount.com"}
@@ -261,7 +258,6 @@ class TestJobsAuthentication:
         """Test that invalid API key returns 401."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "correct-key"
-            mock_settings.timezone = "America/Chicago"
 
             response = test_client.post(
                 "/jobs/execute-due-bookings",
@@ -275,7 +271,6 @@ class TestJobsAuthentication:
         """Test that unconfigured API key on server returns 500."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = None
-            mock_settings.timezone = "America/Chicago"
 
             response = test_client.post(
                 "/jobs/execute-due-bookings",
@@ -289,7 +284,6 @@ class TestJobsAuthentication:
         """Test that valid API key allows access."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[])
@@ -309,7 +303,6 @@ class TestJobsExecuteDueBookings:
         """Test that no due bookings returns empty results."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[])
@@ -336,7 +329,6 @@ class TestJobsExecuteDueBookings:
         """Test successful execution of a due booking."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
@@ -383,7 +375,6 @@ class TestJobsExecuteDueBookings:
         """Test failed execution of a due booking."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
@@ -423,7 +414,6 @@ class TestJobsExecuteDueBookings:
         """Test exception during booking execution."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
@@ -463,7 +453,6 @@ class TestJobsExecuteDueBookings:
         """Test that failure SMS includes specific booking details (date, time, players)."""
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
@@ -548,7 +537,6 @@ class TestJobsExecuteDueBookings:
 
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(
@@ -631,7 +619,6 @@ class TestJobsTimeout:
 
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
@@ -985,7 +972,6 @@ class TestOriginChannelRouting:
 
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])
@@ -1028,7 +1014,6 @@ class TestOriginChannelRouting:
 
         with patch("app.api.jobs.settings") as mock_settings:
             mock_settings.scheduler_api_key = "test-api-key"
-            mock_settings.timezone = "America/Chicago"
 
             with patch("app.api.jobs.booking_service") as mock_service:
                 mock_service.get_due_bookings = AsyncMock(return_value=[sample_booking])

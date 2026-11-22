@@ -120,7 +120,6 @@ locals {
   # is gitignored, so terraform.tfvars is not in the Cloud Build checkout and
   # every other variable resolves to its default.
   booking_env_base = {
-    TIMEZONE                             = var.timezone
     BOOKING_OPEN_HOUR                    = tostring(var.booking_open_hour)
     BOOKING_OPEN_MINUTE                  = tostring(var.booking_open_minute)
     DAYS_IN_ADVANCE                      = tostring(var.days_in_advance)
