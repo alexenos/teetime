@@ -231,11 +231,18 @@ Artifact Registry scanning), and 6 is #489.
 
 **4 is in place** with #487's PR, from its merge. A Tests job, `audit`, runs
 osv-scanner v2.7.1 on `poetry.lock` and fails on any advisory that
-`osv-scanner.toml` does not list. The binary is pinned and checked against its
+`.github/osv-scanner.toml` does not list (under `.github/` so that renewing an
+exception does not redeploy). The binary is pinned and checked against its
 published SHA-256; Dependabot does not update it. Each exception there needs a
 reason and an `effectiveUntil` date no more than six months out
 (`tests/test_osv_scanner_config.py`); once the date passes, CI fails again. The
 Tuesday Dependabot run reads `audit` as one more check under its gate 4.
+
+Accepted cost: a new advisory with no fixed release, or an OSV API outage, turns
+`audit` red on every PR, Dependabot's included, so the Tuesday run merges nothing
+until it clears. When `audit` fails on a package a PR does not touch, the fix is a
+maintainer PR that updates the package or adds a reviewed exception, not a
+change to the PR that failed.
 
 The backlog it would have failed on, all in development dependencies, was cleared
 in the same change:

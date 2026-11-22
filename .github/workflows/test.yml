@@ -146,7 +146,7 @@ jobs:
 
   # Known vulnerabilities in poetry.lock fail the build (#487, recommendation 4 in
   # operations/dependency-updates.md). Reviewed exceptions, each with a reason and an
-  # expiry, are in osv-scanner.toml. The binary is pinned and checksummed rather
+  # expiry, are in .github/osv-scanner.toml. The binary is pinned and checksummed rather
   # than fetched as latest; Dependabot does not update it, so a bump is a
   # deliberate edit of both values below. Exit 128 (no packages found) fails too.
   audit:
@@ -168,7 +168,7 @@ jobs:
           chmod +x osv-scanner
 
       - name: Scan poetry.lock for known vulnerabilities
-        run: ./osv-scanner scan source --lockfile=poetry.lock --config=osv-scanner.toml
+        run: ./osv-scanner scan source --lockfile=poetry.lock --config=.github/osv-scanner.toml
 
   # cloudbuild.yaml runs `terraform apply -auto-approve` on every merge to main,
   # so before this job a malformed terraform change was first caught by the
