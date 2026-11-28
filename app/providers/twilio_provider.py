@@ -144,7 +144,7 @@ class TwilioSMSProvider(SMSProvider):
 
             logger.debug("Sent %s successfully: sid=%s", channel, result.sid)
             return SMSResult(success=True, message_sid=result.sid)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - a failed send is returned as SMSResult, not raised
             logger.error("Error sending %s to %s: %s", channel, to_number, e)
             return SMSResult(success=False, error_message=str(e))
 
